@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The repository is ANYmesh, but `anymesh` was already taken on PyPI, so the
+# distribution and import package are `ANYmesher`/`anymesher`.
+name = "ANYmesher"
+version = "0.1.0"
+description = "Geometry modelling and structured meshing for shell and beam finite-element models"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+authors = [
+  { name = "Audun Arnesen Nyhus", email = "audunarn@gmail.com" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# The editor uses tkinter from the standard library, so it adds no wheel.  The
+# extra exists so `pip install ANYmesher[gui]` is meaningful and stays
+# meaningful if that ever stops being true.
+gui = []
+# A 3D mesh preview.  Kept separate from `gui` so the tables and controls are
+# usable without pulling in a viewport.
+gui3d = ["ANYtk3D>=0.2.1"]
+# The alternative mesh backend.  The built-in mapped mesher needs nothing.
+gmsh = ["gmsh>=4.11"]
+dev = [
+  "build>=1.2",
+  "pytest>=8",
+  "twine>=5",
+]
+
+[project.scripts]
+anymesher = "anymesher.__main__:main"
+
+# A GUI entry point so no console window opens alongside the mesher.
+[project.gui-scripts]
+anymesher-gui = "anymesher.gui:main"
+
+[project.urls]
+Homepage = "https://github.com/audunarn/ANYmesh"
+Repository = "https://github.com/audunarn/ANYmesh"
+Issues = "https://github.com/audunarn/ANYmesh/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["anymesher*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
+# A repository-local basetemp, because the user temp directory is not always
+# writable by the test process on Windows.  Gitignored, and pytest prunes it.
+addopts = ["-ra", "-p", "no:cacheprovider", "--basetemp=.pytest_tmp"]
