@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -34,7 +34,7 @@ from .primitives import (
 from .quality import verify_mesh_quality
 from .serialize import save_mesh
 
-__all__ = ["MesherWindow", "main"]
+__all__ = ["MesherWindow", "open_mesher", "main"]
 
 _SHAPES = ("stiffened panel", "plate", "beam")
 
@@ -71,11 +71,18 @@ _STIFFENER_TYPES = ("T-bar", "L-bulb", "Angle", "Flatbar")
 class MesherWindow(ttk.Frame):
     """The mesher, as a frame so it can be embedded as well as run alone."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        on_apply: Optional[Callable[[Mesh], None]] = None,
+    ) -> None:
         super().__init__(master, padding=8)
         self._field_vars: Dict[str, tk.StringVar] = {}
         self._mesh: Optional[Mesh] = None
+        self._applied_mesh: Optional[Mesh] = None
         self._message = ""
+        self._on_apply = on_apply
 
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -140,6 +147,8 @@ class MesherWindow(ttk.Frame):
         buttons = ttk.Frame(form)
         buttons.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(buttons, text="Save mesh...", command=self.save).pack(side="left")
+        if self._on_apply is not None:
+            ttk.Button(buttons, text="Use mesh", command=self.apply).pack(side="left", padx=4)
 
     def _entry(self, parent: tk.Misc, row: int, label: str, default: str) -> tk.StringVar:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
@@ -197,6 +206,23 @@ class MesherWindow(ttk.Frame):
         """The mesh currently displayed, or ``None``."""
 
         return self._mesh
+
+    @property
+    def applied_mesh(self) -> Optional[Mesh]:
+        """The last mesh sent to the embedding application, if any."""
+
+        return self._applied_mesh
+
+    def apply(self) -> None:
+        """Send the current valid mesh to the embedding application."""
+
+        if self._mesh is None:
+            messagebox.showerror("Use mesh", "there is no valid mesh; fix the input first")
+            return
+        self._applied_mesh = self._mesh
+        self.event_generate("<<MeshApplied>>")
+        if self._on_apply is not None:
+            self._on_apply(self._mesh)
 
     def _value(self, key: str) -> float:
         return float(self._field_vars[key].get())
@@ -363,6 +389,22 @@ class MesherWindow(ttk.Frame):
             save_mesh(path, self._mesh, overwrite=True)
         except OSError as error:
             messagebox.showerror("Save failed", str(error))
+
+
+def open_mesher(
+    master: tk.Misc,
+    *,
+    on_apply: Optional[Callable[[Mesh], None]] = None,
+    title: str = "ANYmesher",
+) -> Tuple[tk.Toplevel, MesherWindow]:
+    """Open an embeddable mesher and return its window and frame."""
+
+    window = tk.Toplevel(master)
+    window.title(title)
+    window.minsize(880, 560)
+    mesher = MesherWindow(window, on_apply=on_apply)
+    mesher.pack(fill="both", expand=True)
+    return window, mesher
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

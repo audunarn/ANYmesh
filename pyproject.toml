@@ -35,7 +35,7 @@ dependencies = [
 gui = []
 # A 3D mesh preview.  Kept separate from `gui` so the tables and controls are
 # usable without pulling in a viewport.
-gui3d = ["ANYtk3D>=0.2.1"]
+gui3d = ["ANYtk3D>=0.2.1,<0.3"]
 # The alternative mesh backend.  The built-in mapped mesher needs nothing.
 gmsh = ["gmsh>=4.11"]
 dev = [

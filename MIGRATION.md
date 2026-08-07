@@ -62,7 +62,7 @@ import either.
 
 ## Deliberate behavioural differences
 
-All need confirming when the sources are stripped:
+All were reviewed during the coordinated strip:
 
 - **`Mesh.couplings` holds `Coupling` records rather than `(beam, plate)` pairs.**
   The interpolated case needs several plate nodes with weights, which a pair
@@ -132,8 +132,8 @@ asserted by test rather than left to be rediscovered.
 
 ## Import changes
 
-Applied when the sources are stripped, not before. Until then ANYfem and
-ANYsolver keep their own copies and remain the authority.
+Applied in ANYfem and ANYsolver 0.2 integration. ANYmesher is now authoritative
+for geometry and neutral meshing; the consumers retain compatibility adapters.
 
 | Previous import | Replacement |
 | --- | --- |
@@ -143,7 +143,7 @@ ANYsolver keep their own copies and remain the authority.
 | `anyfem.mesh.refinement` | `anymesher.refinement` |
 | `anysolver.mesh_gen` | `anymesher.primitives` (+ solver-side adapter) |
 
-`anyfem/geometry/__init__.py` and `anyfem/mesh/__init__.py` become re-export
+`anyfem/geometry/__init__.py` and `anyfem/mesh/__init__.py` are re-export
 shims, so the fourteen ANYfem modules that import `EntityRef` need no edit.
 
 ## Tests

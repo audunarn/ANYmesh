@@ -6,9 +6,9 @@ Coons) mesher, primitives for shapes that need no geometry model, an optional
 gmsh backend, mesh quality metrics, a tkinter mesher and a command-line
 interface.
 
-```powershell
-python -m pip install ANYmesher
-```
+After the first package-index release, install with
+`python -m pip install ANYmesher`. Until then, use the editable development
+setup below.
 
 The repository is `ANYmesh`, but `anymesh` was already taken on PyPI, so the
 distribution is **`ANYmesher`** and the import package is **`anymesher`**.
@@ -60,6 +60,18 @@ anymesher panel --length 4 --width 3 --thickness 0.012 --height 0.3 --web-thickn
 as you type, read the quality report, and save the result. It is deliberately not
 a geometry editor — building a BRep interactively is an application's job, and
 [ANYfem](https://github.com/audunarn/ANYfem) already does it.
+
+Applications can put that form behind their own mesh button.  Passing a callback
+adds a **Use mesh** button and returns the neutral `Mesh` directly:
+
+```python
+from anymesher.gui import open_mesher
+
+window, mesher = open_mesher(root, on_apply=project.replace_mesh)
+```
+
+The host remains responsible for deciding whether a generic neutral mesh is
+appropriate for its structural model.
 
 ## What a mesh is here
 
@@ -137,4 +149,11 @@ converts at the widget.
 ```powershell
 python -m pip install -e "C:\Github\ANYmesh[dev,gmsh]"
 python -m pytest
+```
+
+To open the mesher straight from a checkout — including an IDE's Run button, with
+nothing installed — run [`run_gui.py`](run_gui.py) at the repository root.
+
+```bash
+python run_gui.py
 ```

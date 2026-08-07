@@ -28,6 +28,7 @@ at mesh time, so re-meshing or editing the geometry never loses it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Real
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -41,6 +42,35 @@ __all__ = [
     "refine_around",
     "refine_at",
 ]
+
+
+def _finite_real(value: object, label: str) -> float:
+    """Normalize one real modelling value without accepting boolean flags."""
+
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise ValueError(f"{label} must be a finite real number")
+    resolved = float(value)
+    if not np.isfinite(resolved):
+        raise ValueError(f"{label} must be a finite real number")
+    return resolved
+
+
+def _finite_center(values: Sequence[float], label: str) -> Tuple[float, float, float]:
+    """Normalize an exact finite xyz coordinate."""
+
+    try:
+        components = tuple(values)
+    except TypeError:
+        raise ValueError(f"{label} needs exactly three finite real components") from None
+    if len(components) != 3:
+        raise ValueError(f"{label} needs exactly three finite real components")
+    try:
+        normalized = tuple(
+            _finite_real(value, label) for value in components
+        )
+    except ValueError:
+        raise ValueError(f"{label} needs exactly three finite real components") from None
+    return normalized  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
@@ -61,15 +91,28 @@ class Refinement:
     name: str = "refinement"
 
     def __post_init__(self) -> None:
-        if self.size <= 0.0:
+        size = _finite_real(
+            self.size, f"refinement {self.name!r}: element size"
+        )
+        radius = _finite_real(
+            self.radius, f"refinement {self.name!r}: radius"
+        )
+        growth = _finite_real(
+            self.growth, f"refinement {self.name!r}: growth"
+        )
+        object.__setattr__(self, "size", size)
+        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "growth", growth)
+
+        if size <= 0.0:
             raise ValueError(
                 f"refinement {self.name!r}: element size must be positive"
             )
-        if self.radius < 0.0:
+        if radius < 0.0:
             raise ValueError(
                 f"refinement {self.name!r}: radius must not be negative"
             )
-        if self.growth <= 1.0:
+        if growth <= 1.0:
             raise ValueError(
                 f"refinement {self.name!r}: growth must exceed 1.0. It is the "
                 "ratio between neighbouring element sizes in the transition, "
@@ -80,6 +123,14 @@ class Refinement:
                 f"refinement {self.name!r}: give either ref (bound to "
                 "geometry) or center (a raw coordinate), not both and not "
                 "neither."
+            )
+        if self.center is not None:
+            object.__setattr__(
+                self,
+                "center",
+                _finite_center(
+                    self.center, f"refinement {self.name!r}: center"
+                ),
             )
 
     def sources(self, geometry: GeometryModel) -> np.ndarray:
@@ -216,7 +267,7 @@ def refine_around(
 ) -> Refinement:
     """Refine to ``size`` within ``radius`` of a modelled entity."""
 
-    return Refinement(size=float(size), radius=float(radius), ref=ref, **options)
+    return Refinement(size=size, radius=radius, ref=ref, **options)
 
 
 def refine_at(
@@ -225,5 +276,5 @@ def refine_at(
     """Refine to ``size`` within ``radius`` of a raw coordinate."""
 
     return Refinement(
-        size=float(size), radius=float(radius), center=tuple(center), **options
+        size=size, radius=radius, center=center, **options
     )

@@ -162,6 +162,38 @@ def test_the_mesh_can_be_saved_and_reloaded(mesher, root, tmp_path) -> None:
     assert reloaded.couplings == mesh.couplings
 
 
+def test_embedded_mesher_applies_the_current_mesh_to_the_host(root) -> None:
+    from anymesher.gui import MesherWindow
+
+    received = []
+    frame = MesherWindow(root, on_apply=received.append)
+    frame.pack(fill="both", expand=True)
+    root.update()
+
+    frame.apply()
+
+    assert received == [frame.mesh]
+    assert frame.applied_mesh is frame.mesh
+    frame.destroy()
+    root.update()
+
+
+def test_open_mesher_returns_a_hosted_mesh_picker(root) -> None:
+    from anymesher.gui import open_mesher
+
+    received = []
+    window, frame = open_mesher(root, on_apply=received.append, title="Mesh picker")
+    root.update()
+
+    frame.apply()
+
+    assert window.title() == "Mesh picker"
+    assert frame.master is window
+    assert received == [frame.mesh]
+    window.destroy()
+    root.update()
+
+
 def test_the_window_tears_down_cleanly(root) -> None:
     # Widget attributes that collide with tkinter's own internals only fail on
     # destroy, and only sometimes, so the teardown path is asserted directly.

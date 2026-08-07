@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Added:
+
+- **Embeddable mesh selection.** `MesherWindow(on_apply=...)` adds a **Use mesh**
+  button, and `open_mesher` opens the same live mesher inside a host Tk
+  application.
+
 ## 0.1.0
 
 First feature release. The geometry kernel and mapped mesher come from ANYfem,

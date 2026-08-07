@@ -59,3 +59,23 @@ def test_allowed_third_party_imports_are_declared_dependencies() -> None:
         "the layering allowlist permits imports that pyproject.toml does not "
         f"install in any extra: {undeclared}"
     )
+
+
+def test_run_gui_bootstraps_without_an_install() -> None:
+    """The IDE Run-button entry point must work in a bare checkout.
+
+    Executed with a run_name other than ``__main__`` so the path bootstrap and
+    the import run but the window does not open.
+    """
+
+    import runpy
+
+    script = REPOSITORY_ROOT / "run_gui.py"
+    assert script.is_file()
+
+    namespace = runpy.run_path(str(script), run_name="not_main")
+    assert callable(namespace["main"])
+    assert namespace["main"].__module__ == "anymesher.gui"
+    assert 'if __name__ == "__main__":\n    raise SystemExit(main())' in script.read_text(
+        encoding="utf-8"
+    )
