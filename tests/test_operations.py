@@ -14,10 +14,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from anygeometry import punch_hole as punch_neutral_hole
+from anymesher import decomposition
+
 from anymesher import (
     Arc,
+    EntityRef,
     GeometryError,
     GeometryModel,
+    MeshError,
     Straight,
     check_mappable,
     generate_mesh,
@@ -251,6 +256,28 @@ def test_splitting_between_two_vertices_uses_them_as_they_are() -> None:
     _every_face_meshes(model)
 
 
+def test_mapped_face_split_records_one_semantic_replacement() -> None:
+    model = GeometryModel()
+    points = model.add_points(
+        [(0, 0, 0), (1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0), (0, 1, 0)]
+    )
+    face = model.add_face(model.add_polyline(points, close=True))
+    old = EntityRef("face", face)
+    model.add_to_group("shell", [old])
+    model.tag(old, "primary")
+    model.begin_replacement_log()
+
+    _divider, replacements = split_face_between(
+        model, face, points[1], points[4]
+    )
+    descendants = tuple(EntityRef("face", item) for item in replacements)
+
+    assert model.replacement_log() == [(old, descendants)]
+    assert model.replacement_history()[old] == descendants
+    assert model.group("shell") == descendants
+    assert all(model.tags_for(item) == ("primary",) for item in descendants)
+
+
 def test_curved_surface_operations_remain_exact_and_conformal() -> None:
     radius = 2.0
     model, _arc, face_id = _quarter_cylinder(radius=radius, height=3.0)
@@ -290,6 +317,31 @@ def test_face_split_validates_parameter_axis_and_side_pair() -> None:
         split_face_at(model, face, axis=2, fraction=0.5)
     with pytest.raises(GeometryError, match="opposite sides"):
         split_face_between(model, face, points[0], points[1])
+
+
+def test_rejected_divider_fit_does_not_publish_temporary_entities() -> None:
+    model = GeometryModel()
+    start = model.add_point(0.0, 0.0, 0.0)
+    end = model.add_point(1.0, 0.0, 0.0)
+    parameter = np.linspace(0.0, 1.0, 24)
+    samples = np.column_stack(
+        (
+            parameter,
+            parameter * (1.0 - parameter) * (1.0 + 0.4 * parameter),
+            np.zeros_like(parameter),
+        )
+    )
+    model.begin_replacement_log()
+
+    with pytest.raises(GeometryError, match="neither a straight line nor a circular arc"):
+        decomposition._fit_dividing_edge(  # noqa: SLF001 - precise cleanup contract
+            model, start, end, samples, tolerance=1.0e-9
+        )
+
+    assert set(model.vertices) == {start, end}
+    assert not model.edges
+    assert model.replacement_log() == []
+    assert model.replacement_history() == {}
 
 
 def test_stripping_a_face_produces_the_requested_number_of_bands() -> None:
@@ -399,6 +451,19 @@ def test_punching_a_hole_leaves_a_meshable_ring() -> None:
     _assert_no_degenerate_quads(mesh)
 
 
+def test_butterfly_hole_records_only_the_public_face_replacement() -> None:
+    model, face, _points, _edges = _rectangle(2.0, 2.0)
+    old = EntityRef("face", face)
+    model.begin_replacement_log()
+
+    faces, _arcs = punch_circular_hole(model, face, (1.0, 1.0, 0.0), 0.3)
+    descendants = tuple(EntityRef("face", item) for item in faces)
+
+    face_events = [entry for entry in model.replacement_log() if entry[0] == old]
+    assert face_events == [(old, descendants)]
+    assert model.replacement_history()[old] == descendants
+
+
 def test_punching_a_hole_validates_radius_fit_and_planarity() -> None:
     model, face, _points, _edges = _rectangle(4.0, 3.0)
     with pytest.raises(GeometryError, match="does not fit"):
@@ -411,14 +476,23 @@ def test_punching_a_hole_validates_radius_fit_and_planarity() -> None:
         punch_circular_hole(curved, curved_face, (1.4, 1.4, 1.5), 0.2)
 
 
-def test_a_face_with_too_few_edges_is_refused_at_construction() -> None:
+def test_mapped_backend_requires_a_trimmed_hole_to_be_partitioned() -> None:
+    model, face, _points, _edges = _rectangle(2.0, 2.0)
+    punch_neutral_hole(model, face, (1.0, 1.0, 0.0), 0.3)
+
+    with pytest.raises(MeshError, match="trimmed holes"):
+        generate_mesh(model, target_size=0.2)
+
+
+def test_a_neutral_triangle_is_refused_by_the_mapped_backend() -> None:
     model = GeometryModel()
     edges = model.add_polyline(model.add_points([(0, 0, 0), (1, 0, 0), (0.4, 0.9, 0)]), close=True)
+    face = model.add_face(edges)
 
-    # The geometry model enforces mappability when a face is made, so a
-    # three-sided region never becomes an unmeshable face in the first place.
-    with pytest.raises(GeometryError, match="at least four edges"):
-        model.add_face(edges)
+    # ANYgeometry accepts neutral triangular topology.  The built-in mapped
+    # quad backend owns the stronger four-side requirement and diagnoses it.
+    with pytest.raises(MeshError, match="four-side mapped parameterization"):
+        generate_mesh(model, target_size=0.2, face_ids=[face])
 
 
 def test_operations_on_a_missing_face_say_which() -> None:

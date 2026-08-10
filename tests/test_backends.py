@@ -12,6 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from anygeometry import punch_hole
+
 from anymesher import (
     DEFAULT_BACKEND,
     EntityRef,
@@ -122,6 +124,43 @@ def test_gmsh_keeps_triangles_rather_than_dropping_them() -> None:
     assert all(node in mesh.nodes for nodes in mesh.tris.values() for node in nodes)
 
 
+def test_gmsh_consumes_a_neutral_triangular_face_directly() -> None:
+    model = GeometryModel()
+    vertices = model.add_points([(0, 0, 0), (1, 0, 0), (0.25, 0.8, 0)])
+    face = model.add_face(model.add_polyline(vertices, close=True))
+
+    mesh = generate_mesh(
+        model, backend="gmsh", target_size=0.2, face_ids=[face], recombine=False
+    )
+
+    assert mesh.tris
+    assert mesh.elements_on(EntityRef("face", face)) == sorted(mesh.tris)
+
+
+def test_gmsh_respects_neutral_face_holes() -> None:
+    model = _rectangle(2.0, 2.0)
+    _face, hole_edges = punch_hole(model, 1, (1.0, 1.0, 0.0), 0.3)
+
+    mesh = generate_mesh(
+        model, backend="gmsh", target_size=0.15, recombine=False
+    )
+
+    ring = np.vstack(
+        [
+            [mesh.nodes[node] for node in mesh.nodes_on(EntityRef("edge", edge))]
+            for edge in hole_edges
+        ]
+    )
+    assert np.linalg.norm(ring[:, :2] - np.array([1.0, 1.0]), axis=1) == pytest.approx(
+        0.3, rel=1.0e-6
+    )
+    connected_nodes = sorted({node for element in mesh.shells.values() for node in element})
+    connected = np.asarray([mesh.nodes[node] for node in connected_nodes])
+    assert np.linalg.norm(connected[:, :2] - np.array([1.0, 1.0]), axis=1).min() == pytest.approx(
+        0.3, rel=1.0e-6
+    )
+
+
 def test_gmsh_puts_arc_nodes_exactly_on_the_arc() -> None:
     model = GeometryModel()
     points = model.add_points([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)])
@@ -142,6 +181,43 @@ def test_gmsh_puts_arc_nodes_exactly_on_the_arc() -> None:
         axis=1,
     )
     assert radii == pytest.approx(frame.radius)
+
+
+def test_gmsh_rebuilds_owner_bezier_splines_without_polyline_approximation() -> None:
+    model = GeometryModel()
+    start, control_1, control_2, end, upper_right, upper_left = model.add_points(
+        [
+            (0.0, 0.0, 0.0),
+            (0.5, -0.3, 0.0),
+            (1.5, -0.3, 0.0),
+            (2.0, 0.0, 0.0),
+            (2.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ]
+    )
+    spline = model.add_spline(start, (control_1, control_2), end)
+    boundary = [
+        spline,
+        model.add_line(end, upper_right),
+        model.add_line(upper_right, upper_left),
+        model.add_line(upper_left, start),
+    ]
+    model.add_face(boundary)
+
+    mesh = generate_mesh(model, backend="gmsh", target_size=0.15)
+    spline_nodes = mesh.nodes_on(EntityRef("edge", spline))
+    samples = model.sample_edge(spline, np.linspace(0.0, 1.0, 20001))
+    distances = [
+        float(np.linalg.norm(samples - mesh.nodes[node], axis=1).min())
+        for node in spline_nodes
+    ]
+
+    assert len(spline_nodes) >= 3
+    assert max(distances) < 1.0e-4
+    connected = {node for element in mesh.shells.values() for node in element}
+    assert set(mesh.nodes) == connected
+    assert control_1 not in mesh.node_of_vertex
+    assert control_2 not in mesh.node_of_vertex
 
 
 def test_gmsh_refuses_a_non_planar_face_and_points_at_the_mapped_mesher() -> None:

@@ -15,11 +15,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          path: .ecosystem/ANYgeometry
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev]"
       - run: python -c "import anymesher; print(anymesher.__version__)"
       - run: python -m pytest
@@ -37,11 +42,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          path: .ecosystem/ANYgeometry
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev,gmsh]"
       - run: python -c "import gmsh"
       - run: python -m pytest
@@ -54,11 +64,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          path: .ecosystem/ANYgeometry
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install --upgrade pip build
       - run: python -m build
-      - run: python -m pip install dist/*.whl
+      - run: python -m pip install .ecosystem/ANYgeometry
+      - run: python -m pip install --no-deps dist/*.whl
+      - run: python -m pip check
       - run: cd /tmp && python -c "import anymesher; print(anymesher.__version__)"

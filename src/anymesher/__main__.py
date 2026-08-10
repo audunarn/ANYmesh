@@ -3,10 +3,10 @@
 ``python -m anymesher <command>``, or ``anymesher <command>`` once installed.
 Every command takes ``--json`` for machine-readable output.
 
-The commands cover the primitives and the inspection of a saved mesh.  Meshing a
-geometry *model* from the command line would need a serialized geometry format,
-which this package does not define -- geometry is built through the API or in an
-application that owns a project file.
+The commands cover the primitives and the inspection of a saved mesh. Geometry
+documents are serialized by ANYgeometry; this mesher CLI intentionally accepts
+mesh primitives and mesh files only. Applications mesh a shared GeometryModel
+through the public API and keep project serialization in their owning package.
 """
 
 from __future__ import annotations

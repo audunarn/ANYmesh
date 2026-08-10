@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Protocol, Tuple, runtime_checkable
 
+from anygeometry.model import GeometryModel
+
 from ..errors import MeshError
-from ..geometry.model import GeometryModel
 from ..mesh import Mesh
 
 __all__ = ["DEFAULT_BACKEND", "MeshBackend", "available_backends", "generate_mesh", "resolve_backend"]

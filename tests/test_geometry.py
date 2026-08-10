@@ -63,13 +63,17 @@ def test_corner_detection_ignores_a_split_side():
     assert [len(side) for side in sides[1:]] == [1, 1, 1]
 
 
-def test_face_needs_four_sides():
+def test_neutral_triangle_is_visible_as_not_mappable():
     model = GeometryModel()
     points = model.add_points([(0, 0, 0), (1, 0, 0), (0.5, 1, 0)])
     edges = model.add_polyline(points, close=True)
 
-    with pytest.raises(GeometryError, match="at least four edges"):
-        model.add_face(edges)
+    face = model.add_face(edges)
+    from anymesher import check_mappable
+
+    report = check_mappable(model, face)
+    assert not report.ok
+    assert report.side_edge_counts == (0, 0, 0, 0)
 
 
 def test_corner_override_must_be_in_loop_order():

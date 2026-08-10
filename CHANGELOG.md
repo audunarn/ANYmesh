@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Depend on ANYgeometry as the single owner of `GeometryModel`, `EntityRef`,
+  topology entities, curves, chain sampling and general geometry operations.
+- Keep `anymesher.geometry` as exact-identity compatibility imports.
+- Keep mapped-face checks, triangle-to-quad conversion and butterfly-hole
+  decomposition in `anymesher.decomposition`.
+- Preserve the historical mapped `split_face_at`, `split_face_between` and
+  `strip_face` behavior in that module while ANYgeometry owns the neutral,
+  general-purpose variants.
+- Reject neutral triangular and trimmed faces at the mapped-backend boundary
+  with a mesh-specific diagnostic instead of restricting neutral topology.
+- Rebuild ANYgeometry Bezier splines exactly in the optional Gmsh backend and
+  preserve edge association on their generated nodes. Exclude Gmsh's isolated
+  circle-centre and spline-control construction nodes from the neutral mesh.
+- Verify mapped and Gmsh remeshing from an ANYgeometry generator through owner
+  replacement history and semantic groups.
+
 Added:
 
 - **Embeddable mesh selection.** `MesherWindow(on_apply=...)` adds a **Use mesh**
@@ -82,17 +98,21 @@ Changed from the sources:
   trimmed in place, so a same-named class with different fields cannot be
   mistaken for the original.
 
-Known limitations, stated rather than worked around:
+Historical limitations in the 0.1.0 implementation, stated rather than worked
+around:
 
 - The gmsh backend meshes **planar** faces only, refuses arcs sweeping 180
   degrees or more (gmsh's built-in kernel cannot express one as a single circle
   arc), and does not support eccentric beam offsets. Each refusal names the
   mapped backend, which handles all three exactly.
-- `GeometryModel.add_face` still requires four sides, so the gmsh backend can only
-  mesh faces the mapped mesher would also accept. That is ANYfem's mapped-only
-  design and was not changed as part of a move.
-- Meshing a geometry *model* from the command line would need a serialized
-  geometry format, which this package does not define.
+- `GeometryModel.add_face` required four sides, so the gmsh backend could only
+  mesh faces the mapped mesher also accepted. The Unreleased ANYgeometry
+  extraction supersedes this restriction: neutral faces may have arbitrary
+  valid loops and holes, while the mapped backend still requires mapped
+  partitioning.
+- Meshing a geometry model from the command line lacked an owner serialization
+  format. ANYgeometry now owns that format; ANYmesher's CLI remains focused on
+  mesh primitives and saved meshes, while the API accepts a shared model.
 
 ## 0.0.1
 

@@ -1,11 +1,10 @@
-"""Geometry modelling and structured meshing for shell and beam models.
+"""Structured meshing for shell and beam models described by ANYgeometry.
 
-The package owns the geometry a mesh is built from and the mesh itself: a small
-BRep of vertices, edges with curve shapes, and four-sided faces; seeding and
-refinement; a mapped (transfinite Coons) mesher; primitives for shapes that need
-no geometry model at all; and an optional gmsh backend.  What it produces is a
-neutral mesh -- nodes, quadrilaterals, triangles, beams, coupling records, and
-the association back to the geometry entities that made them.
+The package owns seeding and refinement, mapped-face preparation, a mapped
+(transfinite Coons) mesher, direct mesh primitives and an optional Gmsh backend.
+What it produces is a neutral mesh -- nodes, quadrilaterals, triangles, beams,
+coupling records, and the association back to the ANYgeometry entities that made
+them. Historical geometry imports below are exact owner aliases during migration.
 
 Elements, materials, assembly and solution live elsewhere.  A mesh here knows
 that a beam node stands off the plating by an eccentricity and which shell
@@ -53,6 +52,7 @@ from .geometry import (
     GeometryModel,
     MappabilityReport,
     OrientedEdge,
+    Spline,
     Straight,
     Vertex,
     arc_frame,
@@ -118,6 +118,7 @@ __all__ = [
     "SeedingConflict",
     "SizeField",
     "StiffenedPanel",
+    "Spline",
     "StiffenerCrossSection",
     "Straight",
     "StructuredShellGrid",

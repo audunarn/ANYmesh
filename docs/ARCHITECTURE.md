@@ -2,113 +2,122 @@
 
 ## Position in the family
 
+```text
+ANYgeometry ---> ANYmesher
+      |              |
+      +--------------+---> ANYfem
+      +-------------------> ANYstructure
 ```
-ANYmaterial ──┐
-              ├──→ ANYfileio ──┐
-ANYmesher ────┘                ├──→ ANYsolver ──→ ANYfem
-                               │         └──────→ ANYstructure
-                               └────────────────→ ANYstructure
+
+ANYgeometry is the single geometry authority. ANYmesher imports it and owns
+only meshing concerns: edge seeding, mapped-face preparation, node and element
+generation, local refinement, mesh quality, geometry-to-mesh associations and
+the optional Gmsh backend. ANYfem and ANYstructure consume the same geometry
+objects directly; there is no copied or adapted geometry model.
+
+ANYmesher must not import ANYfem, ANYstructure, ANYsolver, ANYfileio or
+ANYmaterial. Any such reverse dependency would either close a cycle or make a
+neutral mesh depend on analysis data. `tests/test_layering.py` checks this by
+walking the source AST, and also checks that every unconditional third-party
+import is declared.
+
+Writing a mesh to `.fem` or `.inp` belongs to ANYfileio. Materials, elements,
+assembly and solution likewise stay in their owning packages.
+
+## Geometry extraction and compatibility
+
+The BRep, curve and surface evaluation, topology edits, semantic groups,
+history and stable `EntityRef` type belong to ANYgeometry. New code imports
+them there.
+
+Temporary modules under `anymesher.geometry` re-export the owner objects. These
+are aliases, not wrapper classes, so all of these statements remain true:
+
+```python
+from anygeometry import EntityRef, GeometryModel
+from anymesher import EntityRef as LegacyRef
+from anymesher.geometry import GeometryModel as LegacyModel
+
+assert LegacyRef is EntityRef
+assert LegacyModel is GeometryModel
 ```
 
-ANYmesher is a leaf. It imports numpy and the standard library, and nothing else
-in the family. ANYsolver and ANYfileio both depend on it, so any import in the
-other direction closes a cycle. `tests/test_layering.py` enforces this by
-walking the AST of every module.
+General chain sampling and `GeometryError` are also owner exports. `MeshError`
+remains local to ANYmesher.
 
-ANYmaterial is forbidden here too, though it would not close a cycle. A mesh is
-geometry and topology; what an element is made of is somebody else's field on
-somebody else's model. Keeping the two apart is what allows a mesh to be
-generated, saved and re-meshed without ever resolving a steel grade.
+Mapped preparation stays explicitly on the meshing side:
 
-Writing a mesh to `.fem` or `.inp` belongs to ANYfileio, which depends on this
-package. That is a consequence of the arrow above rather than a preference: an
-export function here would need the file layer, and the file layer already needs
-the mesh.
+- `check_mappable`, which assesses the four-side mapped parameterization;
+- the historical `split_face_at`, `split_face_between` and `strip_face`
+  operations, which partition that parameterization while preserving established
+  mapped-mesh behavior;
+- `triangle_to_quads`, which creates non-degenerate mapped quad patches;
+- `punch_circular_hole`, the historical four-patch butterfly/O-grid helper.
+
+They live in `anymesher.decomposition`. The old
+`anymesher.geometry.operations` module re-exports them for compatibility and
+aliases ANYgeometry's `surface_point`. General-purpose neutral split, strip,
+trim, hole, projection and transform operations are imported from ANYgeometry
+under that package's own path. A neutral triangular or trimmed face is valid
+geometry; the built-in mapped backend diagnoses that it needs partitioning
+before it attempts seeding or mesh construction.
 
 ## The neutral mesh
 
-`generate_mesh` returns nodes, quadrilaterals, beams, coupling records, and the
-**association** back to the geometry: which node came from which vertex, which
-nodes lie along which edge, which elements belong to which face. The association
-is the point. It is what lets a load or a restraint be named against geometry and
-survive a re-mesh, and it is what makes results addressable by the thing the user
-drew rather than by node number.
+`generate_mesh` returns nodes, quadrilaterals, triangles, beams, coupling
+records and the association back to geometry: which node came from which
+vertex, which nodes lie on each edge and which elements belong to each face.
+That association lets loads, supports, mesh controls and results use stable
+geometry references across remeshing.
 
-An imported mesh has no geometry behind it, so it carries element groups instead
-of a structured grid. Everything downstream goes through the association, which
-is why both kinds work through the same code.
+An imported mesh has no live geometry behind it, so it carries element groups
+instead of a structured face grid. Consumers still use the same association
+lookups.
 
-## What a coupling record is, and is not
+## Conformity by topology
 
-When a stiffener stands off the plating, its beam nodes are not shell nodes. The
-mesher records, per beam node: the shell element it projects into, the shape
-weights at that point, and the eccentricity vector. That is a statement about
-geometry — this point is here, inside that element, offset by that much.
+Node generation order is fixed: one node per used vertex, then edge-interior
+nodes in the edge's own direction, then face-interior nodes. Adjacent faces
+look up the same shared edge nodes and reverse traversal order where necessary.
+They therefore share node IDs by construction, without merging coincident
+coordinates after meshing.
 
-It is not a constraint. The consuming solver decides that the record becomes six
-multi-point constraints tying the beam node's translations and rotations to the
-shell nodes' with rigid-offset terms. Interpolating through the shell shape
-functions is what removes the older requirement that a beam node lie exactly on a
-shell node row, so the mesh no longer has to be aligned to the stiffeners for the
-coupling to be exact.
+This is why shell intersections must be fragmented into real shared
+ANYgeometry edges before meshing. A tolerance-based mesh-node merge can make
+nearly coincident geometry look connected while leaving invalid topology.
 
-## Conformity by construction
+## Coupling records
 
-Node generation order is fixed, not incidental: one node per used vertex, then
-`n - 1` interior nodes per edge stored in the edge's own direction, then face
-interior nodes. Faces look their boundary nodes up from the vertex and edge
-registries and reverse the list when they traverse an edge backwards, so
-neighbouring faces share the very same nodes.
+When an eccentric beam stands off a shell, ANYmesher records the shell element,
+shape weights and eccentricity associated with each beam node. This is a mesh
+relationship, not an FE constraint. The consuming workflow decides how to turn
+it into solver MPC equations.
 
-The alternative — meshing faces independently and merging coincident nodes within
-a tolerance — fails quietly on nearly-coincident geometry and produces a mesh
-that looks connected and is not. Ordering makes the guarantee structural, so
-there is no tolerance to tune and nothing to get wrong at small feature sizes.
+## Numbering contract
 
-## Numbering is a contract
+Numbering is deterministic and tested because consumers store results by node
+and element ID. The direct primitives retain their established offsets, while
+the mapped backend numbers by deterministic registry order. A mathematically
+irrelevant renumbering can still invalidate project and verification baselines.
 
-Two numbering conventions exist and both are load-bearing. The primitives number
-shell nodes from 1, beam nodes from 10000, beam elements from 20000 and couplings
-from 30000; the mapped mesher numbers by registry order. ANYsolver's deterministic
-baselines record results per node and element ID, so a renumbering that is
-mathematically irrelevant still invalidates them.
+## Backend guarantees
 
-The numbering therefore belongs to the generator that produces it, is documented
-where it is implemented, and is asserted by test. It is not a detail the mesh
-container is free to normalize.
+Both backends return `Mesh`, but their guarantees differ:
 
-## No cycles inside the package either
+- The built-in mapped backend fills `grid_of_face`, produces quads and supports
+  the qualified curved Coons patches.
+- Gmsh leaves `grid_of_face` empty, may retain triangles and currently accepts
+  planar faces only. Their straight, circular-arc and Bezier-spline boundaries
+  are rebuilt as exact Gmsh curve primitives. Auxiliary circle-centre and
+  spline-control points are not imported as disconnected mesh nodes.
 
-The same rule that keeps ANYmesher below ANYsolver applies within it. Two edges
-had to be cut to make the extraction acyclic:
+The container records those differences instead of inventing a structured grid
+for an unstructured mesh.
 
-- The **chain-sampling helpers** live in `geometry/chains.py`. They used to live
-  with the mapped mesher, and `geometry/operations.py` imported them from there —
-  so the geometry package depended on the mesher while all three mesh modules
-  depended on the geometry package. Sampling a chain of edges by arc length is a
-  geometry question, so that is where it belongs.
-- The **exception types** live in `errors.py`. `GeometryError` used to sit with the
-  geometry model and `MeshError` with the mesher, which worked until the chain
-  helpers moved and needed to raise `MeshError` without importing the mesher.
+## Serialization and units
 
-Both are still importable from their old module paths, so the move is invisible to
-a caller.
+`anymesher.serialize` owns only mesh JSON. Geometry serialization belongs to
+ANYgeometry; FEM/project serialization belongs to the relevant application.
 
-## Two backends, two sets of guarantees
-
-`generate_mesh(..., backend=...)` dispatches. Both backends return the same
-container, so quality metrics, association lookups and export work either way.
-They do not promise the same things, and the container says so rather than
-pretending:
-
-- The mapped mesher fills `grid_of_face` with an `(i, j)` index and produces quads
-  only. gmsh leaves it empty and may produce triangles.
-- gmsh meshes planar faces; it refuses a curved patch and names the mapped mesher,
-  which meshes one exactly.
-
-An unstructured mesh with a plausible-looking grid attached would be worse than
-one that admits it has none, because the grid would silently be wrong.
-
-## Units
-
-SI throughout, lengths in m. No conversion layer.
+Library geometry and mesh coordinates use SI metres. The GUI may accept common
+engineering display units and converts them at its boundary.

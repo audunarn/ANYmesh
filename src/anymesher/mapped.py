@@ -26,9 +26,10 @@ from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
+from anygeometry.entities import OrientedEdge
+from anygeometry.model import GeometryModel
+
 from .errors import MeshError
-from .geometry.entities import OrientedEdge
-from .geometry.model import GeometryModel
 from .mesh import Coupling, Mesh
 from .refinement import Refinement, SizeField
 from .seeding import Seeding, edge_distribution, solve_seeding
@@ -140,6 +141,17 @@ def generate_mesh(
     for face_id in faces:
         if face_id not in geometry.faces:
             raise MeshError(f"no face {face_id}")
+        face = geometry.faces[face_id]
+        if len(face.corners) != 4:
+            raise MeshError(
+                f"face {face_id} has no four-side mapped parameterization; "
+                "partition it first (triangle_to_quads handles triangles)"
+            )
+        if getattr(face, "holes", ()):
+            raise MeshError(
+                f"face {face_id} has trimmed holes; decompose it into mapped "
+                "patches before using the built-in quad backend"
+            )
 
     beam_edge_ids = list(dict.fromkeys(int(e) for e in beam_edges))
     for edge_id in beam_edge_ids:
@@ -200,7 +212,7 @@ def _refuse_curved_beams(
     would spend the assembly first and name only an element number.
     """
 
-    from .geometry.curves import Straight
+    from anygeometry.curves import Straight
 
     curved = [
         edge_id

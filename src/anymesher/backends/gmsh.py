@@ -31,9 +31,10 @@ import numpy as np
 
 import gmsh
 
+from anygeometry.curves import Arc, Spline, Straight
+from anygeometry.model import GeometryModel
+
 from ..errors import MeshError
-from ..geometry.curves import Arc, Straight
-from ..geometry.model import GeometryModel
 from ..mesh import Mesh
 
 __all__ = ["generate_mesh"]
@@ -64,8 +65,9 @@ def _face_planarity_error(geometry: GeometryModel, face_id: int) -> Optional[str
     """Return a complaint when a face is too far from planar, else ``None``."""
 
     points: List[np.ndarray] = []
-    for side in geometry.faces[face_id].sides():
-        for item in side:
+    face = geometry.faces[face_id]
+    for boundary in (face.loop, *getattr(face, "holes", ())):
+        for item in boundary:
             points.extend(geometry.sample_edge(item.edge, np.linspace(0.0, 1.0, 5)))
     cloud = np.asarray(points, dtype=float)
     centred = cloud - cloud.mean(axis=0)
@@ -92,8 +94,10 @@ def _build_geometry(
     needed_vertices: List[int] = []
     needed_edges: List[int] = []
     for face_id in face_ids:
-        for item in geometry.faces[face_id].loop:
-            needed_edges.append(item.edge)
+        face = geometry.faces[face_id]
+        for boundary in (face.loop, *getattr(face, "holes", ())):
+            for item in boundary:
+                needed_edges.append(item.edge)
     needed_edges.extend(beam_edge_ids)
     needed_edges = list(dict.fromkeys(needed_edges))
     for edge_id in needed_edges:
@@ -133,6 +137,20 @@ def _build_geometry(
             curve_tags[edge_id] = gmsh.model.geo.addCircleArc(
                 point_tags[edge.start], centre_tag, point_tags[edge.end]
             )
+        elif isinstance(curve, Spline):
+            # ANYgeometry's lightweight spline is a Bezier curve, so this is an
+            # exact reconstruction rather than a sampled polyline approximation.
+            # Control vertices remain geometry-only; mesh association stays on
+            # the owning edge.
+            control_tags = []
+            for vertex in curve.control_vertices:
+                position = geometry.vertex_position(vertex)
+                control_tags.append(
+                    gmsh.model.geo.addPoint(*(float(value) for value in position))
+                )
+            curve_tags[edge_id] = gmsh.model.geo.addBezier(
+                [point_tags[edge.start], *control_tags, point_tags[edge.end]]
+            )
         else:
             raise MeshError(
                 f"line {edge_id} has curve type {type(curve).__name__}, which the "
@@ -144,23 +162,39 @@ def _build_geometry(
         complaint = _face_planarity_error(geometry, face_id)
         if complaint is not None:
             raise MeshError(complaint)
-        oriented = [
-            curve_tags[item.edge] if item.forward else -curve_tags[item.edge]
-            for item in geometry.faces[face_id].loop
-        ]
-        loop = gmsh.model.geo.addCurveLoop(oriented)
-        surface_tags[face_id] = gmsh.model.geo.addPlaneSurface([loop])
+        face = geometry.faces[face_id]
+        loops = []
+        for boundary in (face.loop, *getattr(face, "holes", ())):
+            oriented = [
+                curve_tags[item.edge] if item.forward else -curve_tags[item.edge]
+                for item in boundary
+            ]
+            loops.append(gmsh.model.geo.addCurveLoop(oriented))
+        surface_tags[face_id] = gmsh.model.geo.addPlaneSurface(loops)
 
     gmsh.model.geo.synchronize()
     return point_tags, curve_tags, surface_tags
 
 
 def _read_nodes() -> Tuple[Dict[int, np.ndarray], Dict[int, int]]:
-    """Read every node, renumbered densely from 1 in gmsh tag order."""
+    """Read connected 1D/2D nodes, renumbered densely in Gmsh tag order.
+
+    Gmsh also meshes construction points used to define circle centres and
+    Bezier controls as isolated 0D nodes. They are not part of the neutral mesh:
+    importing them would create disconnected solver degrees of freedom.
+    """
 
     tags, coords, _parametric = gmsh.model.mesh.getNodes()
     positions = np.asarray(coords, dtype=float).reshape(-1, 3)
-    order = sorted(range(len(tags)), key=lambda index: int(tags[index]))
+    connected_tags: set[int] = set()
+    for dimension in (1, 2):
+        _types, _element_tags, node_tags = gmsh.model.mesh.getElements(dimension)
+        for block in node_tags:
+            connected_tags.update(int(tag) for tag in block)
+    order = sorted(
+        (index for index, tag in enumerate(tags) if int(tag) in connected_tags),
+        key=lambda index: int(tags[index]),
+    )
     nodes: Dict[int, np.ndarray] = {}
     remap: Dict[int, int] = {}
     for new_id, index in enumerate(order, start=1):

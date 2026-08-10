@@ -28,7 +28,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / PACKAGE
 
 # Distributions this package may import unconditionally.  Keep in step with the
 # `dependencies` list in pyproject.toml -- test_packaging.py checks that.
-ALLOWED_THIRD_PARTY = frozenset({"numpy"})
+ALLOWED_THIRD_PARTY = frozenset({"anygeometry", "numpy"})
 
 # Importing any of these would either invert the dependency direction or give a
 # mesh an opinion about something that is not its business.

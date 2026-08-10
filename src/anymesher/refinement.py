@@ -33,8 +33,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .geometry.entities import EntityRef
-from .geometry.model import GeometryModel
+from anygeometry.chains import sample_chain
+from anygeometry.entities import EntityRef
+from anygeometry.model import GeometryModel
+
 
 __all__ = [
     "Refinement",
@@ -166,7 +168,7 @@ class Refinement:
     def _face_sources(
         self, geometry: GeometryModel, face_id: int
     ) -> np.ndarray:
-        from .mapped import coons_grid, sample_chain
+        from .mapped import coons_grid
 
         face = geometry.faces[face_id]
         sides = face.sides()

@@ -19,8 +19,9 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
+from anygeometry.entities import EntityRef
+
 from .errors import MeshError
-from .geometry.entities import EntityRef
 from .seeding import Seeding
 
 __all__ = ["Coupling", "Mesh"]

@@ -37,8 +37,9 @@ from typing import Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
 
-from .geometry.entities import Face, OrientedEdge
-from .geometry.model import GeometryModel
+from anygeometry.entities import Face, OrientedEdge
+from anygeometry.model import GeometryModel
+
 from .refinement import SizeField
 
 __all__ = [

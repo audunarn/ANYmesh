@@ -1,5 +1,34 @@
 # Migration to ANYmesher
 
+## Geometry authority extracted to ANYgeometry (2026-08-08)
+
+The reusable geometry kernel has moved again, this time to its final neutral
+owner: the `ANYgeometry` distribution and `anygeometry` import package.
+
+| Previous ANYmesher source | Current owner |
+| --- | --- |
+| `geometry/entities.py` | `anygeometry.entities` |
+| `geometry/curves.py` | `anygeometry.curves` |
+| `geometry/chains.py` | `anygeometry.chains` |
+| `geometry/model.py` | `anygeometry.model` |
+| general operations in `geometry/operations.py` | `anygeometry.operations` |
+
+`anymesher.geometry` remains a compatibility facade and returns the exact owner
+classes. Mapped-only preparation did not move: `check_mappable`,
+`triangle_to_quads`, and the legacy butterfly implementation of
+`punch_circular_hole` are implemented in `anymesher.decomposition` and re-exported
+from their old paths. The historical mapped `split_face_at`,
+`split_face_between` and `strip_face` paths also remain there so existing mapped
+models retain their exact partitioning. ANYgeometry separately owns the neutral,
+general-purpose edit operations under its own import path.
+
+The extraction removes the old geometry/mesher ownership ambiguity. ANYmesher
+now imports ANYgeometry; ANYgeometry never imports ANYmesher or an FE package.
+Because the dependency is not yet published, CI installs the sibling checkout;
+release ANYgeometry 0.1 before publishing ANYmesher 0.1 to a package index.
+The historical account below describes the earlier extraction from ANYfem into
+ANYmesher and is retained as provenance, not as the current dependency boundary.
+
 ANYmesher is a curated extraction, not a filtered-history import, following the
 precedent set by `ANYsolver/MIGRATION.md`. It draws on two sources, because the
 family currently has two meshers.
@@ -72,10 +101,12 @@ All were reviewed during the coordinated strip:
   `tests/test_structural.py`.
 - **`Mesh` gained `tris` and `thickness_of_face`.** Both stay empty for the mapped
   mesher, so nothing changes for it.
-- **The chain helpers, `GeometryError` and `MeshError` moved.**
-  `chain_breaks`, `chain_point` and `sample_chain` are now in
-  `anymesher.geometry.chains`; the two exceptions are in `anymesher.errors`. Both
-  are still importable from their old module paths. The reason is a cycle:
+- **The chain helpers, `GeometryError` and `MeshError` moved.** At the 0.1
+  extraction, `chain_breaks`, `chain_point` and `sample_chain` moved to
+  `anymesher.geometry.chains`; they are now owned by `anygeometry.chains` and
+  the former path is an exact compatibility re-export. `GeometryError` likewise
+  belongs to ANYgeometry, while `MeshError` remains in `anymesher.errors`. The
+  reason for the original move was a cycle:
   `geometry/operations.py` imported the chain helpers from `mesh/mapped.py` while
   all three mesh modules imported from `geometry`.
 - **`GeometryModel.arc_frame(edge_id)` is public.** New method, delegating to the
@@ -130,12 +161,14 @@ survive verbatim or ANYsolver's deterministic baselines
 The policies belong to the generators, not to the mesh container, and are
 asserted by test rather than left to be rediscovered.
 
-## Import changes
+## Historical 0.1 import changes
 
-Applied in ANYfem and ANYsolver 0.2 integration. ANYmesher is now authoritative
-for geometry and neutral meshing; the consumers retain compatibility adapters.
+The first extraction made ANYmesher authoritative for geometry and neutral
+meshing. That geometry ownership has since moved to ANYgeometry as described at
+the top of this document; only neutral meshing remains authoritative here. The
+table records the 0.1 transition for provenance, not current import guidance.
 
-| Previous import | Replacement |
+| Import before ANYmesher 0.1 | Replacement at 0.1 |
 | --- | --- |
 | `anyfem.geometry` | `anymesher.geometry` |
 | `anyfem.mesh.mapped` | `anymesher.mapped`, `anymesher.mesh` |

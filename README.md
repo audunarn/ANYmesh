@@ -1,10 +1,10 @@
 # ANYmesher
 
-Geometry modelling and structured meshing for shell and beam finite-element
-models: a small BRep, seeding and refinement, a built-in mapped (transfinite
-Coons) mesher, primitives for shapes that need no geometry model, an optional
-gmsh backend, mesh quality metrics, a tkinter mesher and a command-line
-interface.
+Structured meshing for shell and beam finite-element models described by
+[ANYgeometry](https://github.com/audunarn/ANYgeometry): edge seeding and local
+refinement, a built-in mapped (transfinite Coons) mesher, mapped-face
+decomposition, optional Gmsh meshing, geometry-to-mesh associations, quality
+metrics, a tkinter mesher and a command-line interface.
 
 After the first package-index release, install with
 `python -m pip install ANYmesher`. Until then, use the editable development
@@ -35,17 +35,23 @@ am.panel_edge_nodes(mesh)["x0"]          # the nodes on the x = 0 edge
 am.verify_mesh_quality(mesh).max_aspect_ratio
 ```
 
-Anything less regular goes through the geometry model:
+Anything less regular goes through the shared geometry model:
 
 ```python
-model = am.GeometryModel()
+import anygeometry as ag
+
+model = ag.GeometryModel()
 points = model.add_points([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)])
 face = model.add_face(model.add_polyline(points, close=True))
 
 am.punch_circular_hole(model, face, (1.0, 0.5, 0.0), 0.2)
 mesh = am.generate_mesh(model, target_size=0.05, order="quadratic")
-mesh.nodes_on(am.EntityRef("edge", 3))   # still addressable after re-meshing
+mesh.nodes_on(ag.EntityRef("edge", 3))   # still addressable after re-meshing
 ```
+
+`anymesher.geometry` remains as a temporary compatibility import. Its classes
+are the exact ANYgeometry classes, not converted copies, but new code should
+import geometry directly from `anygeometry`.
 
 ## Command line
 
@@ -102,8 +108,14 @@ am.generate_mesh(model, backend="gmsh", target_size=0.1)
 The two are not interchangeable in what they guarantee, and the differences are
 recorded rather than smoothed over: an unstructured mesh has no `(i, j)` index, so
 that field is left empty instead of filled with something plausible.
+Planar boundaries may contain ANYgeometry straight lines, circular arcs or
+Bezier splines; Gmsh receives each as its corresponding exact curve primitive.
 
 ## Design notes
+
+**One shared geometry authority.** ANYmesher never converts a geometry model.
+It consumes the same `GeometryModel` and `EntityRef` objects that applications
+use for selections and attributes, then records associations to their stable IDs.
 
 **Conformity by construction.** Node generation order is fixed: one node per used
 vertex, then `n - 1` interior nodes per edge in the edge's own direction, then face
@@ -132,7 +144,14 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layering, and
 
 ## Scope
 
-Out of scope: elements, materials, assembly, solution. Writing a mesh to a `.fem`
+Out of scope: geometry ownership, elements, materials, assembly and solution.
+General splitting, trimming, projection, transforms and intersections belong to
+ANYgeometry. `check_mappable`, `triangle_to_quads` and the four-patch butterfly
+hole decomposition stay here because they exist specifically for mapped quads.
+The legacy `anymesher.split_face_at`, `split_face_between` and `strip_face`
+imports likewise retain their mapped-partition semantics; new neutral geometry
+code should import the general edit operations from `anygeometry`.
+Writing a mesh to a `.fem`
 or `.inp` file belongs to [ANYfileio](https://github.com/audunarn/ANYio), which
 depends on this package — so the arrow cannot point back. The JSON in
 `anymesher.serialize` is the mesh container written out as itself, not an
@@ -147,6 +166,7 @@ converts at the widget.
 ## Development
 
 ```powershell
+python -m pip install --no-deps -e C:\Github\ANYgeometry
 python -m pip install -e "C:\Github\ANYmesh[dev,gmsh]"
 python -m pytest
 ```
