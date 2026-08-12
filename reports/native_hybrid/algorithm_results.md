@@ -36,7 +36,11 @@ The focused narrow-region mesh is topologically valid but contains low-shape-qua
 
 - Large and adversarial planar/curved corpora with acceptance distributions.
 - Nonlinear curved convergence and solver-reference comparisons.
-- Full platform wheel installation/import matrix.
-- Incremental remeshing, cache, cancellation, and deterministic parallel evidence.
+- Installed-wheel behavior and the full platform artifact matrix in CI/release
+  infrastructure; the bounded local wheel path was retired without qualification.
+- Real in-kernel cancellation latency, within-component parallelism, and repeated
+  large-model scheduling stress. Focused cache reuse, safe-phase cancellation,
+  and two-component serial/concurrent determinism are accepted separately.
 - Leased generation, memory, serialization, and scaling measurements at the plan sizes.
-- Shell/sheet shared-topology integration after the renewed ANYgeometry public-tree handoff.
+- Broad downstream shell/sheet application qualification against the frozen
+  ANYgeometry public tree, without coordinate inference.

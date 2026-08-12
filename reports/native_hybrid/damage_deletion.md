@@ -28,7 +28,9 @@ Result: `109 passed in 67.58s`; no failures or skips. Ecosystem review accepted 
 ## Limitations and open gates
 
 - This result is not a damage-model calibration, fracture-mechanics validation, scaling result, or memory/performance measurement.
-- The activity hot path still requires a committed delivery SHA and reconciliation with the separately owned S4 formulation branch.
+- The activity hot path is committed at ANYsolver `1fd1c19`, with its SHA ledger
+  at `7daa6e8`; reconciliation with the separately owned S4 formulation branch
+  remains required.
 - Combined activity/S4 regression must follow the recorded merge order before ecosystem closeout.
 - Restart compatibility outside the exercised state lifecycle modules and long-running progressive-deletion histories remain open.
 

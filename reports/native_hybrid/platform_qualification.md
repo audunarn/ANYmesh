@@ -17,10 +17,23 @@ The CI and release workflows build compiled wheels with `pypa/cibuildwheel@v4.1.
 - manylinux x86-64
 - macOS runner architecture
 
-Each wheel is installed by cibuildwheel in its isolated temporary test environment. The smoke installs the checked-out public ANYgeometry dependency, imports ANYmesher from the wheel, asserts that the compiled extension is available, and generates a small mesh. The regular test matrix runs on Windows, Ubuntu, and macOS for the same Python versions. Gmsh remains a separate optional compatibility job and is not part of the production default.
+The configured cibuildwheel smoke installs the checked-out public ANYgeometry dependency, imports ANYmesher from the wheel, asserts that the compiled extension is available, and generates a small mesh. The regular workflow matrix targets Windows, Ubuntu, and macOS for the same Python versions. This paragraph describes workflow configuration, not completed artifact evidence. Gmsh remains a separate optional compatibility job and is not part of the production default.
+
+## Local installed-wheel outcome
+
+The bounded local Windows qualification path did not produce accepted behavior
+evidence. Attempts 1 and 2 are retained as failed transport/dependency reports.
+Attempt 3 timed out before a report. The final Stage A attempt timed out without
+publishing its required atomic wheel/log/report/index bundle. Independent
+post-timeout inspection found no surviving build process, temporary tree, or
+source mutation. No local installed-wheel, ABI, backend, oracle, predicate, or
+publication-readiness claim is made, and no further local attempt is authorized
+for this core completion slice.
 
 ## Remaining evidence
 
 - CI artifact URLs and exact wheel tags must be recorded after the workflow runs.
 - Non-Windows behavioral results remain pending until CI reports them.
 - Apple Silicon and additional Linux architectures are not claimed by this matrix.
+- Dependency-complete installed-wheel behavior must pass in CI/release before
+  publication; the local attempt history is not a substitute.

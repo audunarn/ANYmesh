@@ -1,0 +1,38 @@
+{
+  "schema": "anymesher.native_hybrid.performance_results.v1",
+  "date": "2026-08-13",
+  "status": "partial",
+  "qualified_results": {
+    "incremental_component_remesh": {
+      "report": "incremental_performance_results.json",
+      "platform": "Windows-11-10.0.26200-SP0",
+      "python": "3.13.9",
+      "component_count": 20,
+      "element_count": 8000,
+      "dirty_component_count": 1,
+      "dirty_fraction": 0.05,
+      "full_generation_seconds": 37.87055400000827,
+      "dirty_response_seconds": 2.0458199999993667,
+      "full_over_dirty_speedup": 18.51118573482515,
+      "maximum_dirty_fraction_gate": 0.2,
+      "minimum_speedup_gate": 5.0,
+      "passed": true
+    }
+  },
+  "unqualified_gates": {
+    "mapped_median_regression": "not executed under the approved frozen comparison method",
+    "mapped_peak_memory_regression": "not executed",
+    "compatibility_serialization_regression": "not executed at release scale",
+    "generation_10000": "failed/absent evidence after a predicate defect correction and a later timeout",
+    "generation_100000": "not executed",
+    "generation_500000": "not executed",
+    "largest_workstation_model": "not executed",
+    "broad_peak_memory_scaling": "not executed",
+    "cross_platform_performance": "not executed"
+  },
+  "interpretation": [
+    "The recorded 20-component result qualifies only dirty-scope and speedup gates on the named Windows CPython 3.13.9 run.",
+    "No broad generation-time, memory, serialization, or asymptotic-scaling claim is supported.",
+    "The retired local wheel path is packaging evidence history and is not a performance result."
+  ]
+}

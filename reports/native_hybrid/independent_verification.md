@@ -2,7 +2,7 @@
 
 Status: partial, not a closeout
 
-Date: 2026-08-12
+Date: 2026-08-13
 
 Independent ecosystem review is coordinated by task
 `019ff655-abd9-7eb1-b94e-d80252ff9215`. The entries below record only results
@@ -24,6 +24,9 @@ that task explicitly reproduced or inspected and accepted in a bounded scope.
 | Runtime cache reuse | 7 passed in 1.01 s | Dirty-only generation, exact clean-publication retention, empty-resolution zero generation, and related focused runtime behavior. |
 | Serial/concurrent component determinism | 2 passed in 0.87 s | Two model-bound faces under one-worker serial versus reversed two-worker scheduling. |
 | Safe-phase cancellation | ANYmesh 1 passed; ANYfem 3 passed | Exception propagation after real triangulation and last-valid publication retention. |
+| ANYfem schema-6 backend migration | 40 passed | Recursive schema 1-5 migration, schema-6 canonical selector, session snapshot, and save/reopen behavior. |
+| ANYfem selector UI | 5 passed | Project selector identity, snapshot, provenance, and fail-hard UI behavior in the focused gate. |
+| ANYsolver consumer surface | 3 passed | Exact `>=0.1,<0.3` source range, neutral runtime API, and order-independent installed METADATA requirement semantics. |
 
 ## Independently inspected performance evidence
 
@@ -43,24 +46,25 @@ This is not broad scaling, peak-memory, or cross-platform evidence.
 
 ## Upstream kernel evidence recorded by independent coordination
 
-- ANYgeometry persistence: 116 focused tests for schema v1-v4 reads,
-  canonical v4 writes, deterministic migration, checksums, and fail-closed
-  unverified legacy relationship evidence.
-- Structural/local model contracts: 30 focused passes.
-- Intersection/predicate/workflow contracts: 52 focused passes.
-- Straight-extrusion Plane support and shell/sheet CONNECT: 3 focused passes
-  before a later hostile review hold.
-- Batch evaluator/projection hostile fixes: 26 focused passes.
-- Structural attachment/radial/curved slice: 45 focused passes.
+ANYgeometry's final public branch tip is
+`37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa`; qualified kernel/package/test code
+is at parent `8828019e0f940b0d6f240b98f8be17d6f306155b`. The final handoff records:
 
-The ANYgeometry public tree remains withheld pending its final intersection and
-full/package qualification. These upstream counts therefore do not yet
-authorize the downstream shell/sheet rerun.
+- Full kernel suite: 389 passed in 11.94 seconds.
+- Evaluator contract: 26 passed.
+- Intersection/policy/radial contract: 67 passed in 7.66 seconds.
+- Structural/source/radial/curved split: 45 passed in 0.25 seconds.
+- Offline build and Twine checks passed.
+- Isolated external-TEMP installed-wheel origin/version/typing/CLI smoke passed.
+- Schema 1 through 4 reads and canonical checksummed schema 4 writes.
+- Qualified face/face `CONNECT` with shared Edge and both Sheets' FaceUse/Coedge
+  incidence; unsupported cases remain typed and fail closed.
 
 ## Committed solver handoff
 
 - Activity implementation delivery: ANYsolver commit `1fd1c19`.
 - SHA ledger update: ANYsolver commit `7daa6e8`.
+- Consumer compatibility commits: ANYsolver `a49fee8` and `925639e`.
 - Public seam and merge order: `C:\Github\ANYsolver\ACTIVITY_S4_HANDOFF.md`.
 
 ## Evidence run locally but awaiting independent acceptance
@@ -73,12 +77,14 @@ authorize the downstream shell/sheet rerun.
 
 ## Open independent gates
 
-- Renewed ANYgeometry `PUBLIC TREE READY`, final SHA, and contract ledger.
-- ANYfem Sheet/FaceUse ownership plus shell/sheet CONNECT and conformal mesh
-  qualification against that frozen tree.
+- Broad ANYfem Sheet/FaceUse shell/sheet CONNECT and conformal-mesh application
+  qualification against the frozen public geometry tree.
 - 10k/100k/500k generation, memory, serialization, and scaling evidence.
 - Like-for-like frozen-baseline/current mapped regression budgets.
-- Isolated installed-wheel import and platform artifact matrix.
+- Dependency-complete installed-wheel import and platform artifact matrix in
+  CI/release infrastructure. The local path was retired without qualification.
+- ANYfileIO range correction and a fully hashed combined resolver/lock selecting
+  ANYmesher 0.2.1; no normal resolved ecosystem claim exists yet.
 - Combined activity/S4 merge and regression matrix.
 - Broad migration, application/UI, edit/restart, and ecosystem regressions.
 - Final report/commit inventory and independent completion review.
