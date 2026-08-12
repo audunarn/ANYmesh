@@ -485,3 +485,12 @@ If approved and implemented, the main reports must record:
 
 This addendum does not approve implementation, authorize a performance run, or
 change ecosystem closeout status.
+
+## Authorization status update (2026-08-12)
+
+Statements marked `NOT AUTHORIZED` in this addendum record the governance state
+when the implementation baseline was reviewed. They were superseded by explicit
+user and ecosystem-boss authorization before the bounded implementation shipped
+in commit `3fb32f8`. This authorization does not qualify wheel/platform coverage,
+performance, dependency resolution, publication, or ecosystem closeout; those
+gates remain open and require their separately recorded evidence and approvals.
