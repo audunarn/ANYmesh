@@ -23,7 +23,7 @@ from ..mesh import Mesh
 
 __all__ = ["DEFAULT_BACKEND", "MeshBackend", "available_backends", "generate_mesh", "resolve_backend"]
 
-DEFAULT_BACKEND = "mapped"
+DEFAULT_BACKEND = "auto"
 
 
 @runtime_checkable
@@ -40,6 +40,22 @@ def _mapped_backend() -> MeshBackend:
     return mapped_generate
 
 
+def _auto_backend() -> MeshBackend:
+    from ..hybrid import generate_hybrid_mesh
+
+    return generate_hybrid_mesh
+
+
+def _native_backend() -> MeshBackend:
+    from ..hybrid import MeshingStrategy, generate_hybrid_mesh
+
+    def generate_native(geometry: GeometryModel, **options: Any) -> Mesh:
+        options.setdefault("strategy", MeshingStrategy.NATIVE)
+        return generate_hybrid_mesh(geometry, **options)
+
+    return generate_native
+
+
 def _gmsh_backend() -> MeshBackend:
     try:
         from .gmsh import generate_mesh as gmsh_generate
@@ -52,7 +68,9 @@ def _gmsh_backend() -> MeshBackend:
 
 # Loaded lazily, so importing anymesher never imports gmsh.
 _BACKEND_LOADERS: Dict[str, Any] = {
+    "auto": _auto_backend,
     "mapped": _mapped_backend,
+    "native": _native_backend,
     "gmsh": _gmsh_backend,
 }
 
@@ -84,10 +102,10 @@ def generate_mesh(
 ) -> Mesh:
     """Mesh a geometry model with the named backend.
 
-    Options are passed through, because the two backends do not take the same
-    ones: the mapped mesher accepts seeding overrides and per-edge beam offsets,
-    gmsh accepts its own algorithm choices, and pretending they share a signature
-    would mean silently dropping whatever did not fit.
+    ``auto`` is the production hybrid selector, ``native`` forces the native
+    surface path, and ``mapped`` preserves the established mapped-only contract.
+    Options are passed through because compatibility backends retain distinct
+    feature sets rather than silently dropping unsupported controls.
     """
 
     return resolve_backend(backend)(geometry, **options)

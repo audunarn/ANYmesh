@@ -139,7 +139,6 @@ def split_face_between(
         face, start_vertex, end_vertex, geometry
     )
     metadata = dict(face.metadata)
-    tags = geometry.tags_for(face.ref) if hasattr(geometry, "tags_for") else ()
     # The explicit replacement below is the public edit.  Suppress the
     # intermediate deletion record so consumers see one unambiguous lineage
     # entry (old face -> the two new faces), rather than old -> () followed by
@@ -153,9 +152,7 @@ def split_face_between(
         [item.edge for item in second_loop] + [dividing_edge]
     )
     for made in (first_face, second_face):
-        geometry.faces[made].metadata.update(metadata)
-        if tags and hasattr(geometry, "tag"):
-            geometry.tag(EntityRef("face", made), *tags)
+        geometry.set_face_metadata(made, metadata)
     geometry.record_replacement(
         EntityRef("face", face_id),
         (EntityRef("face", first_face), EntityRef("face", second_face)),
@@ -206,9 +203,12 @@ def _split_side_at(
     span = breaks[segment + 1] - breaks[segment]
     local = 0.0 if span <= 0.0 else (fraction - breaks[segment]) / span
     item = side[segment]
-    if local <= 1.0e-9:
+    parameter_tolerance = geometry.tolerance.effective_parameter(
+        geometry.edge_length(item.edge)
+    )
+    if local <= parameter_tolerance:
         return geometry.oriented_start_vertex(item)
-    if local >= 1.0 - 1.0e-9:
+    if local >= 1.0 - parameter_tolerance:
         return geometry.oriented_end_vertex(item)
     parameter = local if item.forward else 1.0 - local
     new_vertex, _halves = geometry.split_edge(item.edge, parameter)
@@ -275,9 +275,12 @@ def _fit_dividing_edge(
     start = samples[0]
     end = samples[-1]
     scale = float(np.linalg.norm(end - start))
-    if scale <= 0.0:
+    if scale <= geometry.tolerance.effective_length(scale):
         raise GeometryError("a dividing edge needs two distinct points")
-    limit = tolerance * scale
+    limit = max(
+        tolerance * scale,
+        geometry.tolerance.effective_surface_residual(scale),
+    )
     straight = start + np.outer(
         np.linspace(0.0, 1.0, len(samples)), end - start
     )
@@ -514,7 +517,10 @@ def punch_circular_hole(
         following = (index + 1) % 4
         start_angle = corner_angles[index]
         sweep = _wrapped_sweep(
-            start_angle, corner_angles[following], counter_clockwise
+            start_angle,
+            corner_angles[following],
+            counter_clockwise,
+            geometry.tolerance.angular,
         )
         via_angle = start_angle + 0.5 * sweep
         via_position = hub + radius * (
@@ -570,7 +576,14 @@ def _plane_of(
     normal = vectors[2]
     scale = float(np.abs(samples - origin).max())
     deviation = float(np.abs((samples - origin) @ normal).max())
-    if scale <= 0.0 or deviation > tolerance * scale:
+    residual_tolerance = max(
+        tolerance * scale,
+        geometry.tolerance.effective_surface_residual(scale),
+    )
+    if (
+        scale <= geometry.tolerance.effective_length(scale)
+        or deviation > residual_tolerance
+    ):
         raise GeometryError(
             f"face {face.id} is not planar, so a circular hole in it is not a "
             "circle in any one plane. Punch the hole in a planar plate."
@@ -603,11 +616,16 @@ def _winding(
     return float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
 
 
-def _wrapped_sweep(start: float, end: float, counter_clockwise: bool) -> float:
+def _wrapped_sweep(
+    start: float,
+    end: float,
+    counter_clockwise: bool,
+    angular_tolerance: float,
+) -> float:
     delta = (end - start) % (2.0 * np.pi)
     if not counter_clockwise:
         delta -= 2.0 * np.pi
-    if abs(delta) <= 1.0e-12:
+    if abs(delta) <= angular_tolerance:
         raise GeometryError(
             "two plate corners lie on the same ray from the hole centre, so "
             "the butterfly patches would be degenerate. Move the hole centre."

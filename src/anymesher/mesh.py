@@ -16,10 +16,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Sequence, Tuple
+from uuid import UUID
 
 import numpy as np
 
 from anygeometry.entities import EntityRef
+from anygeometry.identity import EntityHandle
 
 from .errors import MeshError
 from .seeding import Seeding
@@ -102,6 +104,9 @@ class Coupling:
 class Mesh:
     """A mesh, with the association back to the geometry that made it."""
 
+    geometry_model_id: UUID | str | None = None
+    geometry_revision: int | None = None
+
     nodes: Dict[int, np.ndarray] = field(default_factory=dict)
     # Four node IDs when linear, eight when quadratic: corners first, then the
     # mid-side nodes, which is the serendipity ordering solvers expect.
@@ -125,6 +130,12 @@ class Mesh:
     grid_of_face: Dict[int, np.ndarray] = field(default_factory=dict)
     elements_of_face: Dict[int, List[int]] = field(default_factory=dict)
     elements_of_edge: Dict[int, List[int]] = field(default_factory=dict)
+    elements_of_sheet: Dict[int, List[int]] = field(default_factory=dict)
+    elements_of_member: Dict[int, List[int]] = field(default_factory=dict)
+    nodes_of_member: Dict[int, List[int]] = field(default_factory=dict)
+    # Compatibility activity view.  Production hot paths use MeshCore's dense
+    # float array; this mapping preserves stable IDs for the neutral facade.
+    activity: Dict[int, float] = field(default_factory=dict)
     # Plate thickness per face, where the generator knows it.  A primitive does;
     # a face meshed from a geometry model gets its thickness from an attribute
     # somewhere else, so this stays empty there.
@@ -174,8 +185,31 @@ class Mesh:
             return tuple(int(node) for node in self.tris[element_id][:3])
         raise MeshError(f"no shell element {element_id}")
 
-    def nodes_on(self, ref: EntityRef) -> List[int]:
+    def _local_ref(self, ref: EntityRef | EntityHandle) -> EntityRef:
+        if isinstance(ref, EntityHandle):
+            if self.geometry_model_id is None:
+                raise MeshError("mesh has no source-model identity")
+            if not ref.belongs_to(self.geometry_model_id):
+                raise MeshError(
+                    f"handle belongs to geometry model {ref.model_id}, not "
+                    f"mesh source {self.geometry_model_id}"
+                )
+            return EntityRef(ref.kind, ref.id)  # type: ignore[arg-type]
+        if not isinstance(ref, EntityRef):
+            raise TypeError("mesh association query needs EntityRef or EntityHandle")
+        return ref
+
+    def _nodes_from_elements(self, element_ids: Sequence[int]) -> List[int]:
+        connectivity = {**self.shells, **self.beams}
+        nodes: set[int] = set()
+        for element_id in element_ids:
+            nodes.update(connectivity.get(int(element_id), ()))
+        return sorted(nodes)
+
+    def nodes_on(self, ref: EntityRef | EntityHandle) -> List[int]:
         """Every node lying on one geometry entity, boundary included."""
+
+        ref = self._local_ref(ref)
 
         if ref.kind == "vertex":
             node_id = self.node_of_vertex.get(ref.id)
@@ -194,9 +228,16 @@ class Mesh:
             for element_id in self.elements_of_face.get(ref.id, ()):
                 nodes.update(shells.get(element_id, ()))
             return sorted(nodes)
+        if ref.kind == "sheet":
+            return self._nodes_from_elements(self.elements_of_sheet.get(ref.id, ()))
+        if ref.kind == "member":
+            explicit = self.nodes_of_member.get(ref.id)
+            if explicit is not None:
+                return list(explicit)
+            return self._nodes_from_elements(self.elements_of_member.get(ref.id, ()))
         raise MeshError(f"unknown entity kind {ref.kind!r}")
 
-    def constrained_nodes_on(self, ref: EntityRef) -> List[int]:
+    def constrained_nodes_on(self, ref: EntityRef | EntityHandle) -> List[int]:
         """Every node a restraint on this entity should hold.
 
         A support applies to a physical location, so it takes the offset
@@ -204,10 +245,11 @@ class Mesh:
         leaving the stiffener free would be a different structure.
         """
 
-        nodes = list(self.nodes_on(ref))
-        if ref.kind == "edge":
-            nodes.extend(self.offset_nodes_of_edge.get(ref.id, ()))
-        elif ref.kind == "vertex":
+        local = self._local_ref(ref)
+        nodes = list(self.nodes_on(local))
+        if local.kind == "edge":
+            nodes.extend(self.offset_nodes_of_edge.get(local.id, ()))
+        elif local.kind == "vertex":
             for offset_nodes, edge_nodes in (
                 (self.offset_nodes_of_edge.get(edge_id, ()), sequence)
                 for edge_id, sequence in self.nodes_of_edge.items()
@@ -217,13 +259,19 @@ class Mesh:
                         nodes.append(offset_node)
         return sorted(set(nodes))
 
-    def elements_on(self, ref: EntityRef) -> List[int]:
+    def elements_on(self, ref: EntityRef | EntityHandle) -> List[int]:
         """Every element belonging to one geometry entity."""
+
+        ref = self._local_ref(ref)
 
         if ref.kind == "face":
             return list(self.elements_of_face.get(ref.id, ()))
         if ref.kind == "edge":
             return list(self.elements_of_edge.get(ref.id, ()))
+        if ref.kind == "sheet":
+            return list(self.elements_of_sheet.get(ref.id, ()))
+        if ref.kind == "member":
+            return list(self.elements_of_member.get(ref.id, ()))
         if ref.kind == "vertex":
             return []
         raise MeshError(f"unknown entity kind {ref.kind!r}")

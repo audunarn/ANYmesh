@@ -221,7 +221,9 @@ def solve_seeding(
     faces = [
         face
         for face in geometry.faces.values()
-        if all(item.edge in desired for item in face.loop)
+        if len(face.corners) == 4
+        and not face.holes
+        and all(item.edge in desired for item in face.loop)
     ]
 
     union = _UnionFind()

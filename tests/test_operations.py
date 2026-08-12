@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from anygeometry import punch_hole as punch_neutral_hole
+from anygeometry.tolerance import TolerancePolicy
 from anymesher import decomposition
 
 from anymesher import (
@@ -263,6 +264,8 @@ def test_mapped_face_split_records_one_semantic_replacement() -> None:
     )
     face = model.add_face(model.add_polyline(points, close=True))
     old = EntityRef("face", face)
+    metadata = {"mapped": True, "source": "panel-7"}
+    model.set_face_metadata(face, metadata)
     model.add_to_group("shell", [old])
     model.tag(old, "primary")
     model.begin_replacement_log()
@@ -276,6 +279,10 @@ def test_mapped_face_split_records_one_semantic_replacement() -> None:
     assert model.replacement_history()[old] == descendants
     assert model.group("shell") == descendants
     assert all(model.tags_for(item) == ("primary",) for item in descendants)
+    assert all(
+        dict(model.faces[item.id].metadata) == metadata for item in descendants
+    )
+    assert all(len(model.faces[item.id].corners) == 4 for item in descendants)
 
 
 def test_curved_surface_operations_remain_exact_and_conformal() -> None:
@@ -317,6 +324,22 @@ def test_face_split_validates_parameter_axis_and_side_pair() -> None:
         split_face_at(model, face, axis=2, fraction=0.5)
     with pytest.raises(GeometryError, match="opposite sides"):
         split_face_between(model, face, points[0], points[1])
+
+
+def test_side_split_uses_the_model_parameter_tolerance() -> None:
+    model = GeometryModel(tolerance=TolerancePolicy(parameter=1.0e-4))
+    points = model.add_points(
+        [(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)]
+    )
+    edges = model.add_polyline(points, close=True)
+    face = model.add_face(edges)
+
+    vertex = decomposition._split_side_at(  # noqa: SLF001 - policy contract
+        model, face, side_index=0, fraction=5.0e-5
+    )
+
+    assert vertex == points[0]
+    assert set(model.edges) == set(edges)
 
 
 def test_rejected_divider_fit_does_not_publish_temporary_entities() -> None:

@@ -24,14 +24,16 @@ def _json_run(capsys, *argv: str) -> tuple[int, object]:
     return code, json.loads(out)
 
 
-def test_backends_lists_both_and_says_what_they_differ_on(capsys) -> None:
+def test_backends_lists_native_first_choices_and_says_what_they_do(capsys) -> None:
     code, payload = _json_run(capsys, "--json", "backends")
     assert code == 0
-    assert payload["backends"] == ["gmsh", "mapped"]
+    assert payload["backends"] == ["auto", "gmsh", "mapped", "native"]
 
     code, out = _run(capsys, "backends")
     assert code == 0
-    assert "structured grid" in out
+    assert "selects mapped or native" in out
+    assert "trimmed arbitrary faces" in out
+    assert "structured four-sided faces" in out
     assert "triangles" in out
 
 

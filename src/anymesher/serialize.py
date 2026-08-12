@@ -24,7 +24,7 @@ from .mesh import Coupling, Mesh
 __all__ = ["load_mesh", "mesh_from_dict", "mesh_to_dict", "save_mesh"]
 
 FORMAT = "anymesher.mesh"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
@@ -33,6 +33,10 @@ def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
     return {
         "format": FORMAT,
         "version": FORMAT_VERSION,
+        "geometry_model_id": (
+            None if mesh.geometry_model_id is None else str(mesh.geometry_model_id)
+        ),
+        "geometry_revision": mesh.geometry_revision,
         "order": mesh.order,
         "automatic_intersections": int(mesh.automatic_intersections),
         "automatic_beam_connections": int(mesh.automatic_beam_connections),
@@ -64,6 +68,18 @@ def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
         "elements_of_edge": {
             str(k): list(map(int, v)) for k, v in sorted(mesh.elements_of_edge.items())
         },
+        "elements_of_sheet": {
+            str(k): list(map(int, v)) for k, v in sorted(mesh.elements_of_sheet.items())
+        },
+        "elements_of_member": {
+            str(k): list(map(int, v)) for k, v in sorted(mesh.elements_of_member.items())
+        },
+        "nodes_of_member": {
+            str(k): list(map(int, v)) for k, v in sorted(mesh.nodes_of_member.items())
+        },
+        "activity": {
+            str(k): float(v) for k, v in sorted(mesh.activity.items())
+        },
         "grid_of_face": {
             str(k): [[int(value) for value in row] for row in np.asarray(v).tolist()]
             for k, v in sorted(mesh.grid_of_face.items())
@@ -85,10 +101,20 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
     if data.get("format") != FORMAT:
         raise MeshError(f"not an {FORMAT} document: format={data.get('format')!r}")
     version = int(data.get("version", 0))
-    if version != FORMAT_VERSION:
-        raise MeshError(f"unsupported {FORMAT} version {version}; this build reads {FORMAT_VERSION}")
+    if version not in (1, FORMAT_VERSION):
+        raise MeshError(
+            f"unsupported {FORMAT} version {version}; this build reads 1-{FORMAT_VERSION}"
+        )
+
+    geometry_revision = data.get("geometry_revision")
+    if geometry_revision is not None:
+        geometry_revision = int(geometry_revision)
+        if geometry_revision < 0:
+            raise MeshError("geometry_revision must be non-negative")
 
     mesh = Mesh(
+        geometry_model_id=data.get("geometry_model_id"),
+        geometry_revision=geometry_revision,
         order=str(data.get("order", "linear")),
         automatic_intersections=int(data.get("automatic_intersections", 0)),
         automatic_beam_connections=int(data.get("automatic_beam_connections", 0)),
@@ -109,10 +135,23 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
         )
     for vertex_id, node_id in data.get("node_of_vertex", {}).items():
         mesh.node_of_vertex[int(vertex_id)] = int(node_id)
-    for name in ("nodes_of_edge", "offset_nodes_of_edge", "elements_of_face", "elements_of_edge"):
+    for name in (
+        "nodes_of_edge",
+        "offset_nodes_of_edge",
+        "elements_of_face",
+        "elements_of_edge",
+        "elements_of_sheet",
+        "elements_of_member",
+        "nodes_of_member",
+    ):
         target = getattr(mesh, name)
         for key, values in data.get(name, {}).items():
             target[int(key)] = [int(value) for value in values]
+    for element_id, value in data.get("activity", {}).items():
+        made = float(value)
+        if not np.isfinite(made) or made < 0.0 or made > 1.0:
+            raise MeshError(f"invalid activity for element {element_id}: {value!r}")
+        mesh.activity[int(element_id)] = made
     for face_id, grid in data.get("grid_of_face", {}).items():
         mesh.grid_of_face[int(face_id)] = np.asarray(grid, dtype=int)
     for face_id, thickness in data.get("thickness_of_face", {}).items():

@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
@@ -56,25 +56,38 @@ jobs:
       - run: python -c "import gmsh"
       - run: python -m pytest
 
-  # A wheel built from a clean checkout, installed on its own, importing
-  # without the repository on sys.path.  Catches the packaging mistakes that an
-  # editable install hides: a subpackage missing from the find directive, a
-  # data file left out of MANIFEST.in.
+  # Build the compiled extension as distributable wheels on every supported
+  # desktop platform.  The ordinary pytest matrix above performs the clean
+  # import and behavioral checks; this job proves the release artifacts can be
+  # produced with platform-appropriate wheel tags.
   wheel:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
           path: .ecosystem/ANYgeometry
-      - uses: actions/setup-python@v5
+      - uses: pypa/cibuildwheel@v4.1.1
+        env:
+          CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
+          CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
+          CIBW_BEFORE_TEST: >-
+            python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
+          CIBW_TEST_COMMAND: >-
+            python -c "from anygeometry import GeometryModel; import anymesher;
+            from anymesher.native_cpp import NATIVE_CPP_AVAILABLE;
+            assert NATIVE_CPP_AVAILABLE;
+            g=GeometryModel(); p=g.add_points(((0,0,0),(1,0,0),(1,1,0),(0,1,0)));
+            g.add_face(g.add_polyline(p,close=True)); m=anymesher.generate_mesh(g,target_size=0.5);
+            assert m.quads; print(anymesher.__version__, anymesher.__file__)"
         with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip build
-      - run: python -m build
-      - run: python -m pip install .ecosystem/ANYgeometry
-      - run: python -m pip install --no-deps dist/*.whl
-      - run: python -m pip check
-      - run: cd /tmp && python -c "import anymesher; print(anymesher.__version__)"
+          output-dir: dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anymesher-wheels-${{ runner.os }}
+          path: dist/*.whl

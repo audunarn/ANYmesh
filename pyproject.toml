@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 # The repository is ANYmesh, but `anymesh` was already taken on PyPI, so the
 # distribution and import package are `ANYmesher`/`anymesher`.
 name = "ANYmesher"
-version = "0.1.0"
-description = "Structured meshing for ANYgeometry shell and beam models"
+version = "0.2.0"
+description = "Native hybrid meshing for ANYgeometry shell and beam models"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
@@ -26,10 +26,13 @@ classifiers = [
 ]
 dependencies = [
   "numpy>=1.26",
-  "ANYgeometry[planar]>=0.1,<0.2",
+  "ANYgeometry>=0.2,<0.3",
 ]
 
 [project.optional-dependencies]
+# Coplanar overlap fragmentation and advanced planar preparation.  The native
+# triangulation and quad-dominant pipeline do not require Shapely.
+planar = ["ANYgeometry[planar]>=0.2,<0.3"]
 # The editor uses tkinter from the standard library, so it adds no wheel.  The
 # extra exists so `pip install ANYmesher[gui]` is meaningful and stays
 # meaningful if that ever stops being true.
@@ -37,7 +40,8 @@ gui = []
 # A 3D mesh preview.  Kept separate from `gui` so the tables and controls are
 # usable without pulling in a viewport.
 gui3d = ["ANYtk3D>=0.2.1,<0.3"]
-# The alternative mesh backend.  The built-in mapped mesher needs nothing.
+# Deprecated compatibility backend.  It is never selected automatically and
+# remains outside the production dependency path.
 gmsh = ["gmsh>=4.11"]
 dev = [
   "build>=1.2",

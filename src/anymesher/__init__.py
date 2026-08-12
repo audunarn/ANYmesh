@@ -12,8 +12,8 @@ element it lands in with what shape weights; it does not know what an MPC is.
 The consuming solver turns that record into a constraint.
 
 ``generate_mesh`` exported here dispatches on ``backend=`` and defaults to the
-built-in mapped mesher.  ``anymesher.mapped.generate_mesh`` is that mesher
-directly, for a caller that wants no dispatch at all.
+native hybrid selector. ``backend='mapped'`` and
+``anymesher.mapped.generate_mesh`` preserve the mapped-only compatibility path.
 
 The package deliberately does not import ANYsolver.  Meshes are produced here
 and consumed there, never the other way round, so the dependency stays acyclic
@@ -68,7 +68,27 @@ from .geometry import (
     triangle_to_quads,
 )
 from .mapped import ELEMENT_ORDERS, coons_grid, nodal_normals
+from .hybrid import (
+    CertificationMode,
+    HybridMeshResult,
+    MeshingStrategy,
+    generate_hybrid_mesh,
+    generate_hybrid_mesh_result,
+)
 from .mesh import Coupling, Mesh
+from .charts import (
+    ChartProjection,
+    FaceChart,
+    MetricField,
+    metric_edge_lengths,
+    metric_tensors,
+)
+from .optimization import (
+    EdgeFlipResult,
+    SmoothingResult,
+    constrained_smoothing,
+    local_edge_flip,
+)
 from .primitives import (
     PANEL_EDGE_IDS,
     PANEL_FACE_ID,
@@ -84,17 +104,24 @@ from .primitives import (
 from .quality import ASPECT_RATIO_LIMIT, WARP_LIMIT, MeshQuality, verify_mesh_quality
 from .refinement import Refinement, SizeField, refine_around, refine_at
 from .seeding import Seeding, SeedingConflict, edge_demand, edge_distribution, solve_seeding
-from .intersections import generate_mesh_with_intersections
+from .intersections import (
+    apply_intersection_mutation,
+    generate_mesh_with_intersections,
+    generate_mesh_with_legacy_imprint,
+    plan_intersection_mutation,
+)
 from .beam_connections import connect_beam_mesh, connect_shell_boundaries
 from .serialize import load_mesh, mesh_from_dict, mesh_to_dict, save_mesh
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ASPECT_RATIO_LIMIT",
     "Arc",
     "ArcFrame",
     "Coupling",
+    "CertificationMode",
+    "ChartProjection",
     "CurveShape",
     "DEFAULT_BACKEND",
     "DegenerateArcError",
@@ -103,14 +130,19 @@ __all__ = [
     "EntityKind",
     "EntityRef",
     "Face",
+    "FaceChart",
     "GeometryError",
     "GeometryModel",
+    "HybridMeshResult",
     "MappabilityReport",
     "Mesh",
     "MeshBackend",
     "MeshError",
     "MeshQuality",
+    "MetricField",
+    "MeshingStrategy",
     "OrientedEdge",
+    "EdgeFlipResult",
     "PANEL_EDGE_IDS",
     "PANEL_FACE_ID",
     "PanelMeshConfig",
@@ -118,6 +150,7 @@ __all__ = [
     "STIFFENER_EDGE_ID_BASE",
     "Seeding",
     "SeedingConflict",
+    "SmoothingResult",
     "SizeField",
     "StiffenedPanel",
     "Spline",
@@ -128,6 +161,7 @@ __all__ = [
     "WARP_LIMIT",
     "arc_frame",
     "available_backends",
+    "apply_intersection_mutation",
     "beam_mesh",
     "build_structured_shell_grid",
     "chain_breaks",
@@ -136,16 +170,23 @@ __all__ = [
     "connect_beam_mesh",
     "connect_shell_boundaries",
     "coons_grid",
+    "constrained_smoothing",
     "edge_demand",
     "edge_distribution",
     "generate_mesh",
+    "generate_hybrid_mesh",
+    "generate_hybrid_mesh_result",
     "load_mesh",
     "locate_shell_element_at_xy",
+    "local_edge_flip",
     "mesh_from_dict",
     "mesh_to_dict",
+    "metric_edge_lengths",
+    "metric_tensors",
     "nodal_normals",
     "panel_edge_nodes",
     "punch_circular_hole",
+    "plan_intersection_mutation",
     "refine_around",
     "refine_at",
     "resolve_backend",
@@ -156,6 +197,7 @@ __all__ = [
     "simple_panel_mesh",
     "solve_seeding",
     "generate_mesh_with_intersections",
+    "generate_mesh_with_legacy_imprint",
     "split_face_at",
     "split_face_between",
     "stiffened_panel_mesh",

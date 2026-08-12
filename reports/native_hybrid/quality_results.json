@@ -1,0 +1,69 @@
+{
+  "schema": "anymesher.native_hybrid.quality_results.v1",
+  "date": "2026-08-12",
+  "scope": "focused_planar_native_corpus",
+  "status": "passed",
+  "command": "$env:PYTHONPATH='C:\\Github\\ANYmesh\\src;C:\\Github\\ANYgeometry\\src'; python -m pytest tests\\test_planar_native_qualification.py tests\\test_performance_harness_fixtures.py -q",
+  "test_result": "5 passed in 2.21s",
+  "measurement_method": "anymesher.quality_v2.evaluate_quality on active MeshCore elements",
+  "cases": {
+    "triangle": {
+      "nodes": 41,
+      "triangles": 16,
+      "quadrilaterals": 19,
+      "validity_errors": [],
+      "triangle_min_area": 0.0016910717654814054,
+      "triangle_min_scaled_jacobian": 0.09766246588729868,
+      "triangle_max_aspect_ratio": 7.414283816766822,
+      "quadrilateral_min_area": 0.02228614675724286,
+      "quadrilateral_min_scaled_jacobian": 0.5365507661259967,
+      "quadrilateral_max_aspect_ratio": 2.3485900795732597
+    },
+    "concave": {
+      "nodes": 44,
+      "triangles": 22,
+      "quadrilaterals": 15,
+      "validity_errors": [],
+      "triangle_min_area": 0.006666666666665555,
+      "triangle_min_scaled_jacobian": 0.31426294485392176,
+      "triangle_max_aspect_ratio": 3.176839261327394,
+      "quadrilateral_min_area": 0.056666666666664825,
+      "quadrilateral_min_scaled_jacobian": 0.6973549598033861,
+      "quadrilateral_max_aspect_ratio": 2.4000000000000377
+    },
+    "narrow": {
+      "nodes": 205,
+      "triangles": 200,
+      "quadrilaterals": 2,
+      "validity_errors": [],
+      "triangle_min_area": 0.0007999999999999803,
+      "triangle_min_scaled_jacobian": 0.0016638912075407537,
+      "triangle_max_aspect_ratio": 25.019992006394308,
+      "quadrilateral_min_area": 0.07999999999999885,
+      "quadrilateral_min_scaled_jacobian": 0.07987220447284113,
+      "quadrilateral_max_aspect_ratio": 1.0000000000000289
+    },
+    "circular_hole": {
+      "nodes": 124,
+      "triangles": 12,
+      "quadrilaterals": 92,
+      "validity_errors": [],
+      "triangle_min_area": 0.004999999999999181,
+      "triangle_min_scaled_jacobian": 0.24253562503627127,
+      "triangle_max_aspect_ratio": 4.1231056256187095,
+      "quadrilateral_min_area": 0.01406411086754836,
+      "quadrilateral_min_scaled_jacobian": 0.8613454684164886,
+      "quadrilateral_max_aspect_ratio": 3.999999999998388
+    }
+  },
+  "qualified_claims": [
+    "No inverted, zero-area, duplicate-corner, or non-manifold active element was reported in the focused corpus.",
+    "The circular trim remained empty and its exact curve remained a registered mesh constraint.",
+    "Every authoritative outer boundary edge retained at least two mesh nodes."
+  ],
+  "limitations": [
+    "This is a small deterministic functional corpus, not a large-mesh, scaling, or statistical quality qualification.",
+    "The narrow-region case is valid but intentionally records poor triangle shape metrics; no broad quality threshold is inferred from positivity alone.",
+    "Curved-support qualification is reported separately."
+  ]
+}

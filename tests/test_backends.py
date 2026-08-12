@@ -39,13 +39,15 @@ def _rectangle(length: float = 2.0, width: float = 1.0) -> GeometryModel:
     return model
 
 
-def test_the_default_backend_is_the_mapped_mesher() -> None:
-    assert DEFAULT_BACKEND == "mapped"
-    assert "mapped" in available_backends()
-    assert "gmsh" in available_backends()
+def test_the_default_backend_is_the_native_first_auto_dispatcher() -> None:
+    assert DEFAULT_BACKEND == "auto"
+    assert available_backends() == ("auto", "gmsh", "mapped", "native")
 
+    from anymesher.hybrid import generate_hybrid_mesh
     from anymesher.mapped import generate_mesh as mapped_generate
 
+    assert resolve_backend("auto") is generate_hybrid_mesh
+    assert resolve_backend("AUTO") is generate_hybrid_mesh
     assert resolve_backend("mapped") is mapped_generate
     assert resolve_backend("MAPPED") is mapped_generate
 
@@ -63,7 +65,7 @@ def test_dispatching_with_the_default_matches_calling_the_mesher_directly() -> N
 def test_an_unknown_backend_names_the_ones_that_exist() -> None:
     with pytest.raises(MeshError, match="unknown mesh backend 'quadratic'"):
         generate_mesh(_rectangle(), backend="quadratic", target_size=0.25)
-    with pytest.raises(MeshError, match="gmsh, mapped"):
+    with pytest.raises(MeshError, match="auto, gmsh, mapped, native"):
         resolve_backend("nope")
 
 

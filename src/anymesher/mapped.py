@@ -178,7 +178,12 @@ def generate_mesh(
         )
     size_field = seeding.size_field or SizeField(geometry, target_size)
 
-    mesh = Mesh(seeding=seeding, order=order)
+    mesh = Mesh(
+        geometry_model_id=geometry.model_id,
+        geometry_revision=geometry.revision,
+        seeding=seeding,
+        order=order,
+    )
     next_node = _Counter()
     next_element = _Counter()
 

@@ -1,0 +1,25 @@
+{
+  "acceptance": {
+    "maximum_dirty_fraction": 0.2,
+    "minimum_speedup": 5.0,
+    "passed": true
+  },
+  "clean_hashes_unchanged": true,
+  "clean_publications_reused": true,
+  "component_count": 20,
+  "dirty_component_count": 1,
+  "dirty_elements_after_edit": 400,
+  "dirty_fraction": 0.05,
+  "dirty_publications_replaced": true,
+  "dirty_response_seconds": 2.0458199999993667,
+  "full_generation_seconds": 37.87055400000827,
+  "full_over_dirty_speedup": 18.51118573482515,
+  "generated_at": "2026-08-12T16:46:20.510974+00:00",
+  "max_background_jobs": 2,
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.13.9",
+  "removed_component_count": 0,
+  "schema": "anyfem.native_incremental_performance.v1",
+  "target_size": 0.05,
+  "total_elements_before_edit": 8000
+}

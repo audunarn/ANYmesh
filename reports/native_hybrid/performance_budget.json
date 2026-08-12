@@ -1,0 +1,13 @@
+{
+  "mapped_median_regression_max_fraction": 0.03,
+  "mapped_peak_memory_regression_max_fraction": 0.05,
+  "compatibility_serialization_regression_max_fraction": 0.05,
+  "repeated_output_hash_identical": true,
+  "serial_parallel_topology_identical": true,
+  "component_cache_hit_regenerates_elements": false,
+  "dirty_component_max_model_fraction": 0.20,
+  "dirty_component_min_speedup": 5.0,
+  "full_strict_audit_in_interactive_path": false,
+  "global_quadratic_production_stage_allowed": false,
+  "per_element_python_objects_in_native_hot_path_allowed": false
+}

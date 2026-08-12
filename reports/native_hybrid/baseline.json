@@ -1,0 +1,19 @@
+{
+  "date": "2026-08-12",
+  "branch": "native_hybrid_mesher",
+  "geometry": {
+    "version": "0.2.0",
+    "schema": 3,
+    "tests_passed": 272,
+    "test_seconds": 9.17
+  },
+  "mesh_wave0": {
+    "initial_geometry_compatibility_failures": 7,
+    "decomposition_tests_passed": 28,
+    "decomposition_test_seconds": 2.05
+  },
+  "environment_findings": [
+    "Coordinated source directories must be present on PYTHONPATH for source-tree qualification.",
+    "ANYsolver full collection also requires the local ANYio source tree."
+  ]
+}

@@ -8,4 +8,6 @@ dist/
 .idea/
 .venv/
 venv/
-reports/
+reports/*
+!reports/native_hybrid/
+!reports/native_hybrid/**

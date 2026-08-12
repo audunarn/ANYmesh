@@ -86,8 +86,10 @@ def _command_backends(args: argparse.Namespace) -> int:
         _print_json({"backends": names})
         return 0
     print("mesh backends: " + ", ".join(names))
-    print("  mapped  built in; structured grid per face, conformity by construction")
-    print("  gmsh    needs ANYmesher[gmsh]; unstructured, planar faces, may leave triangles")
+    print("  auto    built in; selects mapped or native meshing face by face")
+    print("  native  built in; trimmed arbitrary faces with shared boundary identity")
+    print("  mapped  built in; structured four-sided faces, conformity by construction")
+    print("  gmsh    optional legacy backend; planar faces, may leave triangles")
     return 0
 
 

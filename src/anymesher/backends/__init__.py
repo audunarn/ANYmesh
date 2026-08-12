@@ -1,4 +1,4 @@
-"""Mesh backends: the built-in mapped mesher, and gmsh."""
+"""Mesh backends: production hybrid/native, mapped compatibility, and gmsh."""
 
 from __future__ import annotations
 
