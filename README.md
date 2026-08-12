@@ -148,6 +148,18 @@ Out of scope: geometry ownership, elements, materials, assembly and solution.
 General splitting, trimming, projection, transforms and intersections belong to
 ANYgeometry. `check_mappable`, `triangle_to_quads` and the four-patch butterfly
 hole decomposition stay here because they exist specifically for mapped quads.
+The convenience workflow `generate_mesh_with_intersections` reuses
+ANYgeometry's qualified intersection imprint on a temporary clone before
+mapped meshing; it does not introduce a second geometric intersection kernel.
+The same workflow also makes structural beam joints explicit: coincident beam
+ends share a node, a beam ending on or crossing another straight beam splits
+the receiving spans, and beam nodes on a shell use either the coincident shell
+node or an interpolation coupling.  The design geometry remains unwelded and
+all associations are folded back to its original owners.
+At a qualified shell T-junction, boundary nodes of the terminating shell are
+likewise attached to the interior support shell with interpolation records;
+crossing shell interiors still require conformal imprinting and fail closed if
+the topology cannot be qualified.
 The legacy `anymesher.split_face_at`, `split_face_between` and `strip_face`
 imports likewise retain their mapped-partition semantics; new neutral geometry
 code should import the general edit operations from `anygeometry`.

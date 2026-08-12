@@ -84,6 +84,8 @@ from .primitives import (
 from .quality import ASPECT_RATIO_LIMIT, WARP_LIMIT, MeshQuality, verify_mesh_quality
 from .refinement import Refinement, SizeField, refine_around, refine_at
 from .seeding import Seeding, SeedingConflict, edge_demand, edge_distribution, solve_seeding
+from .intersections import generate_mesh_with_intersections
+from .beam_connections import connect_beam_mesh, connect_shell_boundaries
 from .serialize import load_mesh, mesh_from_dict, mesh_to_dict, save_mesh
 
 __version__ = "0.1.0"
@@ -131,6 +133,8 @@ __all__ = [
     "chain_breaks",
     "chain_point",
     "check_mappable",
+    "connect_beam_mesh",
+    "connect_shell_boundaries",
     "coons_grid",
     "edge_demand",
     "edge_distribution",
@@ -151,6 +155,7 @@ __all__ = [
     "shape_functions_8node",
     "simple_panel_mesh",
     "solve_seeding",
+    "generate_mesh_with_intersections",
     "split_face_at",
     "split_face_between",
     "stiffened_panel_mesh",

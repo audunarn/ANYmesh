@@ -132,6 +132,15 @@ class Mesh:
 
     seeding: Seeding | None = None
     order: str = "linear"
+    # Number of design-face crossings imprinted on the non-persistent working
+    # geometry before this mesh was generated.
+    automatic_intersections: int = 0
+    # Number of beam nodes merged at physical joints or attached to a shell by
+    # an interpolation coupling during automatic structural connectivity.
+    automatic_beam_connections: int = 0
+    # Shell boundary nodes tied into the interior of another shell for welded
+    # T-junctions which do not require conformal fragmentation.
+    automatic_shell_connections: int = 0
 
     @property
     def is_quadratic(self) -> bool:

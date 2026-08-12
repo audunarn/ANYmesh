@@ -34,6 +34,9 @@ def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
         "format": FORMAT,
         "version": FORMAT_VERSION,
         "order": mesh.order,
+        "automatic_intersections": int(mesh.automatic_intersections),
+        "automatic_beam_connections": int(mesh.automatic_beam_connections),
+        "automatic_shell_connections": int(mesh.automatic_shell_connections),
         "nodes": {
             str(node_id): [float(value) for value in position]
             for node_id, position in sorted(mesh.nodes.items())
@@ -85,7 +88,12 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
     if version != FORMAT_VERSION:
         raise MeshError(f"unsupported {FORMAT} version {version}; this build reads {FORMAT_VERSION}")
 
-    mesh = Mesh(order=str(data.get("order", "linear")))
+    mesh = Mesh(
+        order=str(data.get("order", "linear")),
+        automatic_intersections=int(data.get("automatic_intersections", 0)),
+        automatic_beam_connections=int(data.get("automatic_beam_connections", 0)),
+        automatic_shell_connections=int(data.get("automatic_shell_connections", 0)),
+    )
     for node_id, position in data.get("nodes", {}).items():
         mesh.nodes[int(node_id)] = np.asarray(position, dtype=float)
     for name in ("quads", "tris", "beams"):

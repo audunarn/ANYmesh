@@ -82,16 +82,27 @@ look up the same shared edge nodes and reverse traversal order where necessary.
 They therefore share node IDs by construction, without merging coincident
 coordinates after meshing.
 
-This is why shell intersections must be fragmented into real shared
-ANYgeometry edges before meshing. A tolerance-based mesh-node merge can make
-nearly coincident geometry look connected while leaving invalid topology.
+This is why shell intersections are fragmented into real shared ANYgeometry
+edges before meshing. ``generate_mesh_with_intersections`` performs the
+qualified imprint on a non-persistent working clone and folds associations
+back to the original face owners. A tolerance-based mesh-node merge can make
+nearly coincident geometry look connected while leaving invalid topology, so
+it is deliberately not used for shell-to-shell connectivity. Zero-offset beam
+nodes are the narrow exception: after beam spans have been split at qualified
+joints, coincident beam/beam or beam/shell stations are merged deterministically.
 
 ## Coupling records
 
-When an eccentric beam stands off a shell, ANYmesher records the shell element,
-shape weights and eccentricity associated with each beam node. This is a mesh
-relationship, not an FE constraint. The consuming workflow decides how to turn
-it into solver MPC equations.
+When an eccentric beam stands off a shell, or an independently modelled beam
+lands inside a shell element away from a shell node, ANYmesher records the shell
+element, shape weights and eccentricity associated with each beam node. This is
+a mesh relationship, not an FE constraint. The consuming workflow decides how
+to turn it into solver MPC equations.
+
+The same neutral coupling record represents a welded shell T-junction where a
+boundary edge terminates inside another shell. The terminating boundary node is
+the slave and the support element supplies interpolation masters. This avoids
+arbitrary mapped-face fragmentation while preserving exact kinematic transfer.
 
 ## Numbering contract
 
