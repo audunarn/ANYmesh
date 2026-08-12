@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Change the six native-triangulation public defaults to `auto` for 0.2.1 while
+  preserving explicit `python`, fail-hard `native`, and Python fallback only
+  when native capability is absent. ANYfem format 6 persists the selector so
+  legacy projects remain explicitly Python-backed after migration.
 - Depend on ANYgeometry as the single owner of `GeometryModel`, `EntityRef`,
   topology entities, curves, chain sampling and general geometry operations.
 - Keep `anymesher.geometry` as exact-identity compatibility imports.

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -70,6 +71,7 @@ class HybridMeshResult:
 
     mesh: Mesh
     strategy_by_face: Mapping[int, str]
+    triangulation_backend_by_face: Mapping[int, Mapping[str, Any]]
     preflight: tuple[Any, ...]
     connectivity: Any | None
     audit_report: Any | None
@@ -358,7 +360,8 @@ def _mesh_native_face(
     recombine: bool,
     native_backend: Any,
     cancellation_check: Callable[[str], None] | None,
-) -> None:
+) -> dict[str, Any]:
+    boundary_started = perf_counter()
     _check_cancellation(cancellation_check, f"native face {face_id} boundary start")
     face = geometry.faces[face_id]
     quadratic = order == "quadratic"
@@ -387,10 +390,12 @@ def _mesh_native_face(
         for loop in loops
         for index in range(len(loop.uv))
     ]
+    boundary_seconds = perf_counter() - boundary_started
     # Edge seeding is authoritative.  A size just above the longest registered
     # chart segment lets the surface filler add interior points without adding
     # unregistered boundary stations.
     chart_size = max(segments) * (1.0 + 64.0 * np.finfo(float).eps)
+    surface_diagnostics: dict[str, Any] = {}
     core = mesh_planar_surface(
         outer.uv,
         tuple(loop.uv for loop in holes),
@@ -400,8 +405,13 @@ def _mesh_native_face(
         backend=native_backend,
         owner=geometry.handle("face", face_id),
         cancellation_check=cancellation_check,
+        diagnostics=surface_diagnostics,
     )
+    surface_diagnostics.setdefault("phase_seconds", {})[
+        "boundary_registration"
+    ] = boundary_seconds
     _check_cancellation(cancellation_check, f"native face {face_id} lifting start")
+    lifting_started = perf_counter()
     assert_valid_mesh(core)
 
     input_uv = np.vstack([loop.uv for loop in loops])
@@ -467,6 +477,10 @@ def _mesh_native_face(
     if not elements:
         raise MeshError(f"native meshing produced no active elements for face {face_id}")
     mesh.elements_of_face[face_id] = elements
+    surface_diagnostics.setdefault("phase_seconds", {})[
+        "surface_lifting_and_publication"
+    ] = perf_counter() - lifting_started
+    return surface_diagnostics
 
 
 def _audit_geometry(
@@ -519,7 +533,7 @@ def generate_hybrid_mesh_result(
     refinements: Iterable[Refinement] = (),
     order: str = "linear",
     recombine: bool = True,
-    native_backend: Any = "python",
+    native_backend: Any = "auto",
     overlap_policy: OverlapPolicy | str = OverlapPolicy.REJECT,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
     certification_mode: CertificationMode | str = CertificationMode.NONE,
@@ -533,6 +547,8 @@ def generate_hybrid_mesh_result(
     cooperative, so its latency is bounded by the current uninterrupted phase.
     """
 
+    generation_started = perf_counter()
+    phase_seconds: dict[str, float] = {}
     _check_cancellation(cancellation_check, "hybrid generation start")
     target_size = float(target_size)
     if not np.isfinite(target_size) or target_size <= 0.0:
@@ -550,6 +566,7 @@ def generate_hybrid_mesh_result(
         mutation_policy, GeometryMutationPolicy, "geometry mutation policy"
     )
 
+    preflight_started = perf_counter()
     view = GeometryMeshingView(geometry)
     faces = _face_ids(geometry, face_ids)
     beams = _member_edges(view, beam_edges, member_ids)
@@ -566,6 +583,7 @@ def generate_hybrid_mesh_result(
     if blocked:
         detail = "; ".join(str(item) for item in blocked[:5])
         raise MeshError(f"structural meshing preflight blocked generation: {detail}")
+    phase_seconds["geometry_and_preflight"] = perf_counter() - preflight_started
 
     if strategy is MeshingStrategy.MAPPED:
         mapped_faces, native_faces = faces, ()
@@ -575,6 +593,7 @@ def generate_hybrid_mesh_result(
         mapped_faces = tuple(face_id for face_id in faces if _mappable(geometry.faces[face_id]))
         native_faces = tuple(face_id for face_id in faces if face_id not in set(mapped_faces))
 
+    seeding_started = perf_counter()
     refinements = tuple(refinements)
     size_field = (
         seeding.size_field
@@ -589,9 +608,11 @@ def generate_hybrid_mesh_result(
             overrides=overrides,
             edge_ids=edges,
         )
+    phase_seconds["seeding"] = perf_counter() - seeding_started
     _check_cancellation(cancellation_check, "hybrid seeding complete")
 
     if mapped_faces or beams:
+        mapped_started = perf_counter()
         _check_cancellation(cancellation_check, "mapped generation start")
         mesh = generate_mapped_mesh(
             geometry,
@@ -605,6 +626,7 @@ def generate_hybrid_mesh_result(
             order=order,
         )
         _check_cancellation(cancellation_check, "mapped generation complete")
+        phase_seconds["mapped_generation"] = perf_counter() - mapped_started
     else:
         mesh = Mesh(
             geometry_model_id=geometry.model_id,
@@ -614,6 +636,16 @@ def generate_hybrid_mesh_result(
         )
 
     boundary_registry = GlobalEdgeBoundaryRegistry(view)
+    triangulation_backend_by_face: dict[int, Mapping[str, Any]] = {
+        int(face_id): {
+            "requested_backend": "mapped",
+            "selected_backend": "mapped",
+            "actual_backend": "mapped",
+            "fallback_reason": None,
+            "phase_seconds": {},
+        }
+        for face_id in mapped_faces
+    }
     _ensure_edge_registry(
         geometry,
         view,
@@ -625,7 +657,7 @@ def generate_hybrid_mesh_result(
         order,
     )
     for face_id in native_faces:
-        _mesh_native_face(
+        face_diagnostics = _mesh_native_face(
             geometry,
             mesh,
             face_id,
@@ -634,12 +666,25 @@ def generate_hybrid_mesh_result(
             native_backend=native_backend,
             cancellation_check=cancellation_check,
         )
+        triangulation_backend_by_face[int(face_id)] = face_diagnostics
         _check_cancellation(cancellation_check, f"native face {face_id} complete")
 
+    for sheet_id, sheet in geometry.sheets.items():
+        element_ids = {
+            int(element_id)
+            for face_use_id in sheet.face_use_ids
+            for element_id in mesh.elements_of_face.get(
+                geometry.face_uses[face_use_id].face_id, ()
+            )
+        }
+        mesh.elements_of_sheet[int(sheet_id)] = sorted(element_ids)
+
+    connectivity_started = perf_counter()
     _check_cancellation(cancellation_check, "hybrid connectivity start")
     for element_id in (*mesh.quads, *mesh.tris, *mesh.beams):
         mesh.activity.setdefault(int(element_id), 1.0)
     connectivity = pipeline.apply_connectivity(mesh)
+    phase_seconds["structural_connectivity"] = perf_counter() - connectivity_started
     view.assert_current(geometry)
     audit_report, certifiable = _audit_geometry(
         geometry,
@@ -654,6 +699,7 @@ def generate_hybrid_mesh_result(
     result = HybridMeshResult(
         mesh=mesh,
         strategy_by_face=strategies,
+        triangulation_backend_by_face=triangulation_backend_by_face,
         preflight=preflight,
         connectivity=connectivity,
         audit_report=audit_report,
@@ -662,11 +708,19 @@ def generate_hybrid_mesh_result(
     )
     mesh.hybrid_diagnostics = {
         "strategy_by_face": dict(strategies),
+        "triangulation_backend_by_face": {
+            int(face_id): dict(values)
+            for face_id, values in triangulation_backend_by_face.items()
+        },
         "geometry_model_id": str(geometry.model_id),
         "geometry_revision": int(geometry.revision),
         "certification_mode": certification_mode.value,
         "certifiable": bool(certifiable),
         "preflight_count": len(preflight),
+        "phase_seconds": {
+            **phase_seconds,
+            "total_generation": perf_counter() - generation_started,
+        },
     }
     mesh.boundary_registry = boundary_registry
     _check_cancellation(cancellation_check, "hybrid generation complete")

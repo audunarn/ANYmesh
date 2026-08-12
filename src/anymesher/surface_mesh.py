@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+from time import perf_counter
 from typing import Any, Callable, Sequence
 
 import numpy as np
@@ -30,7 +31,7 @@ class SurfaceMeshOptions:
     recombine: bool = True
     order: str | int = "linear"
     target_size: float | None = None
-    backend: str | NativeBoundary | None = "python"
+    backend: str | NativeBoundary | None = "auto"
     min_scaled_jacobian: float = 0.20
     max_aspect_ratio: float = 4.0
     min_angle: float = 30.0
@@ -249,10 +250,11 @@ def mesh_planar_surface(
     recombine: bool = True,
     order: str | int = "linear",
     target_size: float | None = None,
-    backend: str | NativeBoundary | None = "python",
+    backend: str | NativeBoundary | None = "auto",
     owner: Any | None = None,
     options: SurfaceMeshOptions | None = None,
     cancellation_check: Callable[[str], None] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -263,6 +265,8 @@ def mesh_planar_surface(
     if cancellation_check is not None:
         cancellation_check("native surface preprocessing")
 
+    phase_seconds: dict[str, float] = {}
+    preparation_started = perf_counter()
     settings = options or SurfaceMeshOptions(
         recombine=recombine,
         order=order,
@@ -292,20 +296,36 @@ def mesh_planar_surface(
     planar_holes = [plane.project(hole) for hole in raw_holes]
     planar_constraints = [plane.project(segment) for segment in raw_constraints]
     planar_interior = plane.project(raw_interior)
+    phase_seconds["chart_projection_and_preparation"] = (
+        perf_counter() - preparation_started
+    )
     if settings.target_size is not None:
+        densification_started = perf_counter()
         planar_outer = _densify_loop(planar_outer, settings.target_size)
         planar_holes = [_densify_loop(hole, settings.target_size) for hole in planar_holes]
         planar_constraints = [_densify_open(segment, settings.target_size)[[0, -1]] for segment in planar_constraints]
+        phase_seconds["boundary_densification"] = (
+            perf_counter() - densification_started
+        )
+        target_points_started = perf_counter()
         generated = _target_points(planar_outer, planar_holes, settings.target_size)
         planar_interior = np.vstack((planar_interior, generated))
+        phase_seconds["target_point_generation"] = (
+            perf_counter() - target_points_started
+        )
     if cancellation_check is not None:
         cancellation_check("native surface triangulation start")
+    triangulation_started = perf_counter()
     triangulation: PlanarTriangulation = triangulate_polygon(
         planar_outer,
         planar_holes,
         planar_constraints,
         interior_points=planar_interior,
         backend=settings.backend,
+        cancellation_check=cancellation_check,
+    )
+    phase_seconds["triangulation_and_strict_qualification"] = (
+        perf_counter() - triangulation_started
     )
     if cancellation_check is not None:
         cancellation_check("native surface triangulation complete")
@@ -320,6 +340,7 @@ def mesh_planar_surface(
         triangle_owner_handles=np.full(len(triangulation.triangles), owner_handle, dtype=np.int32),
     )
     if settings.recombine:
+        recombination_started = perf_counter()
         core = recombine_triangles(
             core,
             protected_edges=triangulation.segments,
@@ -330,13 +351,29 @@ def mesh_planar_surface(
             max_warpage=settings.max_warpage,
         )
         assert isinstance(core, MeshCore)
+        phase_seconds["recombination"] = perf_counter() - recombination_started
         if cancellation_check is not None:
             cancellation_check("native surface recombination complete")
     if settings.quadratic:
+        promotion_started = perf_counter()
         core = insert_midside_nodes(core)
+        phase_seconds["quadratic_promotion"] = perf_counter() - promotion_started
         if cancellation_check is not None:
             cancellation_check("native surface quadratic promotion complete")
+    validation_started = perf_counter()
     assert_valid_mesh(core)
+    phase_seconds["surface_validation"] = perf_counter() - validation_started
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "requested_backend": triangulation.requested_backend,
+                "selected_backend": triangulation.selected_backend,
+                "actual_backend": triangulation.actual_backend,
+                "fallback_reason": triangulation.fallback_reason,
+                "phase_seconds": phase_seconds,
+                "native_diagnostics": dict(triangulation.native_diagnostics),
+            }
+        )
     if cancellation_check is not None:
         cancellation_check("native surface validation complete")
     return core

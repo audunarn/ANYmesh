@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "_triangulation_native.hpp"
+
 namespace {
 
 long double orient2d_value(
@@ -306,6 +308,8 @@ PyMethodDef methods[] = {
     {"incircle", py_incircle, METH_VARARGS, "Robust long-double in-circle predicate."},
     {"orient2d_many", py_orient2d_many, METH_VARARGS, "Batch triangle orientations with the GIL released."},
     {"triangle_adjacency", py_triangle_adjacency, METH_O, "Deterministic edge incidence for triangle connectivity."},
+    {"constrained_triangulate", anymesher_native::py_constrained_triangulate, METH_VARARGS,
+     "Deterministic constrained triangulation over canonical prepared PSLG buffers."},
     {nullptr, nullptr, 0, nullptr},
 };
 

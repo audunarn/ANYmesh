@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from anygeometry import ConnectionIntent, EntityHandle, GeometryModel, IntersectionDimension
+from anygeometry import (
+    ConnectionIntent,
+    EntityHandle,
+    GeometryModel,
+    ImprintOperation,
+    IntersectionDimension,
+    IntersectionKind,
+)
 from anymesher import intersections
 from anymesher.intersections import (
     apply_intersection_mutation,
@@ -55,6 +62,69 @@ def test_crossing_faces_plan_and_apply_through_the_public_kernel_contract() -> N
     assert application.result.dimension is IntersectionDimension.CURVE
     assert application.change_set is not None
     assert geometry.revision > revision
+
+
+def test_face_connect_persists_sheet_face_use_and_coedge_ownership() -> None:
+    geometry = GeometryModel()
+    supporting = _plate(
+        geometry,
+        ((-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)),
+    )
+    terminating = _plate(
+        geometry,
+        ((-1, 0, 0), (1, 0, 0), (1, 0, 1), (-1, 0, 1)),
+    )
+    supporting_sheet = geometry.add_sheet((supporting,))
+    terminating_sheet = geometry.add_sheet((terminating,))
+
+    application = apply_intersection_mutation(
+        geometry,
+        geometry.handle("face", terminating),
+        geometry.handle("face", supporting),
+        intent=ConnectionIntent.CONNECT,
+    )
+
+    assert application.plan.operation is ImprintOperation.FACE_IMPRINT
+    assert application.result.kind is IntersectionKind.CROSS
+    assert application.result.dimension is IntersectionDimension.CURVE
+    assert application.face_intersection is not None
+    shared_edge = application.face_intersection.edge.id
+    face_use_ids = geometry.face_uses_using_edge(shared_edge)
+    assert {
+        geometry.face_uses[face_use_id].sheet_id
+        for face_use_id in face_use_ids
+    } == {supporting_sheet, terminating_sheet}
+    assert {
+        geometry.face_uses[geometry.coedges[coedge_id].face_use_id].sheet_id
+        for coedge_id in geometry.coedges_using_edge(shared_edge)
+    } == {supporting_sheet, terminating_sheet}
+    assert geometry.validate_topology() == ()
+
+
+def test_nonplanar_face_connect_preserves_typed_unsupported_result() -> None:
+    geometry = GeometryModel()
+    support = _plate(
+        geometry,
+        ((0, 0, 0), (3, 0, 0), (3, 2, 0), (0, 2, 0)),
+    )
+    start, control, end = geometry.add_points(
+        ((0.5, 0.5, 0.0), (1.5, 1.5, 0.0), (2.5, 0.5, 0.0))
+    )
+    spline = geometry.add_spline(start, (control,), end)
+    wall = geometry.extrude((spline,), (0.0, 0.0, 1.0))[0]
+    revision = geometry.revision
+
+    plan = plan_intersection_mutation(
+        geometry,
+        geometry.handle("face", support),
+        geometry.handle("face", wall),
+        intent=ConnectionIntent.CONNECT,
+    )
+
+    assert plan.result.kind is IntersectionKind.UNSUPPORTED
+    assert not plan.result.classified
+    assert plan.operation is ImprintOperation.NO_TOPOLOGY
+    assert geometry.revision == revision
 
 
 def test_deprecated_legacy_entry_warns_and_forwards_explicitly(monkeypatch) -> None:

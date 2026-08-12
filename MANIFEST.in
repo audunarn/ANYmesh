@@ -7,3 +7,4 @@ recursive-include tests *.py
 include src/anymesher/_native.cpp
 global-exclude __pycache__
 global-exclude *.py[cod]
+include src/anymesher/_triangulation_native.hpp

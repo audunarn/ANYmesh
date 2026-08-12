@@ -1,0 +1,74 @@
+{
+  "schema": "anymesher.native_hybrid.compiled_triangulation_thresholds",
+  "version": 1,
+  "frozen_against": {
+    "addendum_sha256": "A64E3DC1DC7733A6ED065E85C7475B49A1071840BE7A075D976F13935CFFBD95",
+    "anymesh_baseline_sha": "97058e0",
+    "geometry_dependency": ">=0.2,<0.3",
+    "qualification_geometry": "exact boss-approved SHA and schema-4 environment"
+  },
+  "common": {
+    "required_families": [
+      "mapped",
+      "native",
+      "cylinder"
+    ],
+    "required_status": "complete",
+    "required_exit_code": 0,
+    "canonical_hash_repeat_identical": true,
+    "invalid_or_inverted_elements": 0,
+    "minimum_scaled_jacobian": 0.001,
+    "maximum_aspect_ratio": 50.0,
+    "minimum_angle_degrees": 2.0,
+    "maximum_angle_degrees": 178.0,
+    "maximum_planar_warpage": 1e-10,
+    "deactivated_stride": 100,
+    "deactivated_count_rule": "ceil(active_elements / 100)",
+    "required_phase_fields": [
+      "chart_projection_and_preparation",
+      "boundary_densification",
+      "target_point_generation",
+      "triangulation_and_strict_qualification",
+      "recombination",
+      "surface_validation",
+      "boundary_registration",
+      "surface_lifting_and_publication"
+    ],
+    "required_memory_fields": [
+      "generation_peak_traced_bytes",
+      "generation_peak_process_rss_bytes",
+      "compact_core_memory_bytes"
+    ],
+    "no_global_triangle_scan_per_point": true,
+    "no_python_object_per_native_point_or_element": true
+  },
+  "tier_10000": {
+    "hard_wall_seconds": 900.0,
+    "maximum_process_rss_bytes": 4294967296,
+    "repeats": 3,
+    "serialization_required": true,
+    "deterministic_repeat_required": true,
+    "element_count_ratio_minimum": 0.5,
+    "element_count_ratio_maximum": 2.0
+  },
+  "tier_100000": {
+    "hard_wall_seconds": 1800.0,
+    "maximum_process_rss_bytes": 8589934592,
+    "repeats": 1,
+    "serialization_required": false,
+    "serialization_skip_reason_required": true,
+    "deterministic_repeat_required": true,
+    "element_count_ratio_minimum": 0.5,
+    "element_count_ratio_maximum": 2.0,
+    "maximum_total_path_growth_ratio_from_10000": 20.0,
+    "maximum_native_triangulation_growth_ratio_from_10000": 20.0,
+    "maximum_process_rss_growth_ratio_from_10000": 15.0
+  },
+  "failure_truth": {
+    "atomic_incomplete_checkpoint_required": true,
+    "exception_type_and_message_required": true,
+    "last_completed_case_count_required": true,
+    "partial_case_is_qualification_evidence": false,
+    "retry_or_tuning_under_same_lease": false
+  }
+}

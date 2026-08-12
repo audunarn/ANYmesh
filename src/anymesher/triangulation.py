@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 from math import fsum
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
 from .errors import MeshError
-from .native import NativeBoundary, get_native_boundary, run_native_triangulation
+from .native import (
+    NativeBoundary,
+    NativeBoundarySelection,
+    run_native_triangulation,
+    snapshot_native_boundary,
+)
 
 __all__ = [
     "PlanarTriangulation",
@@ -523,6 +528,11 @@ class PlanarTriangulation:
     outer_loop: np.ndarray
     hole_loops: tuple[np.ndarray, ...]
     backend: str = "python"
+    requested_backend: str = "python"
+    selected_backend: str = "python"
+    actual_backend: str = "python"
+    fallback_reason: str | None = None
+    native_diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("points", "triangles", "segments", "boundary_segments", "mandatory_segments", "outer_loop"):
@@ -533,6 +543,7 @@ class PlanarTriangulation:
         for ring in holes:
             ring.setflags(write=False)
         object.__setattr__(self, "hole_loops", holes)
+        object.__setattr__(self, "native_diagnostics", dict(self.native_diagnostics))
 
     @property
     def constraint_edges(self) -> np.ndarray:
@@ -557,6 +568,145 @@ class PlanarTriangulation:
 TriangulationResult = PlanarTriangulation
 
 
+def _strict_native_triangles(
+    result_points: np.ndarray,
+    triangles: np.ndarray,
+    prepared: _PreparedPSLG,
+) -> np.ndarray:
+    if (
+        result_points.dtype != np.dtype(np.float64)
+        or not result_points.dtype.isnative
+        or result_points.shape != prepared.points.shape
+        or not result_points.flags.c_contiguous
+        or result_points.tobytes(order="C") != prepared.points.tobytes(order="C")
+    ):
+        raise MeshError(
+            "native triangulation changed prepared PSLG point rows or binary64 values"
+        )
+    if (
+        triangles.dtype != np.dtype(np.int64)
+        or not triangles.dtype.isnative
+        or triangles.ndim != 2
+        or triangles.shape[1] != 3
+        or not triangles.flags.c_contiguous
+    ):
+        raise MeshError(
+            "native triangulation connectivity must be C-contiguous native int64 T3 rows"
+        )
+    if not len(triangles):
+        raise MeshError("native triangulation returned no cells")
+
+    canonical: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+    incidence: dict[tuple[int, int], list[int]] = {}
+    area = 0.0
+    for row, raw in enumerate(triangles):
+        made = tuple(int(value) for value in raw)
+        if min(made) < 0 or max(made) >= len(result_points) or len(set(made)) != 3:
+            raise MeshError("native triangulation returned invalid connectivity")
+        candidate = _canonical_triangle(made, result_points)
+        determinant = orient2d(
+            result_points[candidate[0]],
+            result_points[candidate[1]],
+            result_points[candidate[2]],
+        )
+        if determinant <= 0.0:
+            raise MeshError("native triangulation returned a zero-area cell")
+        if candidate in seen:
+            raise MeshError("native triangulation returned duplicate cells")
+        seen.add(candidate)
+        centroid = np.mean(result_points[np.asarray(candidate)], axis=0)
+        if not _inside_domain(centroid, prepared):
+            raise MeshError("native triangulation returned a cell outside the domain")
+        canonical.append(candidate)
+        area += 0.5 * determinant
+        for local in range(3):
+            edge = _normal_edge(candidate[local], candidate[(local + 1) % 3])
+            incidence.setdefault(edge, []).append(row)
+
+    if any(len(rows) > 2 for rows in incidence.values()):
+        raise MeshError("native triangulation returned nonmanifold incidence")
+    boundary = {tuple(map(int, edge)) for edge in prepared.boundary_segments}
+    mandatory = {tuple(map(int, edge)) for edge in prepared.mandatory_segments}
+    required = {tuple(map(int, edge)) for edge in prepared.segments}
+    missing = sorted(required.difference(incidence))
+    if missing:
+        raise MeshError(f"native triangulation omitted mandatory segments: {missing[:5]}")
+    wrong_boundary = sorted(
+        edge for edge in boundary if len(incidence.get(edge, ())) != 1
+    )
+    if wrong_boundary:
+        raise MeshError(
+            f"native triangulation returned invalid boundary incidence: {wrong_boundary[:5]}"
+        )
+    open_interior = sorted(
+        edge
+        for edge, rows in incidence.items()
+        if len(rows) == 1 and edge not in boundary
+    )
+    if open_interior:
+        raise MeshError(
+            f"native triangulation left open interior edges: {open_interior[:5]}"
+        )
+    if any(edge not in incidence for edge in mandatory):
+        raise MeshError("native triangulation omitted a mandatory interior constraint")
+
+    edges = sorted(incidence)
+    records = sorted(
+        (
+            float(min(result_points[a, 0], result_points[b, 0])),
+            float(max(result_points[a, 0], result_points[b, 0])),
+            float(min(result_points[a, 1], result_points[b, 1])),
+            float(max(result_points[a, 1], result_points[b, 1])),
+            a,
+            b,
+        )
+        for a, b in edges
+    )
+    active: list[tuple[float, float, float, float, int, int]] = []
+    tolerance = prepared.tolerance
+    for record in records:
+        minimum_x, maximum_x, minimum_y, maximum_y, a, b = record
+        active = [item for item in active if item[1] >= minimum_x - tolerance]
+        for other in active:
+            _, _, other_minimum_y, other_maximum_y, c, d = other
+            if maximum_y < other_minimum_y - tolerance or other_maximum_y < minimum_y - tolerance:
+                continue
+            shared = {a, b}.intersection((c, d))
+            first, second = result_points[a], result_points[b]
+            third, fourth = result_points[c], result_points[d]
+            crossing = _proper_intersection(first, second, third, fourth)
+            touching = False
+            if not shared:
+                touching = any(
+                    _point_on_segment(point, start, end, tolerance)
+                    for point, start, end in (
+                        (first, third, fourth),
+                        (second, third, fourth),
+                        (third, first, second),
+                        (fourth, first, second),
+                    )
+                )
+            if crossing or touching:
+                raise MeshError(
+                    f"native triangulation returned crossing or overlapping edges {(a, b)} and {(c, d)}"
+                )
+        active.append(record)
+
+    expected_area = abs(_ring_area(result_points, prepared.outer)) - sum(
+        abs(_ring_area(result_points, hole)) for hole in prepared.holes
+    )
+    area_tolerance = max(
+        prepared.tolerance * max(1.0, expected_area) * max(16, len(boundary)),
+        128.0 * np.finfo(float).eps * max(1.0, expected_area),
+    )
+    if abs(area - expected_area) > area_tolerance:
+        raise MeshError(
+            "native triangulation coverage area does not match the prepared domain"
+        )
+    return np.ascontiguousarray(sorted(canonical), dtype=np.int64)
+
+
 def constrained_planar_triangulation(
     points: Any,
     outer: Sequence[int] | None = None,
@@ -566,7 +716,8 @@ def constrained_planar_triangulation(
     constraints: Sequence[Sequence[int]] = (),
     mandatory_constraints: Sequence[Sequence[int]] | None = None,
     tolerance: float | None = None,
-    backend: str | NativeBoundary | None = "python",
+    backend: str | NativeBoundary | None = "auto",
+    cancellation_check: Callable[[str], None] | None = None,
 ) -> PlanarTriangulation:
     """Triangulate a planar straight-line graph.
 
@@ -582,6 +733,27 @@ def constrained_planar_triangulation(
         if constraints:
             raise MeshError("provide constraints or mandatory_constraints, not both")
         constraints = mandatory_constraints
+    chosen = backend
+    if chosen is None:
+        chosen = "python"
+    explicit_boundary: NativeBoundary | None = None
+    if not isinstance(chosen, str):
+        explicit_boundary = chosen
+        chosen = "native"
+    if chosen not in ("python", "native", "auto"):
+        raise MeshError("backend must be 'python', 'native', 'auto', or a NativeBoundary")
+
+    requested_backend = (
+        str(getattr(explicit_boundary, "name", "native"))
+        if explicit_boundary is not None
+        else str(chosen)
+    )
+    selection: NativeBoundarySelection | None = None
+    if chosen in ("native", "auto"):
+        selection = snapshot_native_boundary(explicit_boundary)
+    if chosen == "native" and selection is None:
+        raise MeshError("no native triangulation boundary is registered")
+
     prepared = _prepare_pslg(
         points,
         outer if outer is not None else boundary,
@@ -589,44 +761,40 @@ def constrained_planar_triangulation(
         constraints,
         tolerance,
     )
-    chosen = backend
-    if chosen is None:
-        chosen = "python"
-    native_boundary: NativeBoundary | None = None
-    if not isinstance(chosen, str):
-        native_boundary = chosen
-        chosen = "native"
-    if chosen not in ("python", "native", "auto"):
-        raise MeshError("backend must be 'python', 'native', 'auto', or a NativeBoundary")
 
     used_backend = "python"
+    selected_backend = "python"
+    fallback_reason = (
+        "native_capability_absent"
+        if chosen == "auto" and selection is None
+        else None
+    )
+    native_diagnostics: Mapping[str, Any] = {}
     result_points = prepared.points
     result_triangles: np.ndarray | None = None
-    if chosen in ("native", "auto") and (native_boundary is not None or get_native_boundary() is not None):
-        try:
-            native_result = run_native_triangulation(
-                prepared.points,
-                prepared.segments,
-                prepared.outer,
-                prepared.holes,
-                boundary=native_boundary,
-            )
-            if len(native_result.points) != len(prepared.points) or not np.allclose(
-                native_result.points[:len(prepared.points)], prepared.points, rtol=0.0, atol=prepared.tolerance
-            ):
-                raise MeshError("native backend must preserve input point rows")
-            result_points = native_result.points
-            result_triangles = _finish_triangles(result_points, native_result.triangles, prepared)
-            used_backend = getattr(native_boundary or get_native_boundary(), "name", "native")
-        except Exception:
-            if chosen == "native":
-                raise
-            result_triangles = None
-            result_points = prepared.points
-    elif chosen == "native":
-        raise MeshError("no native triangulation boundary is registered")
+    if selection is not None:
+        selected_backend = selection.name
+        native_result = run_native_triangulation(
+            prepared.points,
+            prepared.segments,
+            prepared.outer,
+            prepared.holes,
+            boundary=selection.boundary,
+            cancellation_check=cancellation_check,
+        )
+        result_points = native_result.points
+        strict_triangles = _strict_native_triangles(
+            result_points, native_result.triangles, prepared
+        )
+        result_triangles = _finish_triangles(
+            result_points, strict_triangles, prepared
+        )
+        used_backend = selection.name
+        native_diagnostics = native_result.diagnostics
 
     if result_triangles is None:
+        if cancellation_check is not None:
+            cancellation_check("python triangulation insertion start")
         triangles = _bowyer_watson(prepared.points)
         protected: set[tuple[int, int]] = set()
         for raw_segment in prepared.segments:
@@ -634,6 +802,8 @@ def constrained_planar_triangulation(
             triangles = _recover_segment(prepared.points, triangles, segment, protected)
             protected.add(_normal_edge(*segment))
         result_triangles = _finish_triangles(prepared.points, triangles, prepared)
+        if cancellation_check is not None:
+            cancellation_check("python triangulation complete")
 
     return PlanarTriangulation(
         points=result_points,
@@ -644,6 +814,11 @@ def constrained_planar_triangulation(
         outer_loop=prepared.outer,
         hole_loops=prepared.holes,
         backend=str(used_backend),
+        requested_backend=requested_backend,
+        selected_backend=selected_backend,
+        actual_backend=str(used_backend),
+        fallback_reason=fallback_reason,
+        native_diagnostics=native_diagnostics,
     )
 
 
@@ -657,7 +832,8 @@ def triangulate_polygon(
     *,
     interior_points: Any | None = None,
     tolerance: float | None = None,
-    backend: str | NativeBoundary | None = "python",
+    backend: str | NativeBoundary | None = "auto",
+    cancellation_check: Callable[[str], None] | None = None,
 ) -> PlanarTriangulation:
     """Coordinate-oriented wrapper around ``constrained_planar_triangulation``."""
 
@@ -697,4 +873,5 @@ def triangulate_polygon(
         constraints=constraint_ids,
         tolerance=tolerance,
         backend=backend,
+        cancellation_check=cancellation_check,
     )

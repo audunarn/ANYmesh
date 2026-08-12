@@ -8,9 +8,11 @@ release evidence packet.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import math
+import os
 import platform
 import statistics
 import sys
@@ -102,23 +104,55 @@ def _mesh_factory(family: str, requested_elements: int) -> Callable[[], Any]:
         return lambda: generate_mapped_mesh(_rectangle(), target_size=target_size)
     if family == "native":
         return lambda: generate_hybrid_mesh(
-            _pentagon(), target_size=target_size, strategy="native"
+            _pentagon(), target_size=target_size, strategy="native",
+            native_backend="native"
         )
     if family == "cylinder":
         return lambda: generate_hybrid_mesh(
-            _cylinder(), target_size=target_size, strategy="native"
+            _cylinder(), target_size=target_size, strategy="native",
+            native_backend="native"
         )
     raise ValueError(f"unknown benchmark family {family!r}")
 
 
-def _time_peak(call: Callable[[], Any]) -> tuple[Any, float, int]:
+def _process_peak_rss_bytes() -> int:
+    if os.name == "nt":
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong),
+                ("PageFaultCount", ctypes.c_ulong),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        if not ctypes.windll.psapi.GetProcessMemoryInfo(
+            handle, ctypes.byref(counters), counters.cb
+        ):
+            raise OSError("GetProcessMemoryInfo failed")
+        return int(counters.PeakWorkingSetSize)
+    import resource
+
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
+
+
+def _time_peak(call: Callable[[], Any]) -> tuple[Any, float, int, int]:
     tracemalloc.start()
     started = time.perf_counter()
     value = call()
     seconds = time.perf_counter() - started
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    return value, float(seconds), int(peak)
+    return value, float(seconds), int(peak), _process_peak_rss_bytes()
 
 
 def _mesh_arrays(mesh) -> dict[str, np.ndarray]:
@@ -212,33 +246,40 @@ def _measure_case(
     factory = _mesh_factory(family, requested_elements)
     generation_seconds: list[float] = []
     generation_peaks: list[int] = []
+    generation_rss_peaks: list[int] = []
+    generation_phase_samples: list[dict[str, Any]] = []
     mesh = None
     for _ in range(repeats):
-        mesh, seconds, peak = _time_peak(factory)
+        mesh, seconds, peak, rss_peak = _time_peak(factory)
         generation_seconds.append(seconds)
         generation_peaks.append(peak)
+        generation_rss_peaks.append(rss_peak)
+        generation_phase_samples.append(
+            dict(getattr(mesh, "hybrid_diagnostics", {}))
+        )
     assert mesh is not None
 
-    arrays, array_seconds, array_peak = _time_peak(lambda: _mesh_arrays(mesh))
+    arrays, array_seconds, array_peak, array_rss = _time_peak(lambda: _mesh_arrays(mesh))
     mesh_hash = _mesh_hash(arrays)
-    core, core_seconds, core_peak = _time_peak(lambda: _core_from(arrays))
-    native_quality, native_quality_seconds, native_quality_peak = _time_peak(
+    core, core_seconds, core_peak, core_rss = _time_peak(lambda: _core_from(arrays))
+    native_quality, native_quality_seconds, native_quality_peak, native_quality_rss = _time_peak(
         lambda: evaluate_quality(core)
     )
-    quality, quality_seconds, quality_peak = _time_peak(lambda: verify_mesh_quality(mesh))
+    quality, quality_seconds, quality_peak, quality_rss = _time_peak(lambda: verify_mesh_quality(mesh))
 
     element_ids = core.element_ids
     victims = element_ids[::100] if len(element_ids) else element_ids
-    _damaged, damage_seconds, damage_peak = _time_peak(
+    _damaged, damage_seconds, damage_peak, damage_rss = _time_peak(
         lambda: core.deactivate_elements(victims)
     )
 
     serialization: dict[str, Any] | None = None
     if mesh.num_elements <= serialization_limit:
-        payload, seconds, peak = _time_peak(lambda: mesh_to_dict(mesh))
+        payload, seconds, peak, rss_peak = _time_peak(lambda: mesh_to_dict(mesh))
         serialization = {
             "seconds": seconds,
             "peak_traced_bytes": peak,
+            "peak_process_rss_bytes": rss_peak,
             "top_level_keys": len(payload),
         }
 
@@ -257,19 +298,26 @@ def _measure_case(
         "generation_seconds": generation_seconds,
         "generation_median_seconds": statistics.median(generation_seconds),
         "generation_peak_traced_bytes": max(generation_peaks),
+        "generation_peak_process_rss_bytes": max(generation_rss_peaks),
+        "generation_phase_samples": generation_phase_samples,
         "compatibility_array_conversion_seconds": array_seconds,
         "compatibility_array_peak_traced_bytes": array_peak,
+        "compatibility_array_peak_process_rss_bytes": array_rss,
         "compact_core_conversion_seconds": core_seconds,
         "compact_core_peak_traced_bytes": core_peak,
+        "compact_core_peak_process_rss_bytes": core_rss,
         "compact_core_memory_bytes": int(core.memory_bytes),
         "native_quality_seconds": native_quality_seconds,
         "native_quality_peak_traced_bytes": native_quality_peak,
+        "native_quality_peak_process_rss_bytes": native_quality_rss,
         "native_quality": _native_quality_summary(native_quality),
         "quality_seconds": quality_seconds,
         "quality_peak_traced_bytes": quality_peak,
+        "quality_peak_process_rss_bytes": quality_rss,
         "quality": quality.as_dict(),
         "damage_one_percent_seconds": damage_seconds,
         "damage_one_percent_peak_traced_bytes": damage_peak,
+        "damage_one_percent_peak_process_rss_bytes": damage_rss,
         "serialization": serialization,
         "mesh_hash": mesh_hash,
         "repeated_mesh_hash": repeated_hash,
@@ -332,25 +380,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _write_report(path: Path, report: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cases: list[dict[str, Any]] = []
     started = time.perf_counter()
-    for family in args.families:
-        for size in args.sizes:
-            print(f"measuring {family} at approximately {size:,} elements", flush=True)
-            cases.append(
-                _measure_case(
-                    family,
-                    size,
-                    repeats=args.repeats,
-                    serialization_limit=args.serialization_limit,
-                    deterministic_repeat_limit=args.deterministic_repeat_limit,
-                )
-            )
     report = {
         "schema": "anymesher.native_hybrid.performance",
-        "version": 1,
+        "version": 2,
+        "status": "incomplete",
+        "current_case": None,
+        "failure": None,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "environment": {
             "platform": platform.platform(),
@@ -364,12 +412,49 @@ def main(argv: list[str] | None = None) -> int:
             "serialization_limit": args.serialization_limit,
             "deterministic_repeat_limit": args.deterministic_repeat_limit,
         },
-        "wall_seconds": time.perf_counter() - started,
+        "wall_seconds": 0.0,
         "cases": cases,
-        "scaling": _scaling(cases),
+        "scaling": [],
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_report(args.output, report)
+    try:
+        for family in args.families:
+            for size in args.sizes:
+                report["current_case"] = {
+                    "family": family,
+                    "requested_elements": int(size),
+                    "phase": "generation",
+                }
+                report["wall_seconds"] = time.perf_counter() - started
+                _write_report(args.output, report)
+                print(f"measuring {family} at approximately {size:,} elements", flush=True)
+                cases.append(
+                    _measure_case(
+                        family,
+                        size,
+                        repeats=args.repeats,
+                        serialization_limit=args.serialization_limit,
+                        deterministic_repeat_limit=args.deterministic_repeat_limit,
+                    )
+                )
+                report["current_case"] = None
+                report["wall_seconds"] = time.perf_counter() - started
+                _write_report(args.output, report)
+    except BaseException as error:
+        report["status"] = "failed"
+        report["failure"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+            "last_completed_cases": len(cases),
+        }
+        report["wall_seconds"] = time.perf_counter() - started
+        _write_report(args.output, report)
+        raise
+    report["status"] = "complete"
+    report["current_case"] = None
+    report["wall_seconds"] = time.perf_counter() - started
+    report["scaling"] = _scaling(cases)
+    _write_report(args.output, report)
     print(f"wrote {args.output}", flush=True)
     return 0
 

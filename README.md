@@ -111,6 +111,20 @@ that field is left empty instead of filled with something plausible.
 Planar boundaries may contain ANYgeometry straight lines, circular arcs or
 Bezier splines; Gmsh receives each as its corresponding exact curve primitive.
 
+### Native triangulation
+
+Mapped/native face selection is separate from the triangulator used after a face
+has selected the native strategy. In 0.2.1, omitted `native_backend` and planar
+`backend` arguments default to `"auto"`: an explicitly registered boundary is
+preferred, then the built-in compiled boundary, with the deterministic Python
+reference used only when native capability is absent.
+
+Use `"python"` to require the compatibility/reference implementation and
+`"native"` to require compiled capability without fallback. Import or execution
+failure from a present but corrupt extension is reported; it is never treated as
+ordinary absence. ANYfem format 6 persists this selector explicitly, while its
+format 1-5 migration writes `"python"` so old projects retain their behavior.
+
 ## Design notes
 
 **One shared geometry authority.** ANYmesher never converts a geometry model.

@@ -9,17 +9,158 @@ benchmarks and higher-level native algorithms.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from importlib.util import find_spec
+from types import TracebackType
 from typing import Any
 
 import numpy as np
 
-try:  # Optional by design; ``setup.py`` marks the extension optional as well.
-    from . import _native as _compiled
-except ImportError:  # pragma: no cover - depends on local build capability
+from .errors import MeshError
+from .native import NativeTriangulation
+
+
+_extension_spec = find_spec(f"{__package__}._native")
+if _extension_spec is None:  # Optional for source/developer installations.
     _compiled = None
+else:  # A present but unloadable artifact is a packaging failure, not absence.
+    from . import _native as _compiled
 
 
 NATIVE_CPP_AVAILABLE = _compiled is not None
+COMPILED_TRIANGULATION_AVAILABLE = bool(
+    _compiled is not None and callable(getattr(_compiled, "constrained_triangulate", None))
+)
+
+
+class _CancellationSentinel(BaseException):
+    pass
+
+
+def _strict_float64_matrix(value: Any, columns: int, name: str) -> np.ndarray:
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name} must be a numpy array before native dispatch")
+    if (
+        value.dtype != np.dtype(np.float64)
+        or not value.dtype.isnative
+        or value.ndim != 2
+        or value.shape[1] != columns
+        or not value.flags.c_contiguous
+        or not np.all(np.isfinite(value))
+    ):
+        raise TypeError(
+            f"{name} must be a C-contiguous native float64 matrix with {columns} columns"
+        )
+    return value
+
+
+def _strict_int64_matrix(value: Any, columns: int, name: str) -> np.ndarray:
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name} must be a numpy array before native dispatch")
+    if (
+        value.dtype != np.dtype(np.int64)
+        or not value.dtype.isnative
+        or value.ndim != 2
+        or value.shape[1] != columns
+        or not value.flags.c_contiguous
+    ):
+        raise TypeError(
+            f"{name} must be a C-contiguous native int64 matrix with {columns} columns"
+        )
+    return value
+
+
+def _strict_int64_vector(value: Any, name: str) -> np.ndarray:
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name} must be a numpy array before native dispatch")
+    if (
+        value.dtype != np.dtype(np.int64)
+        or not value.dtype.isnative
+        or value.ndim != 1
+        or not value.flags.c_contiguous
+    ):
+        raise TypeError(f"{name} must be a C-contiguous native int64 vector")
+    return value
+
+
+class CompiledNativeBoundary:
+    """Strict adapter for the built-in C++17 constrained triangulator."""
+
+    name = "anymesher-cpp17"
+
+    def triangulate(
+        self,
+        points: np.ndarray,
+        segments: np.ndarray,
+        outer_loop: np.ndarray,
+        hole_loops: tuple[np.ndarray, ...],
+    ) -> NativeTriangulation:
+        return self.triangulate_cancellable(
+            points,
+            segments,
+            outer_loop,
+            hole_loops,
+            cancellation_check=None,
+        )
+
+    def triangulate_cancellable(
+        self,
+        points: np.ndarray,
+        segments: np.ndarray,
+        outer_loop: np.ndarray,
+        hole_loops: tuple[np.ndarray, ...],
+        *,
+        cancellation_check: Any = None,
+    ) -> NativeTriangulation:
+        if not COMPILED_TRIANGULATION_AVAILABLE:
+            raise MeshError("compiled triangulation capability is unavailable")
+        made_points = _strict_float64_matrix(points, 2, "points")
+        made_segments = _strict_int64_matrix(segments, 2, "segments")
+        made_outer = _strict_int64_vector(outer_loop, "outer_loop")
+        made_holes = tuple(
+            _strict_int64_vector(hole, f"hole_loops[{number}]")
+            for number, hole in enumerate(hole_loops)
+        )
+        offsets = np.zeros(len(made_holes) + 1, dtype=np.int64)
+        if made_holes:
+            offsets[1:] = np.cumsum([len(hole) for hole in made_holes], dtype=np.int64)
+            hole_indices = np.ascontiguousarray(np.concatenate(made_holes), dtype=np.int64)
+        else:
+            hole_indices = np.empty(0, dtype=np.int64)
+
+        captured: list[tuple[BaseException, TracebackType | None]] = []
+
+        def checked(phase: str) -> None:
+            if cancellation_check is None:
+                return
+            try:
+                cancellation_check(phase)
+            except BaseException as error:
+                captured.append((error, error.__traceback__))
+                raise _CancellationSentinel from None
+
+        try:
+            raw_triangles, diagnostics = _compiled.constrained_triangulate(
+                made_points,
+                made_segments,
+                made_outer,
+                hole_indices,
+                offsets,
+                checked if cancellation_check is not None else None,
+            )
+        except _CancellationSentinel:
+            error, traceback = captured[0]
+            raise error.with_traceback(traceback)
+        except RuntimeError as error:
+            raise MeshError(str(error)) from error
+        triangles = np.ascontiguousarray(raw_triangles, dtype=np.int64).reshape((-1, 3))
+        return NativeTriangulation(made_points, triangles, diagnostics)
+
+
+_COMPILED_BOUNDARY = CompiledNativeBoundary()
+
+
+def compiled_native_boundary() -> CompiledNativeBoundary | None:
+    return _COMPILED_BOUNDARY if COMPILED_TRIANGULATION_AVAILABLE else None
 
 
 def orient2d(
@@ -137,7 +278,10 @@ def triangle_edge_incidence(triangles: Any) -> np.ndarray:
 
 
 __all__ = [
+    "COMPILED_TRIANGULATION_AVAILABLE",
+    "CompiledNativeBoundary",
     "NATIVE_CPP_AVAILABLE",
+    "compiled_native_boundary",
     "incircle",
     "orient2d",
     "orient2d_many",
