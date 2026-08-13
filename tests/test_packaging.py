@@ -7,11 +7,18 @@ dependencies turns the layering check into decoration.
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 import anymesher
+from anymesher.errors import MeshError
+from anymesher.native_cpp import COMPILED_TRIANGULATION_AVAILABLE
+from anymesher.triangulation import constrained_planar_triangulation
 from test_layering import ALLOWED_THIRD_PARTY, OPTIONAL_IMPORT_EXCEPTIONS
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -79,3 +86,60 @@ def test_run_gui_bootstraps_without_an_install() -> None:
     assert 'if __name__ == "__main__":\n    raise SystemExit(main())' in script.read_text(
         encoding="utf-8"
     )
+
+def test_anygeometry_release_dependency_floor_is_exact() -> None:
+    project = _pyproject()["project"]
+    geometry_requirements = [
+        requirement
+        for requirement in project["dependencies"]
+        if requirement.lower().startswith("anygeometry")
+    ]
+    assert geometry_requirements == ["ANYgeometry>=0.2.1,<0.3"]
+    assert project["optional-dependencies"]["planar"] == [
+        "ANYgeometry[planar]>=0.2.1,<0.3"
+    ]
+
+
+def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
+    geometry_ref = "37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa"
+    ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
+    publish = (REPOSITORY_ROOT / ".github/workflows/publish.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert ci.count("repository: audunarn/ANYgeometry") == 4
+    assert ci.count(f"ref: {geometry_ref}") == 4
+    assert publish.count("repository: audunarn/ANYgeometry") == 1
+    assert publish.count(f"ref: {geometry_ref}") == 1
+    assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
+    assert (
+        "tests/test_packaging.py::test_disabled_native_build_is_absence_only"
+        in ci
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("ANYMESHER_DISABLE_NATIVE") != "1",
+    reason="requires the fresh disabled-native build cell",
+)
+def test_disabled_native_build_is_absence_only() -> None:
+    assert COMPILED_TRIANGULATION_AVAILABLE is False
+
+    points = np.asarray(
+        ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+        dtype=np.float64,
+    )
+    result = constrained_planar_triangulation(points, (0, 1, 2, 3))
+
+    assert result.requested_backend == "auto"
+    assert result.selected_backend == "python"
+    assert result.actual_backend == "python"
+    assert result.fallback_reason == "native_capability_absent"
+    with pytest.raises(MeshError, match="no native triangulation boundary"):
+        constrained_planar_triangulation(
+            points,
+            (0, 1, 2, 3),
+            backend="native",
+        )

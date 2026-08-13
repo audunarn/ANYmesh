@@ -68,3 +68,15 @@ surface to `ANYmesher>=0.1,<0.3` and compare installed requirement metadata
 semantically. ANYfileIO still declares `ANYmesher<0.2`; its owner must widen that
 range before a combined 0.2.1 resolver lock or publication-readiness claim is
 valid.
+
+## 2026-08-13: release-source contract supersession
+
+This status supersedes the current dependency and resolver statements above
+without rewriting their historical evidence. ANYmesh now requires
+`ANYgeometry>=0.2.1,<0.3`; its planar extra has the equivalent 0.2.1 floor.
+
+Pinned ANYfileIO main object
+`5513881827cdee9fd337497a2730a5912d8ea751` is version 0.2.0 with a NumPy-only
+base and a semantics extra requiring `ANYmesher>=0.2,<0.3` and
+`ANYmaterial>=0.1,<0.2`. A dependency-complete installed-wheel resolver lock
+and publication-readiness qualification remain open.

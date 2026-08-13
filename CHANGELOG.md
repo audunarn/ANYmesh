@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Require ANYgeometry 0.2.1 or newer within the qualified 0.2 line, pin the
+  accepted geometry source in CI/release workflows, and add a disabled-native
+  cell proving absence-only Python fallback and fail-hard explicit native use.
 - Change the six native-triangulation public defaults to `auto` for 0.2.1 while
   preserving explicit `python`, fail-hard `native`, and Python fallback only
   when native capability is absent. ANYfem format 6 persists the selector so

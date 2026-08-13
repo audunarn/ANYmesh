@@ -178,7 +178,7 @@ The legacy `anymesher.split_face_at`, `split_face_between` and `strip_face`
 imports likewise retain their mapped-partition semantics; new neutral geometry
 code should import the general edit operations from `anygeometry`.
 Writing a mesh to a `.fem`
-or `.inp` file belongs to [ANYfileio](https://github.com/audunarn/ANYio), which
+or `.inp` file belongs to [ANYfileio](https://github.com/audunarn/ANYfileIO), which
 depends on this package — so the arrow cannot point back. The JSON in
 `anymesher.serialize` is the mesh container written out as itself, not an
 interchange format.

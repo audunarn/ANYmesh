@@ -26,13 +26,13 @@ classifiers = [
 ]
 dependencies = [
   "numpy>=1.26",
-  "ANYgeometry>=0.2,<0.3",
+  "ANYgeometry>=0.2.1,<0.3",
 ]
 
 [project.optional-dependencies]
 # Coplanar overlap fragmentation and advanced planar preparation.  The native
 # triangulation and quad-dominant pipeline do not require Shapely.
-planar = ["ANYgeometry[planar]>=0.2,<0.3"]
+planar = ["ANYgeometry[planar]>=0.2.1,<0.3"]
 # The editor uses tkinter from the standard library, so it adds no wheel.  The
 # extra exists so `pip install ANYmesher[gui]` is meaningful and stays
 # meaningful if that ever stops being true.

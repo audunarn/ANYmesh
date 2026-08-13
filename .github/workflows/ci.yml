@@ -18,7 +18,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
+          ref: 37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa
           path: .ecosystem/ANYgeometry
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -29,6 +31,29 @@ jobs:
       - run: python -c "import anymesher; print(anymesher.__version__)"
       - run: python -m pytest
 
+  native-absent:
+    name: Disabled native boundary is absence-only
+    runs-on: ubuntu-latest
+    env:
+      ANYMESHER_DISABLE_NATIVE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev]"
+      - name: Prove absence-only fallback and strict native failure
+        run: >-
+          python -m pytest
+          tests/test_packaging.py::test_disabled_native_build_is_absence_only -q
   # The gmsh backend is optional, so the suite has to pass both with and
   # without it.  Without this job the only configuration ever tested is the one
   # where every backend is present.
@@ -45,7 +70,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
+          ref: 37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa
           path: .ecosystem/ANYgeometry
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -70,7 +97,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
+          ref: 37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa
           path: .ecosystem/ANYgeometry
+          persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
         env:
           CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
