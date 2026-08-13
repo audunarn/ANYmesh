@@ -120,6 +120,24 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     )
 
 
+    assert ci.count(
+        'python -m pip install -e ".[dev,planar]"'
+    ) == 1
+    assert ci.count(
+        'python -m pip install -e ".[dev,gmsh,planar]"'
+    ) == 1
+    assert ci.count(
+        'python -m pip install -e ".[dev]"'
+    ) == 1
+    assert 'python -m pip install -e ".[dev,gmsh]"' not in ci
+    assert ci.count("name: Install Ubuntu Gmsh runtime") == 1
+    assert ci.count("if: runner.os == 'Linux'") == 1
+    assert ci.count("sudo apt-get update") == 1
+    assert ci.count(
+        "sudo apt-get install --yes --no-install-recommends libglu1-mesa"
+    ) == 1
+    assert ci.startswith("name: Tests\n\non:\n  push:\n  pull_request:\n")
+
 @pytest.mark.skipif(
     os.environ.get("ANYMESHER_DISABLE_NATIVE") != "1",
     reason="requires the fresh disabled-native build cell",

@@ -27,7 +27,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,planar]"
       - run: python -c "import anymesher; print(anymesher.__version__)"
       - run: python -m pytest
 
@@ -79,7 +79,12 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
-      - run: python -m pip install -e ".[dev,gmsh]"
+      - run: python -m pip install -e ".[dev,gmsh,planar]"
+      - name: Install Ubuntu Gmsh runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libglu1-mesa
       - run: python -c "import gmsh"
       - run: python -m pytest
 
