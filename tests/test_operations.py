@@ -504,7 +504,7 @@ def test_mapped_backend_requires_a_trimmed_hole_to_be_partitioned() -> None:
     punch_neutral_hole(model, face, (1.0, 1.0, 0.0), 0.3)
 
     with pytest.raises(MeshError, match="trimmed holes"):
-        generate_mesh(model, target_size=0.2)
+        generate_mesh(model, target_size=0.2, backend="mapped")
 
 
 def test_a_neutral_triangle_is_refused_by_the_mapped_backend() -> None:
@@ -515,7 +515,7 @@ def test_a_neutral_triangle_is_refused_by_the_mapped_backend() -> None:
     # ANYgeometry accepts neutral triangular topology.  The built-in mapped
     # quad backend owns the stronger four-side requirement and diagnoses it.
     with pytest.raises(MeshError, match="four-side mapped parameterization"):
-        generate_mesh(model, target_size=0.2, face_ids=[face])
+        generate_mesh(model, target_size=0.2, face_ids=[face], backend="mapped")
 
 
 def test_operations_on_a_missing_face_say_which() -> None:

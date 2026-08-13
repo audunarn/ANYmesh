@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
-from anygeometry import MutationPolicy
+from anygeometry import IntersectionKind, MutationPolicy, query_intersection
 from anygeometry.entities import EntityRef
 from anygeometry.errors import GeometryError
 from anygeometry.intersections import intersect_faces
@@ -48,13 +48,6 @@ class _PreparedGeometry:
             for item in self.geometry.resolve_ref(EntityRef(kind, int(identifier)))
             if item.kind == kind
         )
-
-
-_NO_INTERSECTION = (
-    "parallel or coplanar",
-    "does not cross both face boundaries",
-    "do not overlap along an intersection segment",
-)
 
 
 def _face_bounds(geometry: GeometryModel, face_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -346,6 +339,13 @@ def _prepare(
                 # extruded in separate modelling commands).  The retained
                 # shell-boundary coupling stage makes the meshes conformal.
                 continue
+            result = query_intersection(
+                working,
+                working.handle("face", first),
+                working.handle("face", second),
+            )
+            if result.classified and result.kind is IntersectionKind.DISJOINT:
+                continue
             try:
                 intersect_faces(
                     working,
@@ -356,8 +356,6 @@ def _prepare(
                 )
             except GeometryError as error:
                 message = str(error)
-                if any(reason in message for reason in _NO_INTERSECTION):
-                    continue
                 if (
                     "intersection endpoint is not on the face boundary" in message
                     and _is_one_sided_shell_junction(working, first, second)

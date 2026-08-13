@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from anygeometry import EntityRef, GeometryModel, fragment_coplanar_overlaps
+from anygeometry import (
+    EntityRef,
+    GeometryModel,
+    IntersectionKind,
+    fragment_coplanar_overlaps,
+    query_intersection,
+)
 from anygeometry.serialization import to_dict
 from anymesher import generate_mesh_with_intersections
 from anymesher.errors import MeshError
@@ -292,3 +298,31 @@ def test_positive_area_coplanar_overlap_is_blocked_before_double_stiffness():
     assert len(result.outputs) == 3
     assert set(mesh.elements_of_face) == set(geometry.faces)
     assert mesh.automatic_intersections == 0
+
+
+def test_legacy_imprint_fails_closed_for_typed_unsupported_faces():
+    geometry = GeometryModel()
+    support = _plate(
+        geometry,
+        ((0, 0, 0), (3, 0, 0), (3, 2, 0), (0, 2, 0)),
+    )
+    start, control, end = geometry.add_points(
+        ((0.5, 0.5, 0.0), (1.5, 1.5, 0.0), (2.5, 0.5, 0.0))
+    )
+    spline = geometry.add_spline(start, (control,), end)
+    wall = geometry.extrude((spline,), (0.0, 0.0, 1.0))[0]
+    result = query_intersection(
+        geometry,
+        geometry.handle("face", support),
+        geometry.handle("face", wall),
+    )
+    before = to_dict(geometry)
+    revision = geometry.revision
+
+    assert result.kind is IntersectionKind.UNSUPPORTED
+    assert not result.classified
+    with pytest.raises(MeshError, match=r"imprint failed.*not qualified"):
+        generate_mesh_with_intersections(geometry, target_size=0.25)
+
+    assert geometry.revision == revision
+    assert to_dict(geometry) == before
