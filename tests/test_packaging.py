@@ -149,9 +149,17 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"
     )
     assert "release:" not in publish
-    assert "gh-action-pypi-publish" not in publish
     assert "repository-url:" not in publish
-    assert "id-token: write" not in publish
+    assert publish.count("id-token: write") == 1
+    assert publish.count("pypa/gh-action-pypi-publish@release/v1") == 1
+    assert "password:" not in publish
+    assert "username:" not in publish
+    assert "skip-existing:" not in publish
+    assert "name: pypi" in publish
+    assert "url: https://pypi.org/p/ANYmesher" in publish
+    assert "name: ANYmesher-0.2.3-pypi-distributions" in publish
+    assert "dist/*.whl" in publish
+    assert "dist/*.tar.gz" in publish
     assert "permissions:\n  contents: read" in publish
     assert publish.count(
         'os: [windows-latest, ubuntu-latest, macos-latest]'
