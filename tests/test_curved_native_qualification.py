@@ -129,7 +129,7 @@ def test_cylinder_refinement_increases_topology_and_reduces_physical_edges() -> 
     assert maximum_edges[0] > maximum_edges[1] > maximum_edges[2]
 
 
-def test_quadratic_cylinder_shares_q8_midsides_on_the_exact_support() -> None:
+def test_quadratic_cylinder_shares_q8_t6_midsides_on_the_exact_support() -> None:
     geometry, face, surface = _model_face("cylinder")
     mesh = generate_hybrid_mesh_result(
         geometry,
@@ -140,6 +140,23 @@ def test_quadratic_cylinder_shares_q8_midsides_on_the_exact_support() -> None:
     ).mesh
 
     assert mesh.quads
-    assert not mesh.tris
+    assert mesh.tris
     assert all(len(connectivity) == 8 for connectivity in mesh.quads.values())
+    assert all(len(connectivity) == 6 for connectivity in mesh.tris.values())
+
+    edge_midpoints: dict[tuple[int, int], int] = {}
+    for connectivity in (*mesh.quads.values(), *mesh.tris.values()):
+        corner_count = 4 if len(connectivity) == 8 else 3
+        for index in range(corner_count):
+            edge = tuple(
+                sorted(
+                    (
+                        connectivity[index],
+                        connectivity[(index + 1) % corner_count],
+                    )
+                )
+            )
+            midpoint = connectivity[corner_count + index]
+            assert edge_midpoints.setdefault(edge, midpoint) == midpoint
+
     assert _support_residual(mesh, surface) < 1.0e-10

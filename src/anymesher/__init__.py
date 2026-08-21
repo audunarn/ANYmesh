@@ -113,7 +113,7 @@ from .intersections import (
 from .beam_connections import connect_beam_mesh, connect_shell_boundaries
 from .serialize import load_mesh, mesh_from_dict, mesh_to_dict, save_mesh
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 __all__ = [
     "ASPECT_RATIO_LIMIT",

@@ -47,9 +47,9 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
-def test_release_metadata_is_0_2_2_alpha() -> None:
+def test_release_metadata_is_0_2_3_alpha() -> None:
     project = _pyproject()["project"]
-    assert project["version"] == "0.2.2"
+    assert project["version"] == "0.2.3"
     assert project["requires-python"] == ">=3.11"
     assert "Development Status :: 3 - Alpha" in project["classifiers"]
 

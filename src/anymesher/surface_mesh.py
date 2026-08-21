@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
+from math import acos, ceil, sqrt
 from time import perf_counter
 from typing import Any, Callable, Sequence
 
@@ -12,6 +12,7 @@ import numpy as np
 from .core import MeshCore, corner_edges
 from .errors import MeshError
 from .native import NativeBoundary
+from .optimization import constrained_smoothing, local_edge_flip
 from .quality_v2 import assert_valid_mesh
 from .recombine import recombine_triangles
 from .triangulation import PlanarTriangulation, triangulate_polygon
@@ -107,7 +108,8 @@ def _densify_open(values: np.ndarray, size: float) -> np.ndarray:
     result = [values[0]]
     for first, second in zip(values, values[1:]):
         divisions = max(1, int(ceil(np.linalg.norm(second - first) / size)))
-        result.extend(first + (second - first) * index / divisions for index in range(1, divisions + 1))
+        result.extend(first + (second - first) * index / divisions for index in range(1, divisions))
+        result.append(second.copy())
     return np.asarray(result)
 
 
@@ -127,18 +129,257 @@ def _inside(point: np.ndarray, ring: np.ndarray) -> bool:
     return inside
 
 
-def _target_points(outer: np.ndarray, holes: Sequence[np.ndarray], size: float) -> np.ndarray:
+def _segment_distance(point: np.ndarray, first: np.ndarray, second: np.ndarray) -> float:
+    direction = second - first
+    squared = float(direction @ direction)
+    if squared == 0.0:
+        return float(np.linalg.norm(point - first))
+    fraction = float(np.clip(((point - first) @ direction) / squared, 0.0, 1.0))
+    return float(np.linalg.norm(point - (first + fraction * direction)))
+
+
+def _target_points(
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    constraints: Sequence[np.ndarray],
+    size: float,
+) -> np.ndarray:
+    """Generate a deterministic triangular lattice away from protected lines."""
+
     minimum = np.min(outer, axis=0)
     maximum = np.max(outer, axis=0)
-    xs = np.arange(minimum[0] + size, maximum[0], size)
-    ys = np.arange(minimum[1] + size, maximum[1], size)
-    values = [
-        np.array((x, y), dtype=float)
-        for y in ys
-        for x in xs
-        if _inside(np.array((x, y)), outer) and not any(_inside(np.array((x, y)), hole) for hole in holes)
+    vertical = sqrt(3.0) * 0.5 * size
+    ys = np.arange(minimum[1] + 0.5 * vertical, maximum[1], vertical)
+    protected_coordinates = [
+        (ring[index], ring[(index + 1) % len(ring)])
+        for ring in (outer, *holes)
+        for index in range(len(ring))
     ]
+    protected_coordinates.extend((segment[0], segment[1]) for segment in constraints)
+    clearance = 0.25 * size
+    values: list[np.ndarray] = []
+    for row, y in enumerate(ys):
+        offset = 0.5 * size if row % 2 else 0.0
+        xs = np.arange(minimum[0] + 0.5 * size + offset, maximum[0], size)
+        for x in xs:
+            point = np.array((x, y), dtype=float)
+            if not _inside(point, outer) or any(_inside(point, hole) for hole in holes):
+                continue
+            if any(
+                _segment_distance(point, first, second) <= clearance
+                for first, second in protected_coordinates
+            ):
+                continue
+            values.append(point)
     return np.asarray(values, dtype=float).reshape((-1, 2))
+
+
+@dataclass(frozen=True)
+class _QualityCandidate:
+    points: np.ndarray
+    triangles: np.ndarray
+    report: dict[str, Any]
+    score: tuple[int, int, float, float, float]
+    aspect_ratios: np.ndarray
+    flips: int = 0
+    moved_nodes: tuple[int, ...] = ()
+    added_points: int = 0
+    rounds: int = 0
+
+
+def _triangle_quality(
+    points: np.ndarray,
+    triangles: np.ndarray,
+) -> tuple[dict[str, Any], tuple[int, int, float, float, float], np.ndarray]:
+    aspects: list[float] = []
+    jacobians: list[float] = []
+    minimum_angles: list[float] = []
+    maximum_angles: list[float] = []
+    invalid = 0
+    scale = max(float(np.ptp(points, axis=0).max()), 1.0) if len(points) else 1.0
+    area_tolerance = np.finfo(np.float64).eps * scale * scale * 32.0
+    for triangle in triangles:
+        coordinates = points[np.asarray(triangle, dtype=np.int64)]
+        lengths = np.asarray(
+            (
+                np.linalg.norm(coordinates[1] - coordinates[0]),
+                np.linalg.norm(coordinates[2] - coordinates[1]),
+                np.linalg.norm(coordinates[0] - coordinates[2]),
+            ),
+            dtype=np.float64,
+        )
+        first = coordinates[1] - coordinates[0]
+        second = coordinates[2] - coordinates[0]
+        double_area = float(first[0] * second[1] - first[1] * second[0])
+        if double_area <= area_tolerance or float(np.min(lengths)) <= 0.0:
+            invalid += 1
+        aspects.append(float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-15)))
+        angles: list[float] = []
+        corner_jacobians: list[float] = []
+        for corner in range(3):
+            previous = coordinates[(corner - 1) % 3] - coordinates[corner]
+            following = coordinates[(corner + 1) % 3] - coordinates[corner]
+            denominator = max(float(np.linalg.norm(previous) * np.linalg.norm(following)), 1.0e-30)
+            cosine = float(np.clip((previous @ following) / denominator, -1.0, 1.0))
+            angles.append(float(np.degrees(acos(cosine))))
+            corner_jacobians.append(double_area / denominator)
+        jacobians.append(min(corner_jacobians))
+        minimum_angles.append(min(angles))
+        maximum_angles.append(max(angles))
+    aspect_array = np.asarray(aspects, dtype=np.float64)
+    poor_rows = np.flatnonzero(aspect_array > 5.0)
+    maximum_aspect = float(np.max(aspect_array)) if len(aspect_array) else 1.0
+    minimum_jacobian = float(np.min(jacobians)) if jacobians else 1.0
+    minimum_angle = float(np.min(minimum_angles)) if minimum_angles else 60.0
+    maximum_angle = float(np.max(maximum_angles)) if maximum_angles else 60.0
+    report = {
+        "invalid_element_count": invalid,
+        "elements_above_aspect_ratio_5": int(len(poor_rows)),
+        "max_aspect_ratio": maximum_aspect,
+        "min_scaled_jacobian": minimum_jacobian,
+        "min_angle": minimum_angle,
+        "max_angle": maximum_angle,
+        "poor_element_ids": [int(row) + 1 for row in poor_rows],
+    }
+    score = (invalid, int(len(poor_rows)), maximum_aspect, -minimum_jacobian, -minimum_angle)
+    return report, score, aspect_array
+
+
+def _make_candidate(
+    points: np.ndarray,
+    triangles: np.ndarray,
+    *,
+    flips: int = 0,
+    moved_nodes: tuple[int, ...] = (),
+    added_points: int = 0,
+    rounds: int = 0,
+) -> _QualityCandidate:
+    report, score, aspects = _triangle_quality(points, triangles)
+    return _QualityCandidate(
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(triangles, dtype=np.int64),
+        report,
+        score,
+        aspects,
+        flips=flips,
+        moved_nodes=moved_nodes,
+        added_points=added_points,
+        rounds=rounds,
+    )
+
+
+def _fixed_rows(
+    points: np.ndarray,
+    protected_edges: np.ndarray,
+    explicit_points: np.ndarray,
+) -> tuple[int, ...]:
+    fixed = {int(node) for edge in protected_edges for node in edge}
+    for explicit in explicit_points:
+        matches = np.flatnonzero(np.all(points == explicit, axis=1))
+        fixed.update(int(row) for row in matches)
+    return tuple(sorted(fixed))
+
+
+def _optimize_candidate(
+    candidate: _QualityCandidate,
+    protected_edges: np.ndarray,
+    explicit_points: np.ndarray,
+) -> _QualityCandidate:
+    """Run the fixed flip/smooth/flip sequence and publish only improvements."""
+
+    best = candidate
+    first_flip = local_edge_flip(
+        candidate.points,
+        candidate.triangles,
+        protected_edges=protected_edges,
+    )
+    flipped = _make_candidate(
+        candidate.points,
+        first_flip.triangles,
+        flips=first_flip.flip_count,
+        added_points=candidate.added_points,
+        rounds=candidate.rounds,
+    )
+    if flipped.score < best.score and flipped.score[0] == 0:
+        best = flipped
+    smoothing = constrained_smoothing(
+        candidate.points,
+        first_flip.triangles,
+        fixed_nodes=_fixed_rows(candidate.points, protected_edges, explicit_points),
+        constrained_edges=protected_edges,
+        iterations=4,
+        relaxation=0.6,
+    )
+    moved_nodes = tuple(int(row) for row in smoothing.moved_nodes)
+    smoothed = _make_candidate(
+        smoothing.points,
+        first_flip.triangles,
+        flips=first_flip.flip_count,
+        moved_nodes=moved_nodes,
+        added_points=candidate.added_points,
+        rounds=candidate.rounds,
+    )
+    if smoothed.score < best.score and smoothed.score[0] == 0:
+        best = smoothed
+    final_flip = local_edge_flip(
+        smoothing.points,
+        first_flip.triangles,
+        protected_edges=protected_edges,
+    )
+    finished = _make_candidate(
+        smoothing.points,
+        final_flip.triangles,
+        flips=first_flip.flip_count + final_flip.flip_count,
+        moved_nodes=moved_nodes,
+        added_points=candidate.added_points,
+        rounds=candidate.rounds,
+    )
+    if finished.score < best.score and finished.score[0] == 0:
+        best = finished
+    return best
+
+
+def _refinement_midpoints(
+    candidate: _QualityCandidate,
+    protected_edges: np.ndarray,
+    limit: int,
+) -> np.ndarray:
+    if limit <= 0:
+        return np.empty((0, 2), dtype=np.float64)
+    protected = {tuple(sorted(map(int, edge))) for edge in protected_edges}
+    poor_rows = [element_id - 1 for element_id in candidate.report["poor_element_ids"]]
+    poor_rows.sort(
+        key=lambda row: (
+            -float(candidate.aspect_ratios[row]),
+            tuple(sorted(map(int, candidate.triangles[row]))),
+            tuple(map(int, candidate.triangles[row])),
+        )
+    )
+    scale = max(float(np.ptp(candidate.points, axis=0).max()), 1.0)
+    tolerance = scale * 1.0e-12
+    added: list[np.ndarray] = []
+    for row in poor_rows:
+        triangle = candidate.triangles[row]
+        edges = {
+            tuple(sorted((int(triangle[index]), int(triangle[(index + 1) % 3]))))
+            for index in range(3)
+        }
+        available = [edge for edge in edges if edge not in protected]
+        if not available:
+            continue
+        edge = min(
+            available,
+            key=lambda item: (-float(np.linalg.norm(candidate.points[item[1]] - candidate.points[item[0]])), item),
+        )
+        midpoint = 0.5 * (candidate.points[edge[0]] + candidate.points[edge[1]])
+        if np.any(np.linalg.norm(candidate.points - midpoint, axis=1) <= tolerance):
+            continue
+        if added and any(float(np.linalg.norm(value - midpoint)) <= tolerance for value in added):
+            continue
+        added.append(midpoint)
+        if len(added) == limit:
+            break
+    return np.asarray(added, dtype=np.float64).reshape((-1, 2))
 
 
 def _next_ids(existing: np.ndarray, count: int) -> np.ndarray:
@@ -296,6 +537,8 @@ def mesh_planar_surface(
     planar_holes = [plane.project(hole) for hole in raw_holes]
     planar_constraints = [plane.project(segment) for segment in raw_constraints]
     planar_interior = plane.project(raw_interior)
+    explicit_interior = planar_interior.copy()
+    generated = np.empty((0, 2), dtype=np.float64)
     phase_seconds["chart_projection_and_preparation"] = (
         perf_counter() - preparation_started
     )
@@ -308,7 +551,12 @@ def mesh_planar_surface(
             perf_counter() - densification_started
         )
         target_points_started = perf_counter()
-        generated = _target_points(planar_outer, planar_holes, settings.target_size)
+        generated = _target_points(
+            planar_outer,
+            planar_holes,
+            planar_constraints,
+            settings.target_size,
+        )
         planar_interior = np.vstack((planar_interior, generated))
         phase_seconds["target_point_generation"] = (
             perf_counter() - target_points_started
@@ -329,15 +577,94 @@ def mesh_planar_surface(
     )
     if cancellation_check is not None:
         cancellation_check("native surface triangulation complete")
-    coordinates = plane.lift(triangulation.points)
+        cancellation_check("native surface quality optimization start")
+
+    optimization_started = perf_counter()
+    initial_candidate = _make_candidate(triangulation.points, triangulation.triangles)
+    current = _optimize_candidate(
+        initial_candidate,
+        triangulation.segments,
+        explicit_interior,
+    )
+    best = current if current.score < initial_candidate.score else initial_candidate
+    best_triangulation = triangulation
+    attempted_added_points = 0
+    attempted_rounds = 0
+    point_budget = int(0.5 * len(generated))
+
+    for round_number in range(1, 3):
+        if best.report["elements_above_aspect_ratio_5"] == 0 or attempted_added_points >= point_budget:
+            break
+        if cancellation_check is not None:
+            cancellation_check(f"native surface quality refinement round {round_number} start")
+        additions = _refinement_midpoints(
+            current,
+            triangulation.segments,
+            point_budget - attempted_added_points,
+        )
+        if not len(additions):
+            break
+        protected_nodes = {int(node) for edge in triangulation.segments for node in edge}
+        interior_rows = [row for row in range(len(current.points)) if row not in protected_nodes]
+        retry_interior = np.vstack((current.points[interior_rows], additions))
+        retry_triangulation = triangulate_polygon(
+            planar_outer,
+            planar_holes,
+            planar_constraints,
+            interior_points=retry_interior,
+            backend=settings.backend,
+            cancellation_check=cancellation_check,
+        )
+        attempted_added_points += len(additions)
+        attempted_rounds += 1
+        retry = _make_candidate(
+            retry_triangulation.points,
+            retry_triangulation.triangles,
+            added_points=attempted_added_points,
+            rounds=attempted_rounds,
+        )
+        retry = _optimize_candidate(
+            retry,
+            retry_triangulation.segments,
+            explicit_interior,
+        )
+        current = retry
+        triangulation = retry_triangulation
+        if retry.score < best.score and retry.score[0] == 0:
+            best = retry
+            best_triangulation = retry_triangulation
+        if cancellation_check is not None:
+            cancellation_check(f"native surface quality refinement round {round_number} complete")
+
+    triangulation = best_triangulation
+    phase_seconds["quality_optimization"] = perf_counter() - optimization_started
+    target_met = best.report["invalid_element_count"] == 0 and best.report["elements_above_aspect_ratio_5"] == 0
+    quality_diagnostics = {
+        "initial_quality": dict(initial_candidate.report),
+        "final_quality": dict(best.report),
+        "flips": best.flips,
+        "moved_nodes": len(best.moved_nodes),
+        "moved_node_rows": list(best.moved_nodes),
+        "added_points": best.added_points,
+        "rounds": best.rounds,
+        "attempted_added_points": attempted_added_points,
+        "attempted_rounds": attempted_rounds,
+        "initial_generated_points": len(generated),
+        "point_budget": point_budget,
+        "target_met": target_met,
+        "budget_exhausted": not target_met and attempted_added_points >= point_budget,
+    }
+    if cancellation_check is not None:
+        cancellation_check("native surface quality optimization complete")
+    coordinates = plane.lift(best.points)
     owner_table = () if owner is None else (owner,)
     owner_handle = -1 if owner is None else 0
     core = MeshCore(
         coordinates,
-        triangulation.triangles,
+        best.triangles,
         owner_table=owner_table,
         node_owner_handles=np.full(len(coordinates), owner_handle, dtype=np.int32),
-        triangle_owner_handles=np.full(len(triangulation.triangles), owner_handle, dtype=np.int32),
+        triangle_owner_handles=np.full(len(best.triangles), owner_handle, dtype=np.int32),
     )
     if settings.recombine:
         recombination_started = perf_counter()
@@ -372,6 +699,7 @@ def mesh_planar_surface(
                 "fallback_reason": triangulation.fallback_reason,
                 "phase_seconds": phase_seconds,
                 "native_diagnostics": dict(triangulation.native_diagnostics),
+                "quality_optimization": quality_diagnostics,
             }
         )
     if cancellation_check is not None:

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-08-21
+
+- Replace the native rectangular interior-point grid with a deterministic
+  staggered triangular lattice that stays clear of protected segments.
+- Add bounded protected-edge flips, constrained smoothing, and at most two
+  local refinement rounds while preserving boundary, shared, and explicit
+  node coordinates.
+- Report scaled Jacobian, angle, poor-element, point-budget, and per-face
+  optimization diagnostics without rejecting an unavoidable valid mesh.
+
 ## 0.2.2 - 2026-08-21
 
 - Require ANYgeometry 0.2.2 and consume its exact boundary-curve CONNECT for

@@ -429,6 +429,147 @@ def _edge_incidence(triangles: Sequence[tuple[int, int, int]]) -> dict[tuple[int
     return result
 
 
+def _point_in_closed_triangle(
+    point: np.ndarray,
+    first: np.ndarray,
+    second: np.ndarray,
+    third: np.ndarray,
+) -> bool:
+    return bool(
+        orient2d(first, second, point) >= 0.0
+        and orient2d(second, third, point) >= 0.0
+        and orient2d(third, first, point) >= 0.0
+    )
+
+
+def _triangulate_cavity_chain(
+    points: np.ndarray,
+    raw_chain: Sequence[int],
+) -> list[tuple[int, int, int]]:
+    """Ear-clip one deterministic side of a recovered constraint cavity."""
+
+    chain = [int(node) for node in raw_chain]
+    if len(chain) < 3:
+        raise MeshError("mandatory-segment cavity side has no area")
+    area = _ring_area(points, chain)
+    if area == 0.0:
+        raise MeshError("mandatory-segment cavity side has zero area")
+    if area < 0.0:
+        chain.reverse()
+    result: list[tuple[int, int, int]] = []
+    while len(chain) > 3:
+        clipped = False
+        for position in range(len(chain)):
+            previous = chain[(position - 1) % len(chain)]
+            current = chain[position]
+            following = chain[(position + 1) % len(chain)]
+            if orient2d(points[previous], points[current], points[following]) <= 0.0:
+                continue
+            if any(
+                _point_in_closed_triangle(
+                    points[node],
+                    points[previous],
+                    points[current],
+                    points[following],
+                )
+                for node in chain
+                if node not in (previous, current, following)
+            ):
+                continue
+            result.append(_canonical_triangle((previous, current, following), points))
+            del chain[position]
+            clipped = True
+            break
+        if not clipped:
+            raise MeshError("mandatory-segment cavity is ambiguous")
+    result.append(_canonical_triangle(chain, points))
+    return result
+
+
+def _recover_segment_by_cavity(
+    points: np.ndarray,
+    triangles: list[tuple[int, int, int]],
+    target: tuple[int, int],
+    protected: set[tuple[int, int]],
+) -> list[tuple[int, int, int]]:
+    """Recover a stalled constraint without adding or moving point rows."""
+
+    incidence = _edge_incidence(triangles)
+    start, end = points[target[0]], points[target[1]]
+    crossed = [
+        edge
+        for edge, attached in incidence.items()
+        if len(attached) == 2
+        and edge not in protected
+        and _proper_intersection(start, end, points[edge[0]], points[edge[1]])
+    ]
+    removed = {row for edge in crossed for row in incidence[edge]}
+    if not crossed or not removed:
+        raise MeshError(f"could not recover mandatory segment {target}")
+    if any(
+        edge != target
+        and len(incidence.get(edge, ())) == 2
+        and all(row in removed for row in incidence[edge])
+        for edge in protected
+    ):
+        raise MeshError("mandatory-segment cavity would remove a protected edge")
+
+    cavity_counts: dict[tuple[int, int], int] = {}
+    for row in sorted(removed):
+        triangle = triangles[row]
+        for index in range(3):
+            edge = _normal_edge(int(triangle[index]), int(triangle[(index + 1) % 3]))
+            cavity_counts[edge] = cavity_counts.get(edge, 0) + 1
+    boundary_edges = {edge for edge, count in cavity_counts.items() if count == 1}
+    adjacency: dict[int, set[int]] = {}
+    for first, second in boundary_edges:
+        adjacency.setdefault(first, set()).add(second)
+        adjacency.setdefault(second, set()).add(first)
+    if target[0] not in adjacency or target[1] not in adjacency:
+        raise MeshError("mandatory-segment cavity does not contain both endpoints")
+    if any(len(neighbors) != 2 for neighbors in adjacency.values()):
+        raise MeshError("mandatory-segment cavity boundary is not a simple cycle")
+
+    def trace(first_neighbor: int) -> list[int]:
+        path = [target[0], first_neighbor]
+        previous, current = target[0], first_neighbor
+        visited = {target[0]}
+        while current != target[1]:
+            if current in visited:
+                raise MeshError("mandatory-segment cavity path repeats a node")
+            visited.add(current)
+            choices = sorted(adjacency[current].difference((previous,)))
+            if len(choices) != 1:
+                raise MeshError("mandatory-segment cavity path is ambiguous")
+            previous, current = current, choices[0]
+            path.append(current)
+        return path
+
+    neighbors = sorted(adjacency[target[0]])
+    first_chain = trace(neighbors[0])
+    second_chain = trace(neighbors[1])
+    if set(first_chain[1:-1]).intersection(second_chain[1:-1]):
+        raise MeshError("mandatory-segment cavity sides overlap")
+    traced_edges = {
+        _normal_edge(chain[index], chain[index + 1])
+        for chain in (first_chain, second_chain)
+        for index in range(len(chain) - 1)
+    }
+    if traced_edges != boundary_edges:
+        raise MeshError("mandatory-segment cavity traversal lost boundary edges")
+
+    replacement = [triangle for row, triangle in enumerate(triangles) if row not in removed]
+    replacement.extend(_triangulate_cavity_chain(points, first_chain))
+    replacement.extend(_triangulate_cavity_chain(points, second_chain))
+    recovered = sorted(set(replacement))
+    recovered_incidence = _edge_incidence(recovered)
+    if len(recovered_incidence.get(target, ())) != 2:
+        raise MeshError(f"could not recover mandatory segment {target}")
+    if any(edge not in recovered_incidence for edge in protected):
+        raise MeshError("mandatory-segment cavity lost a protected edge")
+    return recovered
+
+
 def _recover_segment(
     points: np.ndarray,
     triangles: list[tuple[int, int, int]],
@@ -480,7 +621,7 @@ def _recover_segment(
             break
         if not flipped:
             break
-    raise MeshError(f"could not recover mandatory segment {target}")
+    return _recover_segment_by_cavity(points, triangles, target, protected)
 
 
 def _inside_domain(point: np.ndarray, prepared: _PreparedPSLG) -> bool:

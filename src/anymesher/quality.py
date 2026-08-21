@@ -36,6 +36,10 @@ class MeshQuality:
     mean_aspect_ratio: float
     max_warp: float
     warnings: Tuple[str, ...] = ()
+    min_scaled_jacobian: float = 1.0
+    min_angle: float = 90.0
+    max_angle: float = 90.0
+    poor_element_ids: Tuple[int, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -49,6 +53,10 @@ class MeshQuality:
             "max_aspect_ratio": self.max_aspect_ratio,
             "mean_aspect_ratio": self.mean_aspect_ratio,
             "max_warp": self.max_warp,
+            "min_scaled_jacobian": self.min_scaled_jacobian,
+            "min_angle": self.min_angle,
+            "max_angle": self.max_angle,
+            "poor_element_ids": list(self.poor_element_ids),
             "warnings": list(self.warnings),
         }
 
@@ -58,6 +66,10 @@ def verify_mesh_quality(mesh: Mesh) -> MeshQuality:
 
     aspect_ratios: List[float] = []
     warps: List[float] = []
+    scaled_jacobians: List[float] = []
+    minimum_angles: List[float] = []
+    maximum_angles: List[float] = []
+    element_metrics: List[Tuple[int, float, float, float]] = []
     shell_count = 0
 
     for element_id in mesh.quads:
@@ -89,6 +101,19 @@ def verify_mesh_quality(mesh: Mesh) -> MeshQuality:
             warps.append(d / max(sum(lengths) / 4.0, 1.0e-15))
         else:
             warps.append(0.0)
+        angles = []
+        jacobians = []
+        for corner in range(4):
+            previous = corner_coords[(corner - 1) % 4] - corner_coords[corner]
+            following = corner_coords[(corner + 1) % 4] - corner_coords[corner]
+            denominator = max(float(np.linalg.norm(previous) * np.linalg.norm(following)), 1.0e-30)
+            cosine = float(np.clip(np.dot(previous, following) / denominator, -1.0, 1.0))
+            angles.append(float(np.degrees(np.arccos(cosine))))
+            jacobians.append(float(np.linalg.norm(np.cross(following, previous))) / denominator)
+        scaled_jacobians.append(min(jacobians))
+        minimum_angles.append(min(angles))
+        maximum_angles.append(max(angles))
+        element_metrics.append((int(element_id), aspect_ratios[-1], warps[-1], scaled_jacobians[-1]))
 
     for element_id in mesh.tris:
         shell_count += 1
@@ -103,11 +128,34 @@ def verify_mesh_quality(mesh: Mesh) -> MeshQuality:
         # still appended, so the mean is over every shell element rather than
         # over an arbitrary subset.
         warps.append(0.0)
+        angles = []
+        jacobians = []
+        for corner in range(3):
+            previous = corner_coords[(corner - 1) % 3] - corner_coords[corner]
+            following = corner_coords[(corner + 1) % 3] - corner_coords[corner]
+            denominator = max(float(np.linalg.norm(previous) * np.linalg.norm(following)), 1.0e-30)
+            cosine = float(np.clip(np.dot(previous, following) / denominator, -1.0, 1.0))
+            angles.append(float(np.degrees(np.arccos(cosine))))
+            jacobians.append(float(np.linalg.norm(np.cross(following, previous))) / denominator)
+        scaled_jacobians.append(min(jacobians))
+        minimum_angles.append(min(angles))
+        maximum_angles.append(max(angles))
+        element_metrics.append((int(element_id), aspect_ratios[-1], 0.0, scaled_jacobians[-1]))
 
     warnings: List[str] = []
     max_ar = float(np.max(aspect_ratios)) if aspect_ratios else 1.0
     mean_ar = float(np.mean(aspect_ratios)) if aspect_ratios else 1.0
     max_warp = float(np.max(warps)) if warps else 0.0
+    min_jacobian = float(np.min(scaled_jacobians)) if scaled_jacobians else 1.0
+    min_angle = float(np.min(minimum_angles)) if minimum_angles else 90.0
+    max_angle = float(np.max(maximum_angles)) if maximum_angles else 90.0
+    poor_ids = tuple(
+        sorted(
+            element_id
+            for element_id, aspect, warp, jacobian in element_metrics
+            if aspect > ASPECT_RATIO_LIMIT or warp > WARP_LIMIT or jacobian <= 0.0
+        )
+    )
 
     if max_ar > ASPECT_RATIO_LIMIT:
         warnings.append(
@@ -126,4 +174,8 @@ def verify_mesh_quality(mesh: Mesh) -> MeshQuality:
         mean_aspect_ratio=mean_ar,
         max_warp=max_warp,
         warnings=tuple(warnings),
+        min_scaled_jacobian=min_jacobian,
+        min_angle=min_angle,
+        max_angle=max_angle,
+        poor_element_ids=poor_ids,
     )
