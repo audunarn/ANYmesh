@@ -47,6 +47,13 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
+def test_release_metadata_is_0_2_1_alpha() -> None:
+    project = _pyproject()["project"]
+    assert project["version"] == "0.2.1"
+    assert project["requires-python"] == ">=3.11"
+    assert "Development Status :: 3 - Alpha" in project["classifiers"]
+
+
 def test_distribution_name_differs_from_the_repository_name() -> None:
     # The repository is ANYmesh; `anymesh` was taken on PyPI.  Asserted rather
     # than assumed, because a well-meaning rename back to `ANYmesh` would
@@ -137,6 +144,28 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         "sudo apt-get install --yes --no-install-recommends libglu1-mesa"
     ) == 1
     assert ci.startswith("name: Tests\n\non:\n  push:\n  pull_request:\n")
+
+    assert publish.startswith(
+        "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"
+    )
+    assert "release:" not in publish
+    assert "gh-action-pypi-publish" not in publish
+    assert "repository-url:" not in publish
+    assert "id-token: write" not in publish
+    assert "permissions:\n  contents: read" in publish
+    assert publish.count(
+        'os: [windows-latest, ubuntu-latest, macos-latest]'
+    ) == 1
+    assert publish.count(
+        'CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"'
+    ) == 1
+    assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
+    assert "expected 12 wheels" in publish
+    assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
+    assert 'name: ANYmesher-0.2.1-release-bundle' in publish
+    assert "python -m twine check --strict dist/*.whl dist/*.tar.gz" in publish
+    assert "result.requested_backend,result.selected_backend,result.actual_backend" in publish
+    assert "('native','anymesher-cpp17','anymesher-cpp17',None)" in publish
 
 @pytest.mark.skipif(
     os.environ.get("ANYMESHER_DISABLE_NATIVE") != "1",

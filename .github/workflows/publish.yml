@@ -1,9 +1,10 @@
-name: Publish
+name: Build release artifacts
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
+
+permissions:
+  contents: read
 
 jobs:
   sdist:
@@ -14,9 +15,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-      - run: python -m pip install build
+          python-version: "3.13"
+      - run: python -m pip install build twine
       - run: python -m build --sdist
+        env:
+          ANYMESHER_REQUIRE_NATIVE: "1"
+      - run: python -m twine check --strict dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: python-package-sdist
@@ -54,7 +58,9 @@ jobs:
             assert root not in module.parents;
             points=np.asarray(((0.,0.),(1.,0.),(1.,1.),(0.,1.)),dtype=np.float64);
             result=constrained_planar_triangulation(points,(0,1,2,3),backend='native');
-            assert result.actual_backend == 'anymesher-cpp17'; assert len(result.triangles)==2;
+            assert (result.requested_backend,result.selected_backend,result.actual_backend,
+            result.fallback_reason)==('native','anymesher-cpp17','anymesher-cpp17',None);
+            assert len(result.triangles)==2;
             print(anymesher.__version__, module, result.actual_backend)"
         with:
           output-dir: dist
@@ -63,38 +69,93 @@ jobs:
           name: python-package-wheels-${{ runner.os }}
           path: dist/*.whl
 
-  testpypi:
-    if: github.event_name == 'workflow_dispatch'
+  bundle:
     needs: [sdist, wheels]
     runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/ANYmesher
-    permissions:
-      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: python-package-*
           path: dist/
           merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: actions/setup-python@v5
         with:
-          repository-url: https://test.pypi.org/legacy/
+          python-version: "3.13"
+      - run: python -m pip install twine
+      - name: Validate complete release set
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
 
-  pypi:
-    if: github.event_name == 'release'
-    needs: [sdist, wheels]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/ANYmesher
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
+          root = Path("dist")
+          sdist = root / "anymesher-0.2.1.tar.gz"
+          wheels = sorted(root.glob("anymesher-0.2.1-*.whl"))
+          if not sdist.is_file():
+              raise SystemExit("missing exact ANYmesher 0.2.1 sdist")
+          if len(wheels) != 12:
+              raise SystemExit(f"expected 12 wheels, found {len(wheels)}")
+
+          expected_pythons = {"cp311", "cp312", "cp313", "cp314"}
+          platforms = {"Windows": [], "Linux": [], "macOS": []}
+          for wheel in wheels:
+              name = wheel.name
+              if "-win_amd64.whl" in name:
+                  platform = "Windows"
+              elif "manylinux" in name and "x86_64" in name:
+                  platform = "Linux"
+              elif "macosx" in name:
+                  platform = "macOS"
+              else:
+                  raise SystemExit(f"unexpected wheel platform: {name}")
+              platforms[platform].append(name.split("-")[2])
+
+          for platform, interpreters in platforms.items():
+              if set(interpreters) != expected_pythons or len(interpreters) != 4:
+                  raise SystemExit(
+                      f"{platform} wheel matrix mismatch: {sorted(interpreters)}"
+                  )
+
+          upload_files = [sdist, *wheels]
+          records = []
+          for path in upload_files:
+              data = path.read_bytes()
+              records.append(
+                  {
+                      "filename": path.name,
+                      "bytes": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest(),
+                  }
+              )
+          records.sort(key=lambda row: row["filename"])
+          (root / "ANYmesher-0.2.1-SHA256SUMS.txt").write_text(
+              "".join(f"{row['sha256']}  {row['filename']}\n" for row in records),
+              encoding="ascii",
+              newline="\n",
+          )
+          (root / "ANYmesher-0.2.1-release-manifest.json").write_text(
+              json.dumps(
+                  {
+                      "schema": "anymesher.release-artifacts/1",
+                      "distribution": "ANYmesher",
+                      "version": "0.2.1",
+                      "commit": os.environ["GITHUB_SHA"],
+                      "upload_file_count": len(records),
+                      "files": records,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+              newline="\n",
+          )
+          PY
+      - run: python -m twine check --strict dist/*.whl dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
         with:
-          pattern: python-package-*
+          name: ANYmesher-0.2.1-release-bundle
           path: dist/
-          merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1

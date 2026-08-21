@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-08-21
+
 - Require ANYgeometry 0.2.1 or newer within the qualified 0.2 line, pin the
   accepted geometry source in CI/release workflows, and add a disabled-native
   cell proving absence-only Python fallback and fail-hard explicit native use.
