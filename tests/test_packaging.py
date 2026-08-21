@@ -47,9 +47,9 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
-def test_release_metadata_is_0_2_1_alpha() -> None:
+def test_release_metadata_is_0_2_2_alpha() -> None:
     project = _pyproject()["project"]
-    assert project["version"] == "0.2.1"
+    assert project["version"] == "0.2.2"
     assert project["requires-python"] == ">=3.11"
     assert "Development Status :: 3 - Alpha" in project["classifiers"]
 
@@ -101,14 +101,14 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry>=0.2.1,<0.3"]
+    assert geometry_requirements == ["ANYgeometry>=0.2.2,<0.3"]
     assert project["optional-dependencies"]["planar"] == [
-        "ANYgeometry[planar]>=0.2.1,<0.3"
+        "ANYgeometry[planar]>=0.2.2,<0.3"
     ]
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa"
+    geometry_ref = "273e03053255fd4a84b0177a5877259a44e603e0"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
@@ -162,8 +162,17 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
     assert "expected 12 wheels" in publish
     assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
-    assert 'name: ANYmesher-0.2.1-release-bundle' in publish
+    assert 'name: ANYmesher-0.2.2-release-bundle' in publish
+    assert 'sdist = root / "anymesher-0.2.2.tar.gz"' in publish
+    assert 'root.glob("anymesher-0.2.2-*.whl")' in publish
+    assert '"version": "0.2.2"' in publish
+    assert "ANYmesher-0.2.2-SHA256SUMS.txt" in publish
+    assert "ANYmesher-0.2.2-release-manifest.json" in publish
     assert "python -m twine check --strict dist/*.whl dist/*.tar.gz" in publish
+    assert "expected_base_requirements" in publish
+    assert "expected one native library" in publish
+    assert "RECORD self-row must be blank" in publish
+    assert "RECORD integrity mismatch" in publish
     assert "result.requested_backend,result.selected_backend,result.actual_backend" in publish
     assert "('native','anymesher-cpp17','anymesher-cpp17',None)" in publish
 

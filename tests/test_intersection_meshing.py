@@ -9,11 +9,13 @@ from anygeometry import (
     EntityRef,
     GeometryModel,
     IntersectionKind,
+    apply_imprint,
     fragment_coplanar_overlaps,
+    plan_imprint,
     query_intersection,
 )
 from anygeometry.serialization import to_dict
-from anymesher import generate_mesh_with_intersections
+from anymesher import generate_hybrid_mesh, generate_mesh_with_intersections
 from anymesher.errors import MeshError
 from anymesher.serialize import mesh_from_dict, mesh_to_dict
 
@@ -300,7 +302,7 @@ def test_positive_area_coplanar_overlap_is_blocked_before_double_stiffness():
     assert mesh.automatic_intersections == 0
 
 
-def test_legacy_imprint_fails_closed_for_typed_unsupported_faces():
+def test_hybrid_mesh_consumes_nonplanar_boundary_connect_by_shared_node_identity():
     geometry = GeometryModel()
     support = _plate(
         geometry,
@@ -311,18 +313,36 @@ def test_legacy_imprint_fails_closed_for_typed_unsupported_faces():
     )
     spline = geometry.add_spline(start, (control,), end)
     wall = geometry.extrude((spline,), (0.0, 0.0, 1.0))[0]
+    geometry.add_sheet((support,))
+    geometry.add_sheet((wall,))
     result = query_intersection(
         geometry,
         geometry.handle("face", support),
         geometry.handle("face", wall),
     )
-    before = to_dict(geometry)
-    revision = geometry.revision
+    application = apply_imprint(
+        geometry,
+        plan_imprint(geometry, result, policy="connect"),
+        policy="connect",
+    )
+    mesh = generate_hybrid_mesh(
+        geometry,
+        target_size=0.25,
+        strategy="auto",
+        native_backend="python",
+    )
 
-    assert result.kind is IntersectionKind.UNSUPPORTED
-    assert not result.classified
-    with pytest.raises(MeshError, match=r"imprint failed.*not qualified"):
-        generate_mesh_with_intersections(geometry, target_size=0.25)
-
-    assert geometry.revision == revision
-    assert to_dict(geometry) == before
+    assert result.kind is IntersectionKind.CONTAINED
+    assert application.face_intersection is not None
+    assert application.face_intersection.edge.id == spline
+    shared_nodes = set(mesh.nodes_on(EntityRef("edge", spline)))
+    assert len(shared_nodes) >= 2
+    incident_faces = {
+        geometry.face_uses[face_use_id].face_id
+        for face_use_id in geometry.face_uses_using_edge(spline)
+    }
+    assert len(incident_faces) >= 2
+    assert all(
+        shared_nodes <= set(mesh.nodes_on(EntityRef("face", face_id)))
+        for face_id in incident_faces
+    )

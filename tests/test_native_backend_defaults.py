@@ -139,10 +139,10 @@ def test_auto_propagates_corrupt_native_boundary_errors(
         constrained_planar_triangulation(SQUARE, OUTER)
 
 
-def test_default_migration_is_released_as_0_2_1() -> None:
+def test_default_migration_remains_released_in_0_2_2() -> None:
     project = tomllib.loads(
         (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     )
 
-    assert anymesher.__version__ == "0.2.1"
-    assert project["project"]["version"] == "0.2.1"
+    assert anymesher.__version__ == "0.2.2"
+    assert project["project"]["version"] == "0.2.2"

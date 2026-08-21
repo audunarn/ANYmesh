@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-08-21
+
+- Require ANYgeometry 0.2.2 and consume its exact boundary-curve CONNECT for
+  nonplanar extrusion walls on convex hole-free planar supports.
+- Preserve the geometry-owned shared Edge, FaceUse, and Coedge identities
+  through hybrid meshing without coordinate-inferred connection or healing.
+- Keep unsupported partial, ambiguous, holed, nonconvex, and general
+  nonplanar intersections fail-closed, with no backend-default or mesh-format
+  change.
+
 ## 0.2.1 - 2026-08-21
 
 - Require ANYgeometry 0.2.1 or newer within the qualified 0.2 line, pin the

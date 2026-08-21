@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 37234b7bc6b6c3f2e02cf1c53acb875245d9c3aa
+          ref: 273e03053255fd4a84b0177a5877259a44e603e0
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -86,16 +86,24 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import base64
+          import csv
+          import email
           import hashlib
+          import io
           import json
           import os
+          import zipfile
           from pathlib import Path
 
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
           root = Path("dist")
-          sdist = root / "anymesher-0.2.1.tar.gz"
-          wheels = sorted(root.glob("anymesher-0.2.1-*.whl"))
+          sdist = root / "anymesher-0.2.2.tar.gz"
+          wheels = sorted(root.glob("anymesher-0.2.2-*.whl"))
           if not sdist.is_file():
-              raise SystemExit("missing exact ANYmesher 0.2.1 sdist")
+              raise SystemExit("missing exact ANYmesher 0.2.2 sdist")
           if len(wheels) != 12:
               raise SystemExit(f"expected 12 wheels, found {len(wheels)}")
 
@@ -119,6 +127,94 @@ jobs:
                       f"{platform} wheel matrix mismatch: {sorted(interpreters)}"
                   )
 
+          expected_base_requirements = {
+              ("numpy", ">=1.26", ()),
+              ("anygeometry", "<0.3,>=0.2.2", ()),
+          }
+          for wheel in wheels:
+              with zipfile.ZipFile(wheel) as archive:
+                  names = archive.namelist()
+                  if len(names) != len(set(names)):
+                      raise SystemExit(f"duplicate wheel member in {wheel.name}")
+                  for name in names:
+                      path = Path(name)
+                      if path.is_absolute() or ".." in path.parts or "\\" in name:
+                          raise SystemExit(f"unsafe wheel member {name!r} in {wheel.name}")
+                  directory_members = [name for name in names if name.endswith("/")]
+                  if any(archive.getinfo(name).file_size != 0 for name in directory_members):
+                      raise SystemExit(
+                          f"non-empty directory member in {wheel.name}: {directory_members}"
+                      )
+                  file_members = [name for name in names if not name.endswith("/")]
+                  signatures = [
+                      name for name in names if name.endswith((".jws", ".p7s"))
+                  ]
+                  if signatures:
+                      raise SystemExit(
+                          f"unexpected wheel signatures in {wheel.name}: {signatures}"
+                      )
+                  native_members = [
+                      name
+                      for name in names
+                      if name.startswith("anymesher/")
+                      and name.endswith((".pyd", ".so", ".dylib"))
+                  ]
+                  if len(native_members) != 1:
+                      raise SystemExit(
+                          f"expected one native library in {wheel.name}: {native_members}"
+                      )
+                  metadata_name, = [
+                      name for name in names if name.endswith(".dist-info/METADATA")
+                  ]
+                  metadata = email.message_from_bytes(archive.read(metadata_name))
+                  if metadata["Name"] != "ANYmesher" or metadata["Version"] != "0.2.2":
+                      raise SystemExit(f"metadata identity mismatch in {wheel.name}")
+                  base_requirements = set()
+                  for raw in metadata.get_all("Requires-Dist", []):
+                      requirement = Requirement(raw)
+                      if requirement.marker is None:
+                          base_requirements.add(
+                              (
+                                  canonicalize_name(requirement.name),
+                                  str(requirement.specifier),
+                                  tuple(sorted(requirement.extras)),
+                              )
+                          )
+                  if base_requirements != expected_base_requirements:
+                      raise SystemExit(
+                          f"runtime requirements mismatch in {wheel.name}: "
+                          f"{sorted(base_requirements)}"
+                      )
+                  record_name, = [
+                      name for name in names if name.endswith(".dist-info/RECORD")
+                  ]
+                  rows = list(
+                      csv.reader(io.StringIO(archive.read(record_name).decode("utf-8")))
+                  )
+                  if len(rows) != len(file_members):
+                      raise SystemExit(
+                          f"RECORD/member count mismatch in {wheel.name}: "
+                          f"{len(rows)} != {len(file_members)}"
+                      )
+                  recorded = {row[0] for row in rows}
+                  if recorded != set(file_members):
+                      raise SystemExit(f"RECORD member set mismatch in {wheel.name}")
+                  for member, encoded_hash, encoded_size in rows:
+                      if member == record_name:
+                          if encoded_hash or encoded_size:
+                              raise SystemExit(
+                                  f"RECORD self-row must be blank in {wheel.name}"
+                              )
+                          continue
+                      data = archive.read(member)
+                      expected_hash = "sha256=" + base64.urlsafe_b64encode(
+                          hashlib.sha256(data).digest()
+                      ).rstrip(b"=").decode("ascii")
+                      if encoded_hash != expected_hash or encoded_size != str(len(data)):
+                          raise SystemExit(
+                              f"RECORD integrity mismatch for {member} in {wheel.name}"
+                          )
+
           upload_files = [sdist, *wheels]
           records = []
           for path in upload_files:
@@ -131,17 +227,17 @@ jobs:
                   }
               )
           records.sort(key=lambda row: row["filename"])
-          (root / "ANYmesher-0.2.1-SHA256SUMS.txt").write_text(
+          (root / "ANYmesher-0.2.2-SHA256SUMS.txt").write_text(
               "".join(f"{row['sha256']}  {row['filename']}\n" for row in records),
               encoding="ascii",
               newline="\n",
           )
-          (root / "ANYmesher-0.2.1-release-manifest.json").write_text(
+          (root / "ANYmesher-0.2.2-release-manifest.json").write_text(
               json.dumps(
                   {
                       "schema": "anymesher.release-artifacts/1",
                       "distribution": "ANYmesher",
-                      "version": "0.2.1",
+                      "version": "0.2.2",
                       "commit": os.environ["GITHUB_SHA"],
                       "upload_file_count": len(records),
                       "files": records,
@@ -157,5 +253,5 @@ jobs:
       - run: python -m twine check --strict dist/*.whl dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: ANYmesher-0.2.1-release-bundle
+          name: ANYmesher-0.2.2-release-bundle
           path: dist/

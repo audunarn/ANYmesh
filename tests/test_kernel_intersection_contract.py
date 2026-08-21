@@ -101,7 +101,7 @@ def test_face_connect_persists_sheet_face_use_and_coedge_ownership() -> None:
     assert geometry.validate_topology() == ()
 
 
-def test_nonplanar_face_connect_preserves_typed_unsupported_result() -> None:
+def test_nonplanar_face_connect_reuses_exact_boundary_and_sheet_topology() -> None:
     geometry = GeometryModel()
     support = _plate(
         geometry,
@@ -112,6 +112,8 @@ def test_nonplanar_face_connect_preserves_typed_unsupported_result() -> None:
     )
     spline = geometry.add_spline(start, (control,), end)
     wall = geometry.extrude((spline,), (0.0, 0.0, 1.0))[0]
+    support_sheet = geometry.add_sheet((support,))
+    wall_sheet = geometry.add_sheet((wall,))
     revision = geometry.revision
 
     plan = plan_intersection_mutation(
@@ -121,10 +123,26 @@ def test_nonplanar_face_connect_preserves_typed_unsupported_result() -> None:
         intent=ConnectionIntent.CONNECT,
     )
 
-    assert plan.result.kind is IntersectionKind.UNSUPPORTED
-    assert not plan.result.classified
-    assert plan.operation is ImprintOperation.NO_TOPOLOGY
+    assert plan.result.kind is IntersectionKind.CONTAINED
+    assert plan.result.classified
+    assert plan.result.dimension is IntersectionDimension.CURVE
+    assert plan.operation is ImprintOperation.FACE_IMPRINT
     assert geometry.revision == revision
+
+    application = apply_intersection_mutation(
+        geometry,
+        geometry.handle("face", support),
+        geometry.handle("face", wall),
+        intent=ConnectionIntent.CONNECT,
+    )
+
+    assert application.face_intersection is not None
+    assert application.face_intersection.edge.id == spline
+    assert {
+        geometry.face_uses[face_use_id].sheet_id
+        for face_use_id in geometry.face_uses_using_edge(spline)
+    } == {support_sheet, wall_sheet}
+    assert geometry.validate_topology() == ()
 
 
 def test_deprecated_legacy_entry_warns_and_forwards_explicitly(monkeypatch) -> None:
