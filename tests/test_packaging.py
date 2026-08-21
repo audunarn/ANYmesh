@@ -162,12 +162,12 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
     assert "expected 12 wheels" in publish
     assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
-    assert 'name: ANYmesher-0.2.2-release-bundle' in publish
-    assert 'sdist = root / "anymesher-0.2.2.tar.gz"' in publish
-    assert 'root.glob("anymesher-0.2.2-*.whl")' in publish
-    assert '"version": "0.2.2"' in publish
-    assert "ANYmesher-0.2.2-SHA256SUMS.txt" in publish
-    assert "ANYmesher-0.2.2-release-manifest.json" in publish
+    assert 'name: ANYmesher-0.2.3-release-bundle' in publish
+    assert 'sdist = root / "anymesher-0.2.3.tar.gz"' in publish
+    assert 'root.glob("anymesher-0.2.3-*.whl")' in publish
+    assert '"version": "0.2.3"' in publish
+    assert "ANYmesher-0.2.3-SHA256SUMS.txt" in publish
+    assert "ANYmesher-0.2.3-release-manifest.json" in publish
     assert "python -m twine check --strict dist/*.whl dist/*.tar.gz" in publish
     assert "expected_base_requirements" in publish
     assert "expected one native library" in publish
