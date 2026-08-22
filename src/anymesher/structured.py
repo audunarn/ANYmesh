@@ -132,6 +132,7 @@ class StructuredMeshingOptions:
     maximum_candidates_per_component: int = 256
     maximum_face_records: int = 100_000
     maximum_blocks: int = 100_000
+    maximum_edge_records: int = 200_000
     maximum_estimated_elements: int = 2_000_000
     maximum_divisions_per_edge: int = 100_000
     quality_policy: MeshQualityPolicy | Mapping[str, Any] = field(default_factory=MeshQualityPolicy)
@@ -156,6 +157,7 @@ class StructuredMeshingOptions:
             ("maximum_candidates_per_component", 1),
             ("maximum_face_records", 1),
             ("maximum_blocks", 1),
+            ("maximum_edge_records", 1),
             ("maximum_estimated_elements", 1),
             ("maximum_divisions_per_edge", 1),
         ):
@@ -186,6 +188,7 @@ class StructuredMeshingOptions:
             "maximum_candidates_per_component": self.maximum_candidates_per_component,
             "maximum_face_records": self.maximum_face_records,
             "maximum_blocks": self.maximum_blocks,
+            "maximum_edge_records": self.maximum_edge_records,
             "maximum_estimated_elements": self.maximum_estimated_elements,
             "maximum_divisions_per_edge": self.maximum_divisions_per_edge,
             "quality_policy": self.quality_policy.to_dict(),
@@ -371,13 +374,16 @@ class StructuredLayoutReport:
     source_to_working_faces: Mapping[int, tuple[int, ...]]
     source_to_working_edges: Mapping[int, tuple[int, ...]]
     diagnostics: tuple[str, ...] = ()
-    metrics: Mapping[str, float | int] = field(default_factory=dict)
+    metrics: Mapping[str, Any] = field(default_factory=dict)
     seed_solution: Mapping[int, int] = field(default_factory=dict)
     quality: Mapping[str, Any] = field(default_factory=dict)
     status: str = "planned"
     blocks: tuple[StructuredBlock, ...] = ()
     interfaces: tuple[StructuredInterface, ...] = ()
     seed_equations: tuple[SeedEquation, ...] = ()
+    working_model_id: str = ""
+    working_revision: int = -1
+    working_binding: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_to_working_faces", _freeze({
@@ -397,6 +403,35 @@ class StructuredLayoutReport:
         object.__setattr__(self, "blocks", tuple(self.blocks))
         object.__setattr__(self, "interfaces", tuple(self.interfaces))
         object.__setattr__(self, "seed_equations", tuple(self.seed_equations))
+        object.__setattr__(
+            self,
+            "working_model_id",
+            str(self.working_model_id or self.plan.model_id),
+        )
+        object.__setattr__(
+            self,
+            "working_revision",
+            self.plan.revision
+            if int(self.working_revision) < 0
+            else int(self.working_revision),
+        )
+        binding_payload = {
+            "plan_hash": self.plan.plan_hash,
+            "source_to_working_faces": _thaw(self.source_to_working_faces),
+            "source_to_working_edges": _thaw(self.source_to_working_edges),
+            "working_revision": self.working_revision,
+        }
+        binding = "sha256:" + sha256(
+            json.dumps(
+                binding_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.working_binding and self.working_binding != binding:
+            raise MeshError("structured report working binding is inconsistent")
+        object.__setattr__(self, "working_binding", binding)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -409,6 +444,8 @@ class StructuredLayoutReport:
             "blocks": [item.to_dict() for item in self.blocks],
             "interfaces": [item.to_dict() for item in self.interfaces],
             "seed_equations": [item.to_dict() for item in self.seed_equations],
+            "working_revision": self.working_revision,
+            "working_binding": self.working_binding,
         }
 
 
@@ -458,6 +495,7 @@ def _components(
     geometry: GeometryModel,
     selected: Sequence[int],
     membership: Mapping[int, tuple[int, ...]],
+    cancellation_check: CancellationCheck | None = None,
 ) -> dict[int, int]:
     """True union through both Sheets and exact shared topology."""
 
@@ -467,7 +505,9 @@ def _components(
         faces = [face for face in selected if sheet_id in membership.get(face, ())]
         for face in faces[1:]:
             union.union(faces[0], face)
-    for edge_id in sorted(geometry.edges):
+    for position, edge_id in enumerate(sorted(geometry.edges)):
+        if position % 512 == 0:
+            _cancel(cancellation_check, "structured component edge scan")
         owners = [face for face in geometry.faces_using_edge(edge_id) if face in selected_set]
         for face in owners[1:]:
             union.union(owners[0], face)
@@ -702,7 +742,17 @@ def plan_structured_layout(
             f"maximum_face_records={policy.maximum_face_records}"
         )
     membership = _face_sheet_membership(geometry)
-    components = _components(geometry, selected, membership)
+    if len(geometry.edges) > policy.maximum_edge_records:
+        raise MeshError(
+            f"model has {len(geometry.edges)} edge records; structured planning "
+            f"is bounded to {policy.maximum_edge_records}"
+        )
+    components = _components(
+        geometry,
+        selected,
+        membership,
+        cancellation_check,
+    )
     selected_set = set(selected)
     normalized_overrides: dict[int, int] = {}
     for edge_id, divisions in (overrides or {}).items():
@@ -889,7 +939,9 @@ def plan_structured_layout(
 
     decision_by_face = {item.source_face_id: item for item in decisions}
     interfaces: list[StructuredInterface] = []
-    for edge_id in sorted(geometry.edges):
+    for position, edge_id in enumerate(sorted(geometry.edges)):
+        if position % 512 == 0:
+            _cancel(cancellation_check, "structured source interface scan")
         owners = tuple(face for face in geometry.faces_using_edge(edge_id) if face in selected_set)
         if len(owners) != 2:
             continue
@@ -938,7 +990,10 @@ def _radial_partition(
     split_edges: Mapping[int, tuple[int, int, int]],
     centre: np.ndarray,
 ) -> tuple[int, ...]:
-    surface = geometry.faces[face_id].surface
+    source_face = geometry.faces[face_id]
+    surface = source_face.surface
+    parameterization = source_face.parameterization
+    metadata = source_face.metadata.to_dict()
     halves: list[tuple[OrientedEdge, OrientedEdge]] = []
     midpoints: list[int] = []
     for item in original_loop:
@@ -955,14 +1010,17 @@ def _radial_partition(
     made: list[int] = []
     for index in range(len(original_loop)):
         previous = (index - 1) % len(original_loop)
-        made.append(geometry.add_face_from_loop(
+        made_face = geometry.add_face_from_loop(
             (
                 halves[previous][1], halves[index][0],
                 OrientedEdge(spokes[index], True),
                 OrientedEdge(spokes[previous], False),
             ),
             (0, 1, 2, 3), surface=surface,
-        ))
+        )
+        geometry.set_face_metadata(made_face, metadata)
+        geometry.set_face_parameterization(made_face, parameterization)
+        made.append(made_face)
     geometry.record_replacement(
         EntityRef("face", face_id), tuple(EntityRef("face", item) for item in made)
     )
@@ -976,6 +1034,8 @@ def _promote_quad(geometry: GeometryModel, face_id: int) -> tuple[int, ...]:
     loop, surface = tuple(face.loop), face.surface
     geometry.remove_face(face_id, record=False)
     made = geometry.add_face_from_loop(loop, (0, 1, 2, 3), surface=surface)
+    geometry.set_face_metadata(made, face.metadata.to_dict())
+    geometry.set_face_parameterization(made, face.parameterization)
     geometry.record_replacement(EntityRef("face", face_id), (EntityRef("face", made),))
     return (made,)
 
@@ -1010,9 +1070,12 @@ def _ogrid_partition(geometry: GeometryModel, face_id: int) -> tuple[int, ...]:
             (ring_edges[index], inner_connectors[following], hole_edge, inner_connectors[index]),
         )
         for edges in rings:
-            made.append(geometry.add_face_from_loop(
+            made_face = geometry.add_face_from_loop(
                 geometry.order_loop(edges), (0, 1, 2, 3), surface=surface,
-            ))
+            )
+            geometry.set_face_metadata(made_face, face.metadata.to_dict())
+            geometry.set_face_parameterization(made_face, face.parameterization)
+            made.append(made_face)
     geometry.record_replacement(
         EntityRef("face", face_id), tuple(EntityRef("face", item) for item in made)
     )
@@ -1094,7 +1157,9 @@ def _actual_evidence(
         for edge_id in descendants:
             source_for_working_edge.setdefault(edge_id, source_edge)
     interfaces: list[StructuredInterface] = []
-    for edge_id in sorted(working.edges):
+    for position, edge_id in enumerate(sorted(working.edges)):
+        if position % 512 == 0:
+            _cancel(cancellation_check, "structured working interface scan")
         owners = [face for face in working.faces_using_edge(edge_id) if face in by_working_face]
         if len(owners) != 2:
             continue
@@ -1183,7 +1248,9 @@ def apply_structured_layout(
                 diagnostics.append(f"face {source}: {decision.reason}")
 
     edge_mapping: dict[int, tuple[int, ...]] = {}
-    for edge_id in sorted(geometry.edges):
+    for position, edge_id in enumerate(sorted(geometry.edges)):
+        if position % 512 == 0:
+            _cancel(cancellation_check, "structured edge lineage")
         resolved = tuple(
             reference.id for reference in working.resolve_ref(EntityRef("edge", edge_id))
             if reference.kind == "edge"
@@ -1204,6 +1271,8 @@ def apply_structured_layout(
         },
         seed_solution=seed_solution, status="applied", blocks=blocks,
         interfaces=interfaces, seed_equations=equations,
+        working_model_id=str(working.model_id),
+        working_revision=working.revision,
     )
     _cancel(cancellation_check, "structured application complete")
     return working, report

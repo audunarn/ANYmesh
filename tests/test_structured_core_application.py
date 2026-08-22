@@ -83,6 +83,18 @@ def _planar_ogrid() -> tuple[GeometryModel, int]:
     return geometry, face
 
 
+def _neutral_quad() -> tuple[GeometryModel, int]:
+    geometry = GeometryModel()
+    vertices = geometry.add_points(
+        ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0), (0.0, 1.0, 0.0))
+    )
+    face = geometry.add_face_from_loop(
+        geometry.order_loop(geometry.add_polyline(vertices, close=True)),
+        surface=PLANE,
+    )
+    return geometry, face
+
+
 def _unmapped_cylinder() -> tuple[GeometryModel, int]:
     geometry = GeometryModel()
     surface = Cylinder(
@@ -136,6 +148,44 @@ def test_direct_apply_is_exact_and_source_document_is_byte_identical() -> None:
     }
     assert owned_faces == set(report.source_to_working_faces[face])
     assert working.validate_topology() == ()
+    assert report.working_model_id == str(working.model_id)
+    assert report.working_revision == working.revision
+    assert report.to_dict()["working_binding"].startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("factory", "action"),
+    (
+        (_pentagon, "radial_partition"),
+        (_neutral_quad, "promote_quad"),
+        (_planar_ogrid, "ogrid_partition"),
+    ),
+)
+def test_every_partition_preserves_face_metadata_and_parameterization(
+    factory,
+    action: str,
+) -> None:
+    geometry, face = factory()
+    parameterization = Plane(
+        np.asarray((0.25, 0.5, 0.0)),
+        np.asarray((2.0, 0.0, 0.0)),
+        np.asarray((0.0, 3.0, 0.0)),
+    )
+    geometry.set_face_metadata(face, {"section": "A", "nested": {"id": 7}})
+    geometry.set_face_parameterization(face, parameterization)
+    plan = plan_structured_layout(geometry, target_size=0.5)
+    assert plan.faces[0].action == action
+
+    working, report = apply_structured_layout(geometry, plan)
+
+    for child in report.source_to_working_faces[face]:
+        made = working.faces[child]
+        assert made.metadata.to_dict() == {"section": "A", "nested": {"id": 7}}
+        assert made.parameterization is not None
+        assert np.allclose(
+            made.parameterization.evaluate(0.2, 0.7),
+            parameterization.evaluate(0.2, 0.7),
+        )
 
 
 def test_planar_ogrid_has_eight_exact_descendant_blocks() -> None:
