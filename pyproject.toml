@@ -72,6 +72,6 @@ include = ["anymesher*"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = ["src"]
-# A repository-local basetemp, because the user temp directory is not always
-# writable by the test process on Windows.  Gitignored, and pytest prunes it.
-addopts = ["-ra", "-p", "no:cacheprovider", "--basetemp=.pytest_tmp"]
+# tests/conftest.py assigns a unique, gitignored repository-local basetemp so
+# concurrent and interrupted Windows runs never contend for one directory.
+addopts = ["-ra", "-p", "no:cacheprovider"]
