@@ -46,10 +46,12 @@ def test_auto_structured_triangle_is_detached_mapped_and_source_bound() -> None:
     assert result.mesh.elements_of_face[face] == sorted(result.mesh.quads)
     assert result.mesh.geometry_model_id == geometry.model_id
     assert result.mesh.geometry_revision == geometry.revision
-    assert result.mesh.structural_preparation["plan"]["plan_hash"].startswith(
+    structured = result.mesh.structural_preparation["structured_layout"]
+    assert structured["plan"]["plan_hash"].startswith(
         "sha256:"
     )
-    assert result.mesh.structural_preparation["quality"]["accepted"] is True
+    assert structured["quality"]["accepted"] is True
+    assert result.mesh.structural_preparation["structural_closure"] is not None
     assert result.mesh.hybrid_diagnostics["structured_quality"]["accepted"] is True
     assert result.triangulation_backend_by_face[face]["actual_backend"] == "mapped"
     assert result.triangulation_backend_by_face[face]["working_face_ids"]
@@ -145,7 +147,7 @@ def test_auto_uses_quality_gated_native_fallback() -> None:
     assert result.strategy_by_face == {face: "native"}
     assert result.structured_layout is not None
     assert result.structured_layout.status == "rejected_fallback"
-    quality = result.mesh.structural_preparation["quality"]
+    quality = result.mesh.structural_preparation["structured_layout"]["quality"]
     assert quality["accepted"] is True
     assert quality["selected_mesh"] == "native_fallback"
     assert quality["rejected_candidate"]["growth_violation_count"] > 0

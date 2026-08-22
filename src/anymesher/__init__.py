@@ -76,6 +76,11 @@ from .hybrid import (
     generate_hybrid_mesh_result,
 )
 from .mesh import Coupling, Mesh
+from .preparation import (
+    StructuralPreparationOptions,
+    StructuralPreparationReport,
+    prepare_structural_closure,
+)
 from .charts import (
     ChartProjection,
     FaceChart,
@@ -181,6 +186,8 @@ __all__ = [
     "StructuredLayoutReport",
     "StructuredMeshingOptions",
     "StructuredShellGrid",
+    "StructuralPreparationOptions",
+    "StructuralPreparationReport",
     "Vertex",
     "WARP_LIMIT",
     "arc_frame",
@@ -214,6 +221,7 @@ __all__ = [
     "punch_circular_hole",
     "plan_intersection_mutation",
     "plan_structured_layout",
+    "prepare_structural_closure",
     "refine_around",
     "refine_at",
     "resolve_backend",
