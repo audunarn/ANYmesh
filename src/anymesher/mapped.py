@@ -28,6 +28,7 @@ import numpy as np
 
 from anygeometry.entities import OrientedEdge
 from anygeometry.model import GeometryModel
+from anygeometry.structural import AttachmentTargetKind
 
 from .errors import MeshError
 from .mesh import Coupling, Mesh
@@ -195,10 +196,18 @@ def generate_mesh(
         _build_face(geometry, mesh, face_id, next_node, next_element)
 
     offsets = dict(beam_offsets or {})
+    offset_registry: dict[tuple[int, tuple[str, str, str]], int] = {}
     for edge_id in beam_edge_ids:
         offset = float(offsets.get(edge_id, 0.0))
         if offset:
-            _build_offset_nodes(geometry, mesh, edge_id, offset, next_node)
+            _build_offset_nodes(
+                geometry,
+                mesh,
+                edge_id,
+                offset,
+                next_node,
+                offset_registry,
+            )
         _build_beam(mesh, edge_id, next_element)
 
     return mesh
@@ -261,35 +270,110 @@ def nodal_normals(mesh: Mesh) -> Dict[int, np.ndarray]:
     return normals
 
 
+def _offset_target_faces(
+    geometry: GeometryModel,
+    edge_id: int,
+) -> tuple[int, ...]:
+    faces = set(map(int, geometry.faces_using_edge(edge_id)))
+    member_ids = set(map(int, geometry.members_using_edge(edge_id)))
+    for attachment in geometry.attachments.values():
+        if int(attachment.member_id) not in member_ids:
+            continue
+        if attachment.target_kind is AttachmentTargetKind.FACE:
+            faces.add(int(attachment.target_id))
+        elif attachment.target_kind is AttachmentTargetKind.EDGE:
+            faces.update(map(int, geometry.faces_using_edge(attachment.target_id)))
+        elif attachment.target_kind is AttachmentTargetKind.SHEET:
+            sheet = geometry.sheets.get(int(attachment.target_id))
+            if sheet is None:
+                continue
+            faces.update(
+                int(geometry.face_uses[face_use_id].face_id)
+                for face_use_id in sheet.face_use_ids
+            )
+    return tuple(sorted(face for face in faces if face in geometry.faces))
+
+
+def _attached_face_normal(
+    geometry: GeometryModel,
+    face_ids: Sequence[int],
+    point: np.ndarray,
+    *,
+    edge_id: int,
+    node_id: int,
+) -> np.ndarray:
+    candidates: list[np.ndarray] = []
+    for face_id in face_ids:
+        _projected, uv, distance = geometry.project_to_face(face_id, point)
+        bounds = geometry.conservative_face_bounds(face_id)
+        extent = (
+            0.0
+            if bounds is None
+            else float(
+                np.linalg.norm(
+                    np.asarray(bounds[3:], dtype=float)
+                    - np.asarray(bounds[:3], dtype=float)
+                )
+            )
+        )
+        tolerance = geometry.tolerance.effective_surface_residual(extent)
+        if distance <= tolerance:
+            candidates.append(
+                np.asarray(geometry.face_normal(face_id, *uv), dtype=float)
+            )
+    if not candidates:
+        raise MeshError(
+            f"line {edge_id} has a beam eccentricity but node {node_id} lies "
+            "outside every exactly attached plate range"
+        )
+    total = np.sum(np.asarray(candidates, dtype=float), axis=0)
+    length = float(np.linalg.norm(total))
+    if length <= max(float(geometry.tolerance.angular), 64.0 * np.finfo(float).eps):
+        raise MeshError(
+            f"line {edge_id} has ambiguous cancelling plate normals at node {node_id}"
+        )
+    return total / length
+
+
 def _build_offset_nodes(
     geometry: GeometryModel,
     mesh: Mesh,
     edge_id: int,
     offset: float,
     next_node: "_Counter",
+    registry: dict[tuple[int, tuple[str, str, str]], int],
 ) -> None:
     """Stand a stiffener off the plating, along the plate normal."""
 
-    if not geometry.faces_using_edge(edge_id):
+    target_faces = _offset_target_faces(geometry, edge_id)
+    if not target_faces:
         raise MeshError(
-            f"line {edge_id} has a beam eccentricity but bounds no plate, so "
-            "there is nothing for it to be eccentric to. Remove the "
-            "eccentricity, or attach the line to a plate."
+            f"line {edge_id} has a beam eccentricity but neither bounds nor has "
+            "an exact attachment to a plate. Remove the eccentricity, or declare "
+            "the member/sheet attachment."
         )
 
     normals = nodal_normals(mesh)
     sequence = mesh.nodes_of_edge[edge_id]
-    missing = [node for node in sequence if node not in normals]
-    if missing:
-        raise MeshError(
-            f"line {edge_id} has a beam eccentricity but no plate normal could "
-            f"be found at node(s) {missing[:4]}"
-        )
+    for node in sequence:
+        if node not in normals:
+            normals[node] = _attached_face_normal(
+                geometry,
+                target_faces,
+                mesh.nodes[node],
+                edge_id=edge_id,
+                node_id=node,
+            )
 
     offset_nodes: List[int] = []
     for node in sequence:
-        node_id = next_node.next()
-        mesh.nodes[node_id] = mesh.nodes[node] + offset * normals[node]
+        displacement = offset * normals[node]
+        key = (node, tuple(float(value).hex() for value in displacement))
+        node_id = registry.get(key)
+        if node_id is None:
+            node_id = next_node.next()
+            mesh.nodes[node_id] = mesh.nodes[node] + displacement
+            registry[key] = node_id
         offset_nodes.append(node_id)
     mesh.offset_nodes_of_edge[edge_id] = offset_nodes
 
@@ -505,7 +589,12 @@ def _build_beam(mesh: Mesh, edge_id: int, next_element: _Counter) -> None:
         element_ids.append(element_id)
     mesh.elements_of_edge[edge_id] = element_ids
 
-    if sequence is not plating:
+    shell_nodes = {
+        int(node)
+        for connectivity in (*mesh.quads.values(), *mesh.tris.values())
+        for node in connectivity
+    }
+    if sequence is not plating and all(node in shell_nodes for node in plating):
         # One coupling per station, tying the stiffener back to the plating.
         # A beam node here sits directly above its plate node, so the record has
         # a single master.  The eccentricity is read back from the node positions

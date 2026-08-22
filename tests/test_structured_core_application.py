@@ -151,6 +151,8 @@ def test_direct_apply_is_exact_and_source_document_is_byte_identical() -> None:
     assert report.working_model_id == str(working.model_id)
     assert report.working_revision == working.revision
     assert report.to_dict()["working_binding"].startswith("sha256:")
+    with pytest.raises(MeshError, match="working binding is inconsistent"):
+        replace(report, working_binding="sha256:" + "0" * 64)
 
 
 @pytest.mark.parametrize(

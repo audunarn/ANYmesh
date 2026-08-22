@@ -163,6 +163,24 @@ def test_candidate_resource_limit_fails_closed_and_source_stays_unchanged() -> N
     assert to_dict(geometry) == before
 
 
+def test_overlap_narrow_phase_is_cancellable_before_geometry_mutation() -> None:
+    geometry, first, second = _crossing_faces()
+    before = to_dict(geometry)
+
+    def cancel(phase: str) -> None:
+        if phase == "structural preparation overlap narrow phase":
+            raise RuntimeError("cancel overlap audit")
+
+    with pytest.raises(RuntimeError, match="cancel overlap audit"):
+        prepare_structural_closure(
+            geometry,
+            face_ids=(first, second),
+            cancellation_check=cancel,
+        )
+
+    assert to_dict(geometry) == before
+
+
 def test_preparation_can_be_explicitly_disabled() -> None:
     geometry, _first, _second = _crossing_faces()
     before = to_dict(geometry)

@@ -234,16 +234,19 @@ def _resolved(
     return tuple(sorted(set(values)))
 
 
-def _face_sheet_ids(geometry: GeometryModel, face_id: int) -> tuple[int, ...]:
-    return tuple(
-        sorted(
-            {
-                int(use.sheet_id)
-                for use in geometry.face_uses.values()
-                if int(use.face_id) == int(face_id)
-            }
-        )
-    )
+def _face_sheet_membership(
+    geometry: GeometryModel,
+) -> dict[int, tuple[int, ...]]:
+    membership: dict[int, list[int]] = {
+        int(face_id): [] for face_id in geometry.faces
+    }
+    for use in geometry.face_uses.values():
+        if int(use.face_id) in membership:
+            membership[int(use.face_id)].append(int(use.sheet_id))
+    return {
+        face_id: tuple(sorted(set(sheet_ids)))
+        for face_id, sheet_ids in membership.items()
+    }
 
 
 def _selected_descendant_faces(
@@ -377,6 +380,7 @@ def _member_sheet_pairs(
     geometry: GeometryModel,
     member_ids: Sequence[int],
     sheet_ids: Sequence[int],
+    face_sheet_membership: Mapping[int, Sequence[int]],
     *,
     maximum_candidates: int,
     cancellation_check: CancellationCheck | None,
@@ -395,7 +399,7 @@ def _member_sheet_pairs(
             ):
                 if kind != "face":
                     continue
-                for sheet_id in _face_sheet_ids(geometry, face_id):
+                for sheet_id in face_sheet_membership.get(int(face_id), ()):
                     if sheet_id not in selected_sheets:
                         continue
                     pairs.add((member_id, sheet_id))
@@ -534,8 +538,22 @@ def prepare_structural_closure(
             f"model has {len(geometry.edges)} edge records; structural preparation "
             f"is bounded to {policy.maximum_edge_records}"
         )
-    _cancel(cancellation_check, "structural preparation overlap preflight")
-    overlaps = find_coplanar_overlaps(geometry, source_faces)
+    _cancel(cancellation_check, "structural preparation overlap broad phase")
+    source_face_candidates = _face_pairs(
+        geometry,
+        source_faces,
+        maximum_candidates=policy.maximum_candidate_pairs,
+        cancellation_check=cancellation_check,
+    )
+    overlaps = []
+    for position, pair in enumerate(source_face_candidates):
+        if position % 16 == 0:
+            _cancel(cancellation_check, "structural preparation overlap narrow phase")
+        overlaps.extend(
+            find_coplanar_overlaps(geometry, candidate_pairs=(pair,))
+        )
+        if len(overlaps) >= 8:
+            break
     if overlaps:
         detail = ", ".join(
             f"faces {item.first}/{item.second}: {item.area:.7g} m^2"
@@ -553,16 +571,18 @@ def prepare_structural_closure(
     queries = applications = 0
     face_connections = member_connections = member_sheet_connections = 0
 
+    face_sheet_membership = _face_sheet_membership(working)
     if policy.declare_missing_owners:
         for face_id in source_faces:
             descendants = _resolved(working, "face", face_id)
-            if not any(_face_sheet_ids(working, item) for item in descendants):
+            if not any(face_sheet_membership.get(item, ()) for item in descendants):
                 temporary_sheets.append(
                     working.add_sheet(
                         descendants,
                         name=f"mesh closure for source face {face_id}",
                     )
                 )
+        face_sheet_membership = _face_sheet_membership(working)
         for edge_id in source_edges:
             descendants = _resolved(working, "edge", edge_id)
             if not any(working.members_using_edge(item) for item in descendants):
@@ -573,7 +593,7 @@ def prepare_structural_closure(
                     )
                 )
     elif policy.automatic_face_connections and source_faces and any(
-        not _face_sheet_ids(working, face_id) for face_id in source_faces
+        not face_sheet_membership.get(face_id, ()) for face_id in source_faces
     ):
         raise MeshError("automatic face preparation requires declared Sheet owners")
     elif (
@@ -654,13 +674,14 @@ def prepare_structural_closure(
         )
 
     def selected_sheets() -> tuple[int, ...]:
+        membership = _face_sheet_membership(working)
         return tuple(
             sorted(
                 {
                     sheet_id
                     for source_face in source_faces
                     for face_id in _resolved(working, "face", source_face)
-                    for sheet_id in _face_sheet_ids(working, face_id)
+                    for sheet_id in membership.get(face_id, ())
                 }
             )
         )
@@ -684,6 +705,7 @@ def prepare_structural_closure(
                     working,
                     selected_members(),
                     selected_sheets(),
+                    _face_sheet_membership(working),
                     maximum_candidates=policy.maximum_candidate_pairs,
                     cancellation_check=cancellation_check,
                 )

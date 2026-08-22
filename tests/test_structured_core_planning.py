@@ -229,6 +229,15 @@ def test_tampered_stale_and_resource_exhausted_plans_fail_closed() -> None:
             target_size=0.5,
             options=StructuredMeshingOptions(maximum_blocks=4),
         )
+    assert StructuredMeshingOptions(maximum_edge_records=7).to_dict()[
+        "maximum_edge_records"
+    ] == 7
+    with pytest.raises(MeshError, match="edge records"):
+        plan_structured_layout(
+            bounded,
+            target_size=0.5,
+            options=StructuredMeshingOptions(maximum_edge_records=4),
+        )
 
 
 def test_explicit_seeding_blocks_partitions_and_overrides_survive_apply() -> None:

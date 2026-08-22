@@ -143,6 +143,65 @@ def _ordered_edge_associations(
     return nodes, offsets, elements
 
 
+def _remapped_seeding(
+    mesh: Mesh,
+    divisions: Mapping[int, int],
+    source_to_working_edges: Mapping[int, Sequence[int]],
+) -> Seeding | None:
+    if not divisions:
+        return None
+    original = mesh.seeding
+    if original is None:
+        return Seeding(
+            divisions=dict(divisions),
+            classes={edge_id: edge_id for edge_id in divisions},
+        )
+    if all(
+        tuple(source_to_working_edges[edge_id]) == (edge_id,)
+        for edge_id in divisions
+    ):
+        return Seeding(
+            divisions=dict(divisions),
+            sweeps=int(original.sweeps),
+            classes={
+                edge_id: int(original.classes.get(edge_id, edge_id))
+                for edge_id in divisions
+            },
+            size_field=original.size_field,
+        )
+
+    parent = {int(edge_id): int(edge_id) for edge_id in divisions}
+
+    def find(edge_id: int) -> int:
+        while parent[edge_id] != edge_id:
+            parent[edge_id] = parent[parent[edge_id]]
+            edge_id = parent[edge_id]
+        return edge_id
+
+    def union(first: int, second: int) -> None:
+        first_root, second_root = find(first), find(second)
+        if first_root == second_root:
+            return
+        low, high = sorted((first_root, second_root))
+        parent[high] = low
+
+    class_sources: dict[int, list[int]] = {}
+    for source_edge in sorted(divisions):
+        for working_edge in source_to_working_edges[source_edge]:
+            class_id = int(original.classes.get(working_edge, working_edge))
+            class_sources.setdefault(class_id, []).append(source_edge)
+    for sources in class_sources.values():
+        for source_edge in sources[1:]:
+            union(sources[0], source_edge)
+
+    return Seeding(
+        divisions=dict(divisions),
+        sweeps=int(original.sweeps),
+        classes={edge_id: find(edge_id) for edge_id in divisions},
+        size_field=original.size_field,
+    )
+
+
 def remap_prepared_mesh_associations(
     mesh: Mesh,
     source: GeometryModel,
@@ -273,15 +332,10 @@ def remap_prepared_mesh_associations(
     }
     if any(value < 1 for value in divisions.values()):
         raise MeshError("prepared mesh produced an invalid zero-division source edge")
-    remapped_seeding = (
-        None
-        if not divisions
-        else Seeding(
-            divisions=divisions,
-            sweeps=0 if mesh.seeding is None else int(mesh.seeding.sweeps),
-            classes={edge_id: edge_id for edge_id in divisions},
-            size_field=None,
-        )
+    remapped_seeding = _remapped_seeding(
+        mesh,
+        divisions,
+        edges,
     )
 
     # Commit the validated association set as one publication step.

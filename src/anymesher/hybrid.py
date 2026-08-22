@@ -162,6 +162,26 @@ def _active_edges(
     return tuple(sorted(result))
 
 
+def _active_structural_owners(
+    view: GeometryMeshingView,
+    face_ids: Iterable[int],
+    edge_ids: Iterable[int],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return exact structural owners seeded by the requested topology."""
+
+    sheets = {
+        int(sheet_id)
+        for face_id in face_ids
+        for sheet_id in view.sheets_for_face(int(face_id))
+    }
+    members = {
+        int(member_id)
+        for edge_id in edge_ids
+        for member_id in view.members_using_edge(int(edge_id))
+    }
+    return tuple(sorted(sheets)), tuple(sorted(members))
+
+
 def _mappable(face: Any) -> bool:
     return len(face.corners) == 4 and not face.holes
 
@@ -512,6 +532,12 @@ def _remap_edge_divisions(
         if len(descendants) == 1:
             remapped[descendants[0]] = requested
             continue
+        if requested < len(descendants):
+            raise MeshError(
+                f"edge {source_edge} override requests {requested} total divisions "
+                f"but immutable preparation created {len(descendants)} non-empty "
+                "descendants; increase the explicit total"
+            )
         lengths = np.asarray(
             [working.edge_length(item) for item in descendants],
             dtype=float,
@@ -519,14 +545,18 @@ def _remap_edge_divisions(
         total_length = float(lengths.sum())
         if total_length <= 0.0:
             raise MeshError(f"source edge {source_edge} has zero-length descendants")
-        total_divisions = max(requested, len(descendants))
-        raw = lengths / total_length * total_divisions
-        counts = np.maximum(1, np.floor(raw).astype(int))
-        remainder = total_divisions - int(counts.sum())
+        remaining = requested - len(descendants)
+        raw = lengths / total_length * remaining
+        additions = np.floor(raw).astype(int)
+        counts = np.ones(len(descendants), dtype=int) + additions
+        remainder = requested - int(counts.sum())
         if remainder > 0:
             order = sorted(
                 range(len(descendants)),
-                key=lambda index: (-(raw[index] - counts[index]), descendants[index]),
+                key=lambda index: (
+                    -(raw[index] - additions[index]),
+                    descendants[index],
+                ),
             )
             for index in order[:remainder]:
                 counts[index] += 1
@@ -535,6 +565,33 @@ def _remap_edge_divisions(
             if previous != int(count):
                 raise MeshError(
                     f"working edge {descendant} receives conflicting exact overrides"
+                )
+    return remapped
+
+
+def _remap_edge_values(
+    source: GeometryModel,
+    source_to_working_edges: Mapping[int, Sequence[int]],
+    values: Mapping[int, float] | None,
+    *,
+    label: str,
+) -> dict[int, float] | None:
+    if values is None:
+        return None
+    remapped: dict[int, float] = {}
+    for raw_source_edge, raw_value in sorted(values.items()):
+        source_edge = int(raw_source_edge)
+        if source_edge not in source.edges:
+            raise MeshError(f"{label} references missing source edge {source_edge}")
+        value = float(raw_value)
+        if not np.isfinite(value):
+            raise MeshError(f"{label} for edge {source_edge} must be finite")
+        for descendant in source_to_working_edges.get(source_edge, (source_edge,)):
+            descendant = int(descendant)
+            previous = remapped.setdefault(descendant, value)
+            if previous != value:
+                raise MeshError(
+                    f"working edge {descendant} receives conflicting exact {label}"
                 )
     return remapped
 
@@ -929,7 +986,7 @@ def generate_hybrid_mesh_result(
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
     ) = None,
-    overlap_policy: OverlapPolicy | str = OverlapPolicy.REJECT,
+    overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
     certification_mode: CertificationMode | str = CertificationMode.NONE,
     change_set: Any | None = None,
@@ -981,10 +1038,15 @@ def generate_hybrid_mesh_result(
     if not source_faces and not source_beams:
         raise MeshError("nothing to mesh: no faces and no beam edges")
 
+    source_sheets, source_members = _active_structural_owners(
+        source_view, source_faces, source_beams
+    )
     source_pipeline = StructuralMeshingPipeline(
         source_view,
         overlap_policy=overlap_policy,
         mutation_policy=mutation_policy,
+        active_sheet_ids=source_sheets,
+        active_member_ids=source_members,
     )
     source_preflight = tuple(source_pipeline.preflight())
     blocked = _blocked_preflight(source_preflight)
@@ -1171,6 +1233,12 @@ def generate_hybrid_mesh_result(
         source_to_final_edges,
         overrides,
     )
+    final_beam_offsets = _remap_edge_values(
+        source_geometry,
+        source_to_final_edges,
+        beam_offsets,
+        label="beam offset",
+    )
     refinements = _remap_refinements(
         geometry,
         source_to_final_faces,
@@ -1179,10 +1247,13 @@ def generate_hybrid_mesh_result(
     )
 
     view = GeometryMeshingView(geometry)
+    active_sheets, active_members = _active_structural_owners(view, faces, beams)
     pipeline = StructuralMeshingPipeline(
         view,
         overlap_policy=overlap_policy,
         mutation_policy=mutation_policy,
+        active_sheet_ids=active_sheets,
+        active_member_ids=active_members,
     )
     preflight = tuple(pipeline.preflight())
     blocked = _blocked_preflight(preflight)
@@ -1227,7 +1298,7 @@ def generate_hybrid_mesh_result(
             target_size=target_size,
             overrides=final_overrides,
             beam_edges=beams,
-            beam_offsets=beam_offsets,
+            beam_offsets=final_beam_offsets,
             face_ids=mapped_faces,
             seeding=seeding,
             refinements=refinements,
