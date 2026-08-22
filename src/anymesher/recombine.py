@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import log
-from typing import Any, Iterable, Sequence
+from numbers import Integral
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -39,6 +40,9 @@ class RecombinationReport:
     scores: np.ndarray
     candidate_count: int
     rejected_candidate_count: int
+    exchange_count: int = 0
+    exchange_work: int = 0
+    exchange_truncated: bool = False
 
     @property
     def pair_count(self) -> int:
@@ -138,6 +142,8 @@ def recombine_triangles_with_report(
     min_angle: float = 30.0,
     max_angle: float = 150.0,
     max_warpage: float = 0.10,
+    cancellation_check: Callable[[str], None] | None = None,
+    max_exchange_work: int = 1_000_000,
 ) -> RecombinationReport:
     """Pair adjacent triangles greedily from best quality to worst.
 
@@ -146,6 +152,16 @@ def recombine_triangles_with_report(
     Paired triangles remain in the dense table with inactive flags, preserving
     their IDs for diagnostics and incremental clients.
     """
+
+    if (
+        isinstance(max_exchange_work, bool)
+        or not isinstance(max_exchange_work, Integral)
+        or int(max_exchange_work) < 1
+    ):
+        raise MeshError("max_exchange_work must be a positive integer")
+    max_exchange_work = int(max_exchange_work)
+    if cancellation_check is not None:
+        cancellation_check("triangle recombination start")
 
     if isinstance(mesh_or_points, MeshCore):
         if triangles is not None:
@@ -162,7 +178,9 @@ def recombine_triangles_with_report(
     incidence = _edge_incidence(mesh)
     candidates: list[_Candidate] = []
     rejected = 0
-    for edge, attached in sorted(incidence.items()):
+    for candidate_index, (edge, attached) in enumerate(sorted(incidence.items())):
+        if cancellation_check is not None and candidate_index % 4096 == 0:
+            cancellation_check("triangle recombination candidates")
         if len(attached) != 2 or edge in protected:
             continue
         first, second = attached
@@ -206,6 +224,110 @@ def recombine_triangles_with_report(
             continue
         used.update((candidate.first, candidate.second))
         selected.append(candidate)
+
+    # A quality-first greedy matching can strand two otherwise pairable
+    # triangles.  Repair that local case with a deterministic 1-for-2
+    # exchange.  Candidate lookup is indexed by triangle row, so the repair
+    # does not repeatedly scan the complete dual graph.  Each accepted
+    # exchange consumes two previously free triangles and therefore the queue
+    # and work counter are both bounded independently of mesh geometry.
+    candidates_by_triangle: dict[int, list[_Candidate]] = {}
+    for candidate in candidates:
+        candidates_by_triangle.setdefault(candidate.first, []).append(candidate)
+        candidates_by_triangle.setdefault(candidate.second, []).append(candidate)
+
+    def candidate_key(candidate: _Candidate) -> tuple[int, int, tuple[int, int]]:
+        return (candidate.first, candidate.second, candidate.shared)
+
+    def other_row(candidate: _Candidate, row: int) -> int:
+        return candidate.second if candidate.first == row else candidate.first
+
+    active = {candidate_key(candidate): candidate for candidate in selected}
+    queue = list(selected)
+    exchange_count = 0
+    exchange_work = 0
+    exchange_truncated = False
+    queue_index = 0
+    while queue_index < len(queue):
+        current = queue[queue_index]
+        queue_index += 1
+        current_key = candidate_key(current)
+        if current_key not in active:
+            continue
+        first_options = [
+            candidate
+            for candidate in candidates_by_triangle.get(current.first, ())
+            if candidate_key(candidate) != current_key
+            and other_row(candidate, current.first) not in used
+        ]
+        second_options = [
+            candidate
+            for candidate in candidates_by_triangle.get(current.second, ())
+            if candidate_key(candidate) != current_key
+            and other_row(candidate, current.second) not in used
+        ]
+        possible: list[tuple[_Candidate, _Candidate, int, int]] = []
+        stop = False
+        for first in first_options:
+            first_other = other_row(first, current.first)
+            for second in second_options:
+                if exchange_work >= max_exchange_work:
+                    exchange_truncated = True
+                    stop = True
+                    break
+                exchange_work += 1
+                second_other = other_row(second, current.second)
+                if first_other != second_other and first is not second:
+                    possible.append((first, second, first_other, second_other))
+            if stop:
+                break
+        if stop:
+            break
+        if not possible:
+            continue
+
+        def exchange_key(
+            value: tuple[_Candidate, _Candidate, int, int]
+        ) -> tuple[float, tuple[int, ...]]:
+            first, second, first_other, second_other = value
+            stable = tuple(
+                sorted(
+                    (
+                        int(mesh.triangle_ids[current.first]),
+                        int(mesh.triangle_ids[current.second]),
+                        int(mesh.triangle_ids[first_other]),
+                        int(mesh.triangle_ids[second_other]),
+                    )
+                )
+            )
+            return (-(first.score + second.score), stable)
+
+        first, second, first_other, second_other = min(
+            possible, key=exchange_key
+        )
+        active.pop(current_key)
+        active[candidate_key(first)] = first
+        active[candidate_key(second)] = second
+        used.update((first_other, second_other))
+        queue.extend((first, second))
+        exchange_count += 1
+        if cancellation_check is not None and exchange_count % 256 == 0:
+            cancellation_check("triangle recombination exchange")
+
+    selected = sorted(
+        active.values(),
+        key=lambda candidate: (
+            min(
+                int(mesh.triangle_ids[candidate.first]),
+                int(mesh.triangle_ids[candidate.second]),
+            ),
+            max(
+                int(mesh.triangle_ids[candidate.first]),
+                int(mesh.triangle_ids[candidate.second]),
+            ),
+            tuple(int(mesh.node_ids[row]) for row in candidate.corners),
+        ),
+    )
 
     triangle_active = np.array(mesh.triangle_active, copy=True)
     for candidate in selected:
@@ -263,7 +385,19 @@ def recombine_triangles_with_report(
     pairs.setflags(write=False)
     created_ids.setflags(write=False)
     scores.setflags(write=False)
-    return RecombinationReport(result, pairs, created_ids, scores, len(candidates) + rejected, rejected)
+    if cancellation_check is not None:
+        cancellation_check("triangle recombination complete")
+    return RecombinationReport(
+        result,
+        pairs,
+        created_ids,
+        scores,
+        len(candidates) + rejected,
+        rejected,
+        exchange_count,
+        exchange_work,
+        exchange_truncated,
+    )
 
 
 def recombine_triangles(
