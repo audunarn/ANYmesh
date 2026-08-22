@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import acos, ceil, sqrt
+from numbers import Integral
 from time import perf_counter
 from typing import Any, Callable, Sequence
 
@@ -13,8 +14,8 @@ from .core import MeshCore, corner_edges
 from .errors import MeshError
 from .native import NativeBoundary
 from .optimization import constrained_smoothing, local_edge_flip
-from .quality_v2 import assert_valid_mesh
-from .recombine import recombine_triangles
+from .quality_v2 import MeshQualityV2, assert_valid_mesh, evaluate_quality
+from .recombine import recombine_triangles_with_report
 from .triangulation import PlanarTriangulation, triangulate_polygon
 
 __all__ = [
@@ -38,6 +39,12 @@ class SurfaceMeshOptions:
     min_angle: float = 30.0
     max_angle: float = 150.0
     max_warpage: float = 0.10
+    lattice_alignment: str = "chart"
+    metric_tensor: Any | None = None
+    enforce_quality: bool = False
+    max_lattice_points: int = 1_000_000
+    max_metric_aspect_ratio: float = 25.0
+    max_recombination_work: int = 1_000_000
 
     @property
     def quadratic(self) -> bool:
@@ -48,6 +55,97 @@ class SurfaceMeshOptions:
             raise MeshError("order must select linear T3/Q4 or quadratic T6/Q8")
         if self.target_size is not None and (not np.isfinite(self.target_size) or self.target_size <= 0.0):
             raise MeshError("target_size must be positive and finite")
+        if self.lattice_alignment not in {"chart", "dominant_boundary"}:
+            raise MeshError(
+                "lattice_alignment must be 'chart' or 'dominant_boundary'"
+            )
+        for name in ("max_lattice_points", "max_recombination_work"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Integral)
+                or int(value) < 1
+            ):
+                raise MeshError(f"{name} must be a positive integer")
+            object.__setattr__(self, name, int(value))
+        metric_aspect = float(self.max_metric_aspect_ratio)
+        if not np.isfinite(metric_aspect) or metric_aspect < 1.0:
+            raise MeshError("max_metric_aspect_ratio must be finite and at least 1")
+        object.__setattr__(self, "max_metric_aspect_ratio", metric_aspect)
+        if self.metric_tensor is not None:
+            tensor = np.asarray(self.metric_tensor, dtype=float)
+            if tensor.shape != (2, 2) or not np.all(np.isfinite(tensor)):
+                raise MeshError("metric_tensor must be a finite 2-by-2 tensor")
+            scale = max(float(np.max(np.abs(tensor))), 1.0)
+            if not np.allclose(
+                tensor,
+                tensor.T,
+                rtol=1.0e-12,
+                atol=1.0e-14 * scale,
+            ):
+                raise MeshError("metric_tensor must be symmetric positive definite")
+            eigenvalues = np.linalg.eigvalsh(tensor)
+            if np.any(eigenvalues <= 0.0):
+                raise MeshError("metric_tensor must be symmetric positive definite")
+            aspect = sqrt(float(eigenvalues[-1] / eigenvalues[0]))
+            if aspect > metric_aspect * (1.0 + 1.0e-12):
+                raise MeshError(
+                    "metric_tensor requests aspect ratio "
+                    f"{aspect:.6g}, above max_metric_aspect_ratio "
+                    f"{metric_aspect:.6g}"
+                )
+
+
+def _quality_threshold_report(
+    quality: MeshQualityV2,
+    settings: SurfaceMeshOptions,
+) -> dict[str, Any]:
+    groups = (quality.triangles, quality.quadrilaterals)
+    values = {
+        "scaled_jacobian": np.concatenate(
+            [group.scaled_jacobian for group in groups]
+        ),
+        "aspect_ratio": np.concatenate([group.aspect_ratio for group in groups]),
+        "minimum_angle": np.concatenate([group.minimum_angle for group in groups]),
+        "maximum_angle": np.concatenate([group.maximum_angle for group in groups]),
+        "warpage": np.concatenate([group.warpage for group in groups]),
+    }
+    element_ids = np.concatenate([group.element_ids for group in groups])
+    masks = {
+        "scaled_jacobian": values["scaled_jacobian"] < settings.min_scaled_jacobian,
+        "aspect_ratio": values["aspect_ratio"] > settings.max_aspect_ratio,
+        "minimum_angle": values["minimum_angle"] < settings.min_angle,
+        "maximum_angle": values["maximum_angle"] > settings.max_angle,
+        "warpage": values["warpage"] > settings.max_warpage,
+    }
+    failed = np.zeros(len(element_ids), dtype=bool)
+    for mask in masks.values():
+        failed |= mask
+    return {
+        "accepted": not bool(np.any(failed)),
+        "thresholds": {
+            "minimum_scaled_jacobian": settings.min_scaled_jacobian,
+            "maximum_aspect_ratio": settings.max_aspect_ratio,
+            "minimum_angle": settings.min_angle,
+            "maximum_angle": settings.max_angle,
+            "maximum_warpage": settings.max_warpage,
+        },
+        "worst": {
+            "minimum_scaled_jacobian": quality.minimum_scaled_jacobian,
+            "maximum_aspect_ratio": quality.maximum_aspect_ratio,
+            "minimum_angle": quality.minimum_angle,
+            "maximum_angle": (
+                float(np.max(values["maximum_angle"]))
+                if len(element_ids)
+                else 90.0
+            ),
+            "maximum_warpage": quality.maximum_warpage,
+        },
+        "violation_counts": {
+            name: int(np.count_nonzero(mask)) for name, mask in masks.items()
+        },
+        "poor_element_ids": [int(value) for value in element_ids[failed]],
+    }
 
 
 @dataclass(frozen=True)
@@ -143,27 +241,138 @@ def _target_points(
     holes: Sequence[np.ndarray],
     constraints: Sequence[np.ndarray],
     size: float,
+    alignment: str = "chart",
+    metric_tensor: Any | None = None,
+    *,
+    max_lattice_points: int = 1_000_000,
+    cancellation_check: Callable[[str], None] | None = None,
 ) -> np.ndarray:
     """Generate a deterministic triangular lattice away from protected lines."""
 
-    minimum = np.min(outer, axis=0)
-    maximum = np.max(outer, axis=0)
-    vertical = sqrt(3.0) * 0.5 * size
+    origin = np.zeros(2, dtype=float)
+    basis = np.eye(2, dtype=float)
+    x_spacing = float(size)
+    y_spacing = float(size)
+    if metric_tensor is not None:
+        tensor = np.asarray(metric_tensor, dtype=float)
+        values, vectors = np.linalg.eigh(tensor)
+        order = np.argsort(values)
+        values = values[order]
+        basis = vectors[:, order]
+        # Eigenvector signs are mathematically arbitrary.  Anchor the first
+        # metric axis to the first non-orthogonal oriented boundary segment so
+        # rotating a model rotates the generated lattice instead of mirroring
+        # or shifting its staggered rows.
+        boundary_segments = np.roll(outer, -1, axis=0) - outer
+        tolerance = 1.0e-14 * max(
+            float(np.max(np.linalg.norm(boundary_segments, axis=1))), 1.0
+        )
+        for segment in boundary_segments:
+            projection = float(segment @ basis[:, 0])
+            if abs(projection) > tolerance:
+                if projection < 0.0:
+                    basis[:, 0] *= -1.0
+                break
+        if float(np.linalg.det(basis)) < 0.0:
+            basis[:, 1] *= -1.0
+        x_spacing, y_spacing = (
+            float(1.0 / sqrt(value)) for value in values
+        )
+        origin = np.mean(outer, axis=0)
+    elif alignment == "dominant_boundary":
+        segments = np.roll(outer, -1, axis=0) - outer
+        lengths = np.linalg.norm(segments, axis=1)
+        if len(lengths) and float(np.max(lengths)) > 0.0:
+            choices: list[
+                tuple[tuple[float, float, tuple[float, ...]], np.ndarray]
+            ] = []
+            for index, (segment, length) in enumerate(zip(segments, lengths)):
+                if float(length) <= 0.0:
+                    continue
+                axis = np.asarray(segment / length, dtype=float)
+                if axis[0] < 0.0 or (
+                    abs(float(axis[0])) <= 1.0e-15 and axis[1] < 0.0
+                ):
+                    axis = -axis
+                angle = float(np.arctan2(axis[1], axis[0]))
+                endpoints = tuple(
+                    np.round(
+                        np.sort(
+                            np.vstack(
+                                (outer[index], outer[(index + 1) % len(outer)])
+                            ),
+                            axis=0,
+                        ).ravel(),
+                        14,
+                    )
+                )
+                choices.append(((-float(length), angle, endpoints), axis))
+            axis = min(choices, key=lambda item: item[0])[1]
+            basis = np.column_stack((axis, np.array((-axis[1], axis[0]))))
+            origin = np.mean(outer, axis=0)
+
+    def project(values: np.ndarray) -> np.ndarray:
+        return (np.asarray(values, dtype=float) - origin) @ basis
+
+    def lift(values: np.ndarray) -> np.ndarray:
+        return origin + np.asarray(values, dtype=float) @ basis.T
+
+    local_outer = project(outer)
+    local_holes = [project(hole) for hole in holes]
+    local_constraints = [project(segment) for segment in constraints]
+    minimum = np.min(local_outer, axis=0)
+    maximum = np.max(local_outer, axis=0)
+    vertical = sqrt(3.0) * 0.5 * y_spacing
+    row_count = max(
+        0,
+        int(
+            ceil(
+                max(0.0, float(maximum[1] - minimum[1]))
+                / max(vertical, np.finfo(float).tiny)
+            )
+        ),
+    )
+    column_count = max(
+        0,
+        int(
+            ceil(
+                max(0.0, float(maximum[0] - minimum[0]))
+                / max(x_spacing, np.finfo(float).tiny)
+            )
+        ),
+    )
+    lattice_budget = row_count * column_count
+    if lattice_budget > int(max_lattice_points):
+        raise MeshError(
+            "target lattice would inspect "
+            f"{lattice_budget} points, above max_lattice_points "
+            f"{int(max_lattice_points)}; increase target size or the explicit budget"
+        )
     ys = np.arange(minimum[1] + 0.5 * vertical, maximum[1], vertical)
     protected_coordinates = [
         (ring[index], ring[(index + 1) % len(ring)])
-        for ring in (outer, *holes)
+        for ring in (local_outer, *local_holes)
         for index in range(len(ring))
     ]
-    protected_coordinates.extend((segment[0], segment[1]) for segment in constraints)
-    clearance = 0.25 * size
+    protected_coordinates.extend(
+        (segment[0], segment[1]) for segment in local_constraints
+    )
+    clearance = 0.25 * min(x_spacing, y_spacing)
     values: list[np.ndarray] = []
     for row, y in enumerate(ys):
-        offset = 0.5 * size if row % 2 else 0.0
-        xs = np.arange(minimum[0] + 0.5 * size + offset, maximum[0], size)
+        if cancellation_check is not None and row % 256 == 0:
+            cancellation_check("native target lattice")
+        offset = 0.5 * x_spacing if row % 2 else 0.0
+        xs = np.arange(
+            minimum[0] + 0.5 * x_spacing + offset,
+            maximum[0],
+            x_spacing,
+        )
         for x in xs:
             point = np.array((x, y), dtype=float)
-            if not _inside(point, outer) or any(_inside(point, hole) for hole in holes):
+            if not _inside(point, local_outer) or any(
+                _inside(point, hole) for hole in local_holes
+            ):
                 continue
             if any(
                 _segment_distance(point, first, second) <= clearance
@@ -171,7 +380,8 @@ def _target_points(
             ):
                 continue
             values.append(point)
-    return np.asarray(values, dtype=float).reshape((-1, 2))
+    local = np.asarray(values, dtype=float).reshape((-1, 2))
+    return lift(local)
 
 
 @dataclass(frozen=True)
@@ -492,6 +702,7 @@ def mesh_planar_surface(
     order: str | int = "linear",
     target_size: float | None = None,
     backend: str | NativeBoundary | None = "auto",
+    lattice_alignment: str = "chart",
     owner: Any | None = None,
     options: SurfaceMeshOptions | None = None,
     cancellation_check: Callable[[str], None] | None = None,
@@ -513,6 +724,7 @@ def mesh_planar_surface(
         order=order,
         target_size=target_size,
         backend=backend,
+        lattice_alignment=lattice_alignment,
     )
     raw_outer = np.asarray(outer, dtype=np.float64)
     plane = _plane_from_outer(raw_outer)
@@ -556,6 +768,10 @@ def mesh_planar_surface(
             planar_holes,
             planar_constraints,
             settings.target_size,
+            settings.lattice_alignment,
+            settings.metric_tensor,
+            max_lattice_points=settings.max_lattice_points,
+            cancellation_check=cancellation_check,
         )
         planar_interior = np.vstack((planar_interior, generated))
         phase_seconds["target_point_generation"] = (
@@ -666,9 +882,17 @@ def mesh_planar_surface(
         node_owner_handles=np.full(len(coordinates), owner_handle, dtype=np.int32),
         triangle_owner_handles=np.full(len(best.triangles), owner_handle, dtype=np.int32),
     )
+    recombination_diagnostics: dict[str, int | bool] = {
+        "candidate_count": 0,
+        "rejected_candidate_count": 0,
+        "exchange_count": 0,
+        "exchange_work": 0,
+        "exchange_truncated": False,
+        "pair_count": 0,
+    }
     if settings.recombine:
         recombination_started = perf_counter()
-        core = recombine_triangles(
+        recombination_report = recombine_triangles_with_report(
             core,
             protected_edges=triangulation.segments,
             min_scaled_jacobian=settings.min_scaled_jacobian,
@@ -676,8 +900,20 @@ def mesh_planar_surface(
             min_angle=settings.min_angle,
             max_angle=settings.max_angle,
             max_warpage=settings.max_warpage,
+            cancellation_check=cancellation_check,
+            max_exchange_work=settings.max_recombination_work,
         )
-        assert isinstance(core, MeshCore)
+        core = recombination_report.mesh
+        recombination_diagnostics = {
+            "candidate_count": recombination_report.candidate_count,
+            "rejected_candidate_count": (
+                recombination_report.rejected_candidate_count
+            ),
+            "exchange_count": recombination_report.exchange_count,
+            "exchange_work": recombination_report.exchange_work,
+            "exchange_truncated": recombination_report.exchange_truncated,
+            "pair_count": recombination_report.pair_count,
+        }
         phase_seconds["recombination"] = perf_counter() - recombination_started
         if cancellation_check is not None:
             cancellation_check("native surface recombination complete")
@@ -689,6 +925,20 @@ def mesh_planar_surface(
             cancellation_check("native surface quadratic promotion complete")
     validation_started = perf_counter()
     assert_valid_mesh(core)
+    threshold_report = _quality_threshold_report(evaluate_quality(core), settings)
+    if settings.enforce_quality and not threshold_report["accepted"]:
+        counts = ", ".join(
+            f"{name}={count}"
+            for name, count in threshold_report["violation_counts"].items()
+            if count
+        )
+        poor = threshold_report["poor_element_ids"][:12]
+        suffix = "..." if len(threshold_report["poor_element_ids"]) > len(poor) else ""
+        raise MeshError(
+            "mesh quality policy rejected the generated surface: "
+            f"{counts}; poor element IDs {poor}{suffix}. "
+            "Refine or partition the face, or relax the explicit quality policy."
+        )
     phase_seconds["surface_validation"] = perf_counter() - validation_started
     if diagnostics is not None:
         diagnostics.update(
@@ -700,6 +950,15 @@ def mesh_planar_surface(
                 "phase_seconds": phase_seconds,
                 "native_diagnostics": dict(triangulation.native_diagnostics),
                 "quality_optimization": quality_diagnostics,
+                "quality_policy": threshold_report,
+                "lattice_alignment": settings.lattice_alignment,
+                "metric_tensor": (
+                    None
+                    if settings.metric_tensor is None
+                    else np.asarray(settings.metric_tensor, dtype=float).tolist()
+                ),
+                "max_lattice_points": settings.max_lattice_points,
+                "recombination": recombination_diagnostics,
             }
         )
     if cancellation_check is not None:
