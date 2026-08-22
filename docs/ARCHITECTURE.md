@@ -53,6 +53,9 @@ Mapped preparation stays explicitly on the meshing side:
   mapped-mesh behavior;
 - `triangle_to_quads`, which creates non-degenerate mapped quad patches;
 - `punch_circular_hole`, the historical four-patch butterfly/O-grid helper.
+- `plan_structured_layout` and `apply_structured_layout`, which build and apply
+  a bounded global Sheet/shared-edge block plan on a detached clone, preserve
+  exact seed equations and lineage, and validate an immutable semantic hash.
 
 They live in `anymesher.decomposition`. The old
 `anymesher.geometry.operations` module re-exports them for compatibility and
@@ -82,14 +85,20 @@ look up the same shared edge nodes and reverse traversal order where necessary.
 They therefore share node IDs by construction, without merging coincident
 coordinates after meshing.
 
-This is why shell intersections are fragmented into real shared ANYgeometry
-edges before meshing. ``generate_mesh_with_intersections`` performs the
-qualified imprint on a non-persistent working clone and folds associations
-back to the original face owners. A tolerance-based mesh-node merge can make
-nearly coincident geometry look connected while leaving invalid topology, so
-it is deliberately not used for shell-to-shell connectivity. Zero-offset beam
-nodes are the narrow exception: after beam spans have been split at qualified
-joints, coincident beam/beam or beam/shell stations are merged deterministically.
+Every production hybrid job first creates an immutable structural closure.
+`prepare_structural_closure` declares temporary Sheet/Member owners when the
+source only contains bare faces/beam edges, then uses ANYgeometry's public
+query/plan/apply workflow to imprint qualified plate, member, and member/sheet
+relations. The mesh is generated from that detached closure and exact lineage
+maps every association back to the source handles. A concurrent source edit can
+therefore make the completed mesh stale but cannot change its input.
+
+Positive-area coplanar shell overlap blocks before meshing and must be resolved
+by the explicit geometry-owned Fragment Overlaps command. A tolerance-based
+mesh-node merge can make nearly coincident geometry look connected while
+leaving invalid topology, so it is never part of the production path. The
+deprecated `generate_mesh_with_intersections` implementation remains
+quarantined solely for migration comparisons.
 
 ## Coupling records
 

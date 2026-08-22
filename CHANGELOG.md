@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-08-22
+
+- Add a bounded global structured-layout planner with exact shared-edge seed
+  equations, mapped promotion, planar radial and O-grid partitions, immutable
+  preview/application reports, and deterministic semantic hashes.
+- Enforce the public `quality_v2` policy on the generated mesh. Explicit
+  mapped requests now fail closed; automatic requests may use the recorded
+  native fallback when the structured candidate violates quality or growth
+  limits.
+- Prepare plate/plate, beam/beam, and beam/shell connectivity on a detached
+  geometry clone through ANYgeometry's public query/plan/apply contract.
+  Coplanar positive-area overlaps are blocked until the user runs the explicit
+  Fragment Overlaps geometry operation.
+- Preserve face metadata, parameterization, exact topology lineage, edge seed
+  intent, refinements, structural preparation provenance, and source-bound
+  mesh associations across detached partitioning and meshing.
+- Bound candidate, face, edge, block, and element work; add cooperative
+  cancellation checkpoints; keep GUI, hardware, and long-running tests
+  explicitly opt-in.
+- This is the next public release after 0.2.3. Version 0.2.4 was used only as
+  an internal integration milestone and was not published.
+
 ## 0.2.3 - 2026-08-21
 
 - Replace the native rectangular interior-point grid with a deterministic
