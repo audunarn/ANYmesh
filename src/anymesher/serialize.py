@@ -24,7 +24,38 @@ from .mesh import Coupling, Mesh
 __all__ = ["load_mesh", "mesh_from_dict", "mesh_to_dict", "save_mesh"]
 
 FORMAT = "anymesher.mesh"
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
+
+
+def _json_value(value: Any, path: str) -> Any:
+    """Return deterministic JSON data or fail rather than stringify objects."""
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, (float, np.floating)):
+        made = float(value)
+        if not np.isfinite(made):
+            raise MeshError(f"{path} contains a non-finite number")
+        return made
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, Mapping):
+        made: Dict[str, Any] = {}
+        for key in sorted(value, key=lambda item: str(item)):
+            name = str(key)
+            made[name] = _json_value(value[key], f"{path}.{name}")
+        return made
+    if isinstance(value, (tuple, list)):
+        return [
+            _json_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, np.ndarray):
+        return _json_value(value.tolist(), path)
+    raise MeshError(
+        f"{path} contains unsupported {type(value).__name__}; "
+        "mesh audit data must be JSON-safe"
+    )
 
 
 def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
@@ -84,9 +115,22 @@ def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
             str(k): [[int(value) for value in row] for row in np.asarray(v).tolist()]
             for k, v in sorted(mesh.grid_of_face.items())
         },
+        "block_grids_of_face": {
+            str(face_id): [
+                [[int(value) for value in row] for row in np.asarray(grid).tolist()]
+                for grid in grids
+            ]
+            for face_id, grids in sorted(mesh.block_grids_of_face.items())
+        },
         "thickness_of_face": {
             str(k): float(v) for k, v in sorted(mesh.thickness_of_face.items())
         },
+        "structural_preparation": _json_value(
+            mesh.structural_preparation, "structural_preparation"
+        ),
+        "hybrid_diagnostics": _json_value(
+            mesh.hybrid_diagnostics, "hybrid_diagnostics"
+        ),
     }
 
 
@@ -101,7 +145,7 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
     if data.get("format") != FORMAT:
         raise MeshError(f"not an {FORMAT} document: format={data.get('format')!r}")
     version = int(data.get("version", 0))
-    if version not in (1, FORMAT_VERSION):
+    if version not in (1, 2, FORMAT_VERSION):
         raise MeshError(
             f"unsupported {FORMAT} version {version}; this build reads 1-{FORMAT_VERSION}"
         )
@@ -119,6 +163,15 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
         automatic_intersections=int(data.get("automatic_intersections", 0)),
         automatic_beam_connections=int(data.get("automatic_beam_connections", 0)),
         automatic_shell_connections=int(data.get("automatic_shell_connections", 0)),
+        structural_preparation=dict(
+            _json_value(
+                data.get("structural_preparation", {}),
+                "structural_preparation",
+            )
+        ),
+        hybrid_diagnostics=dict(
+            _json_value(data.get("hybrid_diagnostics", {}), "hybrid_diagnostics")
+        ),
     )
     for node_id, position in data.get("nodes", {}).items():
         mesh.nodes[int(node_id)] = np.asarray(position, dtype=float)
@@ -154,6 +207,10 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
         mesh.activity[int(element_id)] = made
     for face_id, grid in data.get("grid_of_face", {}).items():
         mesh.grid_of_face[int(face_id)] = np.asarray(grid, dtype=int)
+    for face_id, grids in data.get("block_grids_of_face", {}).items():
+        mesh.block_grids_of_face[int(face_id)] = tuple(
+            np.asarray(grid, dtype=int) for grid in grids
+        )
     for face_id, thickness in data.get("thickness_of_face", {}).items():
         mesh.thickness_of_face[int(face_id)] = float(thickness)
 

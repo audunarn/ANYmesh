@@ -15,7 +15,7 @@ six multi-point constraints is the consuming solver's business.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 from uuid import UUID
 
 import numpy as np
@@ -128,6 +128,13 @@ class Mesh:
     offset_nodes_of_edge: Dict[int, List[int]] = field(default_factory=dict)
     couplings: Dict[int, Coupling] = field(default_factory=dict)
     grid_of_face: Dict[int, np.ndarray] = field(default_factory=dict)
+    # A detached structured preparation may replace one persistent design face
+    # with several working faces.  There is then no honest single ``(i, j)``
+    # grid for the source face.  Preserve every actual block grid separately;
+    # consumers that only need scope membership can still use ``nodes_on``.
+    block_grids_of_face: Dict[int, Tuple[np.ndarray, ...]] = field(
+        default_factory=dict
+    )
     elements_of_face: Dict[int, List[int]] = field(default_factory=dict)
     elements_of_edge: Dict[int, List[int]] = field(default_factory=dict)
     elements_of_sheet: Dict[int, List[int]] = field(default_factory=dict)
@@ -152,6 +159,11 @@ class Mesh:
     # Shell boundary nodes tied into the interior of another shell for welded
     # T-junctions which do not require conformal fragmentation.
     automatic_shell_connections: int = 0
+    # JSON-safe audit records.  These are data, not live kernel objects, so a
+    # saved mesh remains independently inspectable after its working geometry
+    # closure has been discarded.
+    structural_preparation: Dict[str, Any] = field(default_factory=dict)
+    hybrid_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_quadratic(self) -> bool:
@@ -221,6 +233,16 @@ class Mesh:
             if grid is not None:
                 # Zeros mark the unused centres of quadratic elements.
                 return sorted({int(n) for n in grid.ravel().tolist() if n})
+            block_grids = self.block_grids_of_face.get(ref.id, ())
+            if block_grids:
+                return sorted(
+                    {
+                        int(node)
+                        for block in block_grids
+                        for node in np.asarray(block).ravel().tolist()
+                        if node
+                    }
+                )
             # An imported or generated mesh has no structured grid behind its
             # groups, so fall back to whatever its elements are made of.
             nodes: set[int] = set()
