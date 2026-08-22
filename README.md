@@ -111,6 +111,60 @@ that field is left empty instead of filled with something plausible.
 Planar boundaries may contain ANYgeometry straight lines, circular arcs or
 Bezier splines; Gmsh receives each as its corresponding exact curve primitive.
 
+### Hybrid strategy: Automatic, Mapped, or Native
+
+`generate_hybrid_mesh_result` is the production shell/beam route. The
+`strategy` argument is explicit and is independent of the lower-level
+triangulator selector:
+
+| `strategy` | Behaviour |
+| --- | --- |
+| `"auto"` | Use mapped blocks where qualified; use native faces for the remainder. With `structured_options`, try the global structured plan first and use the recorded native fallback only when its actual mesh fails `quality_v2`. |
+| `"mapped"` | Require every selected face to become a qualified mapped block. Any unsupported partition or quality violation blocks the mesh. |
+| `"native"` | Require the unstructured face route. It cannot be combined with `structured_options`. |
+
+```python
+result = am.generate_hybrid_mesh_result(
+    model,
+    target_size=0.1,
+    strategy="auto",                 # Automatic
+    structured_options={},           # enable global structured planning
+)
+
+mapped = am.generate_hybrid_mesh(
+    model,
+    target_size=0.1,
+    strategy="mapped",               # fail closed unless all faces map
+    structured_options={},
+)
+
+native = am.generate_hybrid_mesh(
+    model,
+    target_size=0.1,
+    strategy="native",
+    native_backend="auto",           # compiled triangulator, else Python
+)
+```
+
+Every call creates a detached structural closure. On that working copy,
+ANYmesher uses ANYgeometry's exact public intersection query/plan/apply
+workflow to connect crossing plates, beam ends and crossings, and beam/shell
+intersections. The editable source model is unchanged; published mesh
+associations are remapped to its original entity handles. Passing
+`structural_preparation=False` disables automatic relationship creation but
+still uses a detached clone.
+
+Positive-area coplanar plate overlaps are never assigned to one plate
+implicitly. Meshing blocks with a diagnostic directing the user to the
+previewable, undoable **Fragment Overlaps** geometry command.
+
+`plan_structured_layout` and `apply_structured_layout` are public detached
+preview/application APIs. `commit_structured_layout` is feature-gated: it is
+available only when the installed ANYgeometry exposes the exact
+`FeatureHistory.adopt_frozen` contract. The qualified base dependency remains
+ANYgeometry 0.2.2, so ordinary mesh generation never depends on that optional
+feature-history operation.
+
 ### Native triangulation
 
 Mapped/native face selection is separate from the triangulator used after a face
@@ -162,18 +216,11 @@ Out of scope: geometry ownership, elements, materials, assembly and solution.
 General splitting, trimming, projection, transforms and intersections belong to
 ANYgeometry. `check_mappable`, `triangle_to_quads` and the four-patch butterfly
 hole decomposition stay here because they exist specifically for mapped quads.
-The convenience workflow `generate_mesh_with_intersections` reuses
-ANYgeometry's qualified intersection imprint on a temporary clone before
-mapped meshing; it does not introduce a second geometric intersection kernel.
-The same workflow also makes structural beam joints explicit: coincident beam
-ends share a node, a beam ending on or crossing another straight beam splits
-the receiving spans, and beam nodes on a shell use either the coincident shell
-node or an interpolation coupling.  The design geometry remains unwelded and
-all associations are folded back to its original owners.
-At a qualified shell T-junction, boundary nodes of the terminating shell are
-likewise attached to the interior support shell with interpolation records;
-crossing shell interiors still require conformal imprinting and fail closed if
-the topology cannot be qualified.
+The production `generate_hybrid_mesh` workflow uses ANYgeometry's qualified
+intersection operations on an immutable working closure; it does not introduce
+a second geometry kernel or weld nodes by proximity. The older
+`generate_mesh_with_intersections` name remains only as a deprecated migration
+seam for historical models and is never selected automatically.
 The legacy `anymesher.split_face_at`, `split_face_between` and `strip_face`
 imports likewise retain their mapped-partition semantics; new neutral geometry
 code should import the general edit operations from `anygeometry`.

@@ -16,6 +16,8 @@ import pytest
 
 from anymesher import load_mesh, verify_mesh_quality
 
+pytestmark = pytest.mark.gui
+
 pytest.importorskip("tkinter.ttk", reason="the mesher window needs a tkinter build")
 
 

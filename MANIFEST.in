@@ -4,6 +4,7 @@ include CHANGELOG.md
 include MIGRATION.md
 recursive-include docs *.md
 recursive-include tests *.py
+include tools/release_wheel_smoke.py
 include src/anymesher/_native.cpp
 global-exclude __pycache__
 global-exclude *.py[cod]

@@ -213,6 +213,63 @@ def test_pipeline_preflight_is_local_and_connectivity_is_declared_only() -> None
     assert 7 not in {item.beam_node for item in mesh.couplings.values()}
 
 
+def test_pipeline_scope_keeps_whole_active_component_only() -> None:
+    geometry = GeometryModel()
+    active_face, _ = _plate(geometry)
+    unrelated_face, _ = _plate(geometry, (3.0, 0.0, 0.0))
+    active_sheet = geometry.add_sheet((active_face,))
+    unrelated_sheet = geometry.add_sheet((unrelated_face,))
+    member_edge = geometry.add_line(
+        *geometry.add_points(((0.5, 0.5, -1.0), (0.5, 0.5, 1.0)))
+    )
+    connected_member = geometry.add_member((member_edge,))
+    geometry.add_attachment(
+        connected_member,
+        AttachmentKind.MEMBER_THROUGH_FACE,
+        AttachmentTargetKind.FACE,
+        active_face,
+        ParameterRange.point(0.5),
+        (ParameterRange.point(0.5), ParameterRange.point(0.5)),
+    )
+
+    pipeline = StructuralMeshingPipeline(
+        GeometryMeshingView(geometry),
+        overlap_policy=OverlapPolicy.CONNECT_DECLARED,
+        mutation_policy=GeometryMutationPolicy.READ_ONLY,
+        active_sheet_ids=(active_sheet,),
+        active_member_ids=(),
+    )
+
+    assert len(pipeline.components) == 1
+    assert pipeline.components[0].sheet_ids == (active_sheet,)
+    assert pipeline.components[0].member_ids == (connected_member,)
+    assert unrelated_sheet not in pipeline.components[0].sheet_ids
+
+    states = pipeline.preflight(Mesh())
+    assert len(states) == 1
+    assert {issue.code for issue in states[0].issues} == {
+        "unmeshed-face",
+        "unmeshed-member",
+    }
+
+
+def test_pipeline_empty_explicit_scope_selects_no_components() -> None:
+    geometry = GeometryModel()
+    face, _ = _plate(geometry)
+    geometry.add_sheet((face,))
+
+    pipeline = StructuralMeshingPipeline(
+        GeometryMeshingView(geometry),
+        overlap_policy=OverlapPolicy.CONNECT_DECLARED,
+        mutation_policy=GeometryMutationPolicy.READ_ONLY,
+        active_sheet_ids=(),
+        active_member_ids=(),
+    )
+
+    assert pipeline.components == ()
+    assert pipeline.preflight() == ()
+
+
 def test_damage_updates_only_local_sides_and_reuses_bvh() -> None:
     mesh = Mesh()
     mesh.nodes.update(

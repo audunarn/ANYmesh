@@ -269,6 +269,8 @@ class StructuralMeshingPipeline:
         *,
         overlap_policy: OverlapPolicy | str,
         mutation_policy: GeometryMutationPolicy | str,
+        active_sheet_ids: Iterable[int] | None = None,
+        active_member_ids: Iterable[int] | None = None,
     ) -> None:
         if not isinstance(view, GeometryMeshingView):
             raise TypeError("pipeline requires a GeometryMeshingView")
@@ -281,7 +283,30 @@ class StructuralMeshingPipeline:
         except (TypeError, ValueError) as error:
             raise ValueError("an explicit valid mutation policy is required") from error
         self.view = view
-        self.components = build_structural_components(view)
+        components = build_structural_components(view)
+        if active_sheet_ids is not None or active_member_ids is not None:
+            active_sheets = frozenset(
+                int(item) for item in (() if active_sheet_ids is None else active_sheet_ids)
+            )
+            active_members = frozenset(
+                int(item) for item in (() if active_member_ids is None else active_member_ids)
+            )
+            missing_sheets = sorted(active_sheets.difference(view.sheets))
+            if missing_sheets:
+                raise MeshError(f"no sheet {missing_sheets[0]}")
+            missing_members = sorted(active_members.difference(view.members))
+            if missing_members:
+                raise MeshError(f"no structural member {missing_members[0]}")
+            # Selection seeds components; it does not trim them.  Retaining the
+            # whole declared connectivity component ensures an omitted but
+            # connected owner still produces a blocking unmeshed diagnostic.
+            components = tuple(
+                component
+                for component in components
+                if active_sheets.intersection(component.sheet_ids)
+                or active_members.intersection(component.member_ids)
+            )
+        self.components = components
         self.component_map: Mapping[ComponentKey, StructuralComponent] = MappingProxyType(
             {item.key: item for item in self.components}
         )
@@ -591,14 +616,44 @@ class StructuralMeshingPipeline:
                 plate_nodes, weights = hit.node_ids, hit.weights
                 projected = np.asarray(hit.point, dtype=float)
         else:
+            target_face_id = int(attachment.target_id)
+            if attachment.target_kind is AttachmentTargetKind.SHEET:
+                metadata = attachment.metadata.to_dict()
+                face_sequence = tuple(
+                    int(value) for value in metadata.get("face_sequence", ())
+                )
+                if len(face_sequence) != 1:
+                    return None, PreflightIssue(
+                        "ambiguous-sheet-attachment-face",
+                        f"attachment {attachment.id} must identify one exact "
+                        "face in its target sheet",
+                        (("attachment", int(attachment.id)),),
+                    )
+                target_face_id = face_sequence[0]
+                if target_face_id not in self.view.faces_for_sheet(
+                    int(attachment.target_id)
+                ):
+                    return None, PreflightIssue(
+                        "invalid-sheet-attachment-face",
+                        f"attachment {attachment.id} face {target_face_id} is not "
+                        f"in sheet {attachment.target_id}",
+                        (("attachment", int(attachment.id)),),
+                    )
+            elif attachment.target_kind is not AttachmentTargetKind.FACE:
+                return None, PreflightIssue(
+                    "unsupported-attachment-target",
+                    f"attachment {attachment.id} target kind "
+                    f"{attachment.target_kind.value!r} is not a meshed face",
+                    (("attachment", int(attachment.id)),),
+                )
             u = self._mapped_parameter(
                 member_parameter, attachment.member_range, attachment.target_parameters[0]
             )
             v = self._mapped_parameter(
                 member_parameter, attachment.member_range, attachment.target_parameters[1]
             )
-            point = self.view.face_point(attachment.target_id, u, v)
-            allowed = tuple(mesh.elements_of_face.get(attachment.target_id, ()))
+            point = self.view.face_point(target_face_id, u, v)
+            allowed = tuple(mesh.elements_of_face.get(target_face_id, ()))
             face_points = np.asarray(
                 [mesh.nodes[node] for element in allowed for node in mesh.corners_of(element)],
                 dtype=float,

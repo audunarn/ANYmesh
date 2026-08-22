@@ -113,16 +113,8 @@ jobs:
           CIBW_BEFORE_TEST: >-
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
-            python -c "from pathlib import Path; import numpy as np; import anymesher;
-            from anymesher.native_cpp import COMPILED_TRIANGULATION_AVAILABLE;
-            from anymesher.triangulation import constrained_planar_triangulation;
-            assert COMPILED_TRIANGULATION_AVAILABLE;
-            root=Path(r'{project}').resolve(); module=Path(anymesher.__file__).resolve();
-            assert root not in module.parents;
-            points=np.asarray(((0.,0.),(1.,0.),(1.,1.),(0.,1.)),dtype=np.float64);
-            result=constrained_planar_triangulation(points,(0,1,2,3),backend='native');
-            assert result.actual_backend == 'anymesher-cpp17'; assert len(result.triangles)==2;
-            print(anymesher.__version__, module, result.actual_backend)"
+            python {project}/tools/release_wheel_smoke.py
+            --expect-version 0.2.5 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4

@@ -13,23 +13,30 @@ node IDs by construction rather than by coordinate welding.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from anygeometry.entities import OrientedEdge
+from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
+from .core import MeshCore
 from .errors import MeshError
 from .mapped import ELEMENT_ORDERS, generate_mesh as generate_mapped_mesh
 from .mesh import Mesh
 from .meshing_view import GeometryMeshingView
-from .quality_v2 import assert_valid_mesh
+from .prepared import remap_prepared_mesh_associations
+from .preparation import (
+    StructuralPreparationOptions,
+    StructuralPreparationReport,
+    prepare_structural_closure,
+)
+from .quality_v2 import assert_valid_mesh, evaluate_quality
 from .refinement import Refinement, SizeField
 from .seeding import Seeding, edge_distribution, solve_seeding
 from .structural_pipeline import (
@@ -39,6 +46,13 @@ from .structural_pipeline import (
     StructuralMeshingPipeline,
 )
 from .surface_mesh import mesh_planar_surface
+from .structured import (
+    StructuredLayoutReport,
+    StructuredMeshingOptions,
+    apply_structured_layout,
+    plan_structured_layout,
+    regularity_metrics,
+)
 
 __all__ = [
     "CertificationMode",
@@ -77,6 +91,8 @@ class HybridMeshResult:
     audit_report: Any | None
     certification_mode: CertificationMode
     certifiable: bool
+    structured_layout: StructuredLayoutReport | None = None
+    structural_preparation: StructuralPreparationReport | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +160,26 @@ def _active_edges(
         for loop in (face.loop, *face.holes):
             result.update(int(item.edge) for item in loop)
     return tuple(sorted(result))
+
+
+def _active_structural_owners(
+    view: GeometryMeshingView,
+    face_ids: Iterable[int],
+    edge_ids: Iterable[int],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return exact structural owners seeded by the requested topology."""
+
+    sheets = {
+        int(sheet_id)
+        for face_id in face_ids
+        for sheet_id in view.sheets_for_face(int(face_id))
+    }
+    members = {
+        int(member_id)
+        for edge_id in edge_ids
+        for member_id in view.members_using_edge(int(edge_id))
+    }
+    return tuple(sorted(sheets)), tuple(sorted(members))
 
 
 def _mappable(face: Any) -> bool:
@@ -232,6 +268,418 @@ def _ensure_edge_registry(
             node_ids=sequence,
             owner=geometry.handle("edge", edge_id),
         )
+
+
+def _published_boundary_registry(
+    geometry: GeometryModel,
+    mesh: Mesh,
+) -> GlobalEdgeBoundaryRegistry:
+    """Rebuild exact source-edge stations after detached preparation."""
+
+    registry = GlobalEdgeBoundaryRegistry(GeometryMeshingView(geometry))
+    for edge_id, sequence in sorted(mesh.nodes_of_edge.items()):
+        if edge_id not in geometry.edges or not sequence:
+            continue
+        parameters: list[float] = []
+        for node_id in sequence:
+            _point, parameter, distance = geometry.closest_edge_point(
+                edge_id, mesh.nodes[node_id]
+            )
+            length = geometry.edge_length(edge_id)
+            tolerance = max(
+                geometry.tolerance.effective_length(length),
+                128.0 * np.finfo(float).eps * max(length, 1.0),
+            )
+            if distance > tolerance:
+                raise MeshError(
+                    f"published node {node_id} is not on exact source edge "
+                    f"{edge_id} (residual {distance:.6g} m)"
+                )
+            parameters.append(float(parameter))
+        registry.register_many(
+            edge_id,
+            parameters,
+            points=[mesh.nodes[node_id] for node_id in sequence],
+            node_ids=sequence,
+            owner=geometry.handle("edge", edge_id),
+        )
+    return registry
+
+
+def _source_backend_diagnostics(
+    source_to_working_faces: Mapping[int, Sequence[int]],
+    source_strategies: Mapping[int, str],
+    working_diagnostics: Mapping[int, Mapping[str, Any]],
+) -> dict[int, Mapping[str, Any]]:
+    result: dict[int, Mapping[str, Any]] = {}
+    for source_face, descendants in sorted(
+        source_to_working_faces.items()
+    ):
+        records = [
+            dict(working_diagnostics[face_id])
+            for face_id in descendants
+            if face_id in working_diagnostics
+        ]
+        if len(records) == 1:
+            result[source_face] = {
+                **records[0],
+                "structured_action": source_strategies[source_face],
+                "working_face_ids": list(descendants),
+            }
+            continue
+        selected = {str(item.get("actual_backend", "unknown")) for item in records}
+        result[source_face] = {
+            "requested_backend": (
+                records[0].get("requested_backend") if len(records) == 1 else "mapped"
+            ),
+            "selected_backend": (
+                records[0].get("selected_backend") if len(records) == 1 else "mapped"
+            ),
+            "actual_backend": (
+                records[0].get("actual_backend")
+                if len(selected) == 1 and records
+                else ("mapped" if not selected or selected == {"mapped"} else "mixed")
+            ),
+            "fallback_reason": (
+                records[0].get("fallback_reason") if len(records) == 1 else None
+            ),
+            "phase_seconds": {
+                "working_face_total": sum(
+                    float(value)
+                    for record in records
+                    for value in record.get("phase_seconds", {}).values()
+                )
+            },
+            "structured_action": source_strategies[source_face],
+            "working_face_ids": list(descendants),
+            "working_face_diagnostics": records,
+        }
+    return result
+
+
+def _neutral_shell_core(mesh: Mesh) -> MeshCore:
+    node_ids = np.asarray(sorted(mesh.nodes), dtype=np.int64)
+    coordinates = np.asarray([mesh.nodes[int(item)] for item in node_ids], dtype=float)
+    triangle_ids = np.asarray(sorted(mesh.tris), dtype=np.int64)
+    quad_ids = np.asarray(sorted(mesh.quads), dtype=np.int64)
+    triangle_width = 6 if mesh.is_quadratic else 3
+    quad_width = 8 if mesh.is_quadratic else 4
+    triangles = np.asarray(
+        [mesh.tris[int(item)] for item in triangle_ids], dtype=np.int64
+    ).reshape((-1, triangle_width))
+    quadrilaterals = np.asarray(
+        [mesh.quads[int(item)] for item in quad_ids], dtype=np.int64
+    ).reshape((-1, quad_width))
+    return MeshCore.from_id_connectivity(
+        coordinates,
+        node_ids=node_ids,
+        triangles=triangles,
+        quadrilaterals=quadrilaterals,
+        triangle_ids=triangle_ids,
+        quad_ids=quad_ids,
+    )
+
+
+def _element_growth(
+    mesh: Mesh,
+    *,
+    limit: float,
+) -> tuple[float, tuple[tuple[int, int, float], ...]]:
+    characteristic: dict[int, float] = {}
+    incidence: dict[tuple[int, int], list[int]] = {}
+    for element_id in sorted(mesh.shells):
+        corners = mesh.corners_of(element_id)
+        lengths = []
+        for first, second in zip(corners, corners[1:] + corners[:1]):
+            edge = tuple(sorted((int(first), int(second))))
+            lengths.append(
+                float(np.linalg.norm(mesh.nodes[second] - mesh.nodes[first]))
+            )
+            incidence.setdefault(edge, []).append(int(element_id))
+        characteristic[int(element_id)] = float(np.mean(lengths))
+    maximum = 1.0
+    violations: list[tuple[int, int, float]] = []
+    for attached in incidence.values():
+        if len(attached) != 2:
+            continue
+        first, second = attached
+        small = min(characteristic[first], characteristic[second])
+        ratio = (
+            float("inf")
+            if small <= 0.0
+            else max(characteristic[first], characteristic[second]) / small
+        )
+        maximum = max(maximum, ratio)
+        if ratio > limit + 1.0e-14:
+            violations.append((min(first, second), max(first, second), ratio))
+    return maximum, tuple(sorted(violations))
+
+
+def _structured_quality_report(
+    mesh: Mesh,
+    options: StructuredMeshingOptions,
+) -> dict[str, Any]:
+    quality = evaluate_quality(_neutral_shell_core(mesh))
+    policy = options.quality_policy
+    violations: dict[str, int] = {
+        "minimum_scaled_jacobian": 0,
+        "maximum_aspect_ratio": 0,
+        "minimum_angle": 0,
+        "maximum_angle": 0,
+        "maximum_warpage": 0,
+    }
+    poor: set[int] = set()
+    for group in (quality.triangles, quality.quadrilaterals):
+        masks = {
+            "minimum_scaled_jacobian": (
+                group.scaled_jacobian < policy.minimum_scaled_jacobian
+            ),
+            "maximum_aspect_ratio": (
+                group.aspect_ratio > policy.maximum_aspect_ratio
+            ),
+            "minimum_angle": group.minimum_angle < policy.minimum_angle,
+            "maximum_angle": group.maximum_angle > policy.maximum_angle,
+            "maximum_warpage": group.warpage > policy.maximum_warpage,
+        }
+        for name, mask in masks.items():
+            violations[name] += int(np.count_nonzero(mask))
+            poor.update(int(item) for item in group.element_ids[mask])
+    growth, growth_pairs = _element_growth(
+        mesh,
+        limit=options.max_element_growth,
+    )
+    growth_violations = len(growth_pairs)
+    accepted = not any(violations.values()) and growth_violations == 0
+    return {
+        "accepted": accepted,
+        "policy": policy.to_dict(),
+        "violation_counts": violations,
+        "poor_element_ids": sorted(poor),
+        "minimum_scaled_jacobian": quality.minimum_scaled_jacobian,
+        "maximum_aspect_ratio": quality.maximum_aspect_ratio,
+        "minimum_angle": quality.minimum_angle,
+        "maximum_angle": max(
+            (
+                float(np.max(group.maximum_angle))
+                for group in (quality.triangles, quality.quadrilaterals)
+                if len(group)
+            ),
+            default=90.0,
+        ),
+        "maximum_warpage": quality.maximum_warpage,
+        "maximum_adjacent_element_growth": growth,
+        "growth_limit": options.max_element_growth,
+        "growth_violation_count": growth_violations,
+        "growth_violation_pairs": [
+            [first, second, ratio]
+            for first, second, ratio in growth_pairs[:16]
+        ],
+    }
+
+
+def _quality_rejection_message(quality: Mapping[str, Any]) -> str:
+    counts = {
+        str(name): int(value)
+        for name, value in quality.get("violation_counts", {}).items()
+        if int(value)
+    }
+    details = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+    growth = int(quality.get("growth_violation_count", 0))
+    if growth:
+        details = f"{details}, " if details else ""
+        details += f"element_growth={growth}"
+    poor = tuple(int(item) for item in quality.get("poor_element_ids", ())[:16])
+    suffix = f"; poor element IDs {poor}" if poor else ""
+    return f"structured mesh violates quality_v2 ({details or 'unspecified'}){suffix}"
+
+
+def _compose_descendants(
+    first: Mapping[int, Sequence[int]],
+    second: Mapping[int, Sequence[int]],
+) -> dict[int, tuple[int, ...]]:
+    return {
+        int(source): tuple(
+            dict.fromkeys(
+                final
+                for intermediate in intermediates
+                for final in second.get(int(intermediate), (int(intermediate),))
+            )
+        )
+        for source, intermediates in first.items()
+    }
+
+
+def _remap_edge_divisions(
+    source: GeometryModel,
+    working: GeometryModel,
+    source_to_working_edges: Mapping[int, Sequence[int]],
+    overrides: Mapping[int, int] | None,
+) -> dict[int, int] | None:
+    if overrides is None:
+        return None
+    remapped: dict[int, int] = {}
+    for source_edge, raw_requested in sorted(overrides.items()):
+        source_edge = int(source_edge)
+        if source_edge not in source.edges:
+            raise MeshError(f"edge override references missing source edge {source_edge}")
+        requested = int(raw_requested)
+        if isinstance(raw_requested, bool) or requested < 1:
+            raise MeshError(f"edge {source_edge} override must be a positive integer")
+        descendants = tuple(
+            int(item)
+            for item in source_to_working_edges.get(source_edge, (source_edge,))
+        )
+        if len(descendants) == 1:
+            remapped[descendants[0]] = requested
+            continue
+        if requested < len(descendants):
+            raise MeshError(
+                f"edge {source_edge} override requests {requested} total divisions "
+                f"but immutable preparation created {len(descendants)} non-empty "
+                "descendants; increase the explicit total"
+            )
+        lengths = np.asarray(
+            [working.edge_length(item) for item in descendants],
+            dtype=float,
+        )
+        total_length = float(lengths.sum())
+        if total_length <= 0.0:
+            raise MeshError(f"source edge {source_edge} has zero-length descendants")
+        remaining = requested - len(descendants)
+        raw = lengths / total_length * remaining
+        additions = np.floor(raw).astype(int)
+        counts = np.ones(len(descendants), dtype=int) + additions
+        remainder = requested - int(counts.sum())
+        if remainder > 0:
+            order = sorted(
+                range(len(descendants)),
+                key=lambda index: (
+                    -(raw[index] - additions[index]),
+                    descendants[index],
+                ),
+            )
+            for index in order[:remainder]:
+                counts[index] += 1
+        for descendant, count in zip(descendants, counts):
+            previous = remapped.setdefault(descendant, int(count))
+            if previous != int(count):
+                raise MeshError(
+                    f"working edge {descendant} receives conflicting exact overrides"
+                )
+    return remapped
+
+
+def _remap_edge_values(
+    source: GeometryModel,
+    source_to_working_edges: Mapping[int, Sequence[int]],
+    values: Mapping[int, float] | None,
+    *,
+    label: str,
+) -> dict[int, float] | None:
+    if values is None:
+        return None
+    remapped: dict[int, float] = {}
+    for raw_source_edge, raw_value in sorted(values.items()):
+        source_edge = int(raw_source_edge)
+        if source_edge not in source.edges:
+            raise MeshError(f"{label} references missing source edge {source_edge}")
+        value = float(raw_value)
+        if not np.isfinite(value):
+            raise MeshError(f"{label} for edge {source_edge} must be finite")
+        for descendant in source_to_working_edges.get(source_edge, (source_edge,)):
+            descendant = int(descendant)
+            previous = remapped.setdefault(descendant, value)
+            if previous != value:
+                raise MeshError(
+                    f"working edge {descendant} receives conflicting exact {label}"
+                )
+    return remapped
+
+
+def _remap_refinements(
+    working: GeometryModel,
+    source_to_working_faces: Mapping[int, Sequence[int]],
+    source_to_working_edges: Mapping[int, Sequence[int]],
+    refinements: Sequence[Refinement],
+) -> tuple[Refinement, ...]:
+    made: list[Refinement] = []
+    for refinement in refinements:
+        reference = refinement.ref
+        if reference is None:
+            made.append(refinement)
+            continue
+        mapping = (
+            source_to_working_faces
+            if reference.kind == "face"
+            else source_to_working_edges
+            if reference.kind == "edge"
+            else None
+        )
+        descendants = (
+            tuple(mapping.get(reference.id, (reference.id,)))
+            if mapping is not None
+            else (reference.id,)
+        )
+        container = {
+            "vertex": working.vertices,
+            "edge": working.edges,
+            "face": working.faces,
+        }.get(reference.kind)
+        if container is None or any(item not in container for item in descendants):
+            raise MeshError(
+                f"refinement {refinement.name!r} has unresolved {reference.kind} "
+                f"target {reference.id}"
+            )
+        made.extend(
+            replace(refinement, ref=EntityRef(reference.kind, int(item)))
+            for item in descendants
+        )
+    return tuple(made)
+
+
+def _preparation_payload(
+    preparation: StructuralPreparationReport | None,
+    structured: StructuredLayoutReport | None,
+    source_to_working_faces: Mapping[int, Sequence[int]],
+    source_to_working_edges: Mapping[int, Sequence[int]],
+) -> dict[str, Any]:
+    return {
+        "status": (
+            structured.status
+            if structured is not None
+            else (preparation.status if preparation is not None else "not_required")
+        ),
+        "structural_closure": (
+            None if preparation is None else preparation.to_dict()
+        ),
+        "structured_layout": (
+            None if structured is None else structured.to_dict()
+        ),
+        "source_to_working_faces": {
+            str(key): list(values)
+            for key, values in sorted(source_to_working_faces.items())
+        },
+        "source_to_working_edges": {
+            str(key): list(values)
+            for key, values in sorted(source_to_working_edges.items())
+        },
+    }
+
+
+def _stable_diagnostic_record(value: Any) -> Any:
+    """Remove wall-clock samples from persisted reproducibility records."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _stable_diagnostic_record(item)
+            for key, item in value.items()
+            if str(key) != "phase_seconds"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_diagnostic_record(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def _signed_area(points: np.ndarray) -> float:
@@ -534,7 +982,11 @@ def generate_hybrid_mesh_result(
     order: str = "linear",
     recombine: bool = True,
     native_backend: Any = "auto",
-    overlap_policy: OverlapPolicy | str = OverlapPolicy.REJECT,
+    structured_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
+    structural_preparation: (
+        StructuralPreparationOptions | Mapping[str, Any] | bool | None
+    ) = None,
+    overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
     certification_mode: CertificationMode | str = CertificationMode.NONE,
     change_set: Any | None = None,
@@ -547,7 +999,6 @@ def generate_hybrid_mesh_result(
     cooperative, so its latency is bounded by the current uninterrupted phase.
     """
 
-    generation_started = perf_counter()
     phase_seconds: dict[str, float] = {}
     _check_cancellation(cancellation_check, "hybrid generation start")
     target_size = float(target_size)
@@ -566,35 +1017,254 @@ def generate_hybrid_mesh_result(
         mutation_policy, GeometryMutationPolicy, "geometry mutation policy"
     )
 
+    source_geometry = geometry
+    requested_beam_edges = tuple(int(item) for item in beam_edges)
+    requested_member_ids = (
+        None if member_ids is None else tuple(int(item) for item in member_ids)
+    )
+    requested_face_ids = (
+        None if face_ids is None else tuple(int(item) for item in face_ids)
+    )
+    requested_seeding = seeding
+    requested_refinements = tuple(refinements)
+    refinements = requested_refinements
+
     preflight_started = perf_counter()
-    view = GeometryMeshingView(geometry)
-    faces = _face_ids(geometry, face_ids)
-    beams = _member_edges(view, beam_edges, member_ids)
-    if not faces and not beams:
+    source_view = GeometryMeshingView(source_geometry)
+    source_faces = _face_ids(source_geometry, requested_face_ids)
+    source_beams = _member_edges(
+        source_view, requested_beam_edges, requested_member_ids
+    )
+    if not source_faces and not source_beams:
         raise MeshError("nothing to mesh: no faces and no beam edges")
 
+    source_sheets, source_members = _active_structural_owners(
+        source_view, source_faces, source_beams
+    )
+    source_pipeline = StructuralMeshingPipeline(
+        source_view,
+        overlap_policy=overlap_policy,
+        mutation_policy=mutation_policy,
+        active_sheet_ids=source_sheets,
+        active_member_ids=source_members,
+    )
+    source_preflight = tuple(source_pipeline.preflight())
+    blocked = _blocked_preflight(source_preflight)
+    if blocked:
+        detail = "; ".join(str(item) for item in blocked[:5])
+        raise MeshError(f"structural meshing preflight blocked generation: {detail}")
+
+    preparation_started = perf_counter()
+    geometry, preparation_report = prepare_structural_closure(
+        source_geometry,
+        face_ids=source_faces,
+        beam_edges=source_beams,
+        options=structural_preparation,
+        cancellation_check=cancellation_check,
+    )
+    phase_seconds["structural_preparation"] = perf_counter() - preparation_started
+    if preparation_report is None:
+        source_to_prepared_faces = {
+            face_id: (face_id,) for face_id in source_geometry.faces
+        }
+        source_to_prepared_edges = {
+            edge_id: (edge_id,) for edge_id in source_geometry.edges
+        }
+    else:
+        source_to_prepared_faces = dict(
+            preparation_report.source_to_working_faces
+        )
+        source_to_prepared_edges = dict(
+            preparation_report.source_to_working_edges
+        )
+    prepared_faces = tuple(
+        dict.fromkeys(
+            face_id
+            for source_face in source_faces
+            for face_id in source_to_prepared_faces[source_face]
+        )
+    )
+    prepared_beams = tuple(
+        dict.fromkeys(
+            edge_id
+            for source_edge in source_beams
+            for edge_id in source_to_prepared_edges[source_edge]
+        )
+    )
+    prepared_overrides = _remap_edge_divisions(
+        source_geometry,
+        geometry,
+        source_to_prepared_edges,
+        overrides,
+    )
+    if seeding is not None and any(
+        len(source_to_prepared_edges[edge_id]) != 1
+        for edge_id in seeding.divisions
+        if edge_id in source_to_prepared_edges
+    ):
+        raise MeshError(
+            "a precomputed Seeding cannot be reused after immutable structural "
+            "preparation splits a source edge; retain the edge pins and regenerate"
+        )
+
+    structured_report: StructuredLayoutReport | None = None
+    if structured_options is not None and strategy is MeshingStrategy.NATIVE:
+        raise MeshError(
+            "structured_options cannot be combined with strategy='native'; "
+            "choose 'auto' for quality-gated structured fallback or 'mapped' "
+            "to require mapped blocks"
+        )
+    if structured_options is not None and prepared_faces:
+        structured_started = perf_counter()
+        plan = plan_structured_layout(
+            geometry,
+            target_size=target_size,
+            face_ids=prepared_faces,
+            options=structured_options,
+            explicit_seeding=seeding is not None,
+            overrides=prepared_overrides,
+            protected_edge_ids=prepared_beams,
+            cancellation_check=cancellation_check,
+        )
+        if strategy is MeshingStrategy.MAPPED:
+            residual = [item for item in plan.faces if not item.structured]
+            if residual:
+                detail = "; ".join(
+                    f"face {item.source_face_id}: {item.reason}"
+                    for item in residual[:8]
+                )
+                raise MeshError(
+                    "explicit mapped strategy cannot create mapped blocks for "
+                    f"every selected face: {detail}"
+                )
+        geometry, structured_report = apply_structured_layout(
+            geometry,
+            plan,
+            cancellation_check=cancellation_check,
+        )
+        phase_seconds["structured_planning_and_application"] = (
+            perf_counter() - structured_started
+        )
+
+    if structured_report is None:
+        prepared_face_strategies = {
+            face_id: (
+                "mapped"
+                if strategy is MeshingStrategy.MAPPED
+                or (
+                    strategy is MeshingStrategy.AUTO
+                    and _mappable(geometry.faces[face_id])
+                )
+                else "native"
+            )
+            for face_id in prepared_faces
+        }
+        prepared_to_final_faces = {
+            prepared_face: (prepared_face,)
+            for descendants in source_to_prepared_faces.values()
+            for prepared_face in descendants
+        }
+        prepared_to_final_edges = {
+            edge_id: (edge_id,) for edge_id in geometry.edges
+        }
+    else:
+        decisions = {
+            item.source_face_id: item for item in structured_report.plan.faces
+        }
+        prepared_face_strategies = {
+            prepared_face: (
+                "mapped" if decisions[prepared_face].structured else "native"
+            )
+            for prepared_face in prepared_faces
+        }
+        prepared_to_final_faces = dict(
+            structured_report.source_to_working_faces
+        )
+        prepared_to_final_edges = dict(
+            structured_report.source_to_working_edges
+        )
+
+    source_to_final_faces = _compose_descendants(
+        source_to_prepared_faces,
+        prepared_to_final_faces,
+    )
+    source_to_final_edges = _compose_descendants(
+        source_to_prepared_edges,
+        prepared_to_final_edges,
+    )
+    faces = tuple(
+        dict.fromkeys(
+            final_face
+            for source_face in source_faces
+            for final_face in source_to_final_faces[source_face]
+        )
+    )
+    beams = tuple(
+        dict.fromkeys(
+            final_edge
+            for source_edge in source_beams
+            for final_edge in source_to_final_edges[source_edge]
+        )
+    )
+    source_strategies: dict[int, str] = {}
+    for source_face in source_faces:
+        strategies = {
+            prepared_face_strategies[prepared_face]
+            for prepared_face in source_to_prepared_faces[source_face]
+        }
+        source_strategies[source_face] = (
+            next(iter(strategies)) if len(strategies) == 1 else "mixed"
+        )
+    mapped_faces = tuple(
+        final_face
+        for prepared_face in prepared_faces
+        if prepared_face_strategies[prepared_face] == "mapped"
+        for final_face in prepared_to_final_faces[prepared_face]
+    )
+    native_faces = tuple(
+        final_face
+        for prepared_face in prepared_faces
+        if prepared_face_strategies[prepared_face] == "native"
+        for final_face in prepared_to_final_faces[prepared_face]
+    )
+    final_overrides = _remap_edge_divisions(
+        source_geometry,
+        geometry,
+        source_to_final_edges,
+        overrides,
+    )
+    final_beam_offsets = _remap_edge_values(
+        source_geometry,
+        source_to_final_edges,
+        beam_offsets,
+        label="beam offset",
+    )
+    refinements = _remap_refinements(
+        geometry,
+        source_to_final_faces,
+        source_to_final_edges,
+        refinements,
+    )
+
+    view = GeometryMeshingView(geometry)
+    active_sheets, active_members = _active_structural_owners(view, faces, beams)
     pipeline = StructuralMeshingPipeline(
         view,
         overlap_policy=overlap_policy,
         mutation_policy=mutation_policy,
+        active_sheet_ids=active_sheets,
+        active_member_ids=active_members,
     )
     preflight = tuple(pipeline.preflight())
     blocked = _blocked_preflight(preflight)
     if blocked:
         detail = "; ".join(str(item) for item in blocked[:5])
-        raise MeshError(f"structural meshing preflight blocked generation: {detail}")
+        raise MeshError(
+            f"prepared structural meshing preflight blocked generation: {detail}"
+        )
     phase_seconds["geometry_and_preflight"] = perf_counter() - preflight_started
 
-    if strategy is MeshingStrategy.MAPPED:
-        mapped_faces, native_faces = faces, ()
-    elif strategy is MeshingStrategy.NATIVE:
-        mapped_faces, native_faces = (), faces
-    else:
-        mapped_faces = tuple(face_id for face_id in faces if _mappable(geometry.faces[face_id]))
-        native_faces = tuple(face_id for face_id in faces if face_id not in set(mapped_faces))
-
     seeding_started = perf_counter()
-    refinements = tuple(refinements)
     size_field = (
         seeding.size_field
         if seeding is not None and seeding.size_field is not None
@@ -602,10 +1272,19 @@ def generate_hybrid_mesh_result(
     )
     edges = _active_edges(geometry, faces, beams)
     if seeding is None:
+        effective_overrides = dict(final_overrides or {})
+        if structured_report is not None:
+            for edge_id, divisions in structured_report.seed_solution.items():
+                previous = effective_overrides.setdefault(edge_id, divisions)
+                if previous != divisions:
+                    raise MeshError(
+                        f"structured seed solution for edge {edge_id} ({divisions}) "
+                        f"conflicts with explicit override {previous}"
+                    )
         seeding = solve_seeding(
             geometry,
             size_field=size_field,
-            overrides=overrides,
+            overrides=effective_overrides,
             edge_ids=edges,
         )
     phase_seconds["seeding"] = perf_counter() - seeding_started
@@ -617,9 +1296,9 @@ def generate_hybrid_mesh_result(
         mesh = generate_mapped_mesh(
             geometry,
             target_size=target_size,
-            overrides=overrides,
+            overrides=final_overrides,
             beam_edges=beams,
-            beam_offsets=beam_offsets,
+            beam_offsets=final_beam_offsets,
             face_ids=mapped_faces,
             seeding=seeding,
             refinements=refinements,
@@ -692,10 +1371,169 @@ def generate_hybrid_mesh_result(
         change_set=change_set,
         policy=audit_policy,
     )
-    strategies = {
-        face_id: ("mapped" if face_id in set(mapped_faces) else "native")
-        for face_id in faces
+    mapped_working_elements = {
+        int(element_id)
+        for face_id in mapped_faces
+        for element_id in mesh.elements_of_face.get(face_id, ())
     }
+    if preparation_report is not None or structured_report is not None:
+        working_backend_diagnostics = triangulation_backend_by_face
+        remap_prepared_mesh_associations(
+            mesh,
+            source_geometry,
+            geometry,
+            source_to_working_faces=source_to_final_faces,
+            source_to_working_edges=source_to_final_edges,
+        )
+        triangulation_backend_by_face = _source_backend_diagnostics(
+            {
+                face_id: source_to_final_faces[face_id]
+                for face_id in source_faces
+            },
+            source_strategies,
+            working_backend_diagnostics,
+        )
+        boundary_registry = _published_boundary_registry(source_geometry, mesh)
+    if preparation_report is not None:
+        mesh.automatic_intersections = preparation_report.face_connections
+        mesh.automatic_beam_connections = len(connectivity.actions)
+    if structured_report is not None:
+        quality = _structured_quality_report(
+            mesh,
+            structured_report.plan.options,
+        )
+        mapped_elements = {
+            element_id for element_id in mapped_working_elements
+        }
+        metrics = regularity_metrics(
+            mesh,
+            target_size=target_size,
+            minimum_size_ratio=(
+                structured_report.plan.options.minimum_size_ratio
+            ),
+            maximum_size_ratio=(
+                structured_report.plan.options.maximum_size_ratio
+            ),
+            mapped_element_ids=mapped_elements,
+        )
+        structured_report = replace(
+            structured_report,
+            quality=quality,
+            metrics=metrics,
+        )
+        if not quality["accepted"]:
+            message = _quality_rejection_message(quality)
+            if strategy is MeshingStrategy.MAPPED:
+                raise MeshError(
+                    f"explicit mapped strategy rejected: {message}. "
+                    "Relax the documented quality policy only after reviewing "
+                    "the reported stable element IDs."
+                )
+            _check_cancellation(
+                cancellation_check,
+                "structured quality rejected; native fallback start",
+            )
+            fallback = generate_hybrid_mesh_result(
+                source_geometry,
+                target_size=target_size,
+                strategy=MeshingStrategy.AUTO,
+                overrides=overrides,
+                beam_edges=requested_beam_edges,
+                beam_offsets=beam_offsets,
+                member_ids=requested_member_ids,
+                face_ids=requested_face_ids,
+                seeding=requested_seeding,
+                refinements=requested_refinements,
+                order=order,
+                recombine=recombine,
+                native_backend=native_backend,
+                structured_options=None,
+                structural_preparation=structural_preparation,
+                overlap_policy=overlap_policy,
+                mutation_policy=mutation_policy,
+                certification_mode=certification_mode,
+                change_set=change_set,
+                audit_policy=audit_policy,
+                cancellation_check=cancellation_check,
+            )
+            fallback_quality = _structured_quality_report(
+                fallback.mesh,
+                structured_report.plan.options,
+            )
+            if not fallback_quality["accepted"]:
+                fallback_message = _quality_rejection_message(fallback_quality)
+                raise MeshError(
+                    f"{message}; automatic native fallback also rejected: "
+                    f"{fallback_message}"
+                )
+            fallback_metrics = regularity_metrics(
+                fallback.mesh,
+                target_size=target_size,
+                minimum_size_ratio=(
+                    structured_report.plan.options.minimum_size_ratio
+                ),
+                maximum_size_ratio=(
+                    structured_report.plan.options.maximum_size_ratio
+                ),
+                mapped_element_ids=(),
+            )
+            structured_report = replace(
+                structured_report,
+                diagnostics=(*structured_report.diagnostics, message),
+                metrics={
+                    "rejected_candidate": dict(metrics),
+                    "accepted_fallback": fallback_metrics,
+                },
+                quality={
+                    "accepted": True,
+                    "selected_mesh": "native_fallback",
+                    "rejected_candidate": quality,
+                    "accepted_fallback": fallback_quality,
+                },
+                status="rejected_fallback",
+            )
+            fallback_preparation = fallback.structural_preparation
+            fallback_faces = (
+                {
+                    face_id: (face_id,)
+                    for face_id in source_geometry.faces
+                }
+                if fallback_preparation is None
+                else dict(fallback_preparation.source_to_working_faces)
+            )
+            fallback_edges = (
+                {
+                    edge_id: (edge_id,)
+                    for edge_id in source_geometry.edges
+                }
+                if fallback_preparation is None
+                else dict(fallback_preparation.source_to_working_edges)
+            )
+            fallback.mesh.structural_preparation = _preparation_payload(
+                fallback_preparation,
+                structured_report,
+                fallback_faces,
+                fallback_edges,
+            )
+            fallback.mesh.hybrid_diagnostics.update(
+                {
+                    "structured_layout_status": structured_report.status,
+                    "structured_plan_hash": structured_report.plan.plan_hash,
+                    "structured_quality": structured_report.to_dict()["quality"],
+                }
+            )
+            _check_cancellation(
+                cancellation_check,
+                "structured quality fallback accepted",
+            )
+            return replace(fallback, structured_layout=structured_report)
+    mesh.structural_preparation = _preparation_payload(
+        preparation_report,
+        structured_report,
+        source_to_final_faces,
+        source_to_final_edges,
+    )
+    strategies = dict(source_strategies)
     result = HybridMeshResult(
         mesh=mesh,
         strategy_by_face=strategies,
@@ -705,22 +1543,35 @@ def generate_hybrid_mesh_result(
         audit_report=audit_report,
         certification_mode=certification_mode,
         certifiable=certifiable,
+        structured_layout=structured_report,
+        structural_preparation=preparation_report,
     )
     mesh.hybrid_diagnostics = {
         "strategy_by_face": dict(strategies),
         "triangulation_backend_by_face": {
-            int(face_id): dict(values)
+            int(face_id): _stable_diagnostic_record(values)
             for face_id, values in triangulation_backend_by_face.items()
         },
-        "geometry_model_id": str(geometry.model_id),
-        "geometry_revision": int(geometry.revision),
+        "geometry_model_id": str(source_geometry.model_id),
+        "geometry_revision": int(source_geometry.revision),
         "certification_mode": certification_mode.value,
         "certifiable": bool(certifiable),
         "preflight_count": len(preflight),
-        "phase_seconds": {
-            **phase_seconds,
-            "total_generation": perf_counter() - generation_started,
-        },
+        "structured_layout_status": (
+            None if structured_report is None else structured_report.status
+        ),
+        "structured_plan_hash": (
+            None if structured_report is None else structured_report.plan.plan_hash
+        ),
+        "structured_quality": (
+            None if structured_report is None else structured_report.to_dict()["quality"]
+        ),
+        "structural_preparation_hash": (
+            None
+            if preparation_report is None
+            else preparation_report.preparation_hash
+        ),
+        "completed_phases": sorted(phase_seconds),
     }
     mesh.boundary_registry = boundary_registry
     _check_cancellation(cancellation_check, "hybrid generation complete")

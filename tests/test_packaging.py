@@ -47,9 +47,9 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
-def test_release_metadata_is_0_2_3_alpha() -> None:
+def test_release_metadata_is_0_2_5_alpha() -> None:
     project = _pyproject()["project"]
-    assert project["version"] == "0.2.3"
+    assert project["version"] == "0.2.5"
     assert project["requires-python"] == ">=3.11"
     assert "Development Status :: 3 - Alpha" in project["classifiers"]
 
@@ -101,10 +101,8 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry>=0.2.2,<0.3"]
-    assert project["optional-dependencies"]["planar"] == [
-        "ANYgeometry[planar]>=0.2.2,<0.3"
-    ]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.2.2,<0.3"]
+    assert project["optional-dependencies"]["planar"] == []
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
@@ -137,6 +135,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         'python -m pip install -e ".[dev]"'
     ) == 1
     assert 'python -m pip install -e ".[dev,gmsh]"' not in ci
+    assert ci.count("tools/release_wheel_smoke.py") == 1
+    assert ci.count("--expect-version 0.2.5 --require-native") == 1
     assert ci.count("name: Install Ubuntu Gmsh runtime") == 1
     assert ci.count("if: runner.os == 'Linux'") == 1
     assert ci.count("sudo apt-get update") == 1
@@ -157,7 +157,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "skip-existing:" not in publish
     assert "name: pypi" in publish
     assert "url: https://pypi.org/p/ANYmesher" in publish
-    assert "name: ANYmesher-0.2.3-pypi-distributions" in publish
+    assert "name: ANYmesher-0.2.5-pypi-distributions" in publish
     assert "dist/*.whl" in publish
     assert "dist/*.tar.gz" in publish
     assert "permissions:\n  contents: read" in publish
@@ -170,19 +170,19 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
     assert "expected 12 wheels" in publish
     assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
-    assert 'name: ANYmesher-0.2.3-release-bundle' in publish
-    assert 'sdist = root / "anymesher-0.2.3.tar.gz"' in publish
-    assert 'root.glob("anymesher-0.2.3-*.whl")' in publish
-    assert '"version": "0.2.3"' in publish
-    assert "ANYmesher-0.2.3-SHA256SUMS.txt" in publish
-    assert "ANYmesher-0.2.3-release-manifest.json" in publish
+    assert 'name: ANYmesher-0.2.5-release-bundle' in publish
+    assert 'sdist = root / "anymesher-0.2.5.tar.gz"' in publish
+    assert 'root.glob("anymesher-0.2.5-*.whl")' in publish
+    assert '"version": "0.2.5"' in publish
+    assert "ANYmesher-0.2.5-SHA256SUMS.txt" in publish
+    assert "ANYmesher-0.2.5-release-manifest.json" in publish
     assert "python -m twine check --strict dist/*.whl dist/*.tar.gz" in publish
     assert "expected_base_requirements" in publish
     assert "expected one native library" in publish
     assert "RECORD self-row must be blank" in publish
     assert "RECORD integrity mismatch" in publish
-    assert "result.requested_backend,result.selected_backend,result.actual_backend" in publish
-    assert "('native','anymesher-cpp17','anymesher-cpp17',None)" in publish
+    assert publish.count("tools/release_wheel_smoke.py") == 1
+    assert publish.count("--expect-version 0.2.5 --require-native") == 1
 
 @pytest.mark.skipif(
     os.environ.get("ANYMESHER_DISABLE_NATIVE") != "1",

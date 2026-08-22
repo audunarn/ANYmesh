@@ -19,6 +19,7 @@ from anymesher.native import (
     register_native_boundary,
 )
 from anymesher.surface_mesh import SurfaceMeshOptions, mesh_planar_surface
+from anymesher.structural_pipeline import OverlapPolicy
 from anymesher.triangulation import (
     constrained_planar_triangulation,
     triangulate_polygon,
@@ -82,6 +83,12 @@ def test_all_six_public_native_backend_defaults_are_auto(monkeypatch) -> None:
     assert captured == {"target_size": 1.0}
 
 
+def test_hybrid_default_accepts_only_explicitly_declared_overlap_relations() -> None:
+    assert signature(generate_hybrid_mesh_result).parameters[
+        "overlap_policy"
+    ].default is OverlapPolicy.CONNECT_DECLARED
+
+
 def test_omitted_backend_selects_auto_and_records_provenance(
     isolated_native_boundary,
 ) -> None:
@@ -139,10 +146,10 @@ def test_auto_propagates_corrupt_native_boundary_errors(
         constrained_planar_triangulation(SQUARE, OUTER)
 
 
-def test_default_migration_remains_released_in_0_2_3() -> None:
+def test_default_migration_remains_released_in_0_2_5() -> None:
     project = tomllib.loads(
         (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     )
 
-    assert anymesher.__version__ == "0.2.3"
-    assert project["project"]["version"] == "0.2.3"
+    assert anymesher.__version__ == "0.2.5"
+    assert project["project"]["version"] == "0.2.5"

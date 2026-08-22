@@ -76,6 +76,11 @@ from .hybrid import (
     generate_hybrid_mesh_result,
 )
 from .mesh import Coupling, Mesh
+from .preparation import (
+    StructuralPreparationOptions,
+    StructuralPreparationReport,
+    prepare_structural_closure,
+)
 from .charts import (
     ChartProjection,
     FaceChart,
@@ -104,6 +109,21 @@ from .primitives import (
 from .quality import ASPECT_RATIO_LIMIT, WARP_LIMIT, MeshQuality, verify_mesh_quality
 from .refinement import Refinement, SizeField, refine_around, refine_at
 from .seeding import Seeding, SeedingConflict, edge_demand, edge_distribution, solve_seeding
+from .structured import (
+    MeshQualityPolicy,
+    SeedEquation,
+    StructurePreference,
+    StructuredBlock,
+    StructuredFacePlan,
+    StructuredInterface,
+    StructuredLayoutPlan,
+    StructuredLayoutReport,
+    StructuredMeshingOptions,
+    apply_structured_layout,
+    commit_structured_layout,
+    plan_structured_layout,
+    regularity_metrics,
+)
 from .intersections import (
     apply_intersection_mutation,
     generate_mesh_with_intersections,
@@ -113,7 +133,7 @@ from .intersections import (
 from .beam_connections import connect_beam_mesh, connect_shell_boundaries
 from .serialize import load_mesh, mesh_from_dict, mesh_to_dict, save_mesh
 
-__version__ = "0.2.3"
+__version__ = "0.2.5"
 
 __all__ = [
     "ASPECT_RATIO_LIMIT",
@@ -139,6 +159,7 @@ __all__ = [
     "MeshBackend",
     "MeshError",
     "MeshQuality",
+    "MeshQualityPolicy",
     "MetricField",
     "MeshingStrategy",
     "OrientedEdge",
@@ -150,18 +171,29 @@ __all__ = [
     "STIFFENER_EDGE_ID_BASE",
     "Seeding",
     "SeedingConflict",
+    "SeedEquation",
     "SmoothingResult",
     "SizeField",
     "StiffenedPanel",
     "Spline",
     "StiffenerCrossSection",
     "Straight",
+    "StructurePreference",
+    "StructuredBlock",
+    "StructuredFacePlan",
+    "StructuredInterface",
+    "StructuredLayoutPlan",
+    "StructuredLayoutReport",
+    "StructuredMeshingOptions",
     "StructuredShellGrid",
+    "StructuralPreparationOptions",
+    "StructuralPreparationReport",
     "Vertex",
     "WARP_LIMIT",
     "arc_frame",
     "available_backends",
     "apply_intersection_mutation",
+    "apply_structured_layout",
     "beam_mesh",
     "build_structured_shell_grid",
     "chain_breaks",
@@ -169,6 +201,7 @@ __all__ = [
     "check_mappable",
     "connect_beam_mesh",
     "connect_shell_boundaries",
+    "commit_structured_layout",
     "coons_grid",
     "constrained_smoothing",
     "edge_demand",
@@ -187,9 +220,12 @@ __all__ = [
     "panel_edge_nodes",
     "punch_circular_hole",
     "plan_intersection_mutation",
+    "plan_structured_layout",
+    "prepare_structural_closure",
     "refine_around",
     "refine_at",
     "resolve_backend",
+    "regularity_metrics",
     "sample_chain",
     "save_mesh",
     "shape_functions_4node",
