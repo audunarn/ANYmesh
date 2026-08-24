@@ -264,15 +264,35 @@ def _selected_descendant_faces(
     )
 
 
-def _share_boundary(geometry: GeometryModel, first: int, second: int) -> bool:
-    """Whether two faces already share authoritative boundary topology.
+def _face_boundary_vertices(geometry: GeometryModel, face_id: int) -> set[int]:
+    face = geometry.faces[face_id]
+    return {
+        vertex
+        for loop in (face.loop,) + face.holes
+        for item in loop
+        for vertex in (
+            geometry.oriented_start_vertex(item),
+            geometry.oriented_end_vertex(item),
+        )
+    }
 
-    A common edge is the usual structural connection.  A common vertex is
-    also already-resolved topology and needs no geometric imprint: grids with
-    four mapped patches meeting at one corner necessarily contain diagonal
-    face pairs that touch at that vertex only.  Sending those pairs through
-    the geometric intersection planner misclassifies the legitimate grid
-    corner as an unqualified free point touch.
+
+def _shared_boundary_vertices(
+    geometry: GeometryModel, first: int, second: int
+) -> set[int]:
+    return _face_boundary_vertices(geometry, first).intersection(
+        _face_boundary_vertices(geometry, second)
+    )
+
+
+def _share_boundary(geometry: GeometryModel, first: int, second: int) -> bool:
+    """Whether two faces already share an authoritative boundary edge.
+
+    A common edge is a complete structural connection.  A common vertex alone
+    is not sufficient: two faces may meet at that vertex *and* intersect
+    elsewhere.  Vertex-only pairs therefore still pass through the qualified
+    geometric predicate and are suppressed only when its complete result is
+    the already-shared point.
     """
 
     first_loops = (geometry.faces[first].loop,) + geometry.faces[first].holes
@@ -284,23 +304,34 @@ def _share_boundary(geometry: GeometryModel, first: int, second: int) -> bool:
     }
     if any(item.edge in first_edges for loop in second_loops for item in loop):
         return True
-    first_vertices = {
-        vertex
-        for loop in first_loops
-        for item in loop
-        for vertex in (
-            geometry.oriented_start_vertex(item),
-            geometry.oriented_end_vertex(item),
-        )
-    }
+    return False
+
+
+def _is_resolved_shared_vertex_touch(
+    geometry: GeometryModel,
+    first: int,
+    second: int,
+    result: Any,
+) -> bool:
+    """Whether the complete predicate result is one existing shared vertex."""
+
+    shared = _shared_boundary_vertices(geometry, first, second)
+    if (
+        not shared
+        or result.kind is not IntersectionKind.TOUCH_POINT
+        or len(result.components) != 1
+        or len(result.components[0].witnesses) != 1
+    ):
+        return False
+    witness = np.asarray(result.components[0].witnesses[0], dtype=float)
+    tolerance = max(
+        float(result.tolerance_used or 0.0),
+        64.0 * np.finfo(float).eps * max(1.0, float(np.linalg.norm(witness))),
+    )
     return any(
-        vertex in first_vertices
-        for loop in second_loops
-        for item in loop
-        for vertex in (
-            geometry.oriented_start_vertex(item),
-            geometry.oriented_end_vertex(item),
-        )
+        float(np.linalg.norm(witness - geometry.vertices[vertex].position))
+        <= tolerance
+        for vertex in shared
     )
 
 
@@ -484,6 +515,14 @@ def _apply_connection(
         result = query_intersection(geometry, first, second)
         if result.kind is IntersectionKind.DISJOINT:
             return False, None
+        if (
+            first_kind == "face"
+            and second_kind == "face"
+            and _is_resolved_shared_vertex_touch(
+                geometry, first_id, second_id, result
+            )
+        ):
+            return False, "exact shared vertex topology"
         plan = plan_imprint(
             geometry,
             result,

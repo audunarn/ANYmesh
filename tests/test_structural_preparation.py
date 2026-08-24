@@ -89,6 +89,39 @@ def test_diagonal_grid_faces_sharing_one_vertex_need_no_imprint() -> None:
     assert working.validate_topology() == ()
 
 
+def test_shared_vertex_does_not_hide_additional_face_intersection() -> None:
+    geometry = GeometryModel()
+    shared = geometry.add_point(-1.0, -1.0, 0.0)
+    first = geometry.add_plate(
+        (
+            shared,
+            geometry.add_point(1.0, -1.0, 0.0),
+            geometry.add_point(1.0, 1.0, 0.0),
+            geometry.add_point(-1.0, 1.0, 0.0),
+        )
+    )
+    second = geometry.add_plate(
+        (
+            shared,
+            geometry.add_point(1.0, 1.0, -1.0),
+            geometry.add_point(1.0, 1.0, 1.0),
+            geometry.add_point(-1.0, -1.0, 1.0),
+        )
+    )
+
+    working, report = prepare_structural_closure(
+        geometry,
+        face_ids=(first, second),
+    )
+
+    assert report is not None
+    assert report.candidate_queries == 1
+    assert report.face_connections == 1
+    assert report.applications == 1
+    assert len(working.faces) == 4
+    assert working.validate_topology() == ()
+
+
 def test_crossing_members_create_declared_junction_without_source_mutation() -> None:
     geometry = GeometryModel()
     first_points = geometry.add_points(((-1, 0, 0), (1, 0, 0)))
