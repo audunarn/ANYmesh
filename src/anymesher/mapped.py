@@ -248,11 +248,24 @@ def _refuse_curved_beams(
         )
 
 
-def nodal_normals(mesh: Mesh) -> Dict[int, np.ndarray]:
-    """A unit normal at every node, averaged over the plates meeting it."""
+def nodal_normals(
+    mesh: Mesh,
+    *,
+    element_owner_normals: Mapping[int, Sequence[float]] | None = None,
+    include_triangles: bool | None = None,
+) -> Dict[int, np.ndarray]:
+    """A unit normal at every shell node, averaged over its incident plates.
+
+    Triangle contributions are opt-in during the additive S3 release. Passing
+    authoritative owner normals enables them by default; callers may also set
+    ``include_triangles=True`` explicitly. The legacy no-argument call keeps
+    its historical quadrilateral-only behavior.
+    """
 
     accumulated: Dict[int, np.ndarray] = {}
-    for element_id, nodes in mesh.quads.items():
+    owners = {} if element_owner_normals is None else element_owner_normals
+    use_triangles = bool(owners) if include_triangles is None else bool(include_triangles)
+    for element_id, nodes in mesh.shells.items():
         # The diagonals come from the corners; a mid-side node would not
         # describe the element's plane. But every node of the element,
         # mid-sides included, gets the normal -- an eccentric stiffener on a
@@ -260,11 +273,31 @@ def nodal_normals(mesh: Mesh) -> Dict[int, np.ndarray]:
         corners = np.array(
             [mesh.nodes[node] for node in mesh.corners_of(element_id)]
         )
-        normal = np.cross(corners[2] - corners[0], corners[3] - corners[1])
+        if len(corners) == 3:
+            if not use_triangles:
+                continue
+            normal = np.cross(corners[1] - corners[0], corners[2] - corners[0])
+        else:
+            normal = np.cross(corners[2] - corners[0], corners[3] - corners[1])
         length = float(np.linalg.norm(normal))
         if length <= 0.0:
             continue
         normal = normal / length
+        owner = owners.get(int(element_id))
+        if owner is not None:
+            made_owner = np.asarray(owner, dtype=float)
+            owner_length = float(np.linalg.norm(made_owner))
+            if made_owner.shape != (3,) or not np.all(np.isfinite(made_owner)) or owner_length <= 0.0:
+                raise MeshError(
+                    f"shell element {int(element_id)} owner normal must be a finite nonzero three-vector"
+                )
+            alignment = float(np.dot(normal, made_owner / owner_length))
+            if abs(alignment) <= 1.0e-8:
+                raise MeshError(
+                    f"shell element {int(element_id)} owner normal is ambiguous or tangential"
+                )
+            if alignment < 0.0:
+                normal = -normal
         for node in nodes:
             accumulated[node] = accumulated.get(node, np.zeros(3)) + normal
 
