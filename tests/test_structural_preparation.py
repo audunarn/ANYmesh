@@ -57,6 +57,38 @@ def test_crossing_faces_prepare_on_clone_with_exact_lineage() -> None:
     assert len(shared) == 1
 
 
+def test_diagonal_grid_faces_sharing_one_vertex_need_no_imprint() -> None:
+    geometry = GeometryModel()
+    shared = geometry.add_point(0.0, 0.0, 0.0)
+    first = geometry.add_plate(
+        (
+            geometry.add_point(-1.0, -1.0, 0.0),
+            geometry.add_point(0.0, -1.0, 0.0),
+            shared,
+            geometry.add_point(-1.0, 0.0, 0.0),
+        )
+    )
+    second = geometry.add_plate(
+        (
+            shared,
+            geometry.add_point(1.0, 0.0, 0.0),
+            geometry.add_point(1.0, 1.0, 0.0),
+            geometry.add_point(0.0, 1.0, 0.0),
+        )
+    )
+
+    working, report = prepare_structural_closure(
+        geometry,
+        face_ids=(first, second),
+    )
+
+    assert report is not None
+    assert report.face_connections == 0
+    assert report.applications == 0
+    assert len(working.faces) == 2
+    assert working.validate_topology() == ()
+
+
 def test_crossing_members_create_declared_junction_without_source_mutation() -> None:
     geometry = GeometryModel()
     first_points = geometry.add_points(((-1, 0, 0), (1, 0, 0)))

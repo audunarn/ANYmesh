@@ -367,6 +367,27 @@ def test_rejected_divider_fit_does_not_publish_temporary_entities() -> None:
     assert model.replacement_history() == {}
 
 
+def test_split_face_at_rolls_back_boundary_splits_when_divider_fit_fails(
+    monkeypatch,
+) -> None:
+    model, face, points, edges = _rectangle(2.0, 1.0)
+    before_vertices = set(model.vertices)
+    before_edges = set(model.edges)
+    before_faces = set(model.faces)
+
+    def rejected(*_args, **_kwargs):
+        raise GeometryError("synthetic divider rejection")
+
+    monkeypatch.setattr(decomposition, "_fit_dividing_edge", rejected)
+    with pytest.raises(GeometryError, match="synthetic divider rejection"):
+        split_face_at(model, face, axis=0, fraction=0.4)
+
+    assert set(model.vertices) == before_vertices == set(points)
+    assert set(model.edges) == before_edges == set(edges)
+    assert set(model.faces) == before_faces == {face}
+    assert model.validate_topology() == ()
+
+
 def test_stripping_a_face_produces_the_requested_number_of_bands() -> None:
     model, face, _points, _edges = _rectangle(4.0, 1.0)
     strips, dividers = strip_face(model, face, 0, 4)

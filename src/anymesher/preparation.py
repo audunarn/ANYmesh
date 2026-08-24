@@ -265,15 +265,42 @@ def _selected_descendant_faces(
 
 
 def _share_boundary(geometry: GeometryModel, first: int, second: int) -> bool:
+    """Whether two faces already share authoritative boundary topology.
+
+    A common edge is the usual structural connection.  A common vertex is
+    also already-resolved topology and needs no geometric imprint: grids with
+    four mapped patches meeting at one corner necessarily contain diagonal
+    face pairs that touch at that vertex only.  Sending those pairs through
+    the geometric intersection planner misclassifies the legitimate grid
+    corner as an unqualified free point touch.
+    """
+
+    first_loops = (geometry.faces[first].loop,) + geometry.faces[first].holes
+    second_loops = (geometry.faces[second].loop,) + geometry.faces[second].holes
     first_edges = {
         item.edge
-        for loop in (geometry.faces[first].loop,) + geometry.faces[first].holes
+        for loop in first_loops
         for item in loop
     }
-    return any(
-        item.edge in first_edges
-        for loop in (geometry.faces[second].loop,) + geometry.faces[second].holes
+    if any(item.edge in first_edges for loop in second_loops for item in loop):
+        return True
+    first_vertices = {
+        vertex
+        for loop in first_loops
         for item in loop
+        for vertex in (
+            geometry.oriented_start_vertex(item),
+            geometry.oriented_end_vertex(item),
+        )
+    }
+    return any(
+        vertex in first_vertices
+        for loop in second_loops
+        for item in loop
+        for vertex in (
+            geometry.oriented_start_vertex(item),
+            geometry.oriented_end_vertex(item),
+        )
     )
 
 
