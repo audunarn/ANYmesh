@@ -101,7 +101,7 @@ def check_mappable(geometry: GeometryModel, face_id: int) -> MappabilityReport:
     )
 
 
-def split_face_between(
+def _split_face_between_impl(
     geometry: GeometryModel,
     face_id: int,
     start_vertex: int,
@@ -145,22 +145,55 @@ def split_face_between(
     # old -> descendants.
     geometry.remove_face(face_id, record=False)
 
-    first_face = geometry.add_face(
-        [item.edge for item in first_loop] + [dividing_edge]
+    first_oriented = tuple(first_loop) + (OrientedEdge(dividing_edge, False),)
+    second_oriented = tuple(second_loop) + (OrientedEdge(dividing_edge, True),)
+    first_corners = (
+        geometry._detect_corners(first_oriented)  # noqa: SLF001
+        if len(first_oriented) >= 4
+        else None
     )
-    second_face = geometry.add_face(
-        [item.edge for item in second_loop] + [dividing_edge]
+    second_corners = (
+        geometry._detect_corners(second_oriented)  # noqa: SLF001
+        if len(second_oriented) >= 4
+        else None
     )
+    first_face = geometry.add_face_from_loop(first_oriented, first_corners)
+    second_face = geometry.add_face_from_loop(second_oriented, second_corners)
     for made in (first_face, second_face):
         geometry.set_face_metadata(made, metadata)
     geometry.record_replacement(
         EntityRef("face", face_id),
         (EntityRef("face", first_face), EntityRef("face", second_face)),
     )
+    errors = geometry.validate_topology()
+    if errors:
+        raise GeometryError(
+            "mapped-face split produced invalid topology: " + "; ".join(errors)
+        )
     return dividing_edge, (first_face, second_face)
 
 
-def split_face_at(
+def split_face_between(
+    geometry: GeometryModel,
+    face_id: int,
+    start_vertex: int,
+    end_vertex: int,
+    *,
+    tolerance: float = SURFACE_TOLERANCE,
+) -> Tuple[int, Tuple[int, int]]:
+    """Atomically partition a mapped face between opposite-side vertices."""
+
+    with geometry.transaction():
+        return _split_face_between_impl(
+            geometry,
+            face_id,
+            start_vertex,
+            end_vertex,
+            tolerance=tolerance,
+        )
+
+
+def _split_face_at_impl(
     geometry: GeometryModel,
     face_id: int,
     axis: int,
@@ -188,9 +221,29 @@ def split_face_at(
     end_vertex = _split_side_at(
         geometry, face_id, axis + 2, 1.0 - float(fraction)
     )
-    return split_face_between(
+    return _split_face_between_impl(
         geometry, face_id, start_vertex, end_vertex, tolerance=tolerance
     )
+
+
+def split_face_at(
+    geometry: GeometryModel,
+    face_id: int,
+    axis: int,
+    fraction: float,
+    *,
+    tolerance: float = SURFACE_TOLERANCE,
+) -> Tuple[int, Tuple[int, int]]:
+    """Atomically partition a mapped face across one parameter direction."""
+
+    with geometry.transaction():
+        return _split_face_at_impl(
+            geometry,
+            face_id,
+            axis,
+            fraction,
+            tolerance=tolerance,
+        )
 
 
 def _split_side_at(
