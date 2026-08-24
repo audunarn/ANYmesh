@@ -103,8 +103,8 @@ def test_shared_vertex_does_not_hide_additional_face_intersection() -> None:
     second = geometry.add_plate(
         (
             shared,
-            geometry.add_point(1.0, 1.0, -1.0),
-            geometry.add_point(1.0, 1.0, 1.0),
+            geometry.add_point(1.0, 0.0, 0.0),
+            geometry.add_point(1.0, 0.0, 1.0),
             geometry.add_point(-1.0, -1.0, 1.0),
         )
     )
@@ -118,7 +118,7 @@ def test_shared_vertex_does_not_hide_additional_face_intersection() -> None:
     assert report.candidate_queries == 1
     assert report.face_connections == 1
     assert report.applications == 1
-    assert len(working.faces) == 4
+    assert len(working.faces) == 3
     assert working.validate_topology() == ()
 
 
