@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.6 - 2026-08-25
+
+- Qualify the native hybrid mesher against ANYgeometry 0.4.0 while preserving
+  model identity, revision, stable associations, and the detached structural
+  preparation boundary.
+- Pin qualification to the published ANYgeometry 0.4.0 commit.
+
 ## 0.2.5 - 2026-08-22
 
 - Add a bounded global structured-layout planner with exact shared-edge seed

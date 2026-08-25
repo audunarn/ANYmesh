@@ -147,7 +147,7 @@ native = am.generate_hybrid_mesh(
 ```
 
 Every call creates a detached structural closure. On that working copy,
-ANYmesher uses ANYgeometry's exact public intersection query/plan/apply
+ANYmesher 0.2.6 is qualified against ANYgeometry 0.4.0 and uses ANYgeometry's exact public intersection query/plan/apply
 workflow to connect crossing plates, beam ends and crossings, and beam/shell
 intersections. The editable source model is unchanged; published mesh
 associations are remapped to its original entity handles. Passing

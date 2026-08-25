@@ -151,5 +151,5 @@ def test_default_migration_remains_released_in_0_2_5() -> None:
         (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     )
 
-    assert anymesher.__version__ == "0.2.5"
-    assert project["project"]["version"] == "0.2.5"
+    assert anymesher.__version__ == "0.2.6"
+    assert project["project"]["version"] == "0.2.6"
