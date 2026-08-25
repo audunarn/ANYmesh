@@ -7,7 +7,7 @@ import anymesher as am
 from anygeometry.generators import plate
 
 
-def test_anygeometry_0_3_hybrid_mesh_preserves_source_identity() -> None:
+def test_anygeometry_0_4_hybrid_mesh_preserves_source_identity() -> None:
     geometry = plate(2.0, 1.0, semantic_group="qualification_plate")
     source_id = geometry.model_id
     source_revision = geometry.revision
@@ -22,7 +22,7 @@ def test_anygeometry_0_3_hybrid_mesh_preserves_source_identity() -> None:
     )
     mesh = result.mesh
 
-    assert ag.__version__.startswith("0.3.")
+    assert ag.__version__.startswith("0.4.")
     assert str(mesh.geometry_model_id) == str(source_id)
     assert mesh.geometry_revision == source_revision
     assert geometry.revision == source_revision
