@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 273e03053255fd4a84b0177a5877259a44e603e0
+          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -28,7 +28,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev,planar]"
-      - run: python -c "import anymesher; print(anymesher.__version__)"
+      - run: python -c "import anygeometry, anymesher; print(anygeometry.__version__, anymesher.__version__)"
       - run: python -m pytest
 
   native-absent:
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 273e03053255fd4a84b0177a5877259a44e603e0
+          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -54,9 +54,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_packaging.py::test_disabled_native_build_is_absence_only -q
-  # The gmsh backend is optional, so the suite has to pass both with and
-  # without it.  Without this job the only configuration ever tested is the one
-  # where every backend is present.
+
   gmsh:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -70,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 273e03053255fd4a84b0177a5877259a44e603e0
+          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -88,9 +86,6 @@ jobs:
       - run: python -c "import gmsh"
       - run: python -m pytest
 
-  # Build the compiled extension as distributable wheels on every supported
-  # desktop platform.  The installed-wheel smoke below proves both clean
-  # import and the compiled constrained-triangulation capability.
   wheel:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -102,7 +97,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 273e03053255fd4a84b0177a5877259a44e603e0
+          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -114,7 +109,7 @@ jobs:
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
-            --expect-version 0.2.5 --require-native
+            --expect-version 0.2.6 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4
