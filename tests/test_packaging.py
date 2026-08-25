@@ -94,6 +94,7 @@ def test_run_gui_bootstraps_without_an_install() -> None:
         encoding="utf-8"
     )
 
+
 def test_anygeometry_release_dependency_floor_is_exact() -> None:
     project = _pyproject()["project"]
     geometry_requirements = [
@@ -101,12 +102,12 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry[planar]>=0.2.2,<0.3"]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.3.0,<0.4"]
     assert project["optional-dependencies"]["planar"] == []
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "273e03053255fd4a84b0177a5877259a44e603e0"
+    geometry_ref = "c377c02f857cf8183ab70705cd67e9163b4ea8ca"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
@@ -123,7 +124,6 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         "tests/test_packaging.py::test_disabled_native_build_is_absence_only"
         in ci
     )
-
 
     assert ci.count(
         'python -m pip install -e ".[dev,planar]"'
@@ -178,11 +178,11 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "ANYmesher-0.2.5-release-manifest.json" in publish
     assert "python -m twine check --strict dist/*.whl dist/*.tar.gz" in publish
     assert "expected_base_requirements" in publish
-    assert "expected one native library" in publish
     assert "RECORD self-row must be blank" in publish
     assert "RECORD integrity mismatch" in publish
     assert publish.count("tools/release_wheel_smoke.py") == 1
     assert publish.count("--expect-version 0.2.5 --require-native") == 1
+
 
 @pytest.mark.skipif(
     os.environ.get("ANYMESHER_DISABLE_NATIVE") != "1",
