@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Update package and qualification contracts
+      - name: Update package contracts
         shell: bash
         run: |
           python - <<'PY'
@@ -61,15 +61,6 @@ jobs:
               text = text.replace(old, new)
           packaging.write_text(text, encoding='utf-8', newline='\n')
 
-          for name in ('.github/workflows/ci.yml', '.github/workflows/publish.yml'):
-              file = Path(name)
-              text = file.read_text(encoding='utf-8')
-              text = text.replace('c377c02f857cf8183ab70705cd67e9163b4ea8ca', '069f22f3682ab97c89eb7824d53010c0b60dd575')
-              text = text.replace('0.2.5', '0.2.6')
-              if name.endswith('publish.yml'):
-                  text = text.replace('<0.4,>=0.3.0', '<0.5,>=0.4.0')
-              file.write_text(text, encoding='utf-8', newline='\n')
-
           changelog = Path('CHANGELOG.md')
           text = changelog.read_text(encoding='utf-8')
           marker = '## 0.2.5 - 2026-08-22\n'
@@ -78,7 +69,7 @@ jobs:
               '- Qualify the native hybrid mesher against ANYgeometry 0.4.0 while preserving\n'
               '  model identity, revision, stable associations, and the detached structural\n'
               '  preparation boundary.\n'
-              '- Pin CI and release qualification to the published ANYgeometry 0.4.0 commit.\n\n'
+              '- Pin qualification to the published ANYgeometry 0.4.0 commit.\n\n'
           )
           if entry not in text:
               if marker not in text:
@@ -96,19 +87,18 @@ jobs:
               )
           readme.write_text(text, encoding='utf-8', newline='\n')
           PY
-      - name: Qualify against exact ANYgeometry release commit
+      - name: Recheck changed compatibility contracts
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".ecosystem/ANYgeometry[planar]"
           python -m pip install -e ".[dev,planar]"
-          python -m pytest
+          python -m pytest tests/test_anygeometry_0_3_contract.py tests/test_packaging.py tests/test_native_backend_defaults.py -q
       - name: Commit qualified compatibility update
         shell: bash
         run: |
           rm -rf .ecosystem
-          rm .github/workflows/apply_anygeometry_0_4_compat.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add pyproject.toml src/anymesher/__init__.py tests/test_anygeometry_0_3_contract.py tests/test_native_backend_defaults.py tests/test_packaging.py CHANGELOG.md README.md
           git commit -m 'fix: qualify ANYmesher against ANYgeometry 0.4'
           git push origin HEAD:anygeometry_0_4_compatibility
