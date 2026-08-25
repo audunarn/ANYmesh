@@ -62,6 +62,21 @@ anymesher panel --length 4 --width 3 --thickness 0.012 --height 0.3 --web-thickn
 `panel`, `plate`, `beam`, `quality` and `backends`, each with `--json`.
 `--output` writes the mesh as JSON.
 
+### Provider-neutral automation
+
+`anymesher automation --geometry model.json` starts a JSON Lines session for
+LLMs and agent frameworks. The core accepts strict structured tools only; it has
+no model SDK, prompt parser, credentials, network access, or arbitrary shell or
+filesystem command. Discover the exact schemas with `mesh_capabilities`, plan a
+revision-bound batch with `plan_mesh`, inspect the detached candidate, and
+publish it exactly once with `apply_mesh`.
+
+Qualified commands configure meshing, select geometry scope, pin edge divisions,
+manage named refinements, generate, undo, and redo. Direct node/element mutation
+is intentionally unavailable because it would invalidate topology associations
+and deterministic numbering. Geometry edits remain in ANYgeometry's own
+automation protocol.
+
 `anymesher-gui` opens the mesher: enter a panel, plate or beam, watch it re-mesh
 as you type, read the quality report, and save the result. It is deliberately not
 a geometry editor — building a BRep interactively is an application's job, and

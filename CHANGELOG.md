@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-25
+
+- Add a provider-neutral, strict JSON mesh command protocol with capability
+  discovery, geometry selection, bounded mesh queries, revision-bound planning,
+  atomic candidate publication, and typed failures.
+- Add qualified commands for mesh controls, scope, edge divisions, local
+  refinement, generation, and bounded in-memory undo/redo without exposing raw
+  node or element mutation.
+- Add a long-lived `anymesher automation` JSON Lines transport. Natural-language
+  interpretation, model clients, credentials, network access, and filesystem
+  paths remain outside command payloads.
+- Require ANYgeometry 0.4 for its provider-neutral quantities, selectors,
+  canonical entity handles, errors, and automation protocol primitives.
+
 ## 0.2.5 - 2026-08-22
 
 - Add a bounded global structured-layout planner with exact shared-edge seed
