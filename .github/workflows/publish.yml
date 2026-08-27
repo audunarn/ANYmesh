@@ -130,7 +130,7 @@ jobs:
 
           expected_base_requirements = {
               ("numpy", ">=1.26", ()),
-              ("anygeometry", "<0.5,>=0.4", ("planar",)),
+              ("anygeometry", "<0.5,>=0.4.1", ("planar",)),
           }
           for wheel in wheels:
               with zipfile.ZipFile(wheel) as archive:
