@@ -373,6 +373,14 @@ def _candidate_bisection(
         return None, None, None, 0, "edge incidence is missing or non-manifold"
     if any(kind != "tri" or element_id not in selected for kind, element_id in incidence):
         return None, None, None, 0, "edge touches an unselected shell; bisection would be nonconforming"
+    if _edge_is_geometry_bound(mesh, edge):
+        return (
+            None,
+            None,
+            None,
+            0,
+            "geometry-bound shell edges require authoritative curve refinement",
+        )
     incident_ids = tuple(sorted(element_id for _, element_id in incidence))
     if incident_ids != attached_ids:
         return None, None, None, 0, "edge incidence changed during deterministic repair"

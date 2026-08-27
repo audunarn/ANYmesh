@@ -38,6 +38,7 @@ from .preparation import (
 )
 from .quality_v2 import assert_valid_mesh, evaluate_quality
 from .refinement import Refinement, SizeField
+from .s3_production import prepare_qualified_s3_mesh
 from .seeding import Seeding, edge_distribution, solve_seeding
 from .structural_pipeline import (
     GeometryMutationPolicy,
@@ -1031,6 +1032,7 @@ def generate_hybrid_mesh_result(
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
     ) = None,
+    qualified_s3: bool = False,
     overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
     certification_mode: CertificationMode | str = CertificationMode.NONE,
@@ -1061,6 +1063,8 @@ def generate_hybrid_mesh_result(
     mutation_policy = _enum_value(
         mutation_policy, GeometryMutationPolicy, "geometry mutation policy"
     )
+    if type(qualified_s3) is not bool:
+        raise MeshError("qualified_s3 must be Boolean")
 
     source_geometry = geometry
     requested_beam_edges = tuple(int(item) for item in beam_edges)
@@ -1403,6 +1407,26 @@ def generate_hybrid_mesh_result(
         }
         mesh.elements_of_sheet[int(sheet_id)] = sorted(element_ids)
 
+    qualified_s3_record: dict[str, Any] | None = None
+    if qualified_s3:
+        qualified_s3_started = perf_counter()
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation start"
+        )
+        mesh, qualified_s3_record = prepare_qualified_s3_mesh(mesh, geometry)
+        qualified_s3_record["authority_model"].update(
+            {
+                "source_model_id": str(source_geometry.model_id),
+                "source_revision": int(source_geometry.revision),
+            }
+        )
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation complete"
+        )
+        phase_seconds["qualified_s3_preparation"] = (
+            perf_counter() - qualified_s3_started
+        )
+
     connectivity_started = perf_counter()
     _check_cancellation(cancellation_check, "hybrid connectivity start")
     for element_id in (*mesh.quads, *mesh.tris, *mesh.beams):
@@ -1498,6 +1522,7 @@ def generate_hybrid_mesh_result(
                 native_backend=native_backend,
                 structured_options=None,
                 structural_preparation=structural_preparation,
+                qualified_s3=qualified_s3,
                 overlap_policy=overlap_policy,
                 mutation_policy=mutation_policy,
                 certification_mode=certification_mode,
@@ -1558,12 +1583,18 @@ def generate_hybrid_mesh_result(
                 if fallback_preparation is None
                 else dict(fallback_preparation.source_to_working_edges)
             )
-            fallback.mesh.structural_preparation = _preparation_payload(
+            fallback_qualified_s3 = fallback.mesh.structural_preparation.get(
+                "qualified_s3"
+            )
+            fallback_payload = _preparation_payload(
                 fallback_preparation,
                 structured_report,
                 fallback_faces,
                 fallback_edges,
             )
+            if fallback_qualified_s3 is not None:
+                fallback_payload["qualified_s3"] = fallback_qualified_s3
+            fallback.mesh.structural_preparation = fallback_payload
             fallback.mesh.hybrid_diagnostics.update(
                 {
                     "structured_layout_status": structured_report.status,
@@ -1576,12 +1607,15 @@ def generate_hybrid_mesh_result(
                 "structured quality fallback accepted",
             )
             return replace(fallback, structured_layout=structured_report)
-    mesh.structural_preparation = _preparation_payload(
+    preparation_payload = _preparation_payload(
         preparation_report,
         structured_report,
         source_to_final_faces,
         source_to_final_edges,
     )
+    if qualified_s3_record is not None:
+        preparation_payload["qualified_s3"] = qualified_s3_record
+    mesh.structural_preparation = preparation_payload
     strategies = dict(source_strategies)
     result = HybridMeshResult(
         mesh=mesh,
@@ -1619,6 +1653,17 @@ def generate_hybrid_mesh_result(
             None
             if preparation_report is None
             else preparation_report.preparation_hash
+        ),
+        "qualified_s3_preparation": (
+            None
+            if qualified_s3_record is None
+            else {
+                "contract_id": qualified_s3_record["contract_id"],
+                "element_count": len(qualified_s3_record["element_ids"]),
+                "formulation_id": qualified_s3_record["formulation_id"],
+                "legacy_fallback": qualified_s3_record["legacy_fallback"],
+                "status": qualified_s3_record["status"],
+            }
         ),
         "completed_phases": sorted(phase_seconds),
     }

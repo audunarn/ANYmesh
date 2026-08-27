@@ -245,6 +245,37 @@ def test_repair_policy_limits_reject_booleans_and_negative_values() -> None:
         S3RepairPolicy(maximum_added_nodes=-1)
 
 
+def test_geometry_bound_edges_are_never_refined_by_chord_midpoint() -> None:
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((4.0, 0.0, 0.0)),
+            3: np.asarray((0.1, 0.05, 0.0)),
+        },
+        tris={11: (1, 2, 3)},
+        nodes_of_edge={
+            101: [1, 2],
+            102: [2, 3],
+            103: [3, 1],
+        },
+    )
+
+    with pytest.raises(S3RepairError) as caught:
+        repair_s3_admission(
+            mesh,
+            element_owner_normals={11: OWNER},
+            repair_policy=S3RepairPolicy(maximum_edge_flips=0),
+        )
+
+    assert any(
+        item.action == "refinement"
+        and item.status == "rejected"
+        and "geometry-bound" in item.detail
+        for item in caught.value.attempts
+    )
+    assert set(mesh.nodes) == {1, 2, 3}
+
+
 def test_legacy_triangle_behavior_changes_only_on_explicit_repair() -> None:
     legacy = _equilateral(reversed_winding=True)
     connectivity = tuple(legacy.tris[11])
