@@ -146,17 +146,20 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert ci.startswith("name: Tests\n\non:\n  push:\n  pull_request:\n")
 
     assert publish.startswith(
-        "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"
+        "name: Build release artifacts\n\non:\n  release:\n"
     )
-    assert "release:" not in publish
-    assert "repository-url:" not in publish
-    assert publish.count("id-token: write") == 1
-    assert publish.count("pypa/gh-action-pypi-publish@release/v1") == 1
+    assert "types: [published]" in publish
+    assert "workflow_dispatch:" in publish
+    assert "repository-url: https://test.pypi.org/legacy/" in publish
+    assert publish.count("id-token: write") == 2
+    assert publish.count("pypa/gh-action-pypi-publish@release/v1") == 2
     assert "password:" not in publish
     assert "username:" not in publish
     assert "skip-existing:" not in publish
     assert "name: pypi" in publish
     assert "url: https://pypi.org/p/ANYmesher" in publish
+    assert "name: testpypi" in publish
+    assert "url: https://test.pypi.org/p/ANYmesher" in publish
     assert "name: ANYmesher-0.3.2-pypi-distributions" in publish
     assert "dist/*.whl" in publish
     assert "dist/*.tar.gz" in publish
@@ -182,6 +185,15 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "RECORD integrity mismatch" in publish
     assert publish.count("tools/release_wheel_smoke.py") == 1
     assert publish.count("--expect-version 0.3.2 --require-native") == 1
+    assert "gh release download \"$RELEASE_TAG\"" in publish
+    assert 'test "$RELEASE_TAG" = "v0.3.2"' in publish
+    assert "checksum manifest does not exactly cover distributions" in publish
+    assert "unexpected ANYmesher distribution asset" in publish
+    assert "release checksum mismatch" in publish
+    assert "packages-dir: dist/" in publish
+    assert "if: github.event_name == 'release'" in publish
+    assert publish.count("if: github.event_name == 'workflow_dispatch'") >= 3
+    assert "timeout-minutes:" not in publish
 
 
 @pytest.mark.skipif(

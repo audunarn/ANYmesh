@@ -1,13 +1,22 @@
 name: Build release artifacts
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      publish_testpypi:
+        description: Publish the manually built candidate to TestPyPI
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   sdist:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +36,7 @@ jobs:
           path: dist/*.tar.gz
 
   wheels:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -60,6 +70,7 @@ jobs:
           path: dist/*.whl
 
   bundle:
+    if: github.event_name == 'workflow_dispatch'
     needs: [sdist, wheels]
     runs-on: ubuntu-latest
     steps:
@@ -252,12 +263,13 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
 
-  publish:
+  publish-testpypi:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_testpypi
     needs: bundle
     runs-on: ubuntu-latest
     environment:
-      name: pypi
-      url: https://pypi.org/p/ANYmesher
+      name: testpypi
+      url: https://test.pypi.org/p/ANYmesher
     permissions:
       id-token: write
     steps:
@@ -266,3 +278,77 @@ jobs:
           name: ANYmesher-0.3.2-pypi-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-production:
+    name: Publish verified release assets to PyPI
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ANYmesher
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download prebuilt GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          test "$RELEASE_TAG" = "v0.3.2"
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets \
+            --pattern "*.whl" \
+            --pattern "*.tar.gz" \
+            --pattern "ANYmesher-0.3.2-SHA256SUMS.txt"
+      - name: Verify release checksums and select distributions
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import shutil
+          from pathlib import Path
+
+          source = Path("release-assets")
+          checksum_path = source / "ANYmesher-0.3.2-SHA256SUMS.txt"
+          if not checksum_path.is_file() or checksum_path.is_symlink():
+              raise SystemExit("missing regular ANYmesher checksum asset")
+          expected = {}
+          for line in checksum_path.read_text(encoding="ascii").splitlines():
+              digest, separator, filename = line.partition("  ")
+              if not separator or len(digest) != 64 or Path(filename).name != filename:
+                  raise SystemExit(f"malformed checksum row: {line!r}")
+              if filename in expected:
+                  raise SystemExit(f"duplicate checksum row: {filename}")
+              expected[filename] = digest.lower()
+          artifacts = sorted((*source.glob("*.whl"), *source.glob("*.tar.gz")))
+          if not artifacts or set(expected) != {item.name for item in artifacts}:
+              raise SystemExit("checksum manifest does not exactly cover distributions")
+          if any(
+              item.name != "anymesher-0.3.2.tar.gz"
+              and not (
+                  item.name.startswith("anymesher-0.3.2-")
+                  and item.name.endswith(".whl")
+              )
+              for item in artifacts
+          ):
+              raise SystemExit("unexpected ANYmesher distribution asset")
+          target = Path("dist")
+          target.mkdir()
+          for artifact in artifacts:
+              if not artifact.is_file() or artifact.is_symlink():
+                  raise SystemExit(f"release asset is not a regular file: {artifact.name}")
+              actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
+              if actual != expected[artifact.name]:
+                  raise SystemExit(f"release checksum mismatch: {artifact.name}")
+              shutil.copy2(artifact, target / artifact.name)
+          PY
+      - name: Publish exact distributions using Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
