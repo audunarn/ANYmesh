@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-08-27
+
+- Add deterministic qualified-S3 admission, bounded repair, owner-normal propagation, and production preparation without legacy fallback.
 - Preserve declared plate-junction incidence when meshing geometry that an upstream owner has already imprinted along an exact shared transverse boundary.
 
 ## 0.3.1 - 2026-08-27
