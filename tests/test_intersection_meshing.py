@@ -17,6 +17,7 @@ from anygeometry import (
 from anygeometry.serialization import to_dict
 from anymesher import generate_hybrid_mesh, generate_mesh_with_intersections
 from anymesher.errors import MeshError
+from anymesher.preparation import prepare_structural_closure
 from anymesher.serialize import mesh_from_dict, mesh_to_dict
 
 
@@ -94,6 +95,39 @@ def test_structured_crossing_plates_accept_only_declared_junction_edges():
 
     restored = mesh_from_dict(mesh_to_dict(mesh))
     assert restored.declared_plate_junction_edges == mesh.declared_plate_junction_edges
+
+
+def test_structured_t_junction_accepts_upstream_imprinted_transverse_edge():
+    geometry = GeometryModel()
+    lower_left = geometry.add_point(0.0, 0.0, 0.0)
+    lower_right = geometry.add_point(2.0, 0.0, 0.0)
+    upper_right = geometry.add_point(2.0, 2.0, 0.0)
+    upper_left = geometry.add_point(0.0, 2.0, 0.0)
+    geometry.add_plate((lower_left, lower_right, upper_right, upper_left))
+    diagonal = geometry.add_line(lower_right, upper_left)
+    geometry.extrude((diagonal,), (0.0, 0.0, 1.0))
+
+    prepared, upstream_report = prepare_structural_closure(geometry)
+    assert upstream_report.declared_face_connection_edges == (diagonal,)
+
+    mesh = generate_hybrid_mesh(
+        prepared,
+        target_size=0.25,
+        strategy="auto",
+    )
+
+    assert len(mesh.elements_of_face) == 3
+    assert mesh.declared_plate_junction_edges
+    incidence: dict[tuple[int, int], list[int]] = {}
+    for element_id in mesh.shells:
+        corners = mesh.corners_of(element_id)
+        for first, second in zip(corners, corners[1:] + corners[:1]):
+            edge = (min(first, second), max(first, second))
+            incidence.setdefault(edge, []).append(element_id)
+    assert all(
+        len(incidence[edge]) == 3
+        for edge in mesh.declared_plate_junction_edges
+    )
 
 
 def test_intersection_diagnostic_survives_mesh_round_trip():

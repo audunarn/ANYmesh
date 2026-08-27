@@ -30,6 +30,7 @@ from anygeometry.model import GeometryModel
 from anygeometry.overlaps import find_coplanar_overlaps
 from anygeometry.policies import ConnectionIntent
 from anygeometry.predicates import IntersectionKind
+from anygeometry.surfaces import Plane
 
 from .errors import MeshError
 
@@ -304,16 +305,48 @@ def _share_boundary(geometry: GeometryModel, first: int, second: int) -> bool:
     the already-shared point.
     """
 
+    return bool(_shared_boundary_edges(geometry, first, second))
+
+
+def _shared_boundary_edges(
+    geometry: GeometryModel,
+    first: int,
+    second: int,
+) -> tuple[int, ...]:
     first_loops = (geometry.faces[first].loop,) + geometry.faces[first].holes
     second_loops = (geometry.faces[second].loop,) + geometry.faces[second].holes
-    first_edges = {
-        item.edge
-        for loop in first_loops
-        for item in loop
-    }
-    if any(item.edge in first_edges for loop in second_loops for item in loop):
-        return True
-    return False
+    first_edges = {item.edge for loop in first_loops for item in loop}
+    return tuple(
+        sorted(
+            {
+                item.edge
+                for loop in second_loops
+                for item in loop
+                if item.edge in first_edges
+            }
+        )
+    )
+
+
+def _shared_transverse_plate_edges(
+    geometry: GeometryModel,
+    first: int,
+    second: int,
+    shared_edges: tuple[int, ...],
+) -> tuple[int, ...]:
+    first_surface = geometry.faces[first].surface
+    second_surface = geometry.faces[second].surface
+    if not isinstance(first_surface, Plane) or not isinstance(second_surface, Plane):
+        return ()
+    first_normal = np.asarray(first_surface.normal, dtype=float)
+    second_normal = np.asarray(second_surface.normal, dtype=float)
+    normal_scale = float(np.linalg.norm(first_normal) * np.linalg.norm(second_normal))
+    if normal_scale <= 0.0:
+        return ()
+    transverse = float(np.linalg.norm(np.cross(first_normal, second_normal)))
+    if transverse <= 1.0e-12 * normal_scale:
+        return ()
+    return shared_edges
 
 
 def _is_resolved_shared_vertex_touch(
@@ -709,7 +742,11 @@ def prepare_structural_closure(
             for pair in candidates:
                 if pair in settled or origin[pair[0]] == origin[pair[1]]:
                     continue
-                if _share_boundary(working, *pair):
+                shared_edges = _shared_boundary_edges(working, *pair)
+                if shared_edges:
+                    declared_face_connection_edges.update(
+                        _shared_transverse_plate_edges(working, *pair, shared_edges)
+                    )
                     settled.add(pair)
                     continue
                 queries += 1
