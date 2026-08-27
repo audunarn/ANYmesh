@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-08-27
+
+- Permit structured shell edges with more than two attached shell elements only when they are exact node segments derived from an explicitly applied plate/plate intersection; undeclared non-manifold edges remain hard failures.
+- Preserve declared plate-junction edge evidence through mesh serialization and add structured crossing-plate and fail-closed regressions.
+
 ## 0.3.0 - 2026-08-25
 
 - Add a provider-neutral, strict JSON mesh command protocol with capability

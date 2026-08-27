@@ -153,6 +153,9 @@ class Mesh:
     # Number of design-face crossings imprinted on the non-persistent working
     # geometry before this mesh was generated.
     automatic_intersections: int = 0
+    # Stable node-ID pairs whose shell incidence is allowed to exceed two
+    # because they came from an explicitly applied plate/plate intersection.
+    declared_plate_junction_edges: Tuple[Tuple[int, int], ...] = ()
     # Number of beam nodes merged at physical joints or attached to a shell by
     # an interpolation coupling during automatic structural connectivity.
     automatic_beam_connections: int = 0

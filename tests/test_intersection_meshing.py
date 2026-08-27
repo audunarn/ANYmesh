@@ -61,6 +61,41 @@ def test_crossing_planar_faces_are_imprinted_and_share_mesh_nodes():
         assert any(node in mesh.shells[element] for element in vertical_elements)
 
 
+def test_structured_crossing_plates_accept_only_declared_junction_edges():
+    geometry = GeometryModel()
+    horizontal = _plate(
+        geometry,
+        ((-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)),
+    )
+    vertical = _plate(
+        geometry,
+        ((0, 0, -1), (0, 2, -1), (0, 2, 1), (0, 0, 1)),
+    )
+
+    mesh = generate_hybrid_mesh(
+        geometry,
+        target_size=0.5,
+        strategy="mapped",
+    )
+
+    assert mesh.automatic_intersections == 1
+    assert mesh.declared_plate_junction_edges
+    assert set(mesh.elements_of_face) == {horizontal, vertical}
+    incidence: dict[tuple[int, int], list[int]] = {}
+    for element_id, connectivity in mesh.shells.items():
+        corners = mesh.corners_of(element_id)
+        for first, second in zip(corners, corners[1:] + corners[:1]):
+            edge = (min(first, second), max(first, second))
+            incidence.setdefault(edge, []).append(element_id)
+    assert all(
+        len(incidence[edge]) == 4
+        for edge in mesh.declared_plate_junction_edges
+    )
+
+    restored = mesh_from_dict(mesh_to_dict(mesh))
+    assert restored.declared_plate_junction_edges == mesh.declared_plate_junction_edges
+
+
 def test_intersection_diagnostic_survives_mesh_round_trip():
     geometry = GeometryModel()
     _plate(geometry, ((-1, 0, 0), (1, 0, 0), (1, 1, 0), (-1, 1, 0)))

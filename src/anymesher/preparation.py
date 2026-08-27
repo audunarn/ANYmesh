@@ -139,6 +139,7 @@ class StructuralPreparationReport:
     source_to_working_edges: Mapping[int, tuple[int, ...]]
     temporary_sheet_ids: tuple[int, ...] = ()
     temporary_member_ids: tuple[int, ...] = ()
+    declared_face_connection_edges: tuple[int, ...] = ()
     candidate_queries: int = 0
     applications: int = 0
     face_connections: int = 0
@@ -182,6 +183,11 @@ class StructuralPreparationReport:
             "temporary_member_ids",
             tuple(sorted(set(map(int, self.temporary_member_ids)))),
         )
+        object.__setattr__(
+            self,
+            "declared_face_connection_edges",
+            tuple(sorted(set(map(int, self.declared_face_connection_edges)))),
+        )
         for name in (
             "candidate_queries",
             "applications",
@@ -208,6 +214,9 @@ class StructuralPreparationReport:
             },
             "temporary_sheet_ids": list(self.temporary_sheet_ids),
             "temporary_member_ids": list(self.temporary_member_ids),
+            "declared_face_connection_edges": list(
+                self.declared_face_connection_edges
+            ),
             "candidate_queries": self.candidate_queries,
             "applications": self.applications,
             "face_connections": self.face_connections,
@@ -508,13 +517,13 @@ def _apply_connection(
     first_id: int,
     second_kind: str,
     second_id: int,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, tuple[int, ...]]:
     first = geometry.handle(first_kind, first_id)
     second = geometry.handle(second_kind, second_id)
     try:
         result = query_intersection(geometry, first, second)
         if result.kind is IntersectionKind.DISJOINT:
-            return False, None
+            return False, None, ()
         if (
             first_kind == "face"
             and second_kind == "face"
@@ -522,7 +531,7 @@ def _apply_connection(
                 geometry, first_id, second_id, result
             )
         ):
-            return False, "exact shared vertex topology"
+            return False, "exact shared vertex topology", ()
         plan = plan_imprint(
             geometry,
             result,
@@ -531,7 +540,7 @@ def _apply_connection(
         if plan.operation is ImprintOperation.NO_TOPOLOGY:
             diagnostics = "; ".join(result.diagnostics)
             if result.kind is IntersectionKind.UNSUPPORTED:
-                return False, diagnostics
+                return False, diagnostics, ()
             raise MeshError(
                 f"unqualified {first_kind}/{second_kind} relationship "
                 f"{first_id}/{second_id}: {diagnostics or result.kind.value}"
@@ -547,7 +556,14 @@ def _apply_connection(
             f"{first_id}/{second_id}: {error}"
         ) from error
     changed = not application.change_set.is_empty
-    return changed, None
+    declared_edges = (
+        tuple(int(item.id) for item in application.face_intersection.edges)
+        if first_kind == "face"
+        and second_kind == "face"
+        and application.face_intersection is not None
+        else ()
+    )
+    return changed, None, declared_edges
 
 
 def _report_hash(report: StructuralPreparationReport) -> str:
@@ -636,6 +652,7 @@ def prepare_structural_closure(
     diagnostics: list[str] = []
     queries = applications = 0
     face_connections = member_connections = member_sheet_connections = 0
+    declared_face_connection_edges: set[int] = set()
 
     face_sheet_membership = _face_sheet_membership(working)
     if policy.declare_missing_owners:
@@ -703,9 +720,10 @@ def prepare_structural_closure(
                     )
                 if queries % 64 == 0:
                     _cancel(cancellation_check, "structural face candidate queries")
-                made, note = _apply_connection(
+                made, note, connection_edges = _apply_connection(
                     working, "face", pair[0], "face", pair[1]
                 )
+                declared_face_connection_edges.update(connection_edges)
                 if note:
                     diagnostics.append(f"faces {pair[0]}/{pair[1]}: {note}")
                 if made:
@@ -792,7 +810,7 @@ def prepare_structural_closure(
                         f"structural {group} candidate queries",
                     )
                 if group == "member":
-                    made, note = _apply_connection(
+                    made, note, _connection_edges = _apply_connection(
                         working, "member", first, "member", second
                     )
                 else:
@@ -802,7 +820,7 @@ def prepare_structural_closure(
                         )
                         settled.add((first, second))
                         continue
-                    made, note = _apply_connection(
+                    made, note, _connection_edges = _apply_connection(
                         working, "member", first, "sheet", second
                     )
                 if note:
@@ -849,6 +867,15 @@ def prepare_structural_closure(
         source_to_working_edges=edge_mapping,
         temporary_sheet_ids=tuple(temporary_sheets),
         temporary_member_ids=tuple(temporary_members),
+        declared_face_connection_edges=tuple(
+            sorted(
+                {
+                    descendant
+                    for edge_id in declared_face_connection_edges
+                    for descendant in _resolved(working, "edge", edge_id)
+                }
+            )
+        ),
         candidate_queries=queries,
         applications=applications,
         face_connections=face_connections,

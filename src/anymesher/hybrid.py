@@ -380,6 +380,47 @@ def _neutral_shell_core(mesh: Mesh) -> MeshCore:
     )
 
 
+def _declared_junction_core_edges(
+    mesh: Mesh, core: MeshCore
+) -> tuple[tuple[int, int], ...]:
+    node_rows = {
+        int(node_id): row for row, node_id in enumerate(core.node_ids)
+    }
+    result: set[tuple[int, int]] = set()
+    for first, second in mesh.declared_plate_junction_edges:
+        try:
+            edge = (node_rows[int(first)], node_rows[int(second)])
+        except KeyError as error:
+            raise MeshError(
+                "declared plate-junction edge references a missing mesh node"
+            ) from error
+        result.add((min(edge), max(edge)))
+    return tuple(sorted(result))
+
+
+def _prepared_plate_junction_edges(
+    mesh: Mesh,
+    report: StructuralPreparationReport,
+) -> tuple[tuple[int, int], ...]:
+    step = 2 if mesh.is_quadratic else 1
+    result: set[tuple[int, int]] = set()
+    for edge_id in report.declared_face_connection_edges:
+        sequence = mesh.nodes_of_edge.get(int(edge_id))
+        if sequence is None or len(sequence) < step + 1:
+            raise MeshError(
+                f"declared plate-junction edge {edge_id} has no seeded mesh boundary"
+            )
+        if (len(sequence) - 1) % step:
+            raise MeshError(
+                f"declared plate-junction edge {edge_id} has inconsistent order"
+            )
+        for index in range(0, len(sequence) - 1, step):
+            first = int(sequence[index])
+            second = int(sequence[index + step])
+            result.add((min(first, second), max(first, second)))
+    return tuple(sorted(result))
+
+
 def _element_growth(
     mesh: Mesh,
     *,
@@ -419,7 +460,11 @@ def _structured_quality_report(
     mesh: Mesh,
     options: StructuredMeshingOptions,
 ) -> dict[str, Any]:
-    quality = evaluate_quality(_neutral_shell_core(mesh))
+    core = _neutral_shell_core(mesh)
+    quality = evaluate_quality(
+        core,
+        declared_plate_junction_edges=_declared_junction_core_edges(mesh, core),
+    )
     policy = options.quality_policy
     violations: dict[str, int] = {
         "minimum_scaled_jacobian": 0,
@@ -1376,6 +1421,10 @@ def generate_hybrid_mesh_result(
         for face_id in mapped_faces
         for element_id in mesh.elements_of_face.get(face_id, ())
     }
+    if preparation_report is not None:
+        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
+            mesh, preparation_report
+        )
     if preparation_report is not None or structured_report is not None:
         working_backend_diagnostics = triangulation_backend_by_face
         remap_prepared_mesh_associations(

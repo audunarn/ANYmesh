@@ -70,6 +70,10 @@ def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
         "geometry_revision": mesh.geometry_revision,
         "order": mesh.order,
         "automatic_intersections": int(mesh.automatic_intersections),
+        "declared_plate_junction_edges": [
+            [int(first), int(second)]
+            for first, second in mesh.declared_plate_junction_edges
+        ],
         "automatic_beam_connections": int(mesh.automatic_beam_connections),
         "automatic_shell_connections": int(mesh.automatic_shell_connections),
         "nodes": {
@@ -156,11 +160,29 @@ def mesh_from_dict(data: Mapping[str, Any]) -> Mesh:
         if geometry_revision < 0:
             raise MeshError("geometry_revision must be non-negative")
 
+    declared_plate_junction_edges = tuple(
+        tuple(int(node) for node in edge)
+        for edge in data.get("declared_plate_junction_edges", ())
+    )
+    if any(
+        len(edge) != 2 or edge[0] == edge[1]
+        for edge in declared_plate_junction_edges
+    ):
+        raise MeshError("declared_plate_junction_edges must contain node-ID pairs")
+
     mesh = Mesh(
         geometry_model_id=data.get("geometry_model_id"),
         geometry_revision=geometry_revision,
         order=str(data.get("order", "linear")),
         automatic_intersections=int(data.get("automatic_intersections", 0)),
+        declared_plate_junction_edges=tuple(
+            sorted(
+                {
+                    (min(first, second), max(first, second))
+                    for first, second in declared_plate_junction_edges
+                }
+            )
+        ),
         automatic_beam_connections=int(data.get("automatic_beam_connections", 0)),
         automatic_shell_connections=int(data.get("automatic_shell_connections", 0)),
         structural_preparation=dict(

@@ -163,6 +163,33 @@ def test_quality_metrics_and_hard_quad_validity() -> None:
         assert_valid_mesh(bow_tie)
 
 
+def test_only_declared_plate_junction_may_have_four_shells_on_one_edge() -> None:
+    mesh = MeshCore(
+        (
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 0.0, 1.0),
+            (-1.0, 0.0, 0.0),
+            (-1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 1.0),
+            (0.0, -1.0, 0.0),
+            (0.0, -1.0, 1.0),
+        ),
+        quad_connectivity=(
+            (0, 2, 3, 1),
+            (0, 1, 5, 4),
+            (0, 1, 7, 6),
+            (0, 8, 9, 1),
+        ),
+    )
+
+    with pytest.raises(MeshValidityError, match="non-manifold edge"):
+        assert_valid_mesh(mesh)
+    assert_valid_mesh(mesh, declared_plate_junction_edges=((0, 1),))
+
+
 def test_surface_slice_builds_a_valid_quadratic_hybrid_mesh() -> None:
     mesh = mesh_planar_surface(
         ((0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)),
