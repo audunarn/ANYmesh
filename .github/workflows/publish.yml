@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 069f22f3682ab97c89eb7824d53010c0b60dd575
+          ref: 97b06b0cfc72179c4f6522f9077d8a1d91911d61
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -329,6 +329,30 @@ jobs:
           artifacts = sorted((*source.glob("*.whl"), *source.glob("*.tar.gz")))
           if not artifacts or set(expected) != {item.name for item in artifacts}:
               raise SystemExit("checksum manifest does not exactly cover distributions")
+          sdists = [item for item in artifacts if item.name.endswith(".tar.gz")]
+          wheels = [item for item in artifacts if item.name.endswith(".whl")]
+          if [item.name for item in sdists] != ["anymesher-0.3.2.tar.gz"]:
+              raise SystemExit("release must contain the exact ANYmesher sdist")
+          if len(wheels) != 12:
+              raise SystemExit(f"release must contain exactly 12 wheels, found {len(wheels)}")
+          expected_pythons = {"cp311", "cp312", "cp313", "cp314"}
+          platforms = {"Windows": [], "Linux": [], "macOS": []}
+          for wheel in wheels:
+              name = wheel.name
+              if "-win_amd64.whl" in name:
+                  platform = "Windows"
+              elif "manylinux" in name and "x86_64" in name:
+                  platform = "Linux"
+              elif "macosx" in name:
+                  platform = "macOS"
+              else:
+                  raise SystemExit(f"unexpected wheel platform: {name}")
+              platforms[platform].append(name.split("-")[2])
+          for platform, interpreters in platforms.items():
+              if set(interpreters) != expected_pythons or len(interpreters) != 4:
+                  raise SystemExit(
+                      f"{platform} release wheel matrix mismatch: {sorted(interpreters)}"
+                  )
           if any(
               item.name != "anymesher-0.3.2.tar.gz"
               and not (

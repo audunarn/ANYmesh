@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 069f22f3682ab97c89eb7824d53010c0b60dd575
+          ref: 97b06b0cfc72179c4f6522f9077d8a1d91911d61
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 069f22f3682ab97c89eb7824d53010c0b60dd575
+          ref: 97b06b0cfc72179c4f6522f9077d8a1d91911d61
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 069f22f3682ab97c89eb7824d53010c0b60dd575
+          ref: 97b06b0cfc72179c4f6522f9077d8a1d91911d61
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 069f22f3682ab97c89eb7824d53010c0b60dd575
+          ref: 97b06b0cfc72179c4f6522f9077d8a1d91911d61
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1

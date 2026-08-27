@@ -107,7 +107,7 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "069f22f3682ab97c89eb7824d53010c0b60dd575"
+    geometry_ref = "97b06b0cfc72179c4f6522f9077d8a1d91911d61"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
@@ -188,6 +188,9 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "gh release download \"$RELEASE_TAG\"" in publish
     assert 'test "$RELEASE_TAG" = "v0.3.2"' in publish
     assert "checksum manifest does not exactly cover distributions" in publish
+    assert "release must contain the exact ANYmesher sdist" in publish
+    assert "release must contain exactly 12 wheels" in publish
+    assert "release wheel matrix mismatch" in publish
     assert "unexpected ANYmesher distribution asset" in publish
     assert "release checksum mismatch" in publish
     assert "packages-dir: dist/" in publish
