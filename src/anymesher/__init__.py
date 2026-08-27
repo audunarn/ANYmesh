@@ -117,6 +117,12 @@ from .s3_quality import (
     assert_s3_admissible,
     evaluate_s3_admission,
 )
+from .s3_production import (
+    QUALIFIED_S3_FORMULATION_ID,
+    QUALIFIED_S3_PRODUCTION_CONTRACT_ID,
+    S3OwnerAuthorityError,
+    prepare_qualified_s3_mesh,
+)
 from .s3_repair import (
     DEFAULT_S3_REPAIR_POLICY,
     S3_REPAIR_CONTRACT_ID,
@@ -201,8 +207,11 @@ __all__ = [
     "PANEL_FACE_ID",
     "PanelMeshConfig",
     "Refinement",
+    "QUALIFIED_S3_PRODUCTION_CONTRACT_ID",
+    "QUALIFIED_S3_FORMULATION_ID",
     "S3AdmissionReport",
     "S3ElementQuality",
+    "S3OwnerAuthorityError",
     "S3QualityError",
     "S3QualityPolicy",
     "S3_QUALITY_CONTRACT_ID",
@@ -267,6 +276,7 @@ __all__ = [
     "plan_intersection_mutation",
     "plan_structured_layout",
     "prepare_structural_closure",
+    "prepare_qualified_s3_mesh",
     "refine_around",
     "refine_at",
     "repair_s3_admission",
