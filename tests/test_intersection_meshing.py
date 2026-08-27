@@ -9,12 +9,14 @@ from anygeometry import (
     EntityRef,
     GeometryModel,
     IntersectionKind,
+    OrientedEdge,
     apply_imprint,
     fragment_coplanar_overlaps,
     plan_imprint,
     query_intersection,
 )
 from anygeometry.serialization import to_dict
+from anygeometry.surfaces import Plane
 from anymesher import generate_hybrid_mesh, generate_mesh_with_intersections
 from anymesher.errors import MeshError
 from anymesher.preparation import prepare_structural_closure
@@ -100,15 +102,50 @@ def test_structured_crossing_plates_accept_only_declared_junction_edges():
 def test_structured_t_junction_accepts_upstream_imprinted_transverse_edge():
     geometry = GeometryModel()
     lower_left = geometry.add_point(0.0, 0.0, 0.0)
+    lower_middle = geometry.add_point(1.0, 0.0, 0.0)
     lower_right = geometry.add_point(2.0, 0.0, 0.0)
     upper_right = geometry.add_point(2.0, 2.0, 0.0)
+    upper_middle = geometry.add_point(1.0, 2.0, 0.0)
     upper_left = geometry.add_point(0.0, 2.0, 0.0)
-    geometry.add_plate((lower_left, lower_right, upper_right, upper_left))
-    diagonal = geometry.add_line(lower_right, upper_left)
-    geometry.extrude((diagonal,), (0.0, 0.0, 1.0))
+    left_bottom = geometry.add_line(lower_left, lower_middle)
+    shared = geometry.add_line(lower_middle, upper_middle)
+    left_top = geometry.add_line(upper_middle, upper_left)
+    left = geometry.add_line(upper_left, lower_left)
+    right_bottom = geometry.add_line(lower_middle, lower_right)
+    right = geometry.add_line(lower_right, upper_right)
+    right_top = geometry.add_line(upper_right, upper_middle)
+    # The upstream owner has already imprinted the junction into the plate:
+    # the two coplanar child faces share the exact transverse edge identity.
+    geometry.add_face_from_loop(
+        tuple(
+            OrientedEdge(edge, True)
+            for edge in (left_bottom, shared, left_top, left)
+        ),
+        corners=(0, 1, 2, 3),
+        surface=Plane(
+            np.array((0.0, 0.0, 0.0)),
+            np.array((1.0, 0.0, 0.0)),
+            np.array((0.0, 1.0, 0.0)),
+        ),
+    )
+    geometry.add_face_from_loop(
+        (
+            OrientedEdge(right_bottom, True),
+            OrientedEdge(right, True),
+            OrientedEdge(right_top, True),
+            OrientedEdge(shared, False),
+        ),
+        corners=(0, 1, 2, 3),
+        surface=Plane(
+            np.array((0.0, 0.0, 0.0)),
+            np.array((1.0, 0.0, 0.0)),
+            np.array((0.0, 1.0, 0.0)),
+        ),
+    )
+    geometry.extrude((shared,), (0.0, 0.0, 1.0))
 
     prepared, upstream_report = prepare_structural_closure(geometry)
-    assert upstream_report.declared_face_connection_edges == (diagonal,)
+    assert upstream_report.declared_face_connection_edges == (shared,)
 
     mesh = generate_hybrid_mesh(
         prepared,
