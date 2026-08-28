@@ -1509,7 +1509,7 @@ def generate_hybrid_mesh_result(
             fallback = generate_hybrid_mesh_result(
                 source_geometry,
                 target_size=target_size,
-                strategy=MeshingStrategy.AUTO,
+                strategy=MeshingStrategy.NATIVE,
                 overrides=overrides,
                 beam_edges=requested_beam_edges,
                 beam_offsets=beam_offsets,
