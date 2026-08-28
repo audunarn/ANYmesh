@@ -113,18 +113,72 @@ def test_gui3d_release_dependency_floor_matches_the_candidate_graph() -> None:
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "97b06b0cfc72179c4f6522f9077d8a1d91911d61"
+    ci_geometry_ref = "6a8b023ef6f65805519c96b56e025b4e3b457a1f"
+    release_geometry_ref = "6a8b023ef6f65805519c96b56e025b4e3b457a1f"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
     publish = (REPOSITORY_ROOT / ".github/workflows/publish.yml").read_text(
         encoding="utf-8"
     )
+    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+    upload = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    download = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    cibuildwheel = "pypa/cibuildwheel@4726cd35bb13f7bde50cf2761f2499ac7b3aa32c"
+    pypi = (
+        "pypa/gh-action-pypi-publish@"
+        "dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    )
+    ci_uses = [
+        line.split("uses:", 1)[1].strip().split(" #", 1)[0]
+        for line in ci.splitlines()
+        if "uses:" in line
+    ]
+    publish_uses = [
+        line.split("uses:", 1)[1].strip().split(" #", 1)[0]
+        for line in publish.splitlines()
+        if "uses:" in line
+    ]
+
+    assert ci_uses == [
+        checkout,
+        checkout,
+        setup,
+        checkout,
+        checkout,
+        setup,
+        checkout,
+        checkout,
+        setup,
+        checkout,
+        checkout,
+        cibuildwheel,
+        upload,
+    ]
+    assert publish_uses == [
+        checkout,
+        setup,
+        upload,
+        checkout,
+        checkout,
+        cibuildwheel,
+        upload,
+        download,
+        setup,
+        upload,
+        upload,
+        download,
+        pypi,
+        checkout,
+        setup,
+        pypi,
+    ]
 
     assert ci.count("repository: audunarn/ANYgeometry") == 4
-    assert ci.count(f"ref: {geometry_ref}") == 4
+    assert ci.count(f"ref: {ci_geometry_ref}") == 4
     assert publish.count("repository: audunarn/ANYgeometry") == 1
-    assert publish.count(f"ref: {geometry_ref}") == 1
+    assert publish.count(f"ref: {release_geometry_ref}") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
     assert (
         "tests/test_packaging.py::test_disabled_native_build_is_absence_only"
@@ -158,7 +212,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "workflow_dispatch:" in publish
     assert "repository-url: https://test.pypi.org/legacy/" in publish
     assert publish.count("id-token: write") == 2
-    assert publish.count("pypa/gh-action-pypi-publish@release/v1") == 2
+    assert "pypa/gh-action-pypi-publish@release/v1" not in publish
+    assert publish.count(pypi) == 2
     assert "password:" not in publish
     assert "username:" not in publish
     assert "skip-existing:" not in publish
@@ -192,15 +247,28 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count("tools/release_wheel_smoke.py") == 1
     assert publish.count("--expect-version 0.3.2 --require-native") == 1
     assert "gh release download \"$RELEASE_TAG\"" in publish
-    assert 'test "$RELEASE_TAG" = "v0.3.2"' in publish
-    assert "checksum manifest does not exactly cover distributions" in publish
-    assert "release must contain the exact ANYmesher sdist" in publish
-    assert "release must contain exactly 12 wheels" in publish
-    assert "release wheel matrix mismatch" in publish
-    assert "unexpected ANYmesher distribution asset" in publish
-    assert "release checksum mismatch" in publish
+    production = publish.split("\n  publish-production:\n", 1)[1]
+    assert (
+        "actions/checkout@"
+        "3d3c42e5aac5ba805825da76410c181273ba90b1"
+    ) in production
+    assert (
+        "actions/setup-python@"
+        "5fda3b95a4ea91299a34e894583c3862153e4b97"
+    ) in production
+    assert "ref: ${{ github.event.release.tag_name }}" in production
+    assert "fetch-depth: 0" in production
+    assert "--pattern" not in production
+    assert "--protected-ref refs/remotes/origin/main" in production
+    assert (
+        "--expected-terminal ACCEPTED_ANYMESHER_0_3_2_RELEASE"
+        in production
+    )
+    assert "--sdist anymesher-0.3.2.tar.gz" in production
+    assert "tools/verify_release_authority.py" in production
+    assert "python -m build" not in production
     assert "packages-dir: dist/" in publish
-    assert "if: github.event_name == 'release'" in publish
+    assert "github.event.release.prerelease == false" in production
     assert publish.count("if: github.event_name == 'workflow_dispatch'") >= 3
     assert "timeout-minutes:" not in publish
 

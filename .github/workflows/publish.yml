@@ -19,10 +19,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
       - run: python -m pip install build twine
@@ -30,7 +30,7 @@ jobs:
         env:
           ANYMESHER_REQUIRE_NATIVE: "1"
       - run: python -m twine check --strict dist/*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-package-sdist
           path: dist/*.tar.gz
@@ -43,16 +43,16 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: audunarn/ANYgeometry
-          ref: 97b06b0cfc72179c4f6522f9077d8a1d91911d61
+          ref: 6a8b023ef6f65805519c96b56e025b4e3b457a1f
           path: .ecosystem/ANYgeometry
           persist-credentials: false
-      - uses: pypa/cibuildwheel@v4.1.1
+      - uses: pypa/cibuildwheel@4726cd35bb13f7bde50cf2761f2499ac7b3aa32c # v4.1.1
         env:
           CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
@@ -64,7 +64,7 @@ jobs:
             --expect-version 0.3.2 --require-native
         with:
           output-dir: dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-package-wheels-${{ runner.os }}
           path: dist/*.whl
@@ -74,12 +74,12 @@ jobs:
     needs: [sdist, wheels]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: python-package-*
           path: dist/
           merge-multiple: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
       - run: python -m pip install twine
@@ -252,11 +252,11 @@ jobs:
           )
           PY
       - run: python -m twine check --strict dist/*.whl dist/*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ANYmesher-0.3.2-release-bundle
           path: dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ANYmesher-0.3.2-pypi-distributions
           path: |
@@ -273,17 +273,20 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ANYmesher-0.3.2-pypi-distributions
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
 
   publish-production:
-    name: Publish verified release assets to PyPI
-    if: github.event_name == 'release'
+    name: Publish ledger-authorized release assets to PyPI
+    if: >-
+      github.event_name == 'release' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -292,87 +295,40 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Download prebuilt GitHub release assets
+      - name: Check out the ledger-only release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Download the complete prebuilt release asset set
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: |
-          test "$RELEASE_TAG" = "v0.3.2"
           mkdir release-assets
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --dir release-assets \
-            --pattern "*.whl" \
-            --pattern "*.tar.gz" \
-            --pattern "ANYmesher-0.3.2-SHA256SUMS.txt"
-      - name: Verify release checksums and select distributions
-        shell: bash
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
+      - name: Verify sole-child ledger authority and native artifact matrix
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python - <<'PY'
-          import hashlib
-          import shutil
-          from pathlib import Path
-
-          source = Path("release-assets")
-          checksum_path = source / "ANYmesher-0.3.2-SHA256SUMS.txt"
-          if not checksum_path.is_file() or checksum_path.is_symlink():
-              raise SystemExit("missing regular ANYmesher checksum asset")
-          expected = {}
-          for line in checksum_path.read_text(encoding="ascii").splitlines():
-              digest, separator, filename = line.partition("  ")
-              if not separator or len(digest) != 64 or Path(filename).name != filename:
-                  raise SystemExit(f"malformed checksum row: {line!r}")
-              if filename in expected:
-                  raise SystemExit(f"duplicate checksum row: {filename}")
-              expected[filename] = digest.lower()
-          artifacts = sorted((*source.glob("*.whl"), *source.glob("*.tar.gz")))
-          if not artifacts or set(expected) != {item.name for item in artifacts}:
-              raise SystemExit("checksum manifest does not exactly cover distributions")
-          sdists = [item for item in artifacts if item.name.endswith(".tar.gz")]
-          wheels = [item for item in artifacts if item.name.endswith(".whl")]
-          if [item.name for item in sdists] != ["anymesher-0.3.2.tar.gz"]:
-              raise SystemExit("release must contain the exact ANYmesher sdist")
-          if len(wheels) != 12:
-              raise SystemExit(f"release must contain exactly 12 wheels, found {len(wheels)}")
-          expected_pythons = {"cp311", "cp312", "cp313", "cp314"}
-          platforms = {"Windows": [], "Linux": [], "macOS": []}
-          for wheel in wheels:
-              name = wheel.name
-              if "-win_amd64.whl" in name:
-                  platform = "Windows"
-              elif "manylinux" in name and "x86_64" in name:
-                  platform = "Linux"
-              elif "macosx" in name:
-                  platform = "macOS"
-              else:
-                  raise SystemExit(f"unexpected wheel platform: {name}")
-              platforms[platform].append(name.split("-")[2])
-          for platform, interpreters in platforms.items():
-              if set(interpreters) != expected_pythons or len(interpreters) != 4:
-                  raise SystemExit(
-                      f"{platform} release wheel matrix mismatch: {sorted(interpreters)}"
-                  )
-          if any(
-              item.name != "anymesher-0.3.2.tar.gz"
-              and not (
-                  item.name.startswith("anymesher-0.3.2-")
-                  and item.name.endswith(".whl")
-              )
-              for item in artifacts
-          ):
-              raise SystemExit("unexpected ANYmesher distribution asset")
-          target = Path("dist")
-          target.mkdir()
-          for artifact in artifacts:
-              if not artifact.is_file() or artifact.is_symlink():
-                  raise SystemExit(f"release asset is not a regular file: {artifact.name}")
-              actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
-              if actual != expected[artifact.name]:
-                  raise SystemExit(f"release checksum mismatch: {artifact.name}")
-              shutil.copy2(artifact, target / artifact.name)
-          PY
-      - name: Publish exact distributions using Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@release/v1
+          python tools/verify_release_authority.py \
+            --ledger docs/release/anymesher-0.3.2-ledger.json \
+            --assets release-assets \
+            --output dist \
+            --tag "$RELEASE_TAG" \
+            --protected-ref refs/remotes/origin/main \
+            --expected-terminal ACCEPTED_ANYMESHER_0_3_2_RELEASE \
+            --distribution ANYmesher \
+            --version 0.3.2 \
+            --checksum-name ANYmesher-0.3.2-SHA256SUMS.txt \
+            --sdist anymesher-0.3.2.tar.gz
+      - name: Publish exact ledger-authorized native distributions
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
