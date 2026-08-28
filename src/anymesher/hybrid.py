@@ -719,7 +719,7 @@ def _stable_diagnostic_record(value: Any) -> Any:
         return {
             str(key): _stable_diagnostic_record(item)
             for key, item in value.items()
-            if str(key) != "phase_seconds"
+            if str(key) != "phase_seconds" and not str(key).endswith("_seconds")
         }
     if isinstance(value, (list, tuple)):
         return [_stable_diagnostic_record(item) for item in value]
