@@ -106,6 +106,12 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
     assert project["optional-dependencies"]["planar"] == []
 
 
+def test_gui3d_release_dependency_floor_matches_the_candidate_graph() -> None:
+    assert _pyproject()["project"]["optional-dependencies"]["gui3d"] == [
+        "ANYtk3D>=0.5.3,<0.6"
+    ]
+
+
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     geometry_ref = "97b06b0cfc72179c4f6522f9077d8a1d91911d61"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(

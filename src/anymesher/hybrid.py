@@ -778,20 +778,29 @@ def _loop_boundary(
         raise MeshError(f"face {face_id} has fewer than three boundary stations")
     if quadratic and len(midside_nodes) != len(corner_nodes):
         raise MeshError(f"face {face_id} has an inconsistent quadratic boundary")
-    try:
-        uv = np.asarray(
-            [
-                geometry.face_local_uv(face_id, mesh.nodes[node_id])
-                for node_id in corner_nodes
-            ],
-            dtype=float,
-        )
-    except GeometryError as error:
-        raise MeshError(
-            f"native face {face_id} has no qualified surface chart: {error}. "
-            "Attach an authoritative Plane/Cylinder surface or partition it "
-            "into mapped patches; ANYmesher will not invent geometry truth."
-        ) from error
+    uv = _mapped_outer_boundary_uv(
+        geometry,
+        mesh,
+        face_id,
+        loop,
+        quadratic=quadratic,
+        expected_nodes=corner_nodes,
+    )
+    if uv is None:
+        try:
+            uv = np.asarray(
+                [
+                    geometry.face_local_uv(face_id, mesh.nodes[node_id])
+                    for node_id in corner_nodes
+                ],
+                dtype=float,
+            )
+        except GeometryError as error:
+            raise MeshError(
+                f"native face {face_id} has no qualified surface chart: {error}. "
+                "Attach an authoritative Plane/Cylinder surface or partition it "
+                "into mapped patches; ANYmesher will not invent geometry truth."
+            ) from error
     if uv.shape != (len(corner_nodes), 2) or not np.all(np.isfinite(uv)):
         raise MeshError(f"face {face_id} surface chart returned invalid UV coordinates")
     boundary = _LoopBoundary(tuple(corner_nodes), tuple(midside_nodes), uv)
@@ -804,6 +813,96 @@ def _loop_boundary(
     if (area > 0.0) != bool(counter_clockwise):
         boundary = _reverse_loop(boundary)
     return boundary
+
+
+def _mapped_outer_boundary_uv(
+    geometry: GeometryModel,
+    mesh: Mesh,
+    face_id: int,
+    loop: Sequence[Any],
+    *,
+    quadratic: bool,
+    expected_nodes: Sequence[int],
+) -> np.ndarray | None:
+    """Use exact mapped-side authority instead of inverting boundary points.
+
+    A four-sided face already defines the unit-square chart through its corner
+    and side ordering.  Numerical inverse maps can drift or even backtrack at
+    Coons-patch boundaries, especially around a butterfly opening.  Boundary
+    nodes are registered globally and therefore need only their exact chart
+    order here; interior nodes continue to lift through the authoritative face
+    evaluator.
+    """
+
+    face = geometry.faces[face_id]
+    if tuple(loop) != tuple(face.loop):
+        return None
+    try:
+        sides = face.sides()
+    except (GeometryError, ValueError):
+        return None
+    # This shortcut is exact only for a four-edge mapped patch.  A face can
+    # expose four logical sides while one side contains multiple edges (for
+    # example, a concave five-edge planar polygon); that remains on the
+    # authoritative inverse-chart path below.
+    if (
+        len(face.loop) != 4
+        or len(sides) != 4
+        or any(len(side) != 1 for side in sides)
+    ):
+        return None
+
+    made_nodes: list[int] = []
+    made_uv: list[tuple[float, float]] = []
+    corner_nodes: list[int] = []
+    for side_index, side in enumerate(sides):
+        chain: list[int] = []
+        for oriented in side:
+            sequence = list(mesh.nodes_of_edge[oriented.edge])
+            if not oriented.forward:
+                sequence.reverse()
+            if quadratic:
+                if (len(sequence) - 1) % 2:
+                    return None
+                sequence = sequence[::2]
+            if chain:
+                if chain[-1] != sequence[0]:
+                    return None
+                chain.extend(sequence[1:])
+            else:
+                chain.extend(sequence)
+        divisions = len(chain) - 1
+        if divisions < 1:
+            return None
+        corner_nodes.append(int(chain[0]))
+        for station, node_id in enumerate(chain[:-1]):
+            parameter = station / divisions
+            if side_index == 0:
+                uv = (parameter, 0.0)
+            elif side_index == 1:
+                uv = (1.0, parameter)
+            elif side_index == 2:
+                uv = (1.0 - parameter, 1.0)
+            else:
+                uv = (0.0, 1.0 - parameter)
+            made_nodes.append(int(node_id))
+            made_uv.append(uv)
+    if made_nodes != list(expected_nodes):
+        return None
+    unit_corners = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    actual_corners = np.asarray([mesh.nodes[item] for item in corner_nodes])
+    try:
+        evaluated_corners = np.asarray(
+            [geometry.face_point(face_id, u, v) for u, v in unit_corners]
+        )
+    except GeometryError:
+        return None
+    extent = max(float(np.max(np.ptp(actual_corners, axis=0))), 1.0)
+    if np.max(np.linalg.norm(evaluated_corners - actual_corners, axis=1)) > (
+        geometry.tolerance.effective_surface_residual(extent)
+    ):
+        return None
+    return np.asarray(made_uv, dtype=float)
 
 
 def _core_edge_midsides(core: Any) -> dict[tuple[int, int], int]:

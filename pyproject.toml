@@ -40,7 +40,7 @@ planar = []
 gui = []
 # A 3D mesh preview.  Kept separate from `gui` so the tables and controls are
 # usable without pulling in a viewport.
-gui3d = ["ANYtk3D>=0.2.1,<0.3"]
+gui3d = ["ANYtk3D>=0.5.3,<0.6"]
 # Deprecated compatibility backend.  It is never selected automatically and
 # remains outside the production dependency path.
 gmsh = ["gmsh>=4.11"]
