@@ -136,10 +136,19 @@ def _metadata_matches(raw: bytes, distribution: str, version: str, label: str) -
         _fail(f"{label} version metadata differs")
 
 
-def _canonical_requirement(value: str) -> str:
-    requirement, separator, _marker = value.partition(";")
+def _canonical_requirement(value: str) -> tuple[str, str | None]:
+    requirement, separator, marker = value.partition(";")
+    marker_extra: str | None = None
     if separator:
-        return ""
+        marker_match = re.fullmatch(
+            r'''\s*extra\s*==\s*(?:"([A-Za-z0-9._-]+)"|'([A-Za-z0-9._-]+)')\s*''',
+            marker,
+        )
+        if marker_match is None:
+            _fail("wheel contains an active, compound, or malformed requirement marker")
+        marker_extra = _canonical_name(
+            marker_match.group(1) or marker_match.group(2)
+        )
     compact = re.sub(r"\s+", "", requirement)
     match = re.fullmatch(
         r"([A-Za-z0-9._-]+)(?:\[([A-Za-z0-9._,-]+)\])?(.*)",
@@ -156,7 +165,7 @@ def _canonical_requirement(value: str) -> str:
             sorted(_canonical_name(extra) for extra in extras.split(","))
         ) + "]"
     specifiers = ",".join(sorted(part for part in suffix.split(",") if part))
-    return f"{name}{extra_text}{specifiers}"
+    return f"{name}{extra_text}{specifiers}", marker_extra
 
 
 def _verify_wheel(path: Path, distribution: str, version: str) -> None:
@@ -178,16 +187,35 @@ def _verify_wheel(path: Path, distribution: str, version: str) -> None:
             parsed = BytesParser(policy=policy.default).parsebytes(metadata_raw)
             if str(parsed.get("Requires-Python", "")) != ">=3.11":
                 _fail("wheel Python requirement differs")
-            requirements = {
-                canonical
+            requirements = [
+                _canonical_requirement(str(raw))
                 for raw in parsed.get_all("Requires-Dist", [])
-                if (canonical := _canonical_requirement(str(raw)))
+            ]
+            if len(requirements) != len(set(requirements)):
+                _fail("wheel contains duplicate requirements")
+            base_requirements = {
+                requirement
+                for requirement, marker_extra in requirements
+                if marker_extra is None
             }
-            if requirements != {
+            if base_requirements != {
                 "anygeometry[planar]<0.5,>=0.4.1",
                 "numpy>=1.26",
             }:
                 _fail("wheel base requirements differ")
+            optional_requirements = {
+                (requirement, marker_extra)
+                for requirement, marker_extra in requirements
+                if marker_extra is not None
+            }
+            if optional_requirements != {
+                ("anytk3d<0.6,>=0.5.3", "gui3d"),
+                ("build>=1.2", "dev"),
+                ("gmsh>=4.11", "gmsh"),
+                ("pytest>=8", "dev"),
+                ("twine>=5", "dev"),
+            }:
+                _fail("wheel optional-extra requirements differ")
             native = [
                 info
                 for info in infos

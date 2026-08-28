@@ -29,6 +29,15 @@ TERMINAL = "ACCEPTED_ANYMESHER_0_3_2_RELEASE"
 LEDGER = Path("docs/release/anymesher-0.3.2-ledger.json")
 SDIST = f"{NORMALIZED}-{VERSION}.tar.gz"
 CHECKSUM = "ANYmesher-0.3.2-SHA256SUMS.txt"
+FROZEN_REQUIREMENTS = (
+    "numpy>=1.26",
+    "ANYgeometry[planar]>=0.4.1,<0.5",
+    'ANYtk3D>=0.5.3,<0.6; extra == "gui3d"',
+    'gmsh>=4.11; extra == "gmsh"',
+    'build>=1.2; extra == "dev"',
+    'pytest>=8; extra == "dev"',
+    'twine>=5; extra == "dev"',
+)
 
 
 def _wheel_names() -> list[str]:
@@ -66,14 +75,22 @@ def _git(repository: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
-def _metadata(distribution: str = DISTRIBUTION) -> bytes:
+def _metadata(
+    distribution: str = DISTRIBUTION,
+    requirements: tuple[str, ...] | None = None,
+) -> bytes:
+    requirement_rows = "".join(
+        f"Requires-Dist: {requirement}\n"
+        for requirement in (
+            FROZEN_REQUIREMENTS if requirements is None else requirements
+        )
+    )
     return (
         "Metadata-Version: 2.1\n"
         f"Name: {distribution}\n"
         f"Version: {VERSION}\n"
         "Requires-Python: >=3.11\n"
-        "Requires-Dist: numpy>=1.26\n"
-        "Requires-Dist: ANYgeometry[planar]>=0.4.1,<0.5\n\n"
+        f"{requirement_rows}\n"
     ).encode("utf-8")
 
 
@@ -89,11 +106,12 @@ def _write_wheel(
     distribution: str = DISTRIBUTION,
     include_native: bool = True,
     corrupt_record: bool = False,
+    requirements: tuple[str, ...] | None = None,
 ) -> None:
     dist_info = f"{NORMALIZED}-{VERSION}.dist-info"
     files = {
         f"{NORMALIZED}/__init__.py": payload,
-        f"{dist_info}/METADATA": _metadata(distribution),
+        f"{dist_info}/METADATA": _metadata(distribution, requirements),
         f"{NORMALIZED}/_native.so": b"native-binary-placeholder\n",
     }
     if not include_native:
@@ -177,6 +195,41 @@ def _run_verifier(
         names[-1] = names[-1].replace("win_amd64", "musllinux_1_2_x86_64")
         names.sort()
     for index, name in enumerate(names):
+        requirements = None
+        if index == 0:
+            if mutation == "active-marker-requirement":
+                requirements = FROZEN_REQUIREMENTS + (
+                    "malicious-runtime>=1; python_version >= '3.11'",
+                )
+            elif mutation == "unknown-extra-marker":
+                requirements = FROZEN_REQUIREMENTS + (
+                    'malicious-runtime>=1; extra == "unknown"',
+                )
+            elif mutation == "compound-extra-marker":
+                requirements = tuple(
+                    (
+                        'gmsh>=4.11; extra == "gmsh" and '
+                        'python_version >= "3.11"'
+                    )
+                    if requirement == 'gmsh>=4.11; extra == "gmsh"'
+                    else requirement
+                    for requirement in FROZEN_REQUIREMENTS
+                )
+            elif mutation == "wrong-extra-marker":
+                requirements = tuple(
+                    'gmsh>=4.11; extra == "dev"'
+                    if requirement == 'gmsh>=4.11; extra == "gmsh"'
+                    else requirement
+                    for requirement in FROZEN_REQUIREMENTS
+                )
+            elif mutation == "duplicate-base-requirement":
+                requirements = FROZEN_REQUIREMENTS + ("numpy>=1.26",)
+            elif mutation == "duplicate-optional-requirement":
+                requirements = FROZEN_REQUIREMENTS + (
+                    'gmsh>=4.11; extra == "gmsh"',
+                )
+            elif mutation == "unmarked-extra-requirement":
+                requirements = FROZEN_REQUIREMENTS + ("malicious-runtime>=1",)
         _write_wheel(
             assets / name,
             distribution=(
@@ -186,6 +239,7 @@ def _run_verifier(
             ),
             include_native=not (mutation == "missing-native" and index == 0),
             corrupt_record=mutation == "bad-record" and index == 0,
+            requirements=requirements,
         )
     _write_sdist(
         assets / SDIST,
@@ -406,6 +460,13 @@ def test_release_authority_accepts_exact_native_matrix(tmp_path: Path) -> None:
         "replacement-ref",
         "graft-file",
         "info-attributes",
+        "active-marker-requirement",
+        "unknown-extra-marker",
+        "compound-extra-marker",
+        "wrong-extra-marker",
+        "duplicate-base-requirement",
+        "duplicate-optional-requirement",
+        "unmarked-extra-requirement",
     ],
 )
 def test_release_authority_rejects_mutation(
@@ -414,6 +475,10 @@ def test_release_authority_rejects_mutation(
     completed = _run_verifier(tmp_path / "g", mutation)
     assert completed.returncode != 0, mutation
     expected = {
+        "active-marker-requirement": "active, compound, or malformed requirement marker",
+        "compound-extra-marker": "active, compound, or malformed requirement marker",
+        "duplicate-base-requirement": "wheel contains duplicate requirements",
+        "duplicate-optional-requirement": "wheel contains duplicate requirements",
         "graft-file": "Git grafts are forbidden",
         "info-attributes": "Git info attributes are forbidden",
         "missing-tag-ref": "release tag ref does not resolve to a commit",
@@ -421,6 +486,9 @@ def test_release_authority_rejects_mutation(
         "noncanonical-tag-ref": "release tag is not canonical",
         "paired-replacement": "committed authority",
         "replacement-ref": "Git replacement objects are forbidden",
+        "unknown-extra-marker": "wheel optional-extra requirements differ",
+        "unmarked-extra-requirement": "wheel base requirements differ",
+        "wrong-extra-marker": "wheel optional-extra requirements differ",
     }
     if mutation in expected:
         assert expected[mutation] in completed.stderr
