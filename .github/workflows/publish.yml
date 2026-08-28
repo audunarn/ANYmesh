@@ -117,7 +117,12 @@ jobs:
           platforms = {"Windows": [], "Linux": [], "macOS": []}
           for wheel in wheels:
               name = wheel.name
-              python_tag = name.split("-")[2]
+              parts = name.split("-")
+              if len(parts) != 5:
+                  raise SystemExit(f"unexpected wheel filename: {name}")
+              python_tag, abi_tag = parts[2:4]
+              if python_tag not in expected_pythons or abi_tag != python_tag:
+                  raise SystemExit(f"unexpected wheel Python/ABI tags: {name}")
               if "-win_amd64.whl" in name:
                   platform = "Windows"
               elif (
@@ -125,7 +130,7 @@ jobs:
                   and name.endswith(expected_linux_suffixes[python_tag])
               ):
                   platform = "Linux"
-              elif "macosx" in name:
+              elif name.endswith("-macosx_11_0_arm64.whl"):
                   platform = "macOS"
               else:
                   raise SystemExit(f"unexpected wheel platform: {name}")

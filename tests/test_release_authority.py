@@ -213,6 +213,20 @@ def _run_verifier(
     elif mutation == "matrix-platform":
         names[-1] = names[-1].replace("win_amd64", "musllinux_1_2_x86_64")
         names.sort()
+    elif mutation == "wrong-abi":
+        index = next(
+            index for index, name in enumerate(names) if "-cp311-cp311-" in name
+        )
+        names[index] = names[index].replace("-cp311-cp311-", "-cp311-abi3-")
+        names.sort()
+    elif mutation == "wrong-macos-platform":
+        index = next(
+            index for index, name in enumerate(names) if "macosx_11_0_arm64" in name
+        )
+        names[index] = names[index].replace(
+            "macosx_11_0_arm64", "macosx_99_0_x86_64"
+        )
+        names.sort()
     elif mutation == "legacy-tag-order":
         index = next(
             index
@@ -502,6 +516,8 @@ def test_release_authority_accepts_exact_native_matrix(tmp_path: Path) -> None:
         "bad-record",
         "missing-wheel",
         "matrix-platform",
+        "wrong-abi",
+        "wrong-macos-platform",
         "legacy-tag-order",
         "cp313-modern-generation",
         "cp314-legacy-generation",
@@ -536,6 +552,8 @@ def test_release_authority_rejects_mutation(
         "duplicate-optional-requirement": "wheel contains duplicate requirements",
         "graft-file": "Git grafts are forbidden",
         "info-attributes": "Git info attributes are forbidden",
+        "wrong-abi": "wheel ABI is outside the frozen matrix",
+        "wrong-macos-platform": "wheel platform is outside the frozen matrix",
         "legacy-tag-order": "wheel platform is outside the frozen matrix",
         "cp313-modern-generation": "wheel platform is outside the frozen matrix",
         "cp314-legacy-generation": "wheel platform is outside the frozen matrix",

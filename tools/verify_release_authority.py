@@ -302,12 +302,14 @@ def _verify_wheel_matrix(
         match = pattern.fullmatch(name)
         if match is None:
             _fail(f"wheel filename is outside the frozen matrix: {name}")
-        python_tag, _abi_tag, platform_tag = match.groups()
+        python_tag, abi_tag, platform_tag = match.groups()
+        if abi_tag != python_tag:
+            _fail(f"wheel ABI is outside the frozen matrix: {name}")
         if platform_tag == "win_amd64":
             platform = "Windows"
         elif platform_tag == _FROZEN_LINUX_PLATFORM_TAGS[python_tag]:
             platform = "Linux"
-        elif platform_tag.startswith("macosx_"):
+        elif platform_tag == "macosx_11_0_arm64":
             platform = "macOS"
         else:
             _fail(f"wheel platform is outside the frozen matrix: {name}")

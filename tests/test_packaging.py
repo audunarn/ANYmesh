@@ -214,6 +214,10 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count(current_linux_tag) == 1
     assert verifier.count(legacy_linux_tag) == 1
     assert verifier.count(current_linux_tag) == 1
+    assert "abi_tag != python_tag" in publish
+    assert "abi_tag != python_tag" in verifier
+    assert 'name.endswith("-macosx_11_0_arm64.whl")' in publish
+    assert 'platform_tag == "macosx_11_0_arm64"' in verifier
     assert '"manylinux" in name and "x86_64" in name' not in publish
     assert '"manylinux" in platform_tag and "x86_64" in platform_tag' not in verifier
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
