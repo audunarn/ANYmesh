@@ -9,6 +9,12 @@ quietly broken.
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -27,6 +33,8 @@ from anymesher import (
 
 gmsh = pytest.importorskip("gmsh", reason="the gmsh backend needs ANYmesher[gmsh]")
 
+from anymesher.backends import gmsh as gmsh_backend
+
 
 def _rectangle(length: float = 2.0, width: float = 1.0) -> GeometryModel:
     model = GeometryModel()
@@ -37,6 +45,153 @@ def _rectangle(length: float = 2.0, width: float = 1.0) -> GeometryModel:
         )
     )
     return model
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 environment contract")
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "C:\\værktøy;D:\\工具", "C:\\long-path;" + "x" * 5000],
+)
+def test_native_environment_snapshot_round_trips_all_path_states(
+    value: str | None,
+) -> None:
+    name = f"ANYMESHER_NATIVE_PATH_TEST_{os.getpid()}"
+    original = gmsh_backend._snapshot_native_environment_variable(name)
+    python_value = os.environ.get(name)
+    requested = (False, "") if value is None else (True, value)
+    try:
+        gmsh_backend._restore_native_environment_variable(name, requested)
+        captured = gmsh_backend._snapshot_native_environment_variable(name)
+        assert captured == requested
+        gmsh_backend._restore_native_environment_variable(
+            name, (True, "changed-after-snapshot")
+        )
+        gmsh_backend._restore_native_environment_variable(name, captured)
+        assert gmsh_backend._snapshot_native_environment_variable(name) == requested
+        assert os.environ.get(name) == python_value
+    finally:
+        gmsh_backend._restore_native_environment_variable(name, original)
+
+
+def test_gmsh_session_restores_immediately_and_after_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    snapshot = (True, "frozen-native-path")
+
+    class _Option:
+        @staticmethod
+        def setNumber(name: str, value: int) -> None:
+            assert (name, value) == ("General.Terminal", 0)
+            events.append("option")
+
+    fake = SimpleNamespace(
+        initialize=lambda: events.append("initialize"),
+        finalize=lambda: events.append("finalize"),
+        option=_Option(),
+    )
+    monkeypatch.setattr(gmsh_backend, "gmsh", fake)
+    monkeypatch.setattr(
+        gmsh_backend,
+        "_snapshot_native_environment_variable",
+        lambda name: snapshot if name == "PATH" else None,
+    )
+    monkeypatch.setattr(
+        gmsh_backend,
+        "_restore_native_environment_variable",
+        lambda name, value: events.append(f"restore:{name}:{value!r}"),
+    )
+
+    with gmsh_backend._gmsh_session():
+        events.append("body")
+
+    assert events == [
+        "initialize",
+        f"restore:PATH:{snapshot!r}",
+        "option",
+        "body",
+        "finalize",
+        f"restore:PATH:{snapshot!r}",
+    ]
+
+
+def test_gmsh_session_restores_after_initialize_and_finalize_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    snapshot = (True, "frozen-native-path")
+
+    def restore(name: str, value: object) -> None:
+        events.append(f"restore:{name}:{value!r}")
+
+    failing_initialize = SimpleNamespace(
+        initialize=lambda: (_ for _ in ()).throw(RuntimeError("initialize failed")),
+        finalize=lambda: events.append("unexpected-finalize"),
+        option=SimpleNamespace(setNumber=lambda *_: None),
+    )
+    monkeypatch.setattr(gmsh_backend, "gmsh", failing_initialize)
+    monkeypatch.setattr(
+        gmsh_backend,
+        "_snapshot_native_environment_variable",
+        lambda name: snapshot if name == "PATH" else None,
+    )
+    monkeypatch.setattr(
+        gmsh_backend, "_restore_native_environment_variable", restore
+    )
+
+    with pytest.raises(RuntimeError, match="initialize failed"):
+        with gmsh_backend._gmsh_session():
+            pytest.fail("initialization failure must not enter the body")
+    assert events == [
+        f"restore:PATH:{snapshot!r}",
+        f"restore:PATH:{snapshot!r}",
+    ]
+
+    events.clear()
+
+    def finalize() -> None:
+        events.append("finalize")
+        raise RuntimeError("finalize failed")
+
+    failing_finalize = SimpleNamespace(
+        initialize=lambda: events.append("initialize"),
+        finalize=finalize,
+        option=SimpleNamespace(setNumber=lambda *_: events.append("option")),
+    )
+    monkeypatch.setattr(gmsh_backend, "gmsh", failing_finalize)
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        with gmsh_backend._gmsh_session():
+            events.append("body")
+    assert events == [
+        "initialize",
+        f"restore:PATH:{snapshot!r}",
+        "option",
+        "body",
+        "finalize",
+        f"restore:PATH:{snapshot!r}",
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Gmsh Win32 PATH regression")
+def test_real_gmsh_mesh_preserves_native_path_and_relative_git_launch() -> None:
+    native_before = gmsh_backend._snapshot_native_environment_variable("PATH")
+    python_before = os.environ.get("PATH")
+    git = shutil.which("git")
+    assert git is not None and os.path.isfile(git)
+
+    mesh = generate_mesh(_rectangle(), backend="gmsh", target_size=0.25)
+
+    assert mesh.shells
+    assert gmsh_backend._snapshot_native_environment_variable("PATH") == native_before
+    assert os.environ.get("PATH") == python_before
+    completed = subprocess.run(
+        ["git", "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith("git version ")
 
 
 def test_the_default_backend_is_the_native_first_auto_dispatcher() -> None:
@@ -264,9 +419,9 @@ def test_gmsh_is_finalized_even_when_meshing_fails() -> None:
         generate_mesh(model, backend="gmsh", target_size=0.4)
 
     # gmsh is process-global state.  A backend that left it initialized would
-    # break the next unrelated call, so initializing again must succeed.
-    gmsh.initialize()
-    gmsh.finalize()
+    # break the next unrelated call, so it must report clean state and allow a
+    # second backend-owned session.
+    assert not gmsh.isInitialized()
     assert generate_mesh(_rectangle(), backend="gmsh", target_size=0.3).quads
 
 
