@@ -56,10 +56,7 @@ jobs:
         env:
           CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"
-          CIBW_BEFORE_TEST: >-
-            python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
             --expect-version 0.3.2 --require-native
@@ -110,21 +107,29 @@ jobs:
               raise SystemExit(f"expected 12 wheels, found {len(wheels)}")
 
           expected_pythons = {"cp311", "cp312", "cp313", "cp314"}
-          expected_linux_suffix = (
-              "-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+          expected_linux_suffixes = {
+              python_tag: "-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+              for python_tag in ("cp311", "cp312", "cp313")
+          }
+          expected_linux_suffixes["cp314"] = (
+              "-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl"
           )
           platforms = {"Windows": [], "Linux": [], "macOS": []}
           for wheel in wheels:
               name = wheel.name
+              python_tag = name.split("-")[2]
               if "-win_amd64.whl" in name:
                   platform = "Windows"
-              elif name.endswith(expected_linux_suffix):
+              elif (
+                  python_tag in expected_linux_suffixes
+                  and name.endswith(expected_linux_suffixes[python_tag])
+              ):
                   platform = "Linux"
               elif "macosx" in name:
                   platform = "macOS"
               else:
                   raise SystemExit(f"unexpected wheel platform: {name}")
-              platforms[platform].append(name.split("-")[2])
+              platforms[platform].append(python_tag)
 
           for platform, interpreters in platforms.items():
               if set(interpreters) != expected_pythons or len(interpreters) != 4:

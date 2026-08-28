@@ -76,3 +76,28 @@ pythonpath = ["src"]
 # tests/conftest.py assigns a unique, gitignored repository-local basetemp so
 # concurrent and interrupted Windows runs never contend for one directory.
 addopts = ["-ra", "-p", "no:cacheprovider"]
+
+[tool.cibuildwheel]
+# The geometry candidate is intentionally installed from the hash-bound source
+# checkout used by the workflows, rather than from an independently mutable
+# package index artifact.
+before-test = [
+  "python -m pip install --no-deps {project}/.ecosystem/ANYgeometry",
+]
+
+[[tool.cibuildwheel.overrides]]
+# NumPy 2.3 and later no longer publish manylinux2014 wheels.  Seed the test
+# environment with the newest compatible generation before cibuildwheel
+# installs ANYmesher and its runtime dependencies.
+select = "cp31{1,2,3}-manylinux_x86_64"
+manylinux-x86_64-image = "manylinux2014"
+before-test = [
+  "python -m pip install \"numpy<2.3\"",
+  "python -m pip install --no-deps {project}/.ecosystem/ANYgeometry",
+]
+
+[[tool.cibuildwheel.overrides]]
+# CPython 3.14 requires the current NumPy generation, whose Linux wheels are
+# manylinux_2_28 rather than manylinux2014.
+select = "cp314-manylinux_x86_64"
+manylinux-x86_64-image = "manylinux_2_28"

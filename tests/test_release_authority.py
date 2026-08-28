@@ -43,11 +43,16 @@ FROZEN_REQUIREMENTS = (
 def _wheel_names() -> list[str]:
     names = []
     for python_tag in ("cp311", "cp312", "cp313", "cp314"):
+        linux_platform_tag = (
+            "manylinux_2_24_x86_64.manylinux_2_28_x86_64"
+            if python_tag == "cp314"
+            else "manylinux2014_x86_64.manylinux_2_17_x86_64"
+        )
         names.extend(
             (
                 f"{NORMALIZED}-{VERSION}-{python_tag}-{python_tag}-win_amd64.whl",
                 f"{NORMALIZED}-{VERSION}-{python_tag}-{python_tag}-"
-                "manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+                f"{linux_platform_tag}.whl",
                 f"{NORMALIZED}-{VERSION}-{python_tag}-{python_tag}-"
                 "macosx_11_0_arm64.whl",
             )
@@ -55,12 +60,17 @@ def _wheel_names() -> list[str]:
     return sorted(names)
 
 
-def test_release_matrix_freezes_manylinux2014_filenames() -> None:
+def test_release_matrix_freezes_per_generation_linux_filenames() -> None:
     linux_wheels = [name for name in _wheel_names() if "manylinux" in name]
     assert linux_wheels == [
-        f"{NORMALIZED}-{VERSION}-{python_tag}-{python_tag}-"
-        "manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
-        for python_tag in ("cp311", "cp312", "cp313", "cp314")
+        f"{NORMALIZED}-{VERSION}-cp311-cp311-"
+        "manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        f"{NORMALIZED}-{VERSION}-cp312-cp312-"
+        "manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        f"{NORMALIZED}-{VERSION}-cp313-cp313-"
+        "manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        f"{NORMALIZED}-{VERSION}-cp314-cp314-"
+        "manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl",
     ]
 
 
@@ -203,13 +213,37 @@ def _run_verifier(
     elif mutation == "matrix-platform":
         names[-1] = names[-1].replace("win_amd64", "musllinux_1_2_x86_64")
         names.sort()
-    elif mutation == "manylinux-2-28":
+    elif mutation == "legacy-tag-order":
         index = next(
-            index for index, name in enumerate(names) if "manylinux" in name
+            index
+            for index, name in enumerate(names)
+            if "-cp311-cp311-" in name and "manylinux" in name
         )
         names[index] = names[index].replace(
+            "manylinux2014_x86_64.manylinux_2_17_x86_64",
             "manylinux_2_17_x86_64.manylinux2014_x86_64",
+        )
+        names.sort()
+    elif mutation == "cp313-modern-generation":
+        index = next(
+            index
+            for index, name in enumerate(names)
+            if "-cp313-cp313-" in name and "manylinux" in name
+        )
+        names[index] = names[index].replace(
+            "manylinux2014_x86_64.manylinux_2_17_x86_64",
             "manylinux_2_24_x86_64.manylinux_2_28_x86_64",
+        )
+        names.sort()
+    elif mutation == "cp314-legacy-generation":
+        index = next(
+            index
+            for index, name in enumerate(names)
+            if "-cp314-cp314-" in name and "manylinux" in name
+        )
+        names[index] = names[index].replace(
+            "manylinux_2_24_x86_64.manylinux_2_28_x86_64",
+            "manylinux2014_x86_64.manylinux_2_17_x86_64",
         )
         names.sort()
     for index, name in enumerate(names):
@@ -468,7 +502,9 @@ def test_release_authority_accepts_exact_native_matrix(tmp_path: Path) -> None:
         "bad-record",
         "missing-wheel",
         "matrix-platform",
-        "manylinux-2-28",
+        "legacy-tag-order",
+        "cp313-modern-generation",
+        "cp314-legacy-generation",
         "extra-child-path",
         "noncanonical-json",
         "duplicate-json-key",
@@ -500,7 +536,9 @@ def test_release_authority_rejects_mutation(
         "duplicate-optional-requirement": "wheel contains duplicate requirements",
         "graft-file": "Git grafts are forbidden",
         "info-attributes": "Git info attributes are forbidden",
-        "manylinux-2-28": "wheel platform is outside the frozen matrix",
+        "legacy-tag-order": "wheel platform is outside the frozen matrix",
+        "cp313-modern-generation": "wheel platform is outside the frozen matrix",
+        "cp314-legacy-generation": "wheel platform is outside the frozen matrix",
         "missing-tag-ref": "release tag ref does not resolve to a commit",
         "moved-tag-ref": "release tag ref does not identify the ledger HEAD",
         "noncanonical-tag-ref": "release tag is not canonical",

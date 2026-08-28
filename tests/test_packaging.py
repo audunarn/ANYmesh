@@ -121,6 +121,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     publish = (REPOSITORY_ROOT / ".github/workflows/publish.yml").read_text(
         encoding="utf-8"
     )
+    cibuildwheel_config = _pyproject()["tool"]["cibuildwheel"]
     verifier = (
         REPOSITORY_ROOT / "tools/verify_release_authority.py"
     ).read_text(encoding="utf-8")
@@ -180,13 +181,39 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
 
     assert ci.count("repository: audunarn/ANYgeometry") == 4
     assert ci.count(f"ref: {ci_geometry_ref}") == 4
-    assert ci.count("CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014") == 1
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {release_geometry_ref}") == 1
-    assert publish.count("CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014") == 1
-    linux_platform_tag = "manylinux_2_17_x86_64.manylinux2014_x86_64"
-    assert publish.count(linux_platform_tag) == 1
-    assert verifier.count(linux_platform_tag) == 1
+    assert "CIBW_MANYLINUX_X86_64_IMAGE" not in ci
+    assert "CIBW_MANYLINUX_X86_64_IMAGE" not in publish
+    assert "CIBW_BEFORE_TEST" not in ci
+    assert "CIBW_BEFORE_TEST" not in publish
+    assert cibuildwheel_config == {
+        "before-test": [
+            "python -m pip install --no-deps "
+            "{project}/.ecosystem/ANYgeometry",
+        ],
+        "overrides": [
+            {
+                "select": "cp31{1,2,3}-manylinux_x86_64",
+                "manylinux-x86_64-image": "manylinux2014",
+                "before-test": [
+                    'python -m pip install "numpy<2.3"',
+                    "python -m pip install --no-deps "
+                    "{project}/.ecosystem/ANYgeometry",
+                ],
+            },
+            {
+                "select": "cp314-manylinux_x86_64",
+                "manylinux-x86_64-image": "manylinux_2_28",
+            },
+        ],
+    }
+    legacy_linux_tag = "manylinux2014_x86_64.manylinux_2_17_x86_64"
+    current_linux_tag = "manylinux_2_24_x86_64.manylinux_2_28_x86_64"
+    assert publish.count(legacy_linux_tag) == 1
+    assert publish.count(current_linux_tag) == 1
+    assert verifier.count(legacy_linux_tag) == 1
+    assert verifier.count(current_linux_tag) == 1
     assert '"manylinux" in name and "x86_64" in name' not in publish
     assert '"manylinux" in platform_tag and "x86_64" in platform_tag' not in verifier
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
