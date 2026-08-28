@@ -145,6 +145,50 @@ def test_directed_shared_edge_must_have_opposite_traversal() -> None:
     )
 
 
+def test_declared_multi_sheet_junction_is_exact_and_sheet_manifold() -> None:
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((-1.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((0.0, sqrt(3.0), 0.0)),
+            4: np.asarray((0.0, -sqrt(3.0), 0.0)),
+            5: np.asarray((0.0, 0.0, sqrt(3.0))),
+            6: np.asarray((0.0, 0.0, -sqrt(3.0))),
+        },
+        tris={
+            10: (1, 2, 3),
+            20: (2, 1, 4),
+            30: (1, 2, 5),
+            40: (2, 1, 6),
+        },
+        elements_of_sheet={101: [10, 20], 202: [30, 40]},
+    )
+    owners = {
+        10: (0.0, 0.0, 1.0),
+        20: (0.0, 0.0, 1.0),
+        30: (0.0, -1.0, 0.0),
+        40: (0.0, -1.0, 0.0),
+    }
+
+    undeclared = evaluate_s3_admission(mesh, element_owner_normals=owners)
+    assert undeclared.topology_violations == (
+        "edge (1, 2) is non-manifold; owners=(10, 20, 30, 40)",
+    )
+
+    mesh.declared_plate_junction_edges = ((1, 2),)
+    declared = evaluate_s3_admission(mesh, element_owner_normals=owners)
+    assert declared.admitted
+    assert declared.topology_violations == ()
+
+    mesh.tris[20] = (1, 2, 4)
+    owners[20] = (0.0, 0.0, -1.0)
+    repeated = evaluate_s3_admission(mesh, element_owner_normals=owners)
+    assert repeated.topology_violations == (
+        "declared junction edge (1, 2) has equal traversal in Sheet 101 "
+        "elements 10 and 20",
+    )
+
+
 def test_mixed_nodal_normals_include_triangles_and_follow_owner_normal() -> None:
     mesh = Mesh(
         nodes={

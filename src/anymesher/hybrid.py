@@ -1506,6 +1506,15 @@ def generate_hybrid_mesh_result(
         }
         mesh.elements_of_sheet[int(sheet_id)] = sorted(element_ids)
 
+    if preparation_report is not None:
+        # Qualified S3 topology checks run before final source-association
+        # remapping.  Publish exact prepared-junction node pairs now so a
+        # deliberate multi-Sheet intersection is not mistaken for an
+        # undeclared non-manifold triangle edge.
+        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
+            mesh, preparation_report
+        )
+
     qualified_s3_record: dict[str, Any] | None = None
     if qualified_s3:
         qualified_s3_started = perf_counter()
@@ -1544,10 +1553,6 @@ def generate_hybrid_mesh_result(
         for face_id in mapped_faces
         for element_id in mesh.elements_of_face.get(face_id, ())
     }
-    if preparation_report is not None:
-        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
-            mesh, preparation_report
-        )
     if preparation_report is not None or structured_report is not None:
         working_backend_diagnostics = triangulation_backend_by_face
         remap_prepared_mesh_associations(

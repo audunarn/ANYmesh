@@ -82,6 +82,70 @@ def test_production_preparation_binds_deterministic_owner_and_nodal_normals() ->
     assert restored.structural_preparation["qualified_s3"] == first_record
 
 
+def test_crossing_sheet_junction_is_declared_before_qualified_s3_admission() -> None:
+    geometry = GeometryModel()
+    horizontal = geometry.add_plate(
+        geometry.add_points(
+            (
+                (-1.0, -1.0, 0.0),
+                (1.0, -1.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (-1.0, 1.0, 0.0),
+            )
+        )
+    )
+    vertical = geometry.add_plate(
+        geometry.add_points(
+            (
+                (-1.0, 0.0, -1.0),
+                (1.0, 0.0, -1.0),
+                (1.0, 0.0, 1.0),
+                (-1.0, 0.0, 1.0),
+            )
+        )
+    )
+    geometry.add_sheet((horizontal,), name="horizontal")
+    geometry.add_sheet((vertical,), name="vertical")
+
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.5,
+        strategy="native",
+        native_backend="python",
+        recombine=False,
+        qualified_s3=True,
+    )
+    mesh = result.mesh
+    record = mesh.structural_preparation["qualified_s3"]
+    incidence: dict[tuple[int, int], list[int]] = {}
+    for element_id in sorted(mesh.shells):
+        corners = mesh.corners_of(element_id)
+        for first, second in zip(corners, corners[1:] + corners[:1]):
+            edge = (min(first, second), max(first, second))
+            incidence.setdefault(edge, []).append(element_id)
+
+    assert mesh.declared_plate_junction_edges
+    assert all(
+        len(incidence[edge]) == 4
+        for edge in mesh.declared_plate_junction_edges
+    )
+    assert record["status"] == "ADMITTED"
+    assert record["admission"]["topology_violations"] == []
+    assert record["repair"]["attempts"] == [
+        {
+            "action": "adjudication",
+            "detail": (
+                "all selected T3 elements satisfy the qualified-S3 "
+                "admission contract"
+            ),
+            "edge": [],
+            "element_ids": sorted(mesh.tris),
+            "sequence": 1,
+            "status": "accepted",
+        }
+    ]
+
+
 def test_reversed_sheet_orientation_repairs_winding_to_physical_director() -> None:
     geometry, _face_id = _square(orientation=Orientation.REVERSED)
 

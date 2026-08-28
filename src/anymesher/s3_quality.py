@@ -144,6 +144,46 @@ def _angles(corners: np.ndarray) -> np.ndarray:
 def _directed_edge_violations(
     mesh: Mesh, selected_triangles: frozenset[int]
 ) -> tuple[str, ...]:
+    declared: set[tuple[int, int]] = set()
+    declaration_errors: list[str] = []
+    for index, raw_edge in enumerate(mesh.declared_plate_junction_edges):
+        try:
+            values = tuple(raw_edge)
+        except TypeError:
+            values = ()
+        if (
+            len(values) != 2
+            or any(isinstance(value, (bool, np.bool_)) for value in values)
+            or any(not isinstance(value, (int, np.integer)) for value in values)
+        ):
+            declaration_errors.append(
+                f"declared plate-junction edge {index} is not an exact node-ID pair"
+            )
+            continue
+        first, second = (int(value) for value in values)
+        edge = (min(first, second), max(first, second))
+        if first == second:
+            declaration_errors.append(
+                f"declared plate-junction edge {index} repeats node {first}"
+            )
+        elif first not in mesh.nodes or second not in mesh.nodes:
+            declaration_errors.append(
+                f"declared plate-junction edge {edge} references a missing node"
+            )
+        elif edge in declared:
+            declaration_errors.append(
+                f"declared plate-junction edge {edge} is duplicated"
+            )
+        else:
+            declared.add(edge)
+
+    sheets_by_element: dict[int, list[int]] = {}
+    for sheet_id, element_ids in sorted(mesh.elements_of_sheet.items()):
+        for element_id in element_ids:
+            made_id = int(element_id)
+            if made_id in mesh.shells:
+                sheets_by_element.setdefault(made_id, []).append(int(sheet_id))
+
     incidence: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
     for element_id, connectivity in sorted(mesh.shells.items()):
         corners = mesh.corners_of(element_id)
@@ -153,13 +193,44 @@ def _directed_edge_violations(
             key = (min(start, end), max(start, end))
             incidence.setdefault(key, []).append((int(element_id), start, end))
 
-    violations: list[str] = []
+    violations: list[str] = list(declaration_errors)
     for edge, attached in sorted(incidence.items()):
         if not any(item[0] in selected_triangles for item in attached):
             continue
         if len(attached) > 2:
             ids = tuple(item[0] for item in attached)
-            violations.append(f"edge {edge} is non-manifold; owners={ids}")
+            if edge not in declared:
+                violations.append(f"edge {edge} is non-manifold; owners={ids}")
+                continue
+            grouped: dict[int, list[tuple[int, int, int]]] = {}
+            malformed = False
+            for item in attached:
+                owners = tuple(sorted(set(sheets_by_element.get(item[0], ()))))
+                if len(owners) != 1:
+                    violations.append(
+                        f"declared junction edge {edge} element {item[0]} needs "
+                        f"exactly one Sheet owner; found {owners}"
+                    )
+                    malformed = True
+                    continue
+                grouped.setdefault(owners[0], []).append(item)
+            if malformed:
+                continue
+            for sheet_id, sheet_items in sorted(grouped.items()):
+                if len(sheet_items) > 2:
+                    sheet_ids = tuple(item[0] for item in sheet_items)
+                    violations.append(
+                        f"declared junction edge {edge} is non-manifold within "
+                        f"Sheet {sheet_id}; owners={sheet_ids}"
+                    )
+                elif len(sheet_items) == 2 and (
+                    sheet_items[0][1:] == sheet_items[1][1:]
+                ):
+                    violations.append(
+                        f"declared junction edge {edge} has equal traversal in "
+                        f"Sheet {sheet_id} elements {sheet_items[0][0]} and "
+                        f"{sheet_items[1][0]}"
+                    )
         elif len(attached) == 2:
             first, second = attached
             if first[1:] == second[1:]:
