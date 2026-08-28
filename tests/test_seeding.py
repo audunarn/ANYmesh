@@ -93,6 +93,40 @@ def test_explicit_override_is_honoured():
     assert seeding[bottom] == seeding[top] == 7
 
 
+def test_planner_minimum_is_nonlocking_and_propagates_across_a_seed_class():
+    model = GeometryModel()
+    edges, _ = rectangle(model, 2.0, 1.0)
+    bottom, _, top, _ = edges
+
+    bounded = solve_seeding(
+        model,
+        target_size=0.5,
+        minimums={bottom: 6},
+    )
+    refined = solve_seeding(
+        model,
+        target_size=0.2,
+        minimums={bottom: 6},
+    )
+
+    assert bounded[bottom] == bounded[top] == 6
+    assert refined[bottom] == refined[top] == 10
+
+
+def test_exact_override_below_a_planner_minimum_fails_closed():
+    model = GeometryModel()
+    edges, _ = rectangle(model, 2.0, 1.0)
+    bottom, _, _, _ = edges
+
+    with pytest.raises(SeedingConflict, match="below the non-locking planner minimum"):
+        solve_seeding(
+            model,
+            target_size=0.5,
+            overrides={bottom: 4},
+            minimums={bottom: 5},
+        )
+
+
 def test_conflicting_overrides_are_reported_not_resolved():
     model = GeometryModel()
     edges, _ = rectangle(model, 2.0, 1.0)

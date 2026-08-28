@@ -8,6 +8,7 @@ import pytest
 
 from anymesher import MeshError
 from anymesher.hybrid import generate_hybrid_mesh_result
+from anymesher.refinement import Refinement
 from anymesher.seeding import solve_seeding
 
 
@@ -129,6 +130,43 @@ def test_caller_seeding_is_preserved_when_structured_preview_needs_no_partition(
     assert result.mesh.seeding is not None
     assert result.mesh.seeding.divisions == supplied.divisions
     assert result.mesh.grid_of_face[face].size > 0
+
+
+def test_structured_seed_solution_remains_a_lower_bound_for_local_refinement() -> None:
+    geometry, face = _plate(
+        (
+            (0.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (2.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        )
+    )
+    bottom = geometry.faces[face].loop[0].edge
+
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.5,
+        strategy="auto",
+        structured_options={},
+        refinements=(
+            Refinement(
+                size=0.1,
+                radius=0.3,
+                center=(1.0, 0.5, 0.0),
+                growth=1.15,
+            ),
+        ),
+        native_backend="python",
+    )
+
+    assert result.structured_layout is not None
+    assert result.structured_layout.status == "applied"
+    assert result.mesh.seeding is not None
+    assert (
+        result.mesh.seeding.divisions[bottom]
+        > result.structured_layout.seed_solution[bottom]
+    )
+    assert result.mesh.hybrid_diagnostics["structured_quality"]["accepted"] is True
 
 
 def test_auto_uses_quality_gated_native_fallback() -> None:

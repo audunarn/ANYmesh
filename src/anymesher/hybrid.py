@@ -1421,18 +1421,15 @@ def generate_hybrid_mesh_result(
     edges = _active_edges(geometry, faces, beams)
     if seeding is None:
         effective_overrides = dict(final_overrides or {})
-        if structured_report is not None:
-            for edge_id, divisions in structured_report.seed_solution.items():
-                previous = effective_overrides.setdefault(edge_id, divisions)
-                if previous != divisions:
-                    raise MeshError(
-                        f"structured seed solution for edge {edge_id} ({divisions}) "
-                        f"conflicts with explicit override {previous}"
-                    )
         seeding = solve_seeding(
             geometry,
             size_field=size_field,
             overrides=effective_overrides,
+            minimums=(
+                None
+                if structured_report is None
+                else structured_report.seed_solution
+            ),
             edge_ids=edges,
         )
     phase_seconds["seeding"] = perf_counter() - seeding_started
