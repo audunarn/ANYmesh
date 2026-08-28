@@ -55,6 +55,15 @@ def _wheel_names() -> list[str]:
     return sorted(names)
 
 
+def test_release_matrix_freezes_manylinux2014_filenames() -> None:
+    linux_wheels = [name for name in _wheel_names() if "manylinux" in name]
+    assert linux_wheels == [
+        f"{NORMALIZED}-{VERSION}-{python_tag}-{python_tag}-"
+        "manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        for python_tag in ("cp311", "cp312", "cp313", "cp314")
+    ]
+
+
 def _git(repository: Path, *arguments: str) -> str:
     completed = subprocess.run(
         [

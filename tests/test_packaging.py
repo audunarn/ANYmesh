@@ -177,8 +177,10 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
 
     assert ci.count("repository: audunarn/ANYgeometry") == 4
     assert ci.count(f"ref: {ci_geometry_ref}") == 4
+    assert ci.count("CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014") == 1
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {release_geometry_ref}") == 1
+    assert publish.count("CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
     assert (
         "tests/test_packaging.py::test_disabled_native_build_is_absence_only"
