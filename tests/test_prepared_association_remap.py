@@ -5,7 +5,7 @@ import pytest
 
 from anygeometry import EntityRef, GeometryModel, split_face_at
 from anygeometry.serialization import to_dict
-from anymesher import MeshError
+from anymesher import Mesh, MeshError
 from anymesher.mapped import generate_mesh
 from anymesher.prepared import remap_prepared_mesh_associations
 
@@ -96,3 +96,33 @@ def test_remap_rejects_missing_or_multiply_claimed_descendants_atomically() -> N
 
     assert mesh.geometry_model_id == original_identity
     assert set(mesh.elements_of_face) == set(face_map[face])
+
+
+def test_remap_allows_exact_coincident_source_edges_to_share_a_descendant() -> None:
+    source = GeometryModel()
+    first_start, first_end, second_start, second_end = source.add_points(
+        ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    )
+    first = source.add_line(first_start, first_end)
+    second = source.add_line(second_start, second_end)
+    working = source.clone()
+    working.remove_edge(second)
+    mesh = Mesh(
+        geometry_model_id=working.model_id,
+        geometry_revision=working.revision,
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+        },
+        nodes_of_edge={first: [1, 2]},
+    )
+
+    result = remap_prepared_mesh_associations(
+        mesh,
+        source,
+        working,
+        source_to_working_faces={},
+        source_to_working_edges={first: (first,), second: (first,)},
+    )
+
+    assert result.nodes_of_edge == {first: [1, 2], second: [1, 2]}
