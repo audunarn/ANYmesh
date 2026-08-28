@@ -203,6 +203,15 @@ def _run_verifier(
     elif mutation == "matrix-platform":
         names[-1] = names[-1].replace("win_amd64", "musllinux_1_2_x86_64")
         names.sort()
+    elif mutation == "manylinux-2-28":
+        index = next(
+            index for index, name in enumerate(names) if "manylinux" in name
+        )
+        names[index] = names[index].replace(
+            "manylinux_2_17_x86_64.manylinux2014_x86_64",
+            "manylinux_2_24_x86_64.manylinux_2_28_x86_64",
+        )
+        names.sort()
     for index, name in enumerate(names):
         requirements = None
         if index == 0:
@@ -459,6 +468,7 @@ def test_release_authority_accepts_exact_native_matrix(tmp_path: Path) -> None:
         "bad-record",
         "missing-wheel",
         "matrix-platform",
+        "manylinux-2-28",
         "extra-child-path",
         "noncanonical-json",
         "duplicate-json-key",
@@ -490,6 +500,7 @@ def test_release_authority_rejects_mutation(
         "duplicate-optional-requirement": "wheel contains duplicate requirements",
         "graft-file": "Git grafts are forbidden",
         "info-attributes": "Git info attributes are forbidden",
+        "manylinux-2-28": "wheel platform is outside the frozen matrix",
         "missing-tag-ref": "release tag ref does not resolve to a commit",
         "moved-tag-ref": "release tag ref does not identify the ledger HEAD",
         "noncanonical-tag-ref": "release tag is not canonical",

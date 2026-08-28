@@ -121,6 +121,9 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     publish = (REPOSITORY_ROOT / ".github/workflows/publish.yml").read_text(
         encoding="utf-8"
     )
+    verifier = (
+        REPOSITORY_ROOT / "tools/verify_release_authority.py"
+    ).read_text(encoding="utf-8")
     checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
     setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
     upload = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
@@ -181,6 +184,11 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {release_geometry_ref}") == 1
     assert publish.count("CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014") == 1
+    linux_platform_tag = "manylinux_2_17_x86_64.manylinux2014_x86_64"
+    assert publish.count(linux_platform_tag) == 1
+    assert verifier.count(linux_platform_tag) == 1
+    assert '"manylinux" in name and "x86_64" in name' not in publish
+    assert '"manylinux" in platform_tag and "x86_64" in platform_tag' not in verifier
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
     assert (
         "tests/test_packaging.py::test_disabled_native_build_is_absence_only"

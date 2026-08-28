@@ -27,6 +27,9 @@ import zipfile
 
 
 SCHEMA = "anyecosystem.release-ledger-v1"
+_FROZEN_LINUX_PLATFORM_TAG = (
+    "manylinux_2_17_x86_64.manylinux2014_x86_64"
+)
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9A-F]{64}")
 
@@ -298,7 +301,7 @@ def _verify_wheel_matrix(
         python_tag, _abi_tag, platform_tag = match.groups()
         if platform_tag == "win_amd64":
             platform = "Windows"
-        elif "manylinux" in platform_tag and "x86_64" in platform_tag:
+        elif platform_tag == _FROZEN_LINUX_PLATFORM_TAG:
             platform = "Linux"
         elif platform_tag.startswith("macosx_"):
             platform = "macOS"

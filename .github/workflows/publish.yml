@@ -110,12 +110,15 @@ jobs:
               raise SystemExit(f"expected 12 wheels, found {len(wheels)}")
 
           expected_pythons = {"cp311", "cp312", "cp313", "cp314"}
+          expected_linux_suffix = (
+              "-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+          )
           platforms = {"Windows": [], "Linux": [], "macOS": []}
           for wheel in wheels:
               name = wheel.name
               if "-win_amd64.whl" in name:
                   platform = "Windows"
-              elif "manylinux" in name and "x86_64" in name:
+              elif name.endswith(expected_linux_suffix):
                   platform = "Linux"
               elif "macosx" in name:
                   platform = "macOS"
