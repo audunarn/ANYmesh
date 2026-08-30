@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from hashlib import sha256
 import json
-from math import isfinite
+from math import ceil, isfinite
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -24,7 +24,7 @@ from anygeometry.surfaces import Cylinder, Plane
 
 from .decomposition import check_mappable
 from .errors import MeshError
-from .seeding import SeedingConflict, solve_seeding
+from .seeding import Seeding, SeedingConflict, edge_distribution, solve_seeding
 
 __all__ = [
     "MeshQualityPolicy",
@@ -1082,6 +1082,184 @@ def _ogrid_partition(geometry: GeometryModel, face_id: int) -> tuple[int, ...]:
     return tuple(made)
 
 
+def _seeded_side_points(
+    geometry: GeometryModel,
+    side: Sequence[OrientedEdge],
+    seeding: Seeding,
+) -> np.ndarray:
+    """Return mapped-boundary stations in exact oriented topology order."""
+
+    if seeding.size_field is None:
+        raise MeshError("mapped quality seeding requires its bound size field")
+    made: list[np.ndarray] = []
+    for oriented in side:
+        divisions = int(seeding.divisions[oriented.edge])
+        parameters = np.concatenate(
+            (
+                np.asarray((0.0,), dtype=float),
+                edge_distribution(
+                    geometry,
+                    oriented.edge,
+                    divisions,
+                    seeding.size_field,
+                ),
+                np.asarray((1.0,), dtype=float),
+            )
+        )
+        points = np.asarray(
+            geometry.sample_edge(oriented.edge, parameters), dtype=float
+        )
+        if not oriented.forward:
+            points = points[::-1]
+        made.append(points if not made else points[1:])
+    if not made:
+        raise MeshError("mapped face side has no edges")
+    return np.concatenate(made, axis=0)
+
+
+def _mapped_aspect_requirements(
+    geometry: GeometryModel,
+    blocks: Sequence[StructuredBlock],
+    seeding: Seeding,
+    *,
+    maximum_aspect_ratio: float,
+) -> dict[int, int]:
+    """Return seed-class lower bounds for mapped cells over the aspect limit.
+
+    This evaluates the same boundary stations and Coons blend used by the
+    mapped producer.  Only a single-edge axis can be refined here: composite
+    sides keep their normal quality adjudication and native fallback rather
+    than receiving a guessed topology change.
+    """
+
+    from .mapped import coons_grid
+
+    required: dict[int, int] = {}
+    for block in blocks:
+        if block.action == "native_residual" or block.working_face_id is None:
+            continue
+        face = geometry.faces[int(block.working_face_id)]
+        if len(face.corners) != 4 or face.holes:
+            continue
+        sides = face.sides()
+        side_a = _seeded_side_points(geometry, sides[0], seeding)
+        side_b = _seeded_side_points(geometry, sides[1], seeding)
+        side_c = _seeded_side_points(geometry, sides[2], seeding)[::-1]
+        side_d = _seeded_side_points(geometry, sides[3], seeding)[::-1]
+        grid = coons_grid(side_a, side_b, side_c, side_d)
+        for u_index in range(grid.shape[0] - 1):
+            for v_index in range(grid.shape[1] - 1):
+                corners = (
+                    grid[u_index, v_index],
+                    grid[u_index + 1, v_index],
+                    grid[u_index + 1, v_index + 1],
+                    grid[u_index, v_index + 1],
+                )
+                lengths = np.asarray(
+                    [
+                        np.linalg.norm(second - first)
+                        for first, second in zip(
+                            corners, corners[1:] + corners[:1]
+                        )
+                    ],
+                    dtype=float,
+                )
+                shortest = float(np.min(lengths))
+                if shortest <= 0.0:
+                    continue
+                ratio = float(np.max(lengths)) / shortest
+                if ratio <= maximum_aspect_ratio:
+                    continue
+                u_length = max(float(lengths[0]), float(lengths[2]))
+                v_length = max(float(lengths[1]), float(lengths[3]))
+                axis = (sides[0], sides[2]) if u_length >= v_length else (
+                    sides[1],
+                    sides[3],
+                )
+                if len(axis[0]) != 1 or len(axis[1]) != 1:
+                    continue
+                first_edge = axis[0][0].edge
+                second_edge = axis[1][0].edge
+                first_class = seeding.classes[first_edge]
+                if seeding.classes[second_edge] != first_class:
+                    continue
+                count = int(seeding.divisions[first_edge])
+                lower_bound = max(
+                    count + 1,
+                    int(ceil(count * ratio / maximum_aspect_ratio)),
+                )
+                required[first_class] = max(
+                    required.get(first_class, 0), lower_bound
+                )
+    return required
+
+
+def _refine_mapped_aspect_seeding(
+    geometry: GeometryModel,
+    blocks: Sequence[StructuredBlock],
+    plan: StructuredLayoutPlan,
+    seeding: Seeding,
+) -> Seeding:
+    """Deterministically refine free mapped axes before quality fallback.
+
+    Exact user overrides remain immutable.  Every accepted refinement raises a
+    complete opposite-edge seed class and the normal global solver rechecks all
+    adjacent block equations.  If a class cannot be refined safely, the
+    original post-mesh quality gate remains authoritative.
+    """
+
+    explicit = dict(plan.seed_overrides)
+    adaptive: dict[int, int] = {}
+    # The factor estimate normally closes in one pass.  The finite loop only
+    # prevents pathological warped faces from chasing an unattainable ratio;
+    # such a face proceeds to the unchanged quality rejection/fallback path.
+    for _iteration in range(16):
+        requirements = _mapped_aspect_requirements(
+            geometry,
+            blocks,
+            seeding,
+            maximum_aspect_ratio=(
+                plan.options.quality_policy.maximum_aspect_ratio
+            ),
+        )
+        if not requirements:
+            return seeding
+        members: dict[int, list[int]] = {}
+        for edge_id, class_id in seeding.classes.items():
+            members.setdefault(class_id, []).append(edge_id)
+        changed = False
+        for class_id, lower_bound in sorted(requirements.items()):
+            class_edges = tuple(sorted(members.get(class_id, ())))
+            if not class_edges or any(
+                edge_id in explicit for edge_id in class_edges
+            ):
+                continue
+            current = max(
+                seeding.divisions[edge_id] for edge_id in class_edges
+            )
+            target = min(
+                int(lower_bound), plan.options.maximum_divisions_per_edge
+            )
+            if target <= current:
+                continue
+            for edge_id in class_edges:
+                adaptive[edge_id] = target
+            changed = True
+        if not changed:
+            return seeding
+        try:
+            seeding = solve_seeding(
+                geometry,
+                target_size=plan.target_size,
+                edge_ids=tuple(sorted(seeding.divisions)),
+                overrides={**explicit, **adaptive},
+                max_divisions=plan.options.maximum_divisions_per_edge,
+            )
+        except (SeedingConflict, ValueError):
+            return seeding
+    return seeding
+
+
 def _actual_evidence(
     working: GeometryModel,
     plan: StructuredLayoutPlan,
@@ -1126,6 +1304,9 @@ def _actual_evidence(
         )
     except (SeedingConflict, ValueError) as error:
         raise MeshError(f"global structured seeding failed: {error}") from error
+    seeding = _refine_mapped_aspect_seeding(
+        working, blocks, plan, seeding
+    )
     _cancel(cancellation_check, "structured global seeding complete")
 
     equations: list[SeedEquation] = []

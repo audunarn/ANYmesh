@@ -107,6 +107,31 @@ from .primitives import (
     stiffened_panel_mesh,
 )
 from .quality import ASPECT_RATIO_LIMIT, WARP_LIMIT, MeshQuality, verify_mesh_quality
+from .s3_quality import (
+    DEFAULT_S3_QUALITY_POLICY,
+    S3_QUALITY_CONTRACT_ID,
+    S3AdmissionReport,
+    S3ElementQuality,
+    S3QualityError,
+    S3QualityPolicy,
+    assert_s3_admissible,
+    evaluate_s3_admission,
+)
+from .s3_production import (
+    QUALIFIED_S3_FORMULATION_ID,
+    QUALIFIED_S3_PRODUCTION_CONTRACT_ID,
+    S3OwnerAuthorityError,
+    prepare_qualified_s3_mesh,
+)
+from .s3_repair import (
+    DEFAULT_S3_REPAIR_POLICY,
+    S3_REPAIR_CONTRACT_ID,
+    S3RepairAttempt,
+    S3RepairError,
+    S3RepairPolicy,
+    S3RepairResult,
+    repair_s3_admission,
+)
 from .refinement import Refinement, SizeField, refine_around, refine_at
 from .seeding import Seeding, SeedingConflict, edge_demand, edge_distribution, solve_seeding
 from .structured import (
@@ -140,7 +165,7 @@ from .automation import (
     MeshPlan,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 __all__ = [
     "ASPECT_RATIO_LIMIT",
@@ -150,6 +175,8 @@ __all__ = [
     "CertificationMode",
     "ChartProjection",
     "CurveShape",
+    "DEFAULT_S3_QUALITY_POLICY",
+    "DEFAULT_S3_REPAIR_POLICY",
     "DEFAULT_BACKEND",
     "DegenerateArcError",
     "ELEMENT_ORDERS",
@@ -180,6 +207,19 @@ __all__ = [
     "PANEL_FACE_ID",
     "PanelMeshConfig",
     "Refinement",
+    "QUALIFIED_S3_PRODUCTION_CONTRACT_ID",
+    "QUALIFIED_S3_FORMULATION_ID",
+    "S3AdmissionReport",
+    "S3ElementQuality",
+    "S3OwnerAuthorityError",
+    "S3QualityError",
+    "S3QualityPolicy",
+    "S3_QUALITY_CONTRACT_ID",
+    "S3_REPAIR_CONTRACT_ID",
+    "S3RepairAttempt",
+    "S3RepairError",
+    "S3RepairPolicy",
+    "S3RepairResult",
     "STIFFENER_EDGE_ID_BASE",
     "Seeding",
     "SeedingConflict",
@@ -204,6 +244,7 @@ __all__ = [
     "WARP_LIMIT",
     "arc_frame",
     "available_backends",
+    "assert_s3_admissible",
     "apply_intersection_mutation",
     "apply_structured_layout",
     "beam_mesh",
@@ -218,6 +259,7 @@ __all__ = [
     "constrained_smoothing",
     "edge_demand",
     "edge_distribution",
+    "evaluate_s3_admission",
     "generate_mesh",
     "generate_hybrid_mesh",
     "generate_hybrid_mesh_result",
@@ -234,8 +276,10 @@ __all__ = [
     "plan_intersection_mutation",
     "plan_structured_layout",
     "prepare_structural_closure",
+    "prepare_qualified_s3_mesh",
     "refine_around",
     "refine_at",
+    "repair_s3_admission",
     "resolve_backend",
     "regularity_metrics",
     "sample_chain",

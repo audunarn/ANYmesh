@@ -38,6 +38,7 @@ from .preparation import (
 )
 from .quality_v2 import assert_valid_mesh, evaluate_quality
 from .refinement import Refinement, SizeField
+from .s3_production import prepare_qualified_s3_mesh
 from .seeding import Seeding, edge_distribution, solve_seeding
 from .structural_pipeline import (
     GeometryMutationPolicy,
@@ -718,7 +719,7 @@ def _stable_diagnostic_record(value: Any) -> Any:
         return {
             str(key): _stable_diagnostic_record(item)
             for key, item in value.items()
-            if str(key) != "phase_seconds"
+            if str(key) != "phase_seconds" and not str(key).endswith("_seconds")
         }
     if isinstance(value, (list, tuple)):
         return [_stable_diagnostic_record(item) for item in value]
@@ -777,20 +778,29 @@ def _loop_boundary(
         raise MeshError(f"face {face_id} has fewer than three boundary stations")
     if quadratic and len(midside_nodes) != len(corner_nodes):
         raise MeshError(f"face {face_id} has an inconsistent quadratic boundary")
-    try:
-        uv = np.asarray(
-            [
-                geometry.face_local_uv(face_id, mesh.nodes[node_id])
-                for node_id in corner_nodes
-            ],
-            dtype=float,
-        )
-    except GeometryError as error:
-        raise MeshError(
-            f"native face {face_id} has no qualified surface chart: {error}. "
-            "Attach an authoritative Plane/Cylinder surface or partition it "
-            "into mapped patches; ANYmesher will not invent geometry truth."
-        ) from error
+    uv = _mapped_outer_boundary_uv(
+        geometry,
+        mesh,
+        face_id,
+        loop,
+        quadratic=quadratic,
+        expected_nodes=corner_nodes,
+    )
+    if uv is None:
+        try:
+            uv = np.asarray(
+                [
+                    geometry.face_local_uv(face_id, mesh.nodes[node_id])
+                    for node_id in corner_nodes
+                ],
+                dtype=float,
+            )
+        except GeometryError as error:
+            raise MeshError(
+                f"native face {face_id} has no qualified surface chart: {error}. "
+                "Attach an authoritative Plane/Cylinder surface or partition it "
+                "into mapped patches; ANYmesher will not invent geometry truth."
+            ) from error
     if uv.shape != (len(corner_nodes), 2) or not np.all(np.isfinite(uv)):
         raise MeshError(f"face {face_id} surface chart returned invalid UV coordinates")
     boundary = _LoopBoundary(tuple(corner_nodes), tuple(midside_nodes), uv)
@@ -803,6 +813,96 @@ def _loop_boundary(
     if (area > 0.0) != bool(counter_clockwise):
         boundary = _reverse_loop(boundary)
     return boundary
+
+
+def _mapped_outer_boundary_uv(
+    geometry: GeometryModel,
+    mesh: Mesh,
+    face_id: int,
+    loop: Sequence[Any],
+    *,
+    quadratic: bool,
+    expected_nodes: Sequence[int],
+) -> np.ndarray | None:
+    """Use exact mapped-side authority instead of inverting boundary points.
+
+    A four-sided face already defines the unit-square chart through its corner
+    and side ordering.  Numerical inverse maps can drift or even backtrack at
+    Coons-patch boundaries, especially around a butterfly opening.  Boundary
+    nodes are registered globally and therefore need only their exact chart
+    order here; interior nodes continue to lift through the authoritative face
+    evaluator.
+    """
+
+    face = geometry.faces[face_id]
+    if tuple(loop) != tuple(face.loop):
+        return None
+    try:
+        sides = face.sides()
+    except (GeometryError, ValueError):
+        return None
+    # This shortcut is exact only for a four-edge mapped patch.  A face can
+    # expose four logical sides while one side contains multiple edges (for
+    # example, a concave five-edge planar polygon); that remains on the
+    # authoritative inverse-chart path below.
+    if (
+        len(face.loop) != 4
+        or len(sides) != 4
+        or any(len(side) != 1 for side in sides)
+    ):
+        return None
+
+    made_nodes: list[int] = []
+    made_uv: list[tuple[float, float]] = []
+    corner_nodes: list[int] = []
+    for side_index, side in enumerate(sides):
+        chain: list[int] = []
+        for oriented in side:
+            sequence = list(mesh.nodes_of_edge[oriented.edge])
+            if not oriented.forward:
+                sequence.reverse()
+            if quadratic:
+                if (len(sequence) - 1) % 2:
+                    return None
+                sequence = sequence[::2]
+            if chain:
+                if chain[-1] != sequence[0]:
+                    return None
+                chain.extend(sequence[1:])
+            else:
+                chain.extend(sequence)
+        divisions = len(chain) - 1
+        if divisions < 1:
+            return None
+        corner_nodes.append(int(chain[0]))
+        for station, node_id in enumerate(chain[:-1]):
+            parameter = station / divisions
+            if side_index == 0:
+                uv = (parameter, 0.0)
+            elif side_index == 1:
+                uv = (1.0, parameter)
+            elif side_index == 2:
+                uv = (1.0 - parameter, 1.0)
+            else:
+                uv = (0.0, 1.0 - parameter)
+            made_nodes.append(int(node_id))
+            made_uv.append(uv)
+    if made_nodes != list(expected_nodes):
+        return None
+    unit_corners = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    actual_corners = np.asarray([mesh.nodes[item] for item in corner_nodes])
+    try:
+        evaluated_corners = np.asarray(
+            [geometry.face_point(face_id, u, v) for u, v in unit_corners]
+        )
+    except GeometryError:
+        return None
+    extent = max(float(np.max(np.ptp(actual_corners, axis=0))), 1.0)
+    if np.max(np.linalg.norm(evaluated_corners - actual_corners, axis=1)) > (
+        geometry.tolerance.effective_surface_residual(extent)
+    ):
+        return None
+    return np.asarray(made_uv, dtype=float)
 
 
 def _core_edge_midsides(core: Any) -> dict[tuple[int, int], int]:
@@ -1031,6 +1131,7 @@ def generate_hybrid_mesh_result(
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
     ) = None,
+    qualified_s3: bool = False,
     overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
     certification_mode: CertificationMode | str = CertificationMode.NONE,
@@ -1061,6 +1162,8 @@ def generate_hybrid_mesh_result(
     mutation_policy = _enum_value(
         mutation_policy, GeometryMutationPolicy, "geometry mutation policy"
     )
+    if type(qualified_s3) is not bool:
+        raise MeshError("qualified_s3 must be Boolean")
 
     source_geometry = geometry
     requested_beam_edges = tuple(int(item) for item in beam_edges)
@@ -1318,18 +1421,15 @@ def generate_hybrid_mesh_result(
     edges = _active_edges(geometry, faces, beams)
     if seeding is None:
         effective_overrides = dict(final_overrides or {})
-        if structured_report is not None:
-            for edge_id, divisions in structured_report.seed_solution.items():
-                previous = effective_overrides.setdefault(edge_id, divisions)
-                if previous != divisions:
-                    raise MeshError(
-                        f"structured seed solution for edge {edge_id} ({divisions}) "
-                        f"conflicts with explicit override {previous}"
-                    )
         seeding = solve_seeding(
             geometry,
             size_field=size_field,
             overrides=effective_overrides,
+            minimums=(
+                None
+                if structured_report is None
+                else structured_report.seed_solution
+            ),
             edge_ids=edges,
         )
     phase_seconds["seeding"] = perf_counter() - seeding_started
@@ -1403,6 +1503,35 @@ def generate_hybrid_mesh_result(
         }
         mesh.elements_of_sheet[int(sheet_id)] = sorted(element_ids)
 
+    if preparation_report is not None:
+        # Qualified S3 topology checks run before final source-association
+        # remapping.  Publish exact prepared-junction node pairs now so a
+        # deliberate multi-Sheet intersection is not mistaken for an
+        # undeclared non-manifold triangle edge.
+        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
+            mesh, preparation_report
+        )
+
+    qualified_s3_record: dict[str, Any] | None = None
+    if qualified_s3:
+        qualified_s3_started = perf_counter()
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation start"
+        )
+        mesh, qualified_s3_record = prepare_qualified_s3_mesh(mesh, geometry)
+        qualified_s3_record["authority_model"].update(
+            {
+                "source_model_id": str(source_geometry.model_id),
+                "source_revision": int(source_geometry.revision),
+            }
+        )
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation complete"
+        )
+        phase_seconds["qualified_s3_preparation"] = (
+            perf_counter() - qualified_s3_started
+        )
+
     connectivity_started = perf_counter()
     _check_cancellation(cancellation_check, "hybrid connectivity start")
     for element_id in (*mesh.quads, *mesh.tris, *mesh.beams):
@@ -1421,10 +1550,6 @@ def generate_hybrid_mesh_result(
         for face_id in mapped_faces
         for element_id in mesh.elements_of_face.get(face_id, ())
     }
-    if preparation_report is not None:
-        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
-            mesh, preparation_report
-        )
     if preparation_report is not None or structured_report is not None:
         working_backend_diagnostics = triangulation_backend_by_face
         remap_prepared_mesh_associations(
@@ -1485,7 +1610,7 @@ def generate_hybrid_mesh_result(
             fallback = generate_hybrid_mesh_result(
                 source_geometry,
                 target_size=target_size,
-                strategy=MeshingStrategy.AUTO,
+                strategy=MeshingStrategy.NATIVE,
                 overrides=overrides,
                 beam_edges=requested_beam_edges,
                 beam_offsets=beam_offsets,
@@ -1498,6 +1623,7 @@ def generate_hybrid_mesh_result(
                 native_backend=native_backend,
                 structured_options=None,
                 structural_preparation=structural_preparation,
+                qualified_s3=qualified_s3,
                 overlap_policy=overlap_policy,
                 mutation_policy=mutation_policy,
                 certification_mode=certification_mode,
@@ -1558,12 +1684,18 @@ def generate_hybrid_mesh_result(
                 if fallback_preparation is None
                 else dict(fallback_preparation.source_to_working_edges)
             )
-            fallback.mesh.structural_preparation = _preparation_payload(
+            fallback_qualified_s3 = fallback.mesh.structural_preparation.get(
+                "qualified_s3"
+            )
+            fallback_payload = _preparation_payload(
                 fallback_preparation,
                 structured_report,
                 fallback_faces,
                 fallback_edges,
             )
+            if fallback_qualified_s3 is not None:
+                fallback_payload["qualified_s3"] = fallback_qualified_s3
+            fallback.mesh.structural_preparation = fallback_payload
             fallback.mesh.hybrid_diagnostics.update(
                 {
                     "structured_layout_status": structured_report.status,
@@ -1576,12 +1708,15 @@ def generate_hybrid_mesh_result(
                 "structured quality fallback accepted",
             )
             return replace(fallback, structured_layout=structured_report)
-    mesh.structural_preparation = _preparation_payload(
+    preparation_payload = _preparation_payload(
         preparation_report,
         structured_report,
         source_to_final_faces,
         source_to_final_edges,
     )
+    if qualified_s3_record is not None:
+        preparation_payload["qualified_s3"] = qualified_s3_record
+    mesh.structural_preparation = preparation_payload
     strategies = dict(source_strategies)
     result = HybridMeshResult(
         mesh=mesh,
@@ -1619,6 +1754,17 @@ def generate_hybrid_mesh_result(
             None
             if preparation_report is None
             else preparation_report.preparation_hash
+        ),
+        "qualified_s3_preparation": (
+            None
+            if qualified_s3_record is None
+            else {
+                "contract_id": qualified_s3_record["contract_id"],
+                "element_count": len(qualified_s3_record["element_ids"]),
+                "formulation_id": qualified_s3_record["formulation_id"],
+                "legacy_fallback": qualified_s3_record["legacy_fallback"],
+                "status": qualified_s3_record["status"],
+            }
         ),
         "completed_phases": sorted(phase_seconds),
     }

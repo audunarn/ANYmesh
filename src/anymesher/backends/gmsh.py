@@ -25,6 +25,8 @@ it, finalizes it in a ``finally``, and never leaves it initialized on the way ou
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import sys
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -49,16 +51,108 @@ _SHELL_TYPES = {_TRI3: "tris", _QUAD4: "quads", _TRI6: "tris", _QUAD8: "quads"}
 _PLANARITY_RTOL = 1.0e-6
 
 
+_NativeEnvironmentSnapshot = Optional[Tuple[bool, str]]
+_ERROR_ENVVAR_NOT_FOUND = 203
+
+if sys.platform == "win32":
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _GET_ENVIRONMENT_VARIABLE = _KERNEL32.GetEnvironmentVariableW
+    _GET_ENVIRONMENT_VARIABLE.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+    )
+    _GET_ENVIRONMENT_VARIABLE.restype = ctypes.c_uint32
+    _SET_ENVIRONMENT_VARIABLE = _KERNEL32.SetEnvironmentVariableW
+    _SET_ENVIRONMENT_VARIABLE.argtypes = (
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+    )
+    _SET_ENVIRONMENT_VARIABLE.restype = ctypes.c_int
+else:
+    _GET_ENVIRONMENT_VARIABLE = None
+    _SET_ENVIRONMENT_VARIABLE = None
+
+
+def _snapshot_native_environment_variable(
+    name: str,
+) -> _NativeEnvironmentSnapshot:
+    """Read the real Windows process environment without consulting ``os.environ``.
+
+    Gmsh 4.14 on Windows changes the native process ``PATH`` during
+    ``initialize()`` without updating Python's cached environment mapping.
+    The Win32 API is therefore the only authoritative source for the value we
+    must restore.  Other platforms need no boundary repair.
+    """
+
+    if _GET_ENVIRONMENT_VARIABLE is None:
+        return None
+    while True:
+        ctypes.set_last_error(0)
+        required = int(_GET_ENVIRONMENT_VARIABLE(name, None, 0))
+        if required == 0:
+            error = ctypes.get_last_error()
+            if error == _ERROR_ENVVAR_NOT_FOUND:
+                return False, ""
+            if error:
+                raise ctypes.WinError(error)
+            return True, ""
+        buffer = ctypes.create_unicode_buffer(required)
+        ctypes.set_last_error(0)
+        copied = int(_GET_ENVIRONMENT_VARIABLE(name, buffer, required))
+        if copied == 0:
+            error = ctypes.get_last_error()
+            if error == _ERROR_ENVVAR_NOT_FOUND:
+                return False, ""
+            if error:
+                raise ctypes.WinError(error)
+            return True, ""
+        if copied < required:
+            return True, buffer.value
+        # The value grew between the size query and the read.  Retry rather
+        # than accepting a truncated process-global environment value.
+
+
+def _restore_native_environment_variable(
+    name: str,
+    snapshot: _NativeEnvironmentSnapshot,
+) -> None:
+    """Restore an exact native environment snapshot without touching ``os.environ``."""
+
+    if _SET_ENVIRONMENT_VARIABLE is None or snapshot is None:
+        return
+    existed, value = snapshot
+    ctypes.set_last_error(0)
+    if not _SET_ENVIRONMENT_VARIABLE(name, value if existed else None):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 @contextlib.contextmanager
 def _gmsh_session(verbose: bool = False) -> Iterator[None]:
     """Initialize gmsh for the duration of a block, and always finalize."""
 
-    gmsh.initialize()
+    native_path = _snapshot_native_environment_variable("PATH")
+    initialized = False
     try:
+        try:
+            gmsh.initialize()
+            initialized = True
+        finally:
+            # Restore immediately: callers may launch other tools while a
+            # process-global Gmsh session is active.
+            _restore_native_environment_variable("PATH", native_path)
         gmsh.option.setNumber("General.Terminal", 1 if verbose else 0)
         yield
     finally:
-        gmsh.finalize()
+        if initialized:
+            try:
+                gmsh.finalize()
+            finally:
+                _restore_native_environment_variable("PATH", native_path)
+        else:
+            # Initialization exceptions can corrupt the native environment as
+            # well.  Repeat restoration in the outer cleanup boundary.
+            _restore_native_environment_variable("PATH", native_path)
 
 
 def _face_planarity_error(geometry: GeometryModel, face_id: int) -> Optional[str]:

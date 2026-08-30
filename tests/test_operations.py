@@ -508,6 +508,79 @@ def test_butterfly_hole_records_only_the_public_face_replacement() -> None:
     assert model.replacement_history()[old] == descendants
 
 
+def test_butterfly_patches_have_nonbacktracking_native_boundary_charts() -> None:
+    from anymesher.hybrid import generate_hybrid_mesh_result
+
+    model, face, _points, _edges = _rectangle(4.0, 3.0)
+    faces, arcs = punch_circular_hole(model, face, (2.0, 1.5, 0.0), 0.6)
+
+    mesh = generate_hybrid_mesh_result(
+        model,
+        target_size=0.3,
+        strategy="native",
+        face_ids=faces,
+    ).mesh
+
+    assert mesh.shells
+    assert set(faces) <= set(mesh.elements_of_face)
+    assert all(mesh.nodes_on(model.entity_ref("edge", edge_id)) for edge_id in arcs)
+
+
+def test_butterfly_mapped_seed_refinement_closes_the_aspect_gate() -> None:
+    from anymesher.seeding import solve_seeding
+    from anymesher.structured import (
+        apply_structured_layout,
+        plan_structured_layout,
+    )
+
+    model, face, _points, outer_edges = _rectangle(4.0, 3.0)
+    faces, arcs = punch_circular_hole(model, face, (2.0, 1.5, 0.0), 0.6)
+    spokes = tuple(
+        sorted(set(model.edges).difference((*outer_edges, *arcs)))
+    )
+    initial = solve_seeding(model, target_size=0.3)
+    assert {initial.divisions[edge_id] for edge_id in spokes} == {6}
+
+    pinned_plan = plan_structured_layout(
+        model,
+        target_size=0.3,
+        face_ids=faces,
+        overrides={spokes[0]: 6},
+    )
+    _pinned_working, pinned_report = apply_structured_layout(
+        model, pinned_plan
+    )
+    assert {
+        pinned_report.seed_solution[edge_id] for edge_id in spokes
+    } == {6}
+
+    plan = plan_structured_layout(
+        model, target_size=0.3, face_ids=faces
+    )
+    working, report = apply_structured_layout(model, plan)
+    assert {report.seed_solution[edge_id] for edge_id in spokes} == {7}
+    mesh = generate_mesh(
+        working,
+        target_size=0.3,
+        face_ids=faces,
+        overrides=report.seed_solution,
+    )
+
+    maximum_aspect = 1.0
+    for connectivity in mesh.quads.values():
+        corners = np.asarray([mesh.nodes[node_id] for node_id in connectivity[:4]])
+        lengths = np.asarray(
+            [
+                np.linalg.norm(second - first)
+                for first, second in zip(corners, np.roll(corners, -1, axis=0))
+            ]
+        )
+        maximum_aspect = max(
+            maximum_aspect, float(np.max(lengths) / np.min(lengths))
+        )
+    assert maximum_aspect <= 4.0
+
+
 def test_punching_a_hole_validates_radius_fit_and_planarity() -> None:
     model, face, _points, _edges = _rectangle(4.0, 3.0)
     with pytest.raises(GeometryError, match="does not fit"):

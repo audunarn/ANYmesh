@@ -7,6 +7,7 @@ from anygeometry.model import GeometryModel
 from anygeometry.surfaces import Plane
 
 from anymesher import available_backends, generate_hybrid_mesh
+from anymesher.hybrid import _stable_diagnostic_record
 from anymesher.mapped import generate_mesh as generate_mapped_mesh
 
 
@@ -72,6 +73,24 @@ def test_native_polygon_is_model_bound_and_deterministic() -> None:
     assert tuple(first.nodes) == tuple(second.nodes)
     for node_id in first.nodes:
         np.testing.assert_allclose(first.nodes[node_id], second.nodes[node_id])
+
+
+def test_persisted_hybrid_diagnostics_exclude_all_runtime_samples() -> None:
+    diagnostics = {
+        "phase_seconds": {"planning": 0.25},
+        "native_diagnostics": {
+            "insertion_seconds": 0.1,
+            "segment_recovery_seconds": 0.2,
+            "domain_filter_seconds": 0.3,
+            "inserted_points": 12,
+        },
+        "selected_backend": "native",
+    }
+
+    assert _stable_diagnostic_record(diagnostics) == {
+        "native_diagnostics": {"inserted_points": 12},
+        "selected_backend": "native",
+    }
 
 
 def test_auto_mixed_faces_share_registry_identity() -> None:

@@ -31,6 +31,8 @@ def _declared_descendants(
     source_ids: Sequence[int],
     working_ids: Mapping[int, _Value],
     kind: str,
+    *,
+    allow_shared: bool = False,
 ) -> dict[int, tuple[int, ...]]:
     source_set = set(int(item) for item in source_ids)
     unknown_sources = sorted(set(int(item) for item in mapping).difference(source_set))
@@ -57,7 +59,7 @@ def _declared_descendants(
             )
         for descendant in descendants:
             previous = claimed.setdefault(descendant, source_id)
-            if previous != source_id:
+            if previous != source_id and not allow_shared:
                 raise MeshError(
                     f"working {kind} {descendant} is claimed by source {kind}s "
                     f"{previous} and {source_id}"
@@ -228,6 +230,7 @@ def remap_prepared_mesh_associations(
         tuple(source.edges),
         working.edges,
         "edge",
+        allow_shared=True,
     )
 
     remapped_elements_of_face: dict[int, list[int]] = {}

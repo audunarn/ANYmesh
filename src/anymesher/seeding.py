@@ -176,6 +176,7 @@ def solve_seeding(
     target_size: float | None = None,
     size_field: SizeField | None = None,
     overrides: Mapping[int, int] | None = None,
+    minimums: Mapping[int, int] | None = None,
     edge_ids: Iterable[int] | None = None,
     max_sweeps: int = 200,
     max_divisions: int = 100_000,
@@ -186,7 +187,8 @@ def solve_seeding(
     instead to seed against local refinement zones.  ``overrides`` pins
     specific edges; pinned edges are never refined, so a pinned edge that
     conflicts with another pinned edge is reported instead of being silently
-    overridden.
+    overridden.  ``minimums`` carries non-locking planner lower bounds, so a
+    later local size field can still refine an accepted structured layout.
     """
 
     if size_field is None:
@@ -200,21 +202,30 @@ def solve_seeding(
         )
 
     overrides = dict(overrides or {})
+    minimums = dict(minimums or {})
     edges = (
         list(geometry.edges)
         if edge_ids is None
         else list(dict.fromkeys(int(e) for e in edge_ids))
     )
-    for edge_id in overrides:
-        if edge_id not in geometry.edges:
-            raise SeedingConflict(f"override given for unknown edge {edge_id}")
-        if overrides[edge_id] < 1:
-            raise SeedingConflict(
-                f"edge {edge_id} override must be at least 1 division"
-            )
+    for label, values in (("override", overrides), ("minimum", minimums)):
+        for edge_id, divisions in values.items():
+            if edge_id not in geometry.edges:
+                raise SeedingConflict(
+                    f"{label} given for unknown edge {edge_id}"
+                )
+            if isinstance(divisions, bool) or int(divisions) < 1:
+                raise SeedingConflict(
+                    f"edge {edge_id} {label} must be at least 1 division"
+                )
+            values[edge_id] = int(divisions)
 
     desired = {
-        edge_id: max(1, int(round(edge_demand(geometry, edge_id, size_field))))
+        edge_id: max(
+            1,
+            int(round(edge_demand(geometry, edge_id, size_field))),
+            minimums.get(edge_id, 1),
+        )
         for edge_id in edges
     }
 
@@ -253,7 +264,14 @@ def solve_seeding(
                 "count by opposite-side constraints."
             )
         if pinned:
-            counts[root] = pinned.pop()
+            pinned_count = pinned.pop()
+            minimum_count = max(minimums.get(edge_id, 1) for edge_id in group)
+            if pinned_count < minimum_count:
+                raise SeedingConflict(
+                    "division override is below the non-locking planner minimum "
+                    f"for edges {sorted(group)}: {pinned_count} < {minimum_count}"
+                )
+            counts[root] = pinned_count
             locked[root] = True
         else:
             # Err finer: taking the max never under-refines a shared edge.

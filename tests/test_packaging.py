@@ -47,9 +47,9 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
-def test_release_metadata_is_0_3_1_alpha() -> None:
+def test_release_metadata_is_0_3_2_alpha() -> None:
     project = _pyproject()["project"]
-    assert project["version"] == "0.3.1"
+    assert project["version"] == "0.3.2"
     assert project["requires-python"] == ">=3.11"
     assert "Development Status :: 3 - Alpha" in project["classifiers"]
 
@@ -102,23 +102,124 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry[planar]>=0.4,<0.5"]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.1,<0.5"]
     assert project["optional-dependencies"]["planar"] == []
 
 
+def test_gui3d_release_dependency_floor_matches_the_candidate_graph() -> None:
+    assert _pyproject()["project"]["optional-dependencies"]["gui3d"] == [
+        "ANYtk3D>=0.5.3,<0.6"
+    ]
+
+
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "069f22f3682ab97c89eb7824d53010c0b60dd575"
+    ci_geometry_ref = "6a8b023ef6f65805519c96b56e025b4e3b457a1f"
+    release_geometry_ref = "6a8b023ef6f65805519c96b56e025b4e3b457a1f"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
     publish = (REPOSITORY_ROOT / ".github/workflows/publish.yml").read_text(
         encoding="utf-8"
     )
+    cibuildwheel_config = _pyproject()["tool"]["cibuildwheel"]
+    verifier = (
+        REPOSITORY_ROOT / "tools/verify_release_authority.py"
+    ).read_text(encoding="utf-8")
+    checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    setup = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
+    upload = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    download = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    cibuildwheel = "pypa/cibuildwheel@4726cd35bb13f7bde50cf2761f2499ac7b3aa32c"
+    pypi = (
+        "pypa/gh-action-pypi-publish@"
+        "dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    )
+    ci_uses = [
+        line.split("uses:", 1)[1].strip().split(" #", 1)[0]
+        for line in ci.splitlines()
+        if "uses:" in line
+    ]
+    publish_uses = [
+        line.split("uses:", 1)[1].strip().split(" #", 1)[0]
+        for line in publish.splitlines()
+        if "uses:" in line
+    ]
+
+    assert ci_uses == [
+        checkout,
+        checkout,
+        setup,
+        checkout,
+        checkout,
+        setup,
+        checkout,
+        checkout,
+        setup,
+        checkout,
+        checkout,
+        cibuildwheel,
+        upload,
+    ]
+    assert publish_uses == [
+        checkout,
+        setup,
+        upload,
+        checkout,
+        checkout,
+        cibuildwheel,
+        upload,
+        download,
+        setup,
+        upload,
+        upload,
+        download,
+        pypi,
+        checkout,
+        setup,
+        pypi,
+    ]
 
     assert ci.count("repository: audunarn/ANYgeometry") == 4
-    assert ci.count(f"ref: {geometry_ref}") == 4
+    assert ci.count(f"ref: {ci_geometry_ref}") == 4
     assert publish.count("repository: audunarn/ANYgeometry") == 1
-    assert publish.count(f"ref: {geometry_ref}") == 1
+    assert publish.count(f"ref: {release_geometry_ref}") == 1
+    assert "CIBW_MANYLINUX_X86_64_IMAGE" not in ci
+    assert "CIBW_MANYLINUX_X86_64_IMAGE" not in publish
+    assert "CIBW_BEFORE_TEST" not in ci
+    assert "CIBW_BEFORE_TEST" not in publish
+    assert cibuildwheel_config == {
+        "before-test": [
+            "python -m pip install --no-deps "
+            "{project}/.ecosystem/ANYgeometry",
+        ],
+        "overrides": [
+            {
+                "select": "cp31{1,2,3}-manylinux_x86_64",
+                "manylinux-x86_64-image": "manylinux2014",
+                "before-test": [
+                    'python -m pip install "numpy<2.3"',
+                    "python -m pip install --no-deps "
+                    "{project}/.ecosystem/ANYgeometry",
+                ],
+            },
+            {
+                "select": "cp314-manylinux_x86_64",
+                "manylinux-x86_64-image": "manylinux_2_28",
+            },
+        ],
+    }
+    legacy_linux_tag = "manylinux2014_x86_64.manylinux_2_17_x86_64"
+    current_linux_tag = "manylinux_2_24_x86_64.manylinux_2_28_x86_64"
+    assert publish.count(legacy_linux_tag) == 1
+    assert publish.count(current_linux_tag) == 1
+    assert verifier.count(legacy_linux_tag) == 1
+    assert verifier.count(current_linux_tag) == 1
+    assert "abi_tag != python_tag" in publish
+    assert "abi_tag != python_tag" in verifier
+    assert 'name.endswith("-macosx_11_0_arm64.whl")' in publish
+    assert 'platform_tag == "macosx_11_0_arm64"' in verifier
+    assert '"manylinux" in name and "x86_64" in name' not in publish
+    assert '"manylinux" in platform_tag and "x86_64" in platform_tag' not in verifier
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
     assert (
         "tests/test_packaging.py::test_disabled_native_build_is_absence_only"
@@ -136,7 +237,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     ) == 1
     assert 'python -m pip install -e ".[dev,gmsh]"' not in ci
     assert ci.count("tools/release_wheel_smoke.py") == 1
-    assert ci.count("--expect-version 0.3.1 --require-native") == 1
+    assert ci.count("--expect-version 0.3.2 --require-native") == 1
     assert ci.count("name: Install Ubuntu Gmsh runtime") == 1
     assert ci.count("if: runner.os == 'Linux'") == 1
     assert ci.count("sudo apt-get update") == 1
@@ -146,18 +247,22 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert ci.startswith("name: Tests\n\non:\n  push:\n  pull_request:\n")
 
     assert publish.startswith(
-        "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"
+        "name: Build release artifacts\n\non:\n  release:\n"
     )
-    assert "release:" not in publish
-    assert "repository-url:" not in publish
-    assert publish.count("id-token: write") == 1
-    assert publish.count("pypa/gh-action-pypi-publish@release/v1") == 1
+    assert "types: [published]" in publish
+    assert "workflow_dispatch:" in publish
+    assert "repository-url: https://test.pypi.org/legacy/" in publish
+    assert publish.count("id-token: write") == 2
+    assert "pypa/gh-action-pypi-publish@release/v1" not in publish
+    assert publish.count(pypi) == 2
     assert "password:" not in publish
     assert "username:" not in publish
     assert "skip-existing:" not in publish
     assert "name: pypi" in publish
     assert "url: https://pypi.org/p/ANYmesher" in publish
-    assert "name: ANYmesher-0.3.1-pypi-distributions" in publish
+    assert "name: testpypi" in publish
+    assert "url: https://test.pypi.org/p/ANYmesher" in publish
+    assert "name: ANYmesher-0.3.2-pypi-distributions" in publish
     assert "dist/*.whl" in publish
     assert "dist/*.tar.gz" in publish
     assert "permissions:\n  contents: read" in publish
@@ -170,18 +275,43 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
     assert "expected 12 wheels" in publish
     assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
-    assert 'name: ANYmesher-0.3.1-release-bundle' in publish
-    assert 'sdist = root / "anymesher-0.3.1.tar.gz"' in publish
-    assert 'root.glob("anymesher-0.3.1-*.whl")' in publish
-    assert '"version": "0.3.1"' in publish
-    assert "ANYmesher-0.3.1-SHA256SUMS.txt" in publish
-    assert "ANYmesher-0.3.1-release-manifest.json" in publish
+    assert 'name: ANYmesher-0.3.2-release-bundle' in publish
+    assert 'sdist = root / "anymesher-0.3.2.tar.gz"' in publish
+    assert 'root.glob("anymesher-0.3.2-*.whl")' in publish
+    assert '"version": "0.3.2"' in publish
+    assert "ANYmesher-0.3.2-SHA256SUMS.txt" in publish
+    assert "ANYmesher-0.3.2-release-manifest.json" in publish
     assert "python -m twine check --strict dist/*.whl dist/*.tar.gz" in publish
     assert "expected_base_requirements" in publish
     assert "RECORD self-row must be blank" in publish
     assert "RECORD integrity mismatch" in publish
     assert publish.count("tools/release_wheel_smoke.py") == 1
-    assert publish.count("--expect-version 0.3.1 --require-native") == 1
+    assert publish.count("--expect-version 0.3.2 --require-native") == 1
+    assert "gh release download \"$RELEASE_TAG\"" in publish
+    production = publish.split("\n  publish-production:\n", 1)[1]
+    assert (
+        "actions/checkout@"
+        "3d3c42e5aac5ba805825da76410c181273ba90b1"
+    ) in production
+    assert (
+        "actions/setup-python@"
+        "5fda3b95a4ea91299a34e894583c3862153e4b97"
+    ) in production
+    assert "ref: ${{ github.event.release.tag_name }}" in production
+    assert "fetch-depth: 0" in production
+    assert "--pattern" not in production
+    assert "--protected-ref refs/remotes/origin/main" in production
+    assert (
+        "--expected-terminal ACCEPTED_ANYMESHER_0_3_2_RELEASE"
+        in production
+    )
+    assert "--sdist anymesher-0.3.2.tar.gz" in production
+    assert "tools/verify_release_authority.py" in production
+    assert "python -m build" not in production
+    assert "packages-dir: dist/" in publish
+    assert "github.event.release.prerelease == false" in production
+    assert publish.count("if: github.event_name == 'workflow_dispatch'") >= 3
+    assert "timeout-minutes:" not in publish
 
 
 @pytest.mark.skipif(
