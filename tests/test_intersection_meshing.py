@@ -15,6 +15,7 @@ from anygeometry import (
     query_intersection,
 )
 from anygeometry.serialization import to_dict
+from anygeometry.generators import cylinder
 from anymesher import generate_hybrid_mesh, generate_mesh_with_intersections
 from anymesher.errors import MeshError
 from anymesher.preparation import prepare_structural_closure
@@ -131,6 +132,55 @@ def test_structured_t_junction_accepts_upstream_imprinted_transverse_edge():
         len(incidence[edge]) == 3
         for edge in mesh.declared_plate_junction_edges
     )
+
+
+def test_structured_mesh_accepts_plate_on_existing_cylinder_ring() -> None:
+    geometry = cylinder(
+        0.5,
+        2.0,
+        circumferential_segments=12,
+        longitudinal_spacing=0.5,
+        ring_spacing=1.0,
+    )
+    cylinder_faces = tuple(reference.id for reference in geometry.group("shell"))
+    plate = _plate(
+        geometry,
+        (
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ),
+    )
+
+    mesh = generate_hybrid_mesh(
+        geometry,
+        target_size=0.25,
+        strategy="auto",
+        beam_edges=(),
+        member_ids=(),
+        structured_options={
+            "quality_policy": {
+                "minimum_scaled_jacobian": 0.1,
+                "maximum_aspect_ratio": 5.0,
+                "minimum_angle": 20.0,
+                "maximum_angle": 160.0,
+                "maximum_warpage": 0.1,
+            }
+        },
+        native_backend="python",
+    )
+
+    cylinder_nodes = {
+        node
+        for face_id in cylinder_faces
+        for node in mesh.nodes_on(EntityRef("face", face_id))
+    }
+    plate_nodes = set(mesh.nodes_on(EntityRef("face", plate)))
+    assert len(cylinder_nodes & plate_nodes) == 12
+    assert len(mesh.declared_plate_junction_edges) == 12
+    assert not mesh.beams
+    assert mesh.hybrid_diagnostics["structured_quality"]["accepted"] is True
 
 
 def test_intersection_diagnostic_survives_mesh_round_trip():

@@ -30,7 +30,7 @@ from anygeometry.model import GeometryModel
 from anygeometry.overlaps import find_coplanar_overlaps
 from anygeometry.policies import ConnectionIntent
 from anygeometry.predicates import IntersectionKind
-from anygeometry.surfaces import Plane
+from anygeometry.surfaces import Cylinder, Plane
 
 from .errors import MeshError
 
@@ -336,17 +336,35 @@ def _shared_transverse_plate_edges(
 ) -> tuple[int, ...]:
     first_surface = geometry.faces[first].surface
     second_surface = geometry.faces[second].surface
-    if not isinstance(first_surface, Plane) or not isinstance(second_surface, Plane):
+    if isinstance(first_surface, Plane) and isinstance(second_surface, Plane):
+        first_normal = np.asarray(first_surface.normal, dtype=float)
+        second_normal = np.asarray(second_surface.normal, dtype=float)
+        normal_scale = float(
+            np.linalg.norm(first_normal) * np.linalg.norm(second_normal)
+        )
+        if normal_scale <= 0.0:
+            return ()
+        transverse = float(np.linalg.norm(np.cross(first_normal, second_normal)))
+        return shared_edges if transverse > 1.0e-12 * normal_scale else ()
+
+    plane = (
+        first_surface
+        if isinstance(first_surface, Plane)
+        else second_surface if isinstance(second_surface, Plane) else None
+    )
+    cylinder = (
+        first_surface
+        if isinstance(first_surface, Cylinder)
+        else second_surface if isinstance(second_surface, Cylinder) else None
+    )
+    if plane is None or cylinder is None:
         return ()
-    first_normal = np.asarray(first_surface.normal, dtype=float)
-    second_normal = np.asarray(second_surface.normal, dtype=float)
-    normal_scale = float(np.linalg.norm(first_normal) * np.linalg.norm(second_normal))
-    if normal_scale <= 0.0:
-        return ()
-    transverse = float(np.linalg.norm(np.cross(first_normal, second_normal)))
-    if transverse <= 1.0e-12 * normal_scale:
-        return ()
-    return shared_edges
+    # A plane normal parallel to the cylinder axis meets the cylindrical
+    # shell transversely around a ring.  Such a ring may already exist as a
+    # generator boundary and can legitimately carry four shell elements
+    # (two axial cylinder bands plus the two sides of the partitioned plate).
+    alignment = abs(float(np.asarray(plane.normal) @ np.asarray(cylinder.axis)))
+    return shared_edges if abs(alignment - 1.0) <= 1.0e-10 else ()
 
 
 def _is_resolved_shared_vertex_touch(

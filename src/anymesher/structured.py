@@ -125,7 +125,12 @@ class MeshQualityPolicy:
 class StructuredMeshingOptions:
     preference: StructurePreference | str = StructurePreference.BALANCED
     allow_detached_partition: bool = True
-    max_element_growth: float = 1.25
+    # Match the native surface optimizer's qualified growth target.  A tighter
+    # implicit 1.25 gate made the automatic fallback counterproductive at
+    # mixed curved/planar junctions: the native repair added points locally,
+    # then failed the separate global gate even though the balanced 1.5 policy
+    # produces a smoother final transition.
+    max_element_growth: float = 1.5
     minimum_size_ratio: float = 0.67
     maximum_size_ratio: float = 1.50
     maximum_radial_sides: int = 8
