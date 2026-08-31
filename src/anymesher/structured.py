@@ -649,6 +649,7 @@ def _structural_blocker(
     face_id: int,
     membership: Mapping[int, tuple[int, ...]],
     protected_edges: set[int],
+    allowed_non_manifold_edges: set[int],
     selected_faces: set[int],
 ) -> str | None:
     sheets = membership.get(face_id, ())
@@ -660,7 +661,7 @@ def _structural_blocker(
     }
     for edge_id in sorted(boundary):
         owners = geometry.faces_using_edge(edge_id)
-        if len(owners) > 2:
+        if len(owners) > 2 and edge_id not in allowed_non_manifold_edges:
             return f"edge {edge_id} is non-manifold with face owners {owners}"
         outside = sorted(set(owners).difference(selected_faces))
         if outside:
@@ -719,6 +720,7 @@ def plan_structured_layout(
     explicit_seeding: bool = False,
     overrides: Mapping[int, int] | None = None,
     protected_edge_ids: Iterable[int] = (),
+    allowed_non_manifold_edge_ids: Iterable[int] = (),
     cancellation_check: CancellationCheck | None = None,
 ) -> StructuredLayoutPlan:
     """Plan globally connected structured blocks without editing the model."""
@@ -761,7 +763,8 @@ def plan_structured_layout(
         normalized_overrides[int(edge_id)] = int(divisions)
     protected = {int(item) for item in protected_edge_ids}
     protected.update(normalized_overrides)
-    unknown = sorted(protected.difference(geometry.edges))
+    allowed_non_manifold = {int(item) for item in allowed_non_manifold_edge_ids}
+    unknown = sorted((protected | allowed_non_manifold).difference(geometry.edges))
     if unknown:
         raise MeshError(f"protected/overridden edge {unknown[0]} does not exist")
 
@@ -781,7 +784,7 @@ def plan_structured_layout(
         owner_blocker = None
         for item in (*face.loop, *(edge for loop in face.holes for edge in loop)):
             owners = geometry.faces_using_edge(item.edge)
-            if len(owners) > 2:
+            if len(owners) > 2 and item.edge not in allowed_non_manifold:
                 owner_blocker = f"edge {item.edge} is non-manifold with face owners {owners}"
                 break
         if len(sheets) > 1:
@@ -798,7 +801,12 @@ def plan_structured_layout(
             continue
 
         blocker = _structural_blocker(
-            geometry, face_id, membership, protected, selected_set
+            geometry,
+            face_id,
+            membership,
+            protected,
+            allowed_non_manifold,
+            selected_set,
         )
         if not policy.allow_detached_partition:
             blocker = "detached partitioning is disabled"

@@ -246,7 +246,7 @@ def _apply_face_boundary_minimums(
 ) -> None:
     """Prevent short imprint segments from forcing abrupt native transitions."""
 
-    maximum_step_ratio = 1.7320508075688772
+    maximum_step_ratio = 1.25
     for face in faces:
         loops = (face.loop,) + face.holes
         edge_ids = tuple(

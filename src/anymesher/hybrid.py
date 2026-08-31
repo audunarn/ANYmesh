@@ -23,6 +23,7 @@ import numpy as np
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
+from anygeometry.surfaces import Plane
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
@@ -45,8 +46,9 @@ from .structural_pipeline import (
     PreflightStatus,
     StructuralMeshingPipeline,
 )
-from .surface_mesh import mesh_planar_surface
+from .surface_mesh import SurfaceMeshOptions, mesh_planar_surface
 from .structured import (
+    MeshQualityPolicy,
     StructuredLayoutReport,
     StructuredMeshingOptions,
     apply_structured_layout,
@@ -497,9 +499,17 @@ def _structured_quality_report(
         for name, mask in masks.items():
             violations[name] += int(np.count_nonzero(mask))
             poor.update(int(item) for item in group.element_ids[mask])
+    # Independently optimized conforming charts can differ by a sub-percent
+    # amount at their shared boundary after their local quality passes.  Keep
+    # the configured limit authoritative while allowing only that numerical
+    # chart-merge tolerance; materially graded transitions remain rejected.
+    growth_relative_tolerance = 0.01
+    effective_growth_limit = options.max_element_growth * (
+        1.0 + growth_relative_tolerance
+    )
     growth, growth_pairs = _element_growth(
         mesh,
-        limit=options.max_element_growth,
+        limit=effective_growth_limit,
     )
     growth_violations = len(growth_pairs)
     accepted = not any(violations.values()) and growth_violations == 0
@@ -522,6 +532,8 @@ def _structured_quality_report(
         "maximum_warpage": quality.maximum_warpage,
         "maximum_adjacent_element_growth": growth,
         "growth_limit": options.max_element_growth,
+        "growth_relative_tolerance": growth_relative_tolerance,
+        "effective_growth_limit": effective_growth_limit,
         "growth_violation_count": growth_violations,
         "growth_violation_pairs": [
             [first, second, ratio]
@@ -695,7 +707,12 @@ def _preparation_payload(
     structured: StructuredLayoutReport | None,
     source_to_working_faces: Mapping[int, Sequence[int]],
     source_to_working_edges: Mapping[int, Sequence[int]],
+    *,
+    source_model_id: str,
 ) -> dict[str, Any]:
+    structured_payload = None if structured is None else structured.to_dict()
+    if structured_payload is not None:
+        structured_payload["plan"]["model_id"] = str(source_model_id)
     return {
         "status": (
             structured.status
@@ -705,9 +722,7 @@ def _preparation_payload(
         "structural_closure": (
             None if preparation is None else preparation.to_dict()
         ),
-        "structured_layout": (
-            None if structured is None else structured.to_dict()
-        ),
+        "structured_layout": structured_payload,
         "source_to_working_faces": {
             str(key): list(values)
             for key, values in sorted(source_to_working_faces.items())
@@ -860,6 +875,7 @@ def _mesh_native_face(
     order: str,
     recombine: bool,
     native_backend: Any,
+    quality_options: StructuredMeshingOptions | None,
     cancellation_check: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     boundary_started = perf_counter()
@@ -886,10 +902,28 @@ def _mesh_native_face(
         for loop in face.holes
     )
     loops = (outer, *holes)
+    chart_transform = np.eye(2, dtype=float)
+    if isinstance(face.surface, Plane) and len(geometry.faces) > 1:
+        u_vector = np.asarray(face.surface.u_vector, dtype=float)
+        v_vector = np.asarray(face.surface.v_vector, dtype=float)
+        metric = np.asarray(
+            (
+                (float(np.dot(u_vector, u_vector)), float(np.dot(u_vector, v_vector))),
+                (float(np.dot(v_vector, u_vector)), float(np.dot(v_vector, v_vector))),
+            ),
+            dtype=float,
+        )
+        chart_transform = np.linalg.cholesky(metric)
+    chart_inverse = np.linalg.inv(chart_transform)
+    chart_outer = np.asarray(outer.uv, dtype=float) @ chart_transform
+    chart_holes = tuple(
+        np.asarray(loop.uv, dtype=float) @ chart_transform for loop in holes
+    )
+    chart_loops = (chart_outer, *chart_holes)
     segments = [
-        float(np.linalg.norm(loop.uv[(index + 1) % len(loop.uv)] - loop.uv[index]))
-        for loop in loops
-        for index in range(len(loop.uv))
+        float(np.linalg.norm(loop[(index + 1) % len(loop)] - loop[index]))
+        for loop in chart_loops
+        for index in range(len(loop))
     ]
     boundary_seconds = perf_counter() - boundary_started
     # Edge seeding is authoritative.  A size just above the longest registered
@@ -897,17 +931,71 @@ def _mesh_native_face(
     # unregistered boundary stations.
     chart_size = max(segments) * (1.0 + 64.0 * np.finfo(float).eps)
     surface_diagnostics: dict[str, Any] = {}
-    core = mesh_planar_surface(
-        outer.uv,
-        tuple(loop.uv for loop in holes),
-        target_size=chart_size,
-        recombine=recombine,
-        order=order,
-        backend=native_backend,
-        owner=geometry.handle("face", face_id),
-        cancellation_check=cancellation_check,
-        diagnostics=surface_diagnostics,
-    )
+    if quality_options is None:
+        core = mesh_planar_surface(
+            chart_outer,
+            chart_holes,
+            target_size=chart_size,
+            recombine=recombine,
+            order=order,
+            backend=native_backend,
+            owner=geometry.handle("face", face_id),
+            cancellation_check=cancellation_check,
+            diagnostics=surface_diagnostics,
+        )
+    else:
+        quality_policy = quality_options.quality_policy
+        surface_options = SurfaceMeshOptions(
+            recombine=recombine,
+            order=order,
+            target_size=chart_size,
+            backend=native_backend,
+            min_scaled_jacobian=quality_policy.minimum_scaled_jacobian,
+            max_aspect_ratio=quality_policy.maximum_aspect_ratio,
+            min_angle=quality_policy.minimum_angle,
+            max_angle=quality_policy.maximum_angle,
+            max_warpage=quality_policy.maximum_warpage,
+            max_element_growth=quality_options.max_element_growth,
+            prefer_quality_policy=True,
+        )
+        core = mesh_planar_surface(
+            chart_outer,
+            chart_holes,
+            options=surface_options,
+            owner=geometry.handle("face", face_id),
+            cancellation_check=cancellation_check,
+            diagnostics=surface_diagnostics,
+        )
+        if (
+            isinstance(face.surface, Plane)
+            and not np.allclose(chart_transform, np.eye(2), rtol=1.0e-12, atol=1.0e-14)
+            and not surface_diagnostics.get("quality_policy", {}).get(
+                "accepted", True
+            )
+        ):
+            parameter_diagnostics: dict[str, Any] = {}
+            parameter_core = mesh_planar_surface(
+                np.asarray(outer.uv, dtype=float),
+                tuple(np.asarray(loop.uv, dtype=float) for loop in holes),
+                options=surface_options,
+                owner=geometry.handle("face", face_id),
+                cancellation_check=cancellation_check,
+                diagnostics=parameter_diagnostics,
+            )
+            if parameter_diagnostics.get("quality_policy", {}).get(
+                "accepted", False
+            ):
+                parameter_diagnostics["chart_fallback"] = {
+                    "from": "physical_metric",
+                    "to": "parameter",
+                    "reason": "physical metric candidate missed explicit policy",
+                }
+                core = parameter_core
+                surface_diagnostics = parameter_diagnostics
+                chart_inverse = np.eye(2, dtype=float)
+                chart_loops = tuple(
+                    np.asarray(loop.uv, dtype=float) for loop in loops
+                )
     surface_diagnostics.setdefault("phase_seconds", {})[
         "boundary_registration"
     ] = boundary_seconds
@@ -915,7 +1003,7 @@ def _mesh_native_face(
     lifting_started = perf_counter()
     assert_valid_mesh(core)
 
-    input_uv = np.vstack([loop.uv for loop in loops])
+    input_uv = np.vstack(chart_loops)
     coordinates = np.asarray(core.node_coordinates, dtype=float)
     if len(coordinates) < len(input_uv) or not np.allclose(
         coordinates[: len(input_uv), :2], input_uv, rtol=0.0, atol=2.0e-14
@@ -955,7 +1043,10 @@ def _mesh_native_face(
     for core_node in range(len(coordinates)):
         if core_node in core_to_global:
             continue
-        u, v = (float(value) for value in coordinates[core_node, :2])
+        u, v = (
+            float(value)
+            for value in (coordinates[core_node, :2] @ chart_inverse)
+        )
         point = np.asarray(geometry.face_point(face_id, u, v), dtype=float)
         if point.shape != (3,) or not np.all(np.isfinite(point)):
             raise MeshError(f"face {face_id} surface evaluation returned an invalid point")
@@ -1045,6 +1136,7 @@ def generate_hybrid_mesh_result(
     change_set: Any | None = None,
     audit_policy: Any | None = None,
     cancellation_check: Callable[[str], None] | None = None,
+    _native_surface_options: StructuredMeshingOptions | None = None,
 ) -> HybridMeshResult:
     """Generate a model-bound mapped/native mesh without rewriting geometry.
 
@@ -1177,6 +1269,11 @@ def generate_hybrid_mesh_result(
             explicit_seeding=seeding is not None,
             overrides=prepared_overrides,
             protected_edge_ids=prepared_beams,
+            allowed_non_manifold_edge_ids=(
+                ()
+                if preparation_report is None
+                else preparation_report.declared_face_connection_edges
+            ),
             cancellation_check=cancellation_check,
         )
         if strategy is MeshingStrategy.MAPPED:
@@ -1399,6 +1496,15 @@ def generate_hybrid_mesh_result(
             order=order,
             recombine=bool(recombine),
             native_backend=native_backend,
+            quality_options=(
+                _native_surface_options
+                if _native_surface_options is not None
+                else (
+                    None
+                    if structured_report is None
+                    else structured_report.plan.options
+                )
+            ),
             cancellation_check=cancellation_check,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
@@ -1517,6 +1623,7 @@ def generate_hybrid_mesh_result(
                 change_set=change_set,
                 audit_policy=audit_policy,
                 cancellation_check=cancellation_check,
+                _native_surface_options=structured_report.plan.options,
             )
             fallback_quality = _structured_quality_report(
                 fallback.mesh,
@@ -1576,6 +1683,7 @@ def generate_hybrid_mesh_result(
                 structured_report,
                 fallback_faces,
                 fallback_edges,
+                source_model_id=str(source_geometry.model_id),
             )
             fallback.mesh.hybrid_diagnostics.update(
                 {
@@ -1594,6 +1702,7 @@ def generate_hybrid_mesh_result(
         structured_report,
         source_to_final_faces,
         source_to_final_edges,
+        source_model_id=str(source_geometry.model_id),
     )
     strategies = dict(source_strategies)
     result = HybridMeshResult(

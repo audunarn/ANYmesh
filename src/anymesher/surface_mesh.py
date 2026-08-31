@@ -40,6 +40,7 @@ class SurfaceMeshOptions:
     max_angle: float = 150.0
     max_warpage: float = 0.10
     max_element_growth: float = 1.5
+    prefer_quality_policy: bool = False
     lattice_alignment: str = "chart"
     metric_tensor: Any | None = None
     enforce_quality: bool = False
@@ -394,7 +395,7 @@ class _QualityCandidate:
     points: np.ndarray
     triangles: np.ndarray
     report: dict[str, Any]
-    score: tuple[int, int, float, float, float]
+    score: tuple[int, int, int, float, float, float]
     aspect_ratios: np.ndarray
     flips: int = 0
     moved_nodes: tuple[int, ...] = ()
@@ -526,17 +527,13 @@ def _triangle_quality(
         "poor_element_ids": [int(row) + 1 for row in poor_rows],
         "repair_element_ids": [int(row) + 1 for row in repair_rows],
     }
-    severity = max(
-        maximum_aspect / policy.max_aspect_ratio,
-        policy.min_scaled_jacobian / max(minimum_jacobian, 1.0e-30),
-        policy.min_angle / max(minimum_angle, 1.0e-30),
-        maximum_angle / policy.max_angle,
-        report["max_element_growth"] / policy.max_element_growth,
-    )
     score = (
         invalid,
-        int(len(poor_rows)),
-        float(severity),
+        int(report["quality_violation_count"])
+        if settings is not None and settings.prefer_quality_policy
+        else 0,
+        int(np.count_nonzero(aspect_array > 5.0)),
+        maximum_aspect,
         -minimum_jacobian,
         -minimum_angle,
     )
@@ -911,10 +908,16 @@ def mesh_planar_surface(
             break
         if cancellation_check is not None:
             cancellation_check(f"native surface quality refinement round {round_number} start")
+        remaining_budget = point_budget - attempted_added_points
+        remaining_rounds = 3 - round_number
+        round_budget = max(
+            1,
+            (remaining_budget + remaining_rounds - 1) // remaining_rounds,
+        )
         additions = _refinement_midpoints(
             current,
             triangulation.segments,
-            point_budget - attempted_added_points,
+            round_budget,
         )
         if not len(additions):
             break

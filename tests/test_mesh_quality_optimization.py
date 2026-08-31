@@ -287,14 +287,58 @@ def test_two_level_plate_intersections_refine_thin_wall_strips_compatibly() -> N
     assert mesh_to_dict(first) == mesh_to_dict(second)
     face_diagnostics = first.hybrid_diagnostics["triangulation_backend_by_face"]
     wall_quality = [
-        face_diagnostics[face_id]["quality_optimization"]["final_quality"]
-        for face_id in wall_faces
+        item["quality_optimization"]["final_quality"]
+        for item in face_diagnostics[wall]["working_face_diagnostics"]
     ]
     assert all(
-        face_diagnostics[face_id]["actual_backend"] == "python"
-        for face_id in wall_faces
+        item["actual_backend"] == "python"
+        for item in face_diagnostics[wall]["working_face_diagnostics"]
     )
     assert max(item["max_aspect_ratio"] for item in wall_quality) <= 5.0
     assert min(item["min_angle"] for item in wall_quality) >= 20.0
     assert max(item["max_element_growth"] for item in wall_quality) <= 1.5
     assert all(item["repair_element_ids"] == [] for item in wall_quality)
+
+
+def test_anyfem_exact_floating_plate_and_diagonal_extrusion_meshes_automatically() -> None:
+    geometry = GeometryModel()
+    first, second, third, fourth = geometry.add_points(
+        ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 2.0, 0.0), (2.0, 2.0, 0.0))
+    )
+    support = geometry.add_plate((first, second, fourth, third))
+    fifth, sixth, seventh, eighth = geometry.add_points(
+        ((0.5, 0.5, 0.5), (1.5, 0.5, 0.5), (0.5, 1.5, 0.5), (1.5, 1.5, 0.5))
+    )
+    floating = geometry.add_plate((fifth, sixth, eighth, seventh))
+    diagonal = geometry.add_line(second, third)
+    before_extrusion = set(geometry.faces)
+    geometry.extrude((diagonal,), (0.0, 0.0, 1.0))
+    wall, = set(geometry.faces) - before_extrusion
+    geometry.add_sheet((support,))
+    geometry.add_sheet((floating,))
+
+    assert len(geometry.vertices) == 10
+    assert len(geometry.edges) == 12
+    assert len(geometry.faces) == 3
+    assert len(geometry.sheets) == 2
+    options = {
+        "target_size": 0.25,
+        "strategy": "auto",
+        "native_backend": "python",
+        "structured_options": {
+            "preference": "balanced",
+            "quality_policy": {
+                "minimum_scaled_jacobian": 0.10,
+                "maximum_aspect_ratio": 5.0,
+                "minimum_angle": 20.0,
+                "maximum_angle": 160.0,
+                "maximum_warpage": 0.10,
+            },
+        },
+    }
+    first_mesh = generate_hybrid_mesh(geometry, **options)
+    second_mesh = generate_hybrid_mesh(geometry, **options)
+
+    assert mesh_to_dict(first_mesh) == mesh_to_dict(second_mesh)
+    assert first_mesh.automatic_intersections == 2
+    assert first_mesh.declared_plate_junction_edges

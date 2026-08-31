@@ -611,6 +611,42 @@ def _report_hash(report: StructuralPreparationReport) -> str:
     return "sha256:" + sha256(encoded).hexdigest()
 
 
+def _restore_collinear_mapped_corners(
+    source: GeometryModel,
+    working: GeometryModel,
+    face_mapping: Mapping[int, tuple[int, ...]],
+) -> None:
+    """Restore mapped corners lost only to collinear imprint side splits."""
+
+    angular_tolerance = 1.0e-7
+    for source_face_id, descendants in face_mapping.items():
+        if len(source.faces[source_face_id].corners) != 4:
+            continue
+        for face_id in descendants:
+            face = working.faces[face_id]
+            if len(face.corners) == 4 or face.holes or len(face.loop) < 4:
+                continue
+            deviations: list[float] = []
+            for index in range(len(face.loop)):
+                incoming = working.oriented_end_tangent(face.loop[index - 1])
+                outgoing = working.oriented_start_tangent(face.loop[index])
+                cosine = float(np.clip(incoming @ outgoing, -1.0, 1.0))
+                deviations.append(float(np.arccos(cosine)))
+            ranked = sorted(
+                range(len(face.loop)),
+                key=lambda index: (-deviations[index], index),
+            )
+            corners = tuple(sorted(ranked[:4]))
+            if min(deviations[index] for index in corners) <= angular_tolerance:
+                continue
+            if any(
+                deviations[index] > angular_tolerance
+                for index in ranked[4:]
+            ):
+                continue
+            working.set_face_corners(face_id, corners)
+
+
 def prepare_structural_closure(
     geometry: GeometryModel,
     *,
@@ -890,6 +926,7 @@ def prepare_structural_closure(
         face_id: _resolved(working, "face", face_id)
         for face_id in geometry.faces
     }
+    _restore_collinear_mapped_corners(geometry, working, face_mapping)
     edge_mapping: dict[int, tuple[int, ...]] = {}
     for position, edge_id in enumerate(geometry.edges):
         if position % 512 == 0:
