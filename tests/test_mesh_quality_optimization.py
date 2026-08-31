@@ -193,13 +193,15 @@ def test_three_plate_connect_quality_and_shared_identity_are_deterministic() -> 
     first = generate_hybrid_mesh(
         geometry,
         target_size=0.25,
-        strategy="native",
+        strategy="auto",
+        structured_options={"max_element_growth": 1.5},
         native_backend="python",
     )
     second = generate_hybrid_mesh(
         geometry,
         target_size=0.25,
-        strategy="native",
+        strategy="auto",
+        structured_options={"max_element_growth": 1.5},
         native_backend="python",
     )
 
@@ -288,5 +290,11 @@ def test_two_level_plate_intersections_refine_thin_wall_strips_compatibly() -> N
         face_diagnostics[face_id]["quality_optimization"]["final_quality"]
         for face_id in wall_faces
     ]
+    assert all(
+        face_diagnostics[face_id]["actual_backend"] == "python"
+        for face_id in wall_faces
+    )
     assert max(item["max_aspect_ratio"] for item in wall_quality) <= 5.0
     assert min(item["min_angle"] for item in wall_quality) >= 20.0
+    assert max(item["max_element_growth"] for item in wall_quality) <= 1.5
+    assert all(item["repair_element_ids"] == [] for item in wall_quality)

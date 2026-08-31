@@ -39,6 +39,7 @@ class SurfaceMeshOptions:
     min_angle: float = 30.0
     max_angle: float = 150.0
     max_warpage: float = 0.10
+    max_element_growth: float = 1.5
     lattice_alignment: str = "chart"
     metric_tensor: Any | None = None
     enforce_quality: bool = False
@@ -72,6 +73,10 @@ class SurfaceMeshOptions:
         if not np.isfinite(metric_aspect) or metric_aspect < 1.0:
             raise MeshError("max_metric_aspect_ratio must be finite and at least 1")
         object.__setattr__(self, "max_metric_aspect_ratio", metric_aspect)
+        growth = float(self.max_element_growth)
+        if not np.isfinite(growth) or growth < 1.0:
+            raise MeshError("max_element_growth must be finite and at least 1")
+        object.__setattr__(self, "max_element_growth", growth)
         if self.metric_tensor is not None:
             tensor = np.asarray(self.metric_tensor, dtype=float)
             if tensor.shape != (2, 2) or not np.all(np.isfinite(tensor)):
@@ -400,15 +405,19 @@ class _QualityCandidate:
 def _triangle_quality(
     points: np.ndarray,
     triangles: np.ndarray,
+    settings: SurfaceMeshOptions | None = None,
 ) -> tuple[dict[str, Any], tuple[int, int, float, float, float], np.ndarray]:
+    policy = settings or SurfaceMeshOptions()
     aspects: list[float] = []
     jacobians: list[float] = []
     minimum_angles: list[float] = []
     maximum_angles: list[float] = []
+    characteristic: list[float] = []
+    incidence: dict[tuple[int, int], list[int]] = {}
     invalid = 0
     scale = max(float(np.ptp(points, axis=0).max()), 1.0) if len(points) else 1.0
     area_tolerance = np.finfo(np.float64).eps * scale * scale * 32.0
-    for triangle in triangles:
+    for row, triangle in enumerate(triangles):
         coordinates = points[np.asarray(triangle, dtype=np.int64)]
         lengths = np.asarray(
             (
@@ -424,6 +433,17 @@ def _triangle_quality(
         if double_area <= area_tolerance or float(np.min(lengths)) <= 0.0:
             invalid += 1
         aspects.append(float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-15)))
+        characteristic.append(float(np.mean(lengths)))
+        for index in range(3):
+            edge = tuple(
+                sorted(
+                    (
+                        int(triangle[index]),
+                        int(triangle[(index + 1) % 3]),
+                    )
+                )
+            )
+            incidence.setdefault(edge, []).append(row)
         angles: list[float] = []
         corner_jacobians: list[float] = []
         for corner in range(3):
@@ -437,21 +457,89 @@ def _triangle_quality(
         minimum_angles.append(min(angles))
         maximum_angles.append(max(angles))
     aspect_array = np.asarray(aspects, dtype=np.float64)
-    poor_rows = np.flatnonzero(aspect_array > 5.0)
+    jacobian_array = np.asarray(jacobians, dtype=np.float64)
+    minimum_angle_array = np.asarray(minimum_angles, dtype=np.float64)
+    maximum_angle_array = np.asarray(maximum_angles, dtype=np.float64)
+    growth_array = np.ones(len(triangles), dtype=np.float64)
+    growth_repair_rows: set[int] = set()
+    for attached in incidence.values():
+        if len(attached) != 2:
+            continue
+        first_row, second_row = attached
+        small = min(characteristic[first_row], characteristic[second_row])
+        ratio = (
+            float("inf")
+            if small <= 0.0
+            else max(characteristic[first_row], characteristic[second_row]) / small
+        )
+        growth_array[first_row] = max(growth_array[first_row], ratio)
+        growth_array[second_row] = max(growth_array[second_row], ratio)
+        if ratio > policy.max_element_growth:
+            if characteristic[first_row] > characteristic[second_row]:
+                growth_repair_rows.add(first_row)
+            elif characteristic[second_row] > characteristic[first_row]:
+                growth_repair_rows.add(second_row)
+    aspect_rows = np.flatnonzero(aspect_array > policy.max_aspect_ratio)
+    jacobian_rows = np.flatnonzero(jacobian_array < policy.min_scaled_jacobian)
+    minimum_angle_rows = np.flatnonzero(minimum_angle_array < policy.min_angle)
+    maximum_angle_rows = np.flatnonzero(maximum_angle_array > policy.max_angle)
+    growth_rows = np.flatnonzero(growth_array > policy.max_element_growth)
+    poor_rows = np.asarray(
+        sorted(
+            set(map(int, aspect_rows))
+            | set(map(int, jacobian_rows))
+            | set(map(int, minimum_angle_rows))
+            | set(map(int, maximum_angle_rows))
+            | set(map(int, growth_rows))
+        ),
+        dtype=np.int64,
+    )
+    repair_rows = np.asarray(
+        sorted(
+            set(map(int, aspect_rows))
+            | set(map(int, jacobian_rows))
+            | set(map(int, minimum_angle_rows))
+            | set(map(int, maximum_angle_rows))
+            | growth_repair_rows
+        ),
+        dtype=np.int64,
+    )
     maximum_aspect = float(np.max(aspect_array)) if len(aspect_array) else 1.0
     minimum_jacobian = float(np.min(jacobians)) if jacobians else 1.0
     minimum_angle = float(np.min(minimum_angles)) if minimum_angles else 60.0
     maximum_angle = float(np.max(maximum_angles)) if maximum_angles else 60.0
     report = {
         "invalid_element_count": invalid,
-        "elements_above_aspect_ratio_5": int(len(poor_rows)),
+        "elements_above_aspect_ratio_5": int(
+            np.count_nonzero(aspect_array > 5.0)
+        ),
+        "quality_violation_count": int(len(poor_rows)),
+        "elements_below_minimum_angle": int(len(minimum_angle_rows)),
+        "elements_above_maximum_angle": int(len(maximum_angle_rows)),
+        "elements_below_minimum_scaled_jacobian": int(len(jacobian_rows)),
+        "elements_above_maximum_growth": int(len(growth_rows)),
         "max_aspect_ratio": maximum_aspect,
         "min_scaled_jacobian": minimum_jacobian,
         "min_angle": minimum_angle,
         "max_angle": maximum_angle,
+        "max_element_growth": float(np.max(growth_array)) if len(growth_array) else 1.0,
         "poor_element_ids": [int(row) + 1 for row in poor_rows],
+        "repair_element_ids": [int(row) + 1 for row in repair_rows],
     }
-    score = (invalid, int(len(poor_rows)), maximum_aspect, -minimum_jacobian, -minimum_angle)
+    severity = max(
+        maximum_aspect / policy.max_aspect_ratio,
+        policy.min_scaled_jacobian / max(minimum_jacobian, 1.0e-30),
+        policy.min_angle / max(minimum_angle, 1.0e-30),
+        maximum_angle / policy.max_angle,
+        report["max_element_growth"] / policy.max_element_growth,
+    )
+    score = (
+        invalid,
+        int(len(poor_rows)),
+        float(severity),
+        -minimum_jacobian,
+        -minimum_angle,
+    )
     return report, score, aspect_array
 
 
@@ -463,8 +551,9 @@ def _make_candidate(
     moved_nodes: tuple[int, ...] = (),
     added_points: int = 0,
     rounds: int = 0,
+    settings: SurfaceMeshOptions | None = None,
 ) -> _QualityCandidate:
-    report, score, aspects = _triangle_quality(points, triangles)
+    report, score, aspects = _triangle_quality(points, triangles, settings)
     return _QualityCandidate(
         np.ascontiguousarray(points, dtype=np.float64),
         np.ascontiguousarray(triangles, dtype=np.int64),
@@ -494,6 +583,7 @@ def _optimize_candidate(
     candidate: _QualityCandidate,
     protected_edges: np.ndarray,
     explicit_points: np.ndarray,
+    settings: SurfaceMeshOptions | None = None,
 ) -> _QualityCandidate:
     """Run the fixed flip/smooth/flip sequence and publish only improvements."""
 
@@ -509,6 +599,7 @@ def _optimize_candidate(
         flips=first_flip.flip_count,
         added_points=candidate.added_points,
         rounds=candidate.rounds,
+        settings=settings,
     )
     if flipped.score < best.score and flipped.score[0] == 0:
         best = flipped
@@ -528,6 +619,7 @@ def _optimize_candidate(
         moved_nodes=moved_nodes,
         added_points=candidate.added_points,
         rounds=candidate.rounds,
+        settings=settings,
     )
     if smoothed.score < best.score and smoothed.score[0] == 0:
         best = smoothed
@@ -543,6 +635,7 @@ def _optimize_candidate(
         moved_nodes=moved_nodes,
         added_points=candidate.added_points,
         rounds=candidate.rounds,
+        settings=settings,
     )
     if finished.score < best.score and finished.score[0] == 0:
         best = finished
@@ -557,7 +650,7 @@ def _refinement_midpoints(
     if limit <= 0:
         return np.empty((0, 2), dtype=np.float64)
     protected = {tuple(sorted(map(int, edge))) for edge in protected_edges}
-    poor_rows = [element_id - 1 for element_id in candidate.report["poor_element_ids"]]
+    poor_rows = [element_id - 1 for element_id in candidate.report["repair_element_ids"]]
     poor_rows.sort(
         key=lambda row: (
             -float(candidate.aspect_ratios[row]),
@@ -796,11 +889,16 @@ def mesh_planar_surface(
         cancellation_check("native surface quality optimization start")
 
     optimization_started = perf_counter()
-    initial_candidate = _make_candidate(triangulation.points, triangulation.triangles)
+    initial_candidate = _make_candidate(
+        triangulation.points,
+        triangulation.triangles,
+        settings=settings,
+    )
     current = _optimize_candidate(
         initial_candidate,
         triangulation.segments,
         explicit_interior,
+        settings,
     )
     best = current if current.score < initial_candidate.score else initial_candidate
     best_triangulation = triangulation
@@ -809,7 +907,7 @@ def mesh_planar_surface(
     point_budget = int(0.5 * len(generated))
 
     for round_number in range(1, 3):
-        if best.report["elements_above_aspect_ratio_5"] == 0 or attempted_added_points >= point_budget:
+        if not best.report["poor_element_ids"] or attempted_added_points >= point_budget:
             break
         if cancellation_check is not None:
             cancellation_check(f"native surface quality refinement round {round_number} start")
@@ -838,11 +936,13 @@ def mesh_planar_surface(
             retry_triangulation.triangles,
             added_points=attempted_added_points,
             rounds=attempted_rounds,
+            settings=settings,
         )
         retry = _optimize_candidate(
             retry,
             retry_triangulation.segments,
             explicit_interior,
+            settings,
         )
         current = retry
         triangulation = retry_triangulation
@@ -854,7 +954,10 @@ def mesh_planar_surface(
 
     triangulation = best_triangulation
     phase_seconds["quality_optimization"] = perf_counter() - optimization_started
-    target_met = best.report["invalid_element_count"] == 0 and best.report["elements_above_aspect_ratio_5"] == 0
+    target_met = (
+        best.report["invalid_element_count"] == 0
+        and not best.report["poor_element_ids"]
+    )
     quality_diagnostics = {
         "initial_quality": dict(initial_candidate.report),
         "final_quality": dict(best.report),

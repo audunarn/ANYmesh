@@ -238,6 +238,41 @@ def _apply_face_shape_minimums(
                 )
 
 
+def _apply_face_boundary_minimums(
+    faces: Sequence[Face],
+    *,
+    desired: Dict[int, int],
+    demands: Mapping[int, float],
+) -> None:
+    """Prevent short imprint segments from forcing abrupt native transitions."""
+
+    maximum_step_ratio = 1.7320508075688772
+    for face in faces:
+        loops = (face.loop,) + face.holes
+        edge_ids = tuple(
+            dict.fromkeys(item.edge for loop in loops for item in loop)
+        )
+        if not edge_ids:
+            continue
+        reference_step = min(
+            demands[edge_id] / desired[edge_id]
+            for edge_id in edge_ids
+        )
+        if reference_step <= 0.0:
+            continue
+        for edge_id in edge_ids:
+            minimum = max(
+                1,
+                int(
+                    np.ceil(
+                        demands[edge_id]
+                        / (maximum_step_ratio * reference_step)
+                    )
+                ),
+            )
+            desired[edge_id] = max(desired[edge_id], minimum)
+
+
 def solve_seeding(
     geometry: GeometryModel,
     *,
@@ -290,9 +325,24 @@ def solve_seeding(
         for edge_id in edges
     }
 
-    faces = [
+    boundary_faces = [
         face
         for face in geometry.faces.values()
+        if all(
+            item.edge in desired
+            for loop in (face.loop,) + face.holes
+            for item in loop
+        )
+    ]
+    _apply_face_boundary_minimums(
+        boundary_faces,
+        desired=desired,
+        demands=demands,
+    )
+
+    faces = [
+        face
+        for face in boundary_faces
         if len(face.corners) == 4
         and not face.holes
         and all(item.edge in desired for item in face.loop)

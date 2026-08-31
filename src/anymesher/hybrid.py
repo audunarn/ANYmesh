@@ -401,23 +401,31 @@ def _declared_junction_core_edges(
 def _prepared_plate_junction_edges(
     mesh: Mesh,
     report: StructuralPreparationReport,
+    edge_descendants: Mapping[int, Sequence[int]],
 ) -> tuple[tuple[int, int], ...]:
     step = 2 if mesh.is_quadratic else 1
     result: set[tuple[int, int]] = set()
-    for edge_id in report.declared_face_connection_edges:
-        sequence = mesh.nodes_of_edge.get(int(edge_id))
-        if sequence is None or len(sequence) < step + 1:
+    for prepared_edge_id in report.declared_face_connection_edges:
+        descendants = edge_descendants.get(int(prepared_edge_id))
+        if not descendants:
             raise MeshError(
-                f"declared plate-junction edge {edge_id} has no seeded mesh boundary"
+                "declared plate-junction edge "
+                f"{prepared_edge_id} has no final structured descendant"
             )
-        if (len(sequence) - 1) % step:
-            raise MeshError(
-                f"declared plate-junction edge {edge_id} has inconsistent order"
-            )
-        for index in range(0, len(sequence) - 1, step):
-            first = int(sequence[index])
-            second = int(sequence[index + step])
-            result.add((min(first, second), max(first, second)))
+        for edge_id in descendants:
+            sequence = mesh.nodes_of_edge.get(int(edge_id))
+            if sequence is None or len(sequence) < step + 1:
+                raise MeshError(
+                    f"declared plate-junction edge {edge_id} has no seeded mesh boundary"
+                )
+            if (len(sequence) - 1) % step:
+                raise MeshError(
+                    f"declared plate-junction edge {edge_id} has inconsistent order"
+                )
+            for index in range(0, len(sequence) - 1, step):
+                first = int(sequence[index])
+                second = int(sequence[index + step])
+                result.add((min(first, second), max(first, second)))
     return tuple(sorted(result))
 
 
@@ -1319,7 +1327,10 @@ def generate_hybrid_mesh_result(
     if seeding is None:
         effective_overrides = dict(final_overrides or {})
         if structured_report is not None:
+            mapped_edge_ids = set(_active_edges(geometry, mapped_faces, ()))
             for edge_id, divisions in structured_report.seed_solution.items():
+                if edge_id not in mapped_edge_ids:
+                    continue
                 previous = effective_overrides.setdefault(edge_id, divisions)
                 if previous != divisions:
                     raise MeshError(
@@ -1423,7 +1434,9 @@ def generate_hybrid_mesh_result(
     }
     if preparation_report is not None:
         mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
-            mesh, preparation_report
+            mesh,
+            preparation_report,
+            prepared_to_final_edges,
         )
     if preparation_report is not None or structured_report is not None:
         working_backend_diagnostics = triangulation_backend_by_face

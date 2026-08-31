@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Score and refine native surface candidates against angle, scaled-Jacobian, and adjacent-element-growth limits in addition to aspect ratio, preventing quality-invalid slivers from being selected for automatic fallback.
+
+- Propagate short imprint-edge spacing across arbitrary native face boundaries before triangulation, preventing acute and rapid-growth transitions without moving topology-owned nodes or relaxing quality policy.
+
+- Allow automatic native fallback to refine edges from rejected structured faces instead of retaining their structured seed solution as hard overrides; mapped/native interface seeds remain locked and conformal.
+
+- Preserve declared transverse plate-junction edges through upstream imprinting and structured-layout edge descendants so valid three- and four-shell junctions pass strict quality validation.
+
 - Refine native seeding across thin four-sided imprint fragments so opposite intersection curves retain compatible divisions without relaxing structured quality limits.
 
 - Preserve declared plate-junction incidence when meshing geometry that an upstream owner has already imprinted along an exact shared transverse boundary.
