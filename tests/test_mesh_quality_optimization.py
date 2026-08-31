@@ -12,7 +12,9 @@ from anygeometry import (
 )
 from anymesher.errors import MeshError
 from anymesher.hybrid import generate_hybrid_mesh
+from anymesher.preparation import prepare_structural_closure
 from anymesher.quality_v2 import assert_valid_mesh
+from anymesher.seeding import edge_demand, solve_seeding
 from anymesher.serialize import mesh_to_dict
 from anymesher.surface_mesh import mesh_planar_surface
 
@@ -226,3 +228,65 @@ def test_three_plate_connect_quality_and_shared_identity_are_deterministic() -> 
         values["quality_optimization"]["final_quality"]["max_aspect_ratio"]
         for values in face_diagnostics.values()
     ) <= 5.0
+
+
+def test_two_level_plate_intersections_refine_thin_wall_strips_compatibly() -> None:
+    geometry = GeometryModel()
+    lower, _ = _plate(
+        geometry,
+        ((-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 2.0, 0.0), (-1.0, 2.0, 0.0)),
+    )
+    upper, _ = _plate(
+        geometry,
+        ((-1.0, 0.0, 0.1), (1.0, 0.0, 0.1), (1.0, 2.0, 0.1), (-1.0, 2.0, 0.1)),
+    )
+    wall, _ = _plate(
+        geometry,
+        ((0.0, 0.0, -0.2), (0.0, 2.0, -0.2), (0.0, 2.0, 0.8), (0.0, 0.0, 0.8)),
+    )
+    geometry.add_sheet((lower,))
+    geometry.add_sheet((upper,))
+    geometry.add_sheet((wall,))
+
+    prepared, report = prepare_structural_closure(geometry)
+    assert report.face_connections == 2
+    wall_faces = report.source_to_working_faces[wall]
+    seeding = solve_seeding(prepared, target_size=0.25)
+    for face_id in wall_faces:
+        face = prepared.faces[face_id]
+        if len(face.corners) != 4:
+            continue
+        axis_steps = []
+        sides = face.sides()
+        for first, second in ((0, 2), (1, 3)):
+            side_steps = []
+            for side in (sides[first], sides[second]):
+                demand = sum(
+                    edge_demand(prepared, item.edge, seeding.size_field)
+                    for item in side
+                )
+                divisions = sum(seeding[item.edge] for item in side)
+                side_steps.append(demand / divisions)
+            axis_steps.append(max(side_steps))
+        assert max(axis_steps) <= 1.7320508075688772 * min(axis_steps) + 1.0e-12
+
+    first = generate_hybrid_mesh(
+        geometry,
+        target_size=0.25,
+        strategy="native",
+        native_backend="python",
+    )
+    second = generate_hybrid_mesh(
+        geometry,
+        target_size=0.25,
+        strategy="native",
+        native_backend="python",
+    )
+    assert mesh_to_dict(first) == mesh_to_dict(second)
+    face_diagnostics = first.hybrid_diagnostics["triangulation_backend_by_face"]
+    wall_quality = [
+        face_diagnostics[face_id]["quality_optimization"]["final_quality"]
+        for face_id in wall_faces
+    ]
+    assert max(item["max_aspect_ratio"] for item in wall_quality) <= 5.0
+    assert min(item["min_angle"] for item in wall_quality) >= 20.0

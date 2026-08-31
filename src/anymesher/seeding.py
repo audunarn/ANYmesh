@@ -170,6 +170,74 @@ class _UnionFind:
             self._parent[right_root] = left_root
 
 
+def _raise_side_minimum(
+    side: Sequence[OrientedEdge],
+    minimum: int,
+    *,
+    desired: Dict[int, int],
+    demands: Mapping[int, float],
+) -> None:
+    """Refine one mapped side deterministically to a minimum station count."""
+
+    while sum(desired[item.edge] for item in side) < minimum:
+        chosen = max(
+            (item.edge for item in side),
+            key=lambda edge_id: (
+                demands[edge_id] / desired[edge_id],
+                -edge_id,
+            ),
+        )
+        desired[chosen] += 1
+
+
+def _apply_face_shape_minimums(
+    faces: Sequence[Face],
+    *,
+    desired: Dict[int, int],
+    demands: Mapping[int, float],
+) -> None:
+    """Bound mapped-axis station anisotropy before compatibility solving.
+
+    Imprinting can create a geometrically thin four-sided strip. Target-size
+    seeding alone then assigns one division through the thickness but leaves
+    target-sized stations along the strip, forcing acute native transition
+    cells. Keep every model edge and station endpoint authoritative while
+    refining the coarser axis to the 30-degree triangular spacing bound.
+    """
+
+    maximum_step_ratio = 1.7320508075688772  # sqrt(3), tan(30 deg) inverse
+    for face in faces:
+        sides = face.sides()
+        axes: list[tuple[tuple[int, int], float, float]] = []
+        for pair in ((0, 2), (1, 3)):
+            axis_demand = max(
+                sum(demands[item.edge] for item in sides[index])
+                for index in pair
+            )
+            axis_count = max(
+                sum(desired[item.edge] for item in sides[index])
+                for index in pair
+            )
+            axes.append((pair, axis_demand, axis_demand / axis_count))
+        reference_step = min(item[2] for item in axes)
+        if reference_step <= 0.0:
+            continue
+        for pair, axis_demand, axis_step in axes:
+            if axis_step <= maximum_step_ratio * reference_step:
+                continue
+            minimum = max(
+                1,
+                int(np.ceil(axis_demand / (maximum_step_ratio * reference_step))),
+            )
+            for index in pair:
+                _raise_side_minimum(
+                    sides[index],
+                    minimum,
+                    desired=desired,
+                    demands=demands,
+                )
+
+
 def solve_seeding(
     geometry: GeometryModel,
     *,
@@ -213,8 +281,12 @@ def solve_seeding(
                 f"edge {edge_id} override must be at least 1 division"
             )
 
+    demands = {
+        edge_id: float(edge_demand(geometry, edge_id, size_field))
+        for edge_id in edges
+    }
     desired = {
-        edge_id: max(1, int(round(edge_demand(geometry, edge_id, size_field))))
+        edge_id: max(1, int(round(demands[edge_id])))
         for edge_id in edges
     }
 
@@ -225,6 +297,7 @@ def solve_seeding(
         and not face.holes
         and all(item.edge in desired for item in face.loop)
     ]
+    _apply_face_shape_minimums(faces, desired=desired, demands=demands)
 
     union = _UnionFind()
     for edge_id in edges:
@@ -264,8 +337,6 @@ def solve_seeding(
     # by raw length, so grading steers refinement to where it is asked for.
     # Under a uniform field this is length divided by a constant, so the
     # ordering -- and therefore the resulting mesh -- is unchanged.
-    demands = {edge_id: desired[edge_id] for edge_id in edges}
-
     sweeps = 0
     for sweeps in range(1, max_sweeps + 1):
         changed = False
