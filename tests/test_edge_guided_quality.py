@@ -115,3 +115,72 @@ def test_segment_grid_reduces_clearance_work_without_changing_output() -> None:
 
     values = diagnostics["quality_optimization"]["lattice_statistics"]
     assert values["distance_checks"] < values["naive_distance_checks"]
+
+
+def test_recombined_plate_with_hole_prefers_boundary_aligned_collars() -> None:
+    outer = np.asarray(
+        ((0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)),
+        dtype=float,
+    )
+    angles = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+    hole = np.column_stack((
+        2.0 + 0.50 * np.cos(angles),
+        2.0 + 0.50 * np.sin(angles),
+    ))
+    first_diagnostics: dict[str, object] = {}
+    second_diagnostics: dict[str, object] = {}
+
+    first = mesh_planar_surface(
+        outer,
+        holes=(hole,),
+        options=SurfaceMeshOptions(
+            recombine=True,
+            target_size=0.25,
+            backend="python",
+        ),
+        diagnostics=first_diagnostics,
+    )
+    second = mesh_planar_surface(
+        outer,
+        holes=(hole,),
+        options=SurfaceMeshOptions(
+            recombine=True,
+            target_size=0.25,
+            backend="python",
+        ),
+        diagnostics=second_diagnostics,
+    )
+
+    assert np.array_equal(first.node_coordinates, second.node_coordinates)
+    assert np.array_equal(first.triangle_connectivity, second.triangle_connectivity)
+    assert np.array_equal(first.quad_connectivity, second.quad_connectivity)
+    quality = first_diagnostics["quality_optimization"]
+    assert quality == second_diagnostics["quality_optimization"]
+    assert quality["candidate_count"] == 3
+    assert {item["strategy"] for item in quality["candidates"]} == {
+        "staggered_chart",
+        "outer_boundary_collar",
+        "outer_hole_collar",
+    }
+    baseline, outer_collar, complete_collar = quality["candidates"]
+    first_collar, second_collar = quality["boundary_collars"]
+    assert first_collar["preparation_cache_hit"] is False
+    assert second_collar["preparation_cache_hit"] is True
+    assert outer_collar["outer_alignment"]["maximum_normal_error_degrees"] < (
+        baseline["outer_alignment"]["maximum_normal_error_degrees"]
+    )
+    assert complete_collar["outer_alignment"]["maximum_normal_error_degrees"] <= (
+        baseline["outer_alignment"]["maximum_normal_error_degrees"]
+    )
+    assert complete_collar["hole_alignment"]["maximum_normal_error_degrees"] < (
+        baseline["hole_alignment"]["maximum_normal_error_degrees"]
+    )
+    selected = quality["published_alignment"]
+    assert selected["outer"]["mean_normal_error_degrees"] <= 20.0
+    assert selected["outer"]["maximum_normal_error_degrees"] <= 50.0
+    assert selected["holes"]["mean_normal_error_degrees"] <= 25.0
+    assert selected["holes"]["maximum_normal_error_degrees"] <= 50.0
+    assert quality["final_quality"]["invalid_element_count"] == 0
+    coordinates = first.node_coordinates[:, :2]
+    for expected in (*outer, *hole):
+        assert np.count_nonzero(np.all(coordinates == expected, axis=1)) == 1

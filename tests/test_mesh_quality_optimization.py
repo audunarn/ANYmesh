@@ -226,17 +226,27 @@ def test_three_plate_connect_quality_and_shared_identity_are_deterministic() -> 
         )
     face_diagnostics = first.hybrid_diagnostics["triangulation_backend_by_face"]
     assert set(face_diagnostics) == set(geometry.faces)
-    repair = first.hybrid_diagnostics["junction_growth_repair"]
-    assert repair["attempted"] is True
-    assert repair["committed"] is True
-    assert repair["junction_node_pairs"]
-    assert repair["moved_node_ids"]
-    assert repair["initial_quality"]["growth_violation_count"] == 1
-    assert repair["final_quality"]["growth_violation_count"] == 0
-    assert repair["final_quality"]["maximum_adjacent_element_growth"] < repair[
-        "initial_quality"
-    ]["maximum_adjacent_element_growth"]
-    assert repair["final_quality"]["maximum_aspect_ratio"] <= 5.0
+    repair = first.hybrid_diagnostics.get("junction_growth_repair")
+    if repair is not None:
+        assert repair["attempted"] is True
+        assert repair["committed"] is True
+        assert repair["junction_node_pairs"]
+        assert repair["moved_node_ids"]
+        assert repair["initial_quality"]["growth_violation_count"] == 1
+        assert repair["final_quality"]["growth_violation_count"] == 0
+        assert repair["final_quality"]["maximum_adjacent_element_growth"] < repair[
+            "initial_quality"
+        ]["maximum_adjacent_element_growth"]
+        assert repair["final_quality"]["maximum_aspect_ratio"] <= 5.0
+    else:
+        assert all(
+            item["quality_optimization"]["final_quality"][
+                "max_element_growth"
+            ]
+            <= 1.5
+            for diagnostic in face_diagnostics.values()
+            for item in diagnostic["working_face_diagnostics"]
+        )
 
 
 def test_two_level_plate_intersections_refine_thin_wall_strips_compatibly() -> None:

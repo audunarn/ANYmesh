@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import acos, ceil, sqrt
+from math import acos, ceil, degrees, sqrt
 from numbers import Integral
 from time import perf_counter
 from typing import Any, Callable, Sequence
@@ -295,6 +295,354 @@ def _canonical_segments(
         return (*min(first, second), *max(first, second))
 
     return tuple(sorted(raw, key=key))
+
+
+def _domain_contains(
+    point: np.ndarray,
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+) -> bool:
+    return _inside(point, outer) and not any(_inside(point, hole) for hole in holes)
+
+
+def _determinant(first: np.ndarray, second: np.ndarray) -> float:
+    return float(first[0] * second[1] - first[1] * second[0])
+
+
+def _segments_cross(
+    first: np.ndarray,
+    second: np.ndarray,
+    third: np.ndarray,
+    fourth: np.ndarray,
+    tolerance: float,
+) -> bool:
+    first_side = _determinant(second - first, third - first)
+    second_side = _determinant(second - first, fourth - first)
+    third_side = _determinant(fourth - third, first - third)
+    fourth_side = _determinant(fourth - third, second - third)
+    return (
+        first_side * second_side < -(tolerance * tolerance)
+        and third_side * fourth_side < -(tolerance * tolerance)
+    )
+
+
+def _material_edge_normal(
+    first: np.ndarray,
+    second: np.ndarray,
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    probe: float,
+) -> np.ndarray | None:
+    direction = second - first
+    length = float(np.linalg.norm(direction))
+    if length <= np.finfo(float).eps:
+        return None
+    tangent = direction / length
+    left = np.asarray((-tangent[1], tangent[0]), dtype=float)
+    midpoint = 0.5 * (first + second)
+    left_inside = _domain_contains(midpoint + probe * left, outer, holes)
+    right_inside = _domain_contains(midpoint - probe * left, outer, holes)
+    if left_inside == right_inside:
+        return None
+    return left if left_inside else -left
+
+
+def _offset_loop(
+    loop: np.ndarray,
+    distance: float,
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    forbidden: Sequence[tuple[np.ndarray, np.ndarray]],
+    size: float,
+) -> tuple[np.ndarray | None, str | None]:
+    """Offset one complete seeded loop into material without changing its phase."""
+
+    tolerance = max(float(size) * 1.0e-10, np.finfo(float).eps)
+    probe = max(0.10 * float(size), 64.0 * tolerance)
+    normals: list[np.ndarray] = []
+    for index in range(len(loop)):
+        normal = _material_edge_normal(
+            loop[index],
+            loop[(index + 1) % len(loop)],
+            outer,
+            holes,
+            probe,
+        )
+        if normal is None:
+            return None, "ambiguous_material_side"
+        normals.append(normal)
+
+    offset: list[np.ndarray] = []
+    for index, point in enumerate(loop):
+        previous = normals[index - 1]
+        following = normals[index]
+        bisector = previous + following
+        length = float(np.linalg.norm(bisector))
+        if length <= tolerance:
+            return None, "opposed_corner_normals"
+        bisector /= length
+        denominator = min(
+            float(bisector @ previous),
+            float(bisector @ following),
+        )
+        if denominator <= 0.40:
+            return None, "excessive_corner_miter"
+        miter = float(distance) / denominator
+        candidate = point + miter * bisector
+        if not _domain_contains(candidate, outer, holes):
+            return None, "offset_left_material"
+        offset.append(candidate)
+
+    ring = np.asarray(offset, dtype=np.float64)
+    lengths = np.linalg.norm(np.roll(ring, -1, axis=0) - ring, axis=1)
+    if np.any(lengths <= tolerance):
+        return None, "collapsed_offset_segment"
+    if float(np.max(lengths)) > 1.5 * float(size) * (1.0 + 1.0e-12):
+        return None, "offset_station_spacing"
+
+    segments = tuple(
+        (ring[index], ring[(index + 1) % len(ring)])
+        for index in range(len(ring))
+    )
+    for index, (first, second) in enumerate(segments):
+        for fraction in (0.25, 0.50, 0.75):
+            if not _domain_contains(
+                first + fraction * (second - first), outer, holes
+            ):
+                return None, "offset_segment_left_material"
+        for other_index, (third, fourth) in enumerate(segments):
+            if other_index <= index or other_index in {
+                (index - 1) % len(segments),
+                (index + 1) % len(segments),
+            }:
+                continue
+            if _segments_cross(first, second, third, fourth, tolerance):
+                return None, "self_intersecting_offset"
+        for third, fourth in forbidden:
+            if _segments_cross(first, second, third, fourth, tolerance):
+                return None, "offset_crossed_protected_segment"
+    return ring, None
+
+
+def _collar_candidate(
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    constraints: Sequence[np.ndarray],
+    generated: np.ndarray,
+    size: float,
+    *,
+    include_holes: bool,
+    max_points: int,
+    preparation_cache: dict[str, Any] | None = None,
+) -> tuple[np.ndarray, tuple[np.ndarray, ...], dict[str, Any]] | None:
+    """Create protected straight-span collars, with the outer loop first."""
+
+    cache = preparation_cache if preparation_cache is not None else {}
+    cached_segments = cache.get("base_segments")
+    if cached_segments is None:
+        cached_segments = tuple(_canonical_segments(outer, holes, constraints))
+        cache["base_segments"] = cached_segments
+    base_segments = list(cached_segments)
+    accepted_segments: list[tuple[np.ndarray, np.ndarray]] = []
+    accepted_rings: list[np.ndarray] = []
+    clearance_regions: list[tuple[_SegmentGrid, float]] = []
+    diagnostics: dict[str, Any] = {
+        "requested_layers": 3,
+        "outer": {},
+        "holes": [],
+        "shortened_rows": 0,
+        "transition_regions": 0,
+        "preparation_cache_hit": False,
+    }
+
+    def add_loop(loop: np.ndarray, label: str) -> dict[str, Any]:
+        layers = 0
+        reason: str | None = None
+        previous_stations = {
+            index: np.asarray(point, dtype=np.float64)
+            for index, point in enumerate(loop)
+        }
+        corner_indices: frozenset[int] = frozenset()
+        if label == "outer":
+            corners: set[int] = set()
+            for index, point in enumerate(loop):
+                incoming = point - loop[(index - 1) % len(loop)]
+                outgoing = loop[(index + 1) % len(loop)] - point
+                incoming_norm = float(np.linalg.norm(incoming))
+                outgoing_norm = float(np.linalg.norm(outgoing))
+                if incoming_norm <= 0.0 or outgoing_norm <= 0.0:
+                    corners.add(index)
+                    continue
+                turn = abs(
+                    _determinant(
+                        incoming / incoming_norm,
+                        outgoing / outgoing_norm,
+                    )
+                )
+                if turn > 1.0e-10:
+                    corners.add(index)
+            corner_indices = frozenset(corners)
+        source_segments = tuple(
+            (loop[index], loop[(index + 1) % len(loop)])
+            for index in range(len(loop))
+        )
+        for layer in range(1, 4):
+            layer_distance = (float(layer) - 0.5) * float(size)
+            station_points: dict[int, np.ndarray]
+            if label == "outer" and layer > 1 and corner_indices:
+                station_points = {}
+                tolerance = max(float(size) * 1.0e-10, np.finfo(float).eps)
+                for index, point in enumerate(loop):
+                    if index in corner_indices:
+                        continue
+                    normal = _material_edge_normal(
+                        point,
+                        loop[(index + 1) % len(loop)],
+                        outer,
+                        holes,
+                        max(0.10 * float(size), 64.0 * tolerance),
+                    )
+                    if normal is None:
+                        station_points = {}
+                        reason = "ambiguous_material_side"
+                        break
+                    candidate = point + layer_distance * normal
+                    if not _domain_contains(candidate, outer, holes):
+                        station_points = {}
+                        reason = "offset_left_material"
+                        break
+                    station_points[index] = candidate
+                if len(station_points) < 2:
+                    reason = reason or "shortened_row_empty"
+                    break
+                made = [
+                    (station_points[index], station_points[(index + 1) % len(loop)])
+                    for index in sorted(station_points)
+                    if (index + 1) % len(loop) in station_points
+                ]
+                made.extend(
+                    (previous_stations[index], point)
+                    for index, point in station_points.items()
+                    if index in previous_stations
+                )
+                if any(
+                    not _domain_contains(0.5 * (first + second), outer, holes)
+                    or any(
+                        _segments_cross(first, second, third, fourth, tolerance)
+                        for third, fourth in (*base_segments, *accepted_segments)
+                    )
+                    for first, second in made
+                ):
+                    reason = "shortened_row_crossed_protected_segment"
+                    break
+                ring = np.asarray(
+                    [station_points[index] for index in sorted(station_points)],
+                    dtype=np.float64,
+                )
+            else:
+                ring, reason = _offset_loop(
+                    loop,
+                    layer_distance,
+                    outer,
+                    holes,
+                    (*base_segments, *accepted_segments),
+                    size,
+                )
+                if ring is None:
+                    break
+                station_points = {
+                    index: ring[index] for index in range(len(ring))
+                }
+                made = [
+                    (ring[index], ring[(index + 1) % len(ring)])
+                    for index in range(len(ring))
+                ]
+                if len(previous_stations) == len(ring):
+                    made.extend(
+                        (previous_stations[index], ring[index])
+                        for index in range(len(ring))
+                    )
+            if sum(len(value) for value in accepted_rings) + len(ring) > max_points:
+                reason = "collar_point_budget"
+                break
+            accepted_rings.append(ring)
+            accepted_segments.extend(made)
+            previous_stations = station_points
+            layers += 1
+        if layers:
+            reach = layers * float(size) - 0.25 * float(size)
+            clearance_regions.append((_SegmentGrid(source_segments, reach), reach))
+        skipped = 3 - layers
+        diagnostics["shortened_rows"] += skipped
+        if skipped:
+            diagnostics["transition_regions"] += 1
+        return {
+            "loop": label,
+            "accepted_layers": layers,
+            "skipped_layers": skipped,
+            "stop_reason": reason,
+            "released_corner_stations": 0,
+        }
+
+    cached_outer = cache.get("outer_collar")
+    if cached_outer is None:
+        diagnostics["outer"] = add_loop(outer, "outer")
+        cache["outer_collar"] = {
+            "rings": tuple(accepted_rings),
+            "segments": tuple(accepted_segments),
+            "clearance_regions": tuple(clearance_regions),
+            "diagnostics": dict(diagnostics["outer"]),
+            "shortened_rows": int(diagnostics["shortened_rows"]),
+            "transition_regions": int(diagnostics["transition_regions"]),
+        }
+    else:
+        accepted_rings.extend(cached_outer["rings"])
+        accepted_segments.extend(cached_outer["segments"])
+        clearance_regions.extend(cached_outer["clearance_regions"])
+        diagnostics["outer"] = dict(cached_outer["diagnostics"])
+        diagnostics["shortened_rows"] = int(cached_outer["shortened_rows"])
+        diagnostics["transition_regions"] = int(
+            cached_outer["transition_regions"]
+        )
+        diagnostics["preparation_cache_hit"] = True
+    if include_holes:
+        diagnostics["holes"] = [
+            add_loop(hole, f"hole_{index + 1}")
+            for index, hole in enumerate(holes)
+        ]
+    if not accepted_rings:
+        return None
+
+    kept: list[np.ndarray] = []
+    removed = 0
+    for point in generated:
+        within_collar = False
+        for grid, reach in clearance_regions:
+            within, _checks = grid.within(point, reach)
+            if within:
+                within_collar = True
+                break
+        if within_collar:
+            removed += 1
+        else:
+            kept.append(point)
+    collar_points = np.vstack(accepted_rings)
+    kept_points = np.asarray(kept, dtype=np.float64).reshape((-1, 2))
+    candidate_points = np.vstack((kept_points, collar_points))
+    collar_constraints = tuple(
+        np.asarray((first, second), dtype=np.float64)
+        for first, second in accepted_segments
+    )
+    diagnostics.update(
+        {
+            "collar_points": len(collar_points),
+            "collar_segments": len(collar_constraints),
+            "removed_lattice_points": removed,
+            "transition_points": 0,
+            "accepted_points": len(candidate_points),
+        }
+    )
+    return candidate_points, collar_constraints, diagnostics
 
 
 def _edge_guided_points(
@@ -718,11 +1066,28 @@ def _fixed_rows(
     return tuple(sorted(fixed))
 
 
+def _candidate_selection_key(
+    candidate: _QualityCandidate,
+    *,
+    prefer_growth: bool,
+) -> tuple[Any, ...]:
+    if prefer_growth:
+        return (
+            int(candidate.report["invalid_element_count"]),
+            int(candidate.report["elements_above_maximum_growth"]),
+            float(candidate.report["max_element_growth"]),
+            *candidate.score,
+        )
+    return candidate.score
+
+
 def _optimize_candidate(
     candidate: _QualityCandidate,
     protected_edges: np.ndarray,
     explicit_points: np.ndarray,
     settings: SurfaceMeshOptions | None = None,
+    *,
+    prefer_growth: bool = False,
 ) -> _QualityCandidate:
     """Run the fixed flip/smooth/flip sequence and publish only improvements."""
 
@@ -740,7 +1105,11 @@ def _optimize_candidate(
         rounds=candidate.rounds,
         settings=settings,
     )
-    if flipped.score < best.score and flipped.score[0] == 0:
+    if (
+        _candidate_selection_key(flipped, prefer_growth=prefer_growth)
+        < _candidate_selection_key(best, prefer_growth=prefer_growth)
+        and flipped.score[0] == 0
+    ):
         best = flipped
     smoothing = constrained_smoothing(
         candidate.points,
@@ -760,7 +1129,11 @@ def _optimize_candidate(
         rounds=candidate.rounds,
         settings=settings,
     )
-    if smoothed.score < best.score and smoothed.score[0] == 0:
+    if (
+        _candidate_selection_key(smoothed, prefer_growth=prefer_growth)
+        < _candidate_selection_key(best, prefer_growth=prefer_growth)
+        and smoothed.score[0] == 0
+    ):
         best = smoothed
     final_flip = local_edge_flip(
         smoothing.points,
@@ -776,7 +1149,11 @@ def _optimize_candidate(
         rounds=candidate.rounds,
         settings=settings,
     )
-    if finished.score < best.score and finished.score[0] == 0:
+    if (
+        _candidate_selection_key(finished, prefer_growth=prefer_growth)
+        < _candidate_selection_key(best, prefer_growth=prefer_growth)
+        and finished.score[0] == 0
+    ):
         best = finished
     return best
 
@@ -785,6 +1162,8 @@ def _refinement_midpoints(
     candidate: _QualityCandidate,
     protected_edges: np.ndarray,
     limit: int,
+    *,
+    preserve_protected_cells: bool = False,
 ) -> np.ndarray:
     if limit <= 0:
         return np.empty((0, 2), dtype=np.float64)
@@ -806,17 +1185,38 @@ def _refinement_midpoints(
             tuple(sorted((int(triangle[index]), int(triangle[(index + 1) % 3]))))
             for index in range(3)
         }
+        if preserve_protected_cells and len(edges & protected) >= 2:
+            continue
         available = [edge for edge in edges if edge not in protected]
         if not available:
             continue
-        edge = min(
+        midpoint: np.ndarray | None = None
+        for edge in sorted(
             available,
-            key=lambda item: (-float(np.linalg.norm(candidate.points[item[1]] - candidate.points[item[0]])), item),
-        )
-        midpoint = 0.5 * (candidate.points[edge[0]] + candidate.points[edge[1]])
-        if np.any(np.linalg.norm(candidate.points - midpoint, axis=1) <= tolerance):
-            continue
-        if added and any(float(np.linalg.norm(value - midpoint)) <= tolerance for value in added):
+            key=lambda item: (
+                -float(
+                    np.linalg.norm(
+                        candidate.points[item[1]] - candidate.points[item[0]]
+                    )
+                ),
+                item,
+            ),
+        ):
+            proposed = 0.5 * (
+                candidate.points[edge[0]] + candidate.points[edge[1]]
+            )
+            if np.any(
+                np.linalg.norm(candidate.points - proposed, axis=1) <= tolerance
+            ):
+                continue
+            if added and any(
+                float(np.linalg.norm(value - proposed)) <= tolerance
+                for value in added
+            ):
+                continue
+            midpoint = proposed
+            break
+        if midpoint is None:
             continue
         added.append(midpoint)
         if len(added) == limit:
@@ -833,6 +1233,9 @@ def _run_quality_path(
     generated: np.ndarray,
     settings: SurfaceMeshOptions,
     cancellation_check: Callable[[str], None] | None,
+    *,
+    allow_refinement: bool = True,
+    preserve_protected_cells: bool = False,
 ) -> dict[str, Any]:
     """Triangulate and optimize one detached deterministic point candidate."""
 
@@ -862,14 +1265,20 @@ def _run_quality_path(
         triangulation.segments,
         explicit_interior,
         settings,
+        prefer_growth=preserve_protected_cells,
     )
-    best = current if current.score < initial.score else initial
+    best = min(
+        (initial, current),
+        key=lambda value: _candidate_selection_key(
+            value, prefer_growth=preserve_protected_cells
+        ),
+    )
     best_triangulation = triangulation
     attempted_added_points = 0
     attempted_rounds = 0
     point_budget = int(0.5 * len(generated))
 
-    for round_number in range(1, 3):
+    for round_number in (range(1, 3) if allow_refinement else ()):
         if not best.report["poor_element_ids"] or attempted_added_points >= point_budget:
             break
         if cancellation_check is not None:
@@ -886,6 +1295,7 @@ def _run_quality_path(
             current,
             triangulation.segments,
             round_budget,
+            preserve_protected_cells=preserve_protected_cells,
         )
         if not len(additions):
             break
@@ -920,10 +1330,19 @@ def _run_quality_path(
             retry_triangulation.segments,
             explicit_interior,
             settings,
+            prefer_growth=preserve_protected_cells,
         )
         current = retry
         triangulation = retry_triangulation
-        if retry.score < best.score and retry.score[0] == 0:
+        if (
+            _candidate_selection_key(
+                retry, prefer_growth=preserve_protected_cells
+            )
+            < _candidate_selection_key(
+                best, prefer_growth=preserve_protected_cells
+            )
+            and retry.score[0] == 0
+        ):
             best = retry
             best_triangulation = retry_triangulation
         if cancellation_check is not None:
@@ -957,6 +1376,200 @@ def _quality_path_key(path: dict[str, Any]) -> tuple[Any, ...]:
     best: _QualityCandidate = path["best"]
     connectivity = tuple(tuple(map(int, row)) for row in best.triangles)
     return (*best.score, connectivity)
+
+
+def _boundary_edge_groups(
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+    offset = 0
+    outer_edges = tuple(
+        (offset + index, offset + (index + 1) % len(outer))
+        for index in range(len(outer))
+    )
+    offset += len(outer)
+    hole_edges: list[tuple[int, int]] = []
+    for hole in holes:
+        hole_edges.extend(
+            (offset + index, offset + (index + 1) % len(hole))
+            for index in range(len(hole))
+        )
+        offset += len(hole)
+    return outer_edges, tuple(hole_edges)
+
+
+def _boundary_alignment(
+    mesh: MeshCore,
+    chart_points: np.ndarray,
+    edges: Sequence[tuple[int, int]],
+) -> dict[str, float | int]:
+    incidence: dict[tuple[int, int], list[tuple[str, np.ndarray]]] = {}
+    for row in np.flatnonzero(mesh.triangle_active):
+        cell = mesh.triangle_connectivity[row, :3]
+        for edge in corner_edges(cell):
+            incidence.setdefault(edge, []).append(("triangle", cell))
+    for row in np.flatnonzero(mesh.quad_active):
+        cell = mesh.quad_connectivity[row, :4]
+        for edge in corner_edges(cell):
+            incidence.setdefault(edge, []).append(("quad", cell))
+
+    errors: list[float] = []
+    quad_edges = 0
+    for raw_first, raw_second in edges:
+        edge = (min(raw_first, raw_second), max(raw_first, raw_second))
+        attached = incidence.get(edge, ())
+        if len(attached) != 1 or attached[0][0] != "quad":
+            errors.append(90.0)
+            continue
+        cell = [int(value) for value in attached[0][1][:4]]
+        first, second = raw_first, raw_second
+        first_index = cell.index(first)
+        second_index = cell.index(second)
+        if cell[(first_index + 1) % 4] == second:
+            first_inner = cell[(first_index - 1) % 4]
+            second_inner = cell[(second_index + 1) % 4]
+        elif cell[(first_index - 1) % 4] == second:
+            first_inner = cell[(first_index + 1) % 4]
+            second_inner = cell[(second_index - 1) % 4]
+        else:
+            errors.append(90.0)
+            continue
+        tangent = chart_points[second] - chart_points[first]
+        tangent_length = float(np.linalg.norm(tangent))
+        if tangent_length <= np.finfo(float).eps:
+            errors.append(90.0)
+            continue
+        tangent /= tangent_length
+        normal = np.asarray((-tangent[1], tangent[0]), dtype=float)
+        local_errors: list[float] = []
+        for boundary_node, inner_node in (
+            (first, first_inner),
+            (second, second_inner),
+        ):
+            direction = chart_points[inner_node] - chart_points[boundary_node]
+            length = float(np.linalg.norm(direction))
+            if length <= np.finfo(float).eps:
+                local_errors.append(90.0)
+                continue
+            cosine = float(np.clip(abs((direction / length) @ normal), 0.0, 1.0))
+            local_errors.append(degrees(acos(cosine)))
+        errors.append(max(local_errors))
+        quad_edges += 1
+    return {
+        "edge_count": len(edges),
+        "quad_edge_count": quad_edges,
+        "quad_fraction": float(quad_edges / len(edges)) if edges else 1.0,
+        "mean_normal_error_degrees": float(np.mean(errors)) if errors else 0.0,
+        "maximum_normal_error_degrees": max(errors, default=0.0),
+    }
+
+
+def _published_quality_key(report: dict[str, Any]) -> tuple[Any, ...]:
+    violations = int(sum(report["violation_counts"].values()))
+    worst = report["worst"]
+    return (
+        violations,
+        float(worst["maximum_aspect_ratio"]),
+        -float(worst["minimum_scaled_jacobian"]),
+        -float(worst["minimum_angle"]),
+        float(worst["maximum_angle"]),
+        float(worst["maximum_warpage"]),
+    )
+
+
+def _quality_not_worse(
+    candidate: dict[str, Any],
+    baseline: dict[str, Any],
+) -> bool:
+    if baseline["accepted"]:
+        return bool(candidate["accepted"])
+    candidate_worst = candidate["worst"]
+    baseline_worst = baseline["worst"]
+    tolerance = 1.0e-12
+    return (
+        sum(candidate["violation_counts"].values())
+        <= sum(baseline["violation_counts"].values())
+        and candidate_worst["maximum_aspect_ratio"]
+        <= baseline_worst["maximum_aspect_ratio"] * (1.0 + tolerance)
+        and candidate_worst["minimum_scaled_jacobian"]
+        >= baseline_worst["minimum_scaled_jacobian"] - tolerance
+        and candidate_worst["minimum_angle"]
+        >= baseline_worst["minimum_angle"] - tolerance
+        and candidate_worst["maximum_angle"]
+        <= baseline_worst["maximum_angle"] + tolerance
+        and candidate_worst["maximum_warpage"]
+        <= baseline_worst["maximum_warpage"] + tolerance
+    )
+
+
+def _active_connectivity_key(mesh: MeshCore) -> tuple[Any, ...]:
+    triangles = tuple(
+        tuple(map(int, mesh.triangle_connectivity[row, :3]))
+        for row in np.flatnonzero(mesh.triangle_active)
+    )
+    quads = tuple(
+        tuple(map(int, mesh.quad_connectivity[row, :4]))
+        for row in np.flatnonzero(mesh.quad_active)
+    )
+    return triangles, quads
+
+
+def _prepare_recombined_path(
+    path: dict[str, Any],
+    plane: _Plane,
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    settings: SurfaceMeshOptions,
+    cancellation_check: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    best: _QualityCandidate = path["best"]
+    triangulation: PlanarTriangulation = path["triangulation"]
+    core = MeshCore(plane.lift(best.points), best.triangles)
+    started = perf_counter()
+    report = recombine_triangles_with_report(
+        core,
+        protected_edges=triangulation.segments,
+        min_scaled_jacobian=settings.min_scaled_jacobian,
+        max_aspect_ratio=settings.max_aspect_ratio,
+        min_angle=settings.min_angle,
+        max_angle=settings.max_angle,
+        max_warpage=settings.max_warpage,
+        cancellation_check=cancellation_check,
+        max_exchange_work=settings.max_recombination_work,
+    )
+    assert_valid_mesh(report.mesh)
+    quality = _quality_threshold_report(evaluate_quality(report.mesh), settings)
+    outer_edges, hole_edges = _boundary_edge_groups(outer, holes)
+    return {
+        "path": path,
+        "core": report.mesh,
+        "report": report,
+        "quality_policy": quality,
+        "outer_alignment": _boundary_alignment(
+            report.mesh, best.points, outer_edges
+        ),
+        "hole_alignment": _boundary_alignment(
+            report.mesh, best.points, hole_edges
+        ),
+        "max_element_growth": float(best.report["max_element_growth"]),
+        "seconds": perf_counter() - started,
+    }
+
+
+def _recombined_path_key(value: dict[str, Any]) -> tuple[Any, ...]:
+    outer = value["outer_alignment"]
+    hole = value["hole_alignment"]
+    quality = value["quality_policy"]
+    return (
+        0 if value["quality_eligible"] else 1,
+        float(outer["maximum_normal_error_degrees"]),
+        float(outer["mean_normal_error_degrees"]),
+        int(sum(quality["violation_counts"].values())),
+        float(hole["maximum_normal_error_degrees"]),
+        float(hole["mean_normal_error_degrees"]),
+        *_published_quality_key(quality),
+        _active_connectivity_key(value["core"]),
+    )
 
 
 def _next_ids(existing: np.ndarray, count: int) -> np.ndarray:
@@ -1167,8 +1780,64 @@ def mesh_planar_surface(
         "distance_checks": 0,
         "soft_symmetry": True,
     }
+    collar_diagnostics: list[dict[str, Any]] = []
     candidate_generation_started = perf_counter()
-    if settings.target_size is not None and not candidate_paths[0]["target_met"]:
+    if settings.target_size is not None and settings.recombine:
+        collar_preparation_cache: dict[str, Any] = {}
+        outer_collar = _collar_candidate(
+            planar_outer,
+            planar_holes,
+            planar_constraints,
+            generated,
+            settings.target_size,
+            include_holes=False,
+            max_points=settings.max_lattice_points,
+            preparation_cache=collar_preparation_cache,
+        )
+        if outer_collar is not None:
+            outer_points, outer_constraints, outer_report = outer_collar
+            path = _run_quality_path(
+                "outer_boundary_collar",
+                planar_outer,
+                planar_holes,
+                (*planar_constraints, *outer_constraints),
+                explicit_interior,
+                outer_points,
+                settings,
+                cancellation_check,
+                preserve_protected_cells=True,
+            )
+            path["collar"] = outer_report
+            candidate_paths.append(path)
+            collar_diagnostics.append(outer_report)
+        if planar_holes:
+            complete_collar = _collar_candidate(
+                planar_outer,
+                planar_holes,
+                planar_constraints,
+                generated,
+                settings.target_size,
+                include_holes=True,
+                max_points=settings.max_lattice_points,
+                preparation_cache=collar_preparation_cache,
+            )
+            if complete_collar is not None:
+                complete_points, complete_constraints, complete_report = complete_collar
+                path = _run_quality_path(
+                    "outer_hole_collar",
+                    planar_outer,
+                    planar_holes,
+                    (*planar_constraints, *complete_constraints),
+                    explicit_interior,
+                    complete_points,
+                    settings,
+                    cancellation_check,
+                    preserve_protected_cells=True,
+                )
+                path["collar"] = complete_report
+                candidate_paths.append(path)
+                collar_diagnostics.append(complete_report)
+    elif settings.target_size is not None and not candidate_paths[0]["target_met"]:
         dominant_statistics: dict[str, Any] = {}
         dominant = _target_points(
             planar_outer,
@@ -1218,7 +1887,32 @@ def mesh_planar_surface(
     phase_seconds["alternate_candidate_generation"] = (
         perf_counter() - candidate_generation_started
     )
-    selected = min(candidate_paths, key=_quality_path_key)
+    published_candidates: list[dict[str, Any]] = []
+    selected_published: dict[str, Any] | None = None
+    if settings.recombine:
+        published_candidates = [
+            _prepare_recombined_path(
+                path,
+                plane,
+                planar_outer,
+                planar_holes,
+                settings,
+                cancellation_check,
+            )
+            for path in candidate_paths
+        ]
+        baseline_policy = published_candidates[0]["quality_policy"]
+        for index, value in enumerate(published_candidates):
+            value["quality_eligible"] = index == 0 or (
+                _quality_not_worse(value["quality_policy"], baseline_policy)
+            )
+        selected_published = min(published_candidates, key=_recombined_path_key)
+        selected = selected_published["path"]
+        phase_seconds["recombination"] = sum(
+            float(value["seconds"]) for value in published_candidates
+        )
+    else:
+        selected = min(candidate_paths, key=_quality_path_key)
     generated = selected["generated"]
     initial_candidate = selected["initial"]
     best = selected["best"]
@@ -1263,19 +1957,61 @@ def mesh_planar_surface(
         ],
         "lattice_statistics": lattice_statistics,
         "edge_guides": guide_diagnostics,
+        "boundary_collars": collar_diagnostics,
+        "published_alignment": (
+            None
+            if selected_published is None
+            else {
+                "outer": dict(selected_published["outer_alignment"]),
+                "holes": dict(selected_published["hole_alignment"]),
+            }
+        ),
     }
+    if published_candidates:
+        for summary, published in zip(
+            quality_diagnostics["candidates"], published_candidates
+        ):
+            summary.update(
+                {
+                    "quality_eligible": bool(published["quality_eligible"]),
+                    "published_quality": dict(published["quality_policy"]),
+                    "outer_alignment": dict(published["outer_alignment"]),
+                    "hole_alignment": dict(published["hole_alignment"]),
+                    "max_element_growth": float(
+                        published["max_element_growth"]
+                    ),
+                }
+            )
     if cancellation_check is not None:
         cancellation_check("native surface quality optimization complete")
-    coordinates = plane.lift(best.points)
     owner_table = () if owner is None else (owner,)
     owner_handle = -1 if owner is None else 0
-    core = MeshCore(
-        coordinates,
-        best.triangles,
-        owner_table=owner_table,
-        node_owner_handles=np.full(len(coordinates), owner_handle, dtype=np.int32),
-        triangle_owner_handles=np.full(len(best.triangles), owner_handle, dtype=np.int32),
-    )
+    if selected_published is None:
+        coordinates = plane.lift(best.points)
+        core = MeshCore(
+            coordinates,
+            best.triangles,
+            owner_table=owner_table,
+            node_owner_handles=np.full(len(coordinates), owner_handle, dtype=np.int32),
+            triangle_owner_handles=np.full(len(best.triangles), owner_handle, dtype=np.int32),
+        )
+    else:
+        published_core: MeshCore = selected_published["core"]
+        core = MeshCore(
+            published_core.node_coordinates,
+            published_core.triangle_connectivity,
+            published_core.quad_connectivity,
+            node_ids=published_core.node_ids,
+            triangle_ids=published_core.triangle_ids,
+            quad_ids=published_core.quad_ids,
+            owner_table=owner_table,
+            node_owner_handles=np.full(published_core.num_nodes, owner_handle, dtype=np.int32),
+            triangle_owner_handles=np.full(published_core.num_triangles, owner_handle, dtype=np.int32),
+            quad_owner_handles=np.full(published_core.num_quads, owner_handle, dtype=np.int32),
+            node_active=published_core.node_active,
+            triangle_active=published_core.triangle_active,
+            quad_active=published_core.quad_active,
+        )
     recombination_diagnostics: dict[str, int | bool] = {
         "candidate_count": 0,
         "rejected_candidate_count": 0,
@@ -1284,20 +2020,8 @@ def mesh_planar_surface(
         "exchange_truncated": False,
         "pair_count": 0,
     }
-    if settings.recombine:
-        recombination_started = perf_counter()
-        recombination_report = recombine_triangles_with_report(
-            core,
-            protected_edges=triangulation.segments,
-            min_scaled_jacobian=settings.min_scaled_jacobian,
-            max_aspect_ratio=settings.max_aspect_ratio,
-            min_angle=settings.min_angle,
-            max_angle=settings.max_angle,
-            max_warpage=settings.max_warpage,
-            cancellation_check=cancellation_check,
-            max_exchange_work=settings.max_recombination_work,
-        )
-        core = recombination_report.mesh
+    if selected_published is not None:
+        recombination_report = selected_published["report"]
         recombination_diagnostics = {
             "candidate_count": recombination_report.candidate_count,
             "rejected_candidate_count": (
@@ -1308,7 +2032,6 @@ def mesh_planar_surface(
             "exchange_truncated": recombination_report.exchange_truncated,
             "pair_count": recombination_report.pair_count,
         }
-        phase_seconds["recombination"] = perf_counter() - recombination_started
         if cancellation_check is not None:
             cancellation_check("native surface recombination complete")
     if settings.quadratic:

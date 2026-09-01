@@ -24,7 +24,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from anygeometry import Cylinder, GeometryModel, Plane
+from anygeometry import Cylinder, GeometryModel, Plane, punch_hole
 from anymesher.core import MeshCore
 from anymesher.hybrid import generate_hybrid_mesh
 from anymesher.mapped import generate_mesh as generate_mapped_mesh
@@ -78,6 +78,22 @@ def _thin_plate() -> GeometryModel:
     return _planar_model(
         ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (4.0, 0.2, 0.0), (0.0, 0.2, 0.0))
     )
+
+
+def _plate_with_hole() -> GeometryModel:
+    geometry = GeometryModel()
+    face = geometry.add_plate(
+        geometry.add_points(
+            (
+                (0.0, 0.0, 0.0),
+                (4.0, 0.0, 0.0),
+                (4.0, 4.0, 0.0),
+                (0.0, 4.0, 0.0),
+            )
+        )
+    )
+    punch_hole(geometry, face, (2.0, 2.0, 0.0), 0.5)
+    return geometry
 
 
 def _three_plate_intersection() -> GeometryModel:
@@ -141,37 +157,48 @@ def _target_size(family: str, requested_elements: int) -> float:
         area = 0.8
     elif family == "intersection":
         area = 8.0 + 2.0 * math.sqrt(2.0)
+    elif family == "plate_hole":
+        area = 16.0 - math.pi * 0.25
     return math.sqrt(area / float(requested_elements))
 
 
-def _mesh_factory(family: str, requested_elements: int) -> Callable[[], Any]:
+def _mesh_factory(
+    family: str,
+    requested_elements: int,
+    backend: str,
+) -> Callable[[], Any]:
     target_size = _target_size(family, requested_elements)
     if family == "mapped":
         return lambda: generate_mapped_mesh(_rectangle(), target_size=target_size)
     if family == "native":
         return lambda: generate_hybrid_mesh(
             _pentagon(), target_size=target_size, strategy="native",
-            native_backend="native"
+            native_backend=backend
         )
     if family == "rotated":
         return lambda: generate_hybrid_mesh(
             _rotated_plate(), target_size=target_size, strategy="native",
-            native_backend="native"
+            native_backend=backend
         )
     if family == "thin":
         return lambda: generate_hybrid_mesh(
             _thin_plate(), target_size=target_size, strategy="native",
-            native_backend="native"
+            native_backend=backend
         )
     if family == "intersection":
         return lambda: generate_hybrid_mesh(
             _three_plate_intersection(), target_size=target_size,
-            strategy="native", native_backend="native"
+            strategy="native", native_backend=backend
         )
     if family == "cylinder":
         return lambda: generate_hybrid_mesh(
             _cylinder(), target_size=target_size, strategy="native",
-            native_backend="native"
+            native_backend=backend
+        )
+    if family == "plate_hole":
+        return lambda: generate_hybrid_mesh(
+            _plate_with_hole(), target_size=target_size, strategy="native",
+            native_backend=backend, recombine=True
         )
     raise ValueError(f"unknown benchmark family {family!r}")
 
@@ -222,6 +249,64 @@ def _time_peak(call: Callable[[], Any]) -> tuple[Any, float, int, int]:
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     return value, float(seconds), int(peak), _process_peak_rss_bytes()
+
+
+def _flatten_phase_seconds(value: Any, prefix: str = "") -> dict[str, float]:
+    result: dict[str, float] = {}
+    if isinstance(value, dict):
+        phases = value.get("phase_seconds")
+        if isinstance(phases, dict):
+            for name, seconds in phases.items():
+                if isinstance(seconds, (int, float)):
+                    key = ".".join(item for item in (prefix, str(name)) if item)
+                    result[key] = result.get(key, 0.0) + float(seconds)
+        for name, nested in value.items():
+            if name == "phase_seconds":
+                continue
+            nested_prefix = ".".join(item for item in (prefix, str(name)) if item)
+            for key, seconds in _flatten_phase_seconds(nested, nested_prefix).items():
+                result[key] = result.get(key, 0.0) + seconds
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            for key, seconds in _flatten_phase_seconds(nested, prefix).items():
+                result[key] = result.get(key, 0.0) + seconds
+    return result
+
+
+def _phase_medians(samples: list[dict[str, Any]]) -> dict[str, float]:
+    values: dict[str, list[float]] = {}
+    for sample in samples:
+        for name, seconds in _flatten_phase_seconds(sample).items():
+            values.setdefault(name, []).append(seconds)
+    return {
+        name: float(statistics.median(seconds))
+        for name, seconds in sorted(values.items())
+    }
+
+
+def _strategy_summary(value: Any) -> dict[str, Any]:
+    strategies: list[str] = []
+    candidate_counts: list[int] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            strategy = item.get("selected_strategy")
+            if isinstance(strategy, str):
+                strategies.append(strategy)
+            count = item.get("candidate_count")
+            if isinstance(count, int):
+                candidate_counts.append(count)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, (list, tuple)):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return {
+        "selected_strategies": sorted(strategies),
+        "candidate_counts": sorted(candidate_counts),
+    }
 
 
 def _mesh_arrays(mesh) -> dict[str, np.ndarray]:
@@ -308,11 +393,15 @@ def _measure_case(
     family: str,
     requested_elements: int,
     *,
+    backend: str,
+    warmups: int,
     repeats: int,
     serialization_limit: int,
     deterministic_repeat_limit: int,
 ) -> dict[str, Any]:
-    factory = _mesh_factory(family, requested_elements)
+    factory = _mesh_factory(family, requested_elements, backend)
+    for _ in range(warmups):
+        factory()
     generation_seconds: list[float] = []
     generation_peaks: list[int] = []
     generation_rss_peaks: list[int] = []
@@ -368,6 +457,7 @@ def _measure_case(
 
     return {
         "family": family,
+        "backend": backend,
         "requested_elements": int(requested_elements),
         "target_size": _target_size(family, requested_elements),
         "nodes": int(mesh.num_nodes),
@@ -379,6 +469,11 @@ def _measure_case(
         "generation_peak_traced_bytes": max(generation_peaks),
         "generation_peak_process_rss_bytes": max(generation_rss_peaks),
         "generation_phase_samples": generation_phase_samples,
+        "generation_phase_median_seconds": _phase_medians(
+            generation_phase_samples
+        ),
+        "generation_strategy": _strategy_summary(generation_phase_samples[-1]),
+        "warmups": int(warmups),
         "compatibility_array_conversion_seconds": array_seconds,
         "compatibility_array_peak_traced_bytes": array_peak,
         "compatibility_array_peak_process_rss_bytes": array_rss,
@@ -408,10 +503,11 @@ def _measure_case(
 
 def _scaling(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    by_family: dict[str, list[dict[str, Any]]] = {}
+    by_family: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for case in cases:
-        by_family.setdefault(str(case["family"]), []).append(case)
-    for family, values in by_family.items():
+        key = (str(case["family"]), str(case["backend"]))
+        by_family.setdefault(key, []).append(case)
+    for (family, backend), values in by_family.items():
         values.sort(key=lambda item: int(item["elements"]))
         for first, second in zip(values, values[1:]):
             element_ratio = float(second["elements"]) / float(first["elements"])
@@ -424,6 +520,7 @@ def _scaling(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
             rows.append(
                 {
                     "family": family,
+                    "backend": backend,
                     "from_elements": int(first["elements"]),
                     "to_elements": int(second["elements"]),
                     "element_ratio": element_ratio,
@@ -439,14 +536,25 @@ def _scaling(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sizes", type=int, nargs="+", default=(10_000, 100_000, 500_000))
+    parser.add_argument("--sizes", type=int, nargs="+", default=(2_000, 10_000, 50_000))
     parser.add_argument(
         "--families",
         nargs="+",
-        choices=("mapped", "native", "cylinder", "rotated", "thin", "intersection"),
-        default=("mapped", "native", "cylinder", "rotated", "thin", "intersection"),
+        choices=(
+            "mapped", "native", "cylinder", "rotated", "thin",
+            "intersection", "plate_hole",
+        ),
+        default=(
+            "mapped", "native", "cylinder", "rotated", "thin",
+            "intersection", "plate_hole",
+        ),
     )
-    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument(
+        "--native-backends", nargs="+", choices=("python", "native"),
+        default=("python", "native"),
+    )
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--serialization-limit", type=int, default=100_000)
     parser.add_argument("--deterministic-repeat-limit", type=int, default=100_000)
     parser.add_argument(
@@ -459,6 +567,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("all sizes must be positive")
     if args.repeats <= 0:
         parser.error("--repeats must be positive")
+    if args.warmups < 0:
+        parser.error("--warmups must not be negative")
     return args
 
 
@@ -477,7 +587,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     report = {
         "schema": "anymesher.native_hybrid.performance",
-        "version": 2,
+        "version": 3,
         "status": "incomplete",
         "current_case": None,
         "failure": None,
@@ -490,6 +600,8 @@ def main(argv: list[str] | None = None) -> int:
         "configuration": {
             "sizes": list(args.sizes),
             "families": list(args.families),
+            "native_backends": list(args.native_backends),
+            "warmups": args.warmups,
             "repeats": args.repeats,
             "serialization_limit": args.serialization_limit,
             "deterministic_repeat_limit": args.deterministic_repeat_limit,
@@ -501,27 +613,35 @@ def main(argv: list[str] | None = None) -> int:
     _write_report(args.output, report)
     try:
         for family in args.families:
-            for size in args.sizes:
-                report["current_case"] = {
-                    "family": family,
-                    "requested_elements": int(size),
-                    "phase": "generation",
-                }
-                report["wall_seconds"] = time.perf_counter() - started
-                _write_report(args.output, report)
-                print(f"measuring {family} at approximately {size:,} elements", flush=True)
-                cases.append(
-                    _measure_case(
-                        family,
-                        size,
-                        repeats=args.repeats,
-                        serialization_limit=args.serialization_limit,
-                        deterministic_repeat_limit=args.deterministic_repeat_limit,
+            backends = ("mapped",) if family == "mapped" else args.native_backends
+            for backend in backends:
+                for size in args.sizes:
+                    report["current_case"] = {
+                        "family": family,
+                        "backend": backend,
+                        "requested_elements": int(size),
+                        "phase": "generation",
+                    }
+                    report["wall_seconds"] = time.perf_counter() - started
+                    _write_report(args.output, report)
+                    print(
+                        f"measuring {family}/{backend} at approximately {size:,} elements",
+                        flush=True,
                     )
-                )
-                report["current_case"] = None
-                report["wall_seconds"] = time.perf_counter() - started
-                _write_report(args.output, report)
+                    cases.append(
+                        _measure_case(
+                            family,
+                            size,
+                            backend=backend,
+                            warmups=args.warmups,
+                            repeats=args.repeats,
+                            serialization_limit=args.serialization_limit,
+                            deterministic_repeat_limit=args.deterministic_repeat_limit,
+                        )
+                    )
+                    report["current_case"] = None
+                    report["wall_seconds"] = time.perf_counter() - started
+                    _write_report(args.output, report)
     except BaseException as error:
         report["status"] = "failed"
         report["failure"] = {
