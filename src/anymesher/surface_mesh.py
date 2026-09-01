@@ -47,6 +47,7 @@ class SurfaceMeshOptions:
     max_lattice_points: int = 1_000_000
     max_metric_aspect_ratio: float = 25.0
     max_recombination_work: int = 1_000_000
+    declared_junction: bool = False
 
     @property
     def quadratic(self) -> bool:
@@ -1561,7 +1562,7 @@ def _recombined_path_key(value: dict[str, Any]) -> tuple[Any, ...]:
     hole = value["hole_alignment"]
     quality = value["quality_policy"]
     return (
-        0 if value["quality_eligible"] else 1,
+        0 if value["quality_eligible"] and value["alignment_qualified"] else 1,
         float(outer["maximum_normal_error_degrees"]),
         float(outer["mean_normal_error_degrees"]),
         int(sum(quality["violation_counts"].values())),
@@ -1570,6 +1571,34 @@ def _recombined_path_key(value: dict[str, Any]) -> tuple[Any, ...]:
         *_published_quality_key(quality),
         _active_connectivity_key(value["core"]),
     )
+
+
+def _alignment_score(value: Mapping[str, Any]) -> tuple[int, float, float]:
+    return (
+        int(value["edge_count"]) - int(value["quad_edge_count"]),
+        float(value["maximum_normal_error_degrees"]),
+        float(value["mean_normal_error_degrees"]),
+    )
+
+
+def _collar_alignment_qualified(
+    candidate: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> bool:
+    name = str(candidate["path"]["name"])
+    if name == "staggered_chart":
+        return True
+    candidate_outer = _alignment_score(candidate["outer_alignment"])
+    baseline_outer = _alignment_score(baseline["outer_alignment"])
+    if name == "outer_boundary_collar":
+        return candidate_outer < baseline_outer
+    if name == "outer_hole_collar":
+        candidate_hole = _alignment_score(candidate["hole_alignment"])
+        baseline_hole = _alignment_score(baseline["hole_alignment"])
+        return candidate_outer <= baseline_outer and (
+            candidate_outer < baseline_outer or candidate_hole < baseline_hole
+        )
+    return True
 
 
 def _next_ids(existing: np.ndarray, count: int) -> np.ndarray:
@@ -1781,8 +1810,19 @@ def mesh_planar_surface(
         "soft_symmetry": True,
     }
     collar_diagnostics: list[dict[str, Any]] = []
+    collar_skipped_reason: str | None = None
     candidate_generation_started = perf_counter()
-    if settings.target_size is not None and settings.recombine:
+    strict_baseline_complete = (
+        settings.prefer_quality_policy and bool(candidate_paths[0]["target_met"])
+    )
+    component_alignment_deferred = bool(
+        strict_baseline_complete and settings.declared_junction
+    )
+    if (
+        settings.target_size is not None
+        and settings.recombine
+        and not component_alignment_deferred
+    ):
         collar_preparation_cache: dict[str, Any] = {}
         outer_collar = _collar_candidate(
             planar_outer,
@@ -1796,20 +1836,30 @@ def mesh_planar_surface(
         )
         if outer_collar is not None:
             outer_points, outer_constraints, outer_report = outer_collar
-            path = _run_quality_path(
-                "outer_boundary_collar",
-                planar_outer,
-                planar_holes,
-                (*planar_constraints, *outer_constraints),
-                explicit_interior,
-                outer_points,
-                settings,
-                cancellation_check,
-                preserve_protected_cells=True,
-            )
-            path["collar"] = outer_report
-            candidate_paths.append(path)
-            collar_diagnostics.append(outer_report)
+            try:
+                path = _run_quality_path(
+                    "outer_boundary_collar",
+                    planar_outer,
+                    planar_holes,
+                    (*planar_constraints, *outer_constraints),
+                    explicit_interior,
+                    outer_points,
+                    settings,
+                    cancellation_check,
+                    allow_refinement=not strict_baseline_complete,
+                    preserve_protected_cells=True,
+                )
+            except MeshError as error:
+                outer_report = {
+                    **outer_report,
+                    "accepted": False,
+                    "fallback_reason": str(error),
+                }
+                collar_diagnostics.append(outer_report)
+            else:
+                path["collar"] = outer_report
+                candidate_paths.append(path)
+                collar_diagnostics.append(outer_report)
         if planar_holes:
             complete_collar = _collar_candidate(
                 planar_outer,
@@ -1823,20 +1873,34 @@ def mesh_planar_surface(
             )
             if complete_collar is not None:
                 complete_points, complete_constraints, complete_report = complete_collar
-                path = _run_quality_path(
-                    "outer_hole_collar",
-                    planar_outer,
-                    planar_holes,
-                    (*planar_constraints, *complete_constraints),
-                    explicit_interior,
-                    complete_points,
-                    settings,
-                    cancellation_check,
-                    preserve_protected_cells=True,
-                )
-                path["collar"] = complete_report
-                candidate_paths.append(path)
-                collar_diagnostics.append(complete_report)
+                try:
+                    path = _run_quality_path(
+                        "outer_hole_collar",
+                        planar_outer,
+                        planar_holes,
+                        (*planar_constraints, *complete_constraints),
+                        explicit_interior,
+                        complete_points,
+                        settings,
+                        cancellation_check,
+                        allow_refinement=not strict_baseline_complete,
+                        preserve_protected_cells=True,
+                    )
+                except MeshError as error:
+                    complete_report = {
+                        **complete_report,
+                        "accepted": False,
+                        "fallback_reason": str(error),
+                    }
+                    collar_diagnostics.append(complete_report)
+                else:
+                    path["collar"] = complete_report
+                    candidate_paths.append(path)
+                    collar_diagnostics.append(complete_report)
+    elif settings.target_size is not None and settings.recombine:
+        collar_skipped_reason = (
+            "declared_junction_requires_component_aligned_transition"
+        )
     elif settings.target_size is not None and not candidate_paths[0]["target_met"]:
         dominant_statistics: dict[str, Any] = {}
         dominant = _target_points(
@@ -1902,9 +1966,14 @@ def mesh_planar_surface(
             for path in candidate_paths
         ]
         baseline_policy = published_candidates[0]["quality_policy"]
+        baseline_published = published_candidates[0]
         for index, value in enumerate(published_candidates):
+            value["alignment_qualified"] = _collar_alignment_qualified(
+                value, baseline_published
+            )
             value["quality_eligible"] = index == 0 or (
-                _quality_not_worse(value["quality_policy"], baseline_policy)
+                value["alignment_qualified"]
+                and _quality_not_worse(value["quality_policy"], baseline_policy)
             )
         selected_published = min(published_candidates, key=_recombined_path_key)
         selected = selected_published["path"]
@@ -1958,6 +2027,21 @@ def mesh_planar_surface(
         "lattice_statistics": lattice_statistics,
         "edge_guides": guide_diagnostics,
         "boundary_collars": collar_diagnostics,
+        "boundary_collar_skip_reason": collar_skipped_reason,
+        "complex_geometry": {
+            "boundary_segment_count": int(len(planar_outer)),
+            "hole_count": int(len(planar_holes)),
+            "hole_segment_count": int(sum(len(hole) for hole in planar_holes)),
+            "mandatory_segment_count": int(len(planar_constraints)),
+            "candidate_budget": 6,
+            "candidate_count": int(len(candidate_paths)),
+            "declared_junction": bool(settings.declared_junction),
+            "alignment_evaluation": (
+                "component_deferred"
+                if component_alignment_deferred
+                else ("evaluated" if settings.recombine else "not_requested")
+            ),
+        },
         "published_alignment": (
             None
             if selected_published is None
@@ -1974,6 +2058,9 @@ def mesh_planar_surface(
             summary.update(
                 {
                     "quality_eligible": bool(published["quality_eligible"]),
+                    "alignment_qualified": bool(
+                        published["alignment_qualified"]
+                    ),
                     "published_quality": dict(published["quality_policy"]),
                     "outer_alignment": dict(published["outer_alignment"]),
                     "hole_alignment": dict(published["hole_alignment"]),

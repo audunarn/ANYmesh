@@ -1061,6 +1061,7 @@ def _mesh_native_face(
     recombine: bool,
     native_backend: Any,
     quality_options: StructuredMeshingOptions | None,
+    declared_junction_edges: Iterable[int],
     cancellation_check: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     boundary_started = perf_counter()
@@ -1130,6 +1131,16 @@ def _mesh_native_face(
         )
     else:
         quality_policy = quality_options.quality_policy
+        face_edge_ids = {
+            int(item.edge)
+            for boundary in (face.loop, *getattr(face, "holes", ()))
+            for item in boundary
+        }
+        has_declared_junction = bool(
+            face_edge_ids.intersection(
+                int(edge_id) for edge_id in declared_junction_edges
+            )
+        )
         surface_options = SurfaceMeshOptions(
             recombine=recombine,
             order=order,
@@ -1142,6 +1153,7 @@ def _mesh_native_face(
             max_warpage=quality_policy.maximum_warpage,
             max_element_growth=quality_options.max_element_growth,
             prefer_quality_policy=True,
+            declared_junction=has_declared_junction,
         )
         core = mesh_planar_surface(
             chart_outer,
@@ -1673,6 +1685,17 @@ def generate_hybrid_mesh_result(
         size_field,
         order,
     )
+    final_declared_junction_edges = frozenset(
+        final_edge
+        for prepared_edge in (
+            ()
+            if preparation_report is None
+            else preparation_report.declared_face_connection_edges
+        )
+        for final_edge in prepared_to_final_edges.get(
+            int(prepared_edge), (int(prepared_edge),)
+        )
+    )
     for face_id in native_faces:
         face_diagnostics = _mesh_native_face(
             geometry,
@@ -1690,6 +1713,7 @@ def generate_hybrid_mesh_result(
                     else structured_report.plan.options
                 )
             ),
+            declared_junction_edges=final_declared_junction_edges,
             cancellation_check=cancellation_check,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
@@ -1928,6 +1952,24 @@ def generate_hybrid_mesh_result(
         structural_preparation=preparation_report,
     )
     mesh.hybrid_diagnostics = {
+        "complex_geometry": {
+            "strategy_ladder": [
+                "mapped_or_structured",
+                "native",
+                "detached_decomposition",
+                "qualified_gmsh",
+            ],
+            "component_candidate_budget": 6,
+            "source_face_count": len(source_faces),
+            "final_face_count": len(faces),
+            "declared_junction_edge_count": len(
+                final_declared_junction_edges
+            ),
+            "source_strategy_by_face": {
+                str(face_id): source_strategies[face_id]
+                for face_id in sorted(source_strategies)
+            },
+        },
         "strategy_by_face": dict(strategies),
         "triangulation_backend_by_face": {
             int(face_id): _stable_diagnostic_record(values)

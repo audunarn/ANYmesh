@@ -137,6 +137,7 @@ def test_recombined_plate_with_hole_prefers_boundary_aligned_collars() -> None:
             recombine=True,
             target_size=0.25,
             backend="python",
+            prefer_quality_policy=True,
         ),
         diagnostics=first_diagnostics,
     )
@@ -147,6 +148,7 @@ def test_recombined_plate_with_hole_prefers_boundary_aligned_collars() -> None:
             recombine=True,
             target_size=0.25,
             backend="python",
+            prefer_quality_policy=True,
         ),
         diagnostics=second_diagnostics,
     )
@@ -157,6 +159,7 @@ def test_recombined_plate_with_hole_prefers_boundary_aligned_collars() -> None:
     quality = first_diagnostics["quality_optimization"]
     assert quality == second_diagnostics["quality_optimization"]
     assert quality["candidate_count"] == 3
+    assert quality["boundary_collar_skip_reason"] is None
     assert {item["strategy"] for item in quality["candidates"]} == {
         "staggered_chart",
         "outer_boundary_collar",
@@ -175,6 +178,8 @@ def test_recombined_plate_with_hole_prefers_boundary_aligned_collars() -> None:
     assert complete_collar["hole_alignment"]["maximum_normal_error_degrees"] < (
         baseline["hole_alignment"]["maximum_normal_error_degrees"]
     )
+    assert outer_collar["alignment_qualified"] is True
+    assert complete_collar["alignment_qualified"] is True
     selected = quality["published_alignment"]
     assert selected["outer"]["mean_normal_error_degrees"] <= 20.0
     assert selected["outer"]["maximum_normal_error_degrees"] <= 50.0
