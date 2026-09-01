@@ -431,6 +431,35 @@ def _prepared_plate_junction_edges(
     return tuple(sorted(result))
 
 
+def _topology_plate_junction_edges(
+    mesh: Mesh,
+    geometry: GeometryModel,
+) -> tuple[tuple[int, int], ...]:
+    """Return seeded mesh edges explicitly shared by model-owned faces."""
+
+    step = 2 if mesh.is_quadratic else 1
+    result: set[tuple[int, int]] = set()
+    for edge_id in sorted(geometry.edges):
+        incident_faces = {
+            int(geometry.face_uses[face_use_id].face_id)
+            for face_use_id in geometry.face_uses_using_edge(int(edge_id))
+        }
+        if len(incident_faces) < 2:
+            continue
+        sequence = mesh.nodes_of_edge.get(int(edge_id))
+        if sequence is None or len(sequence) < step + 1:
+            continue
+        if (len(sequence) - 1) % step:
+            raise MeshError(
+                f"topology-owned plate-junction edge {edge_id} has inconsistent order"
+            )
+        for index in range(0, len(sequence) - 1, step):
+            first = int(sequence[index])
+            second = int(sequence[index + step])
+            result.add((min(first, second), max(first, second)))
+    return tuple(sorted(result))
+
+
 def _element_growth(
     mesh: Mesh,
     *,
@@ -1567,6 +1596,12 @@ def generate_hybrid_mesh_result(
             working_backend_diagnostics,
         )
         boundary_registry = _published_boundary_registry(source_geometry, mesh)
+    mesh.declared_plate_junction_edges = tuple(
+        sorted(
+            set(mesh.declared_plate_junction_edges)
+            | set(_topology_plate_junction_edges(mesh, source_geometry))
+        )
+    )
     if preparation_report is not None:
         mesh.automatic_intersections = preparation_report.face_connections
         mesh.automatic_beam_connections = len(connectivity.actions)
