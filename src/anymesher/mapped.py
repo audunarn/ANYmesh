@@ -104,7 +104,7 @@ def generate_mesh(
     target_size: float,
     overrides: Mapping[int, int] | None = None,
     beam_edges: Iterable[int] = (),
-    beam_offsets: Mapping[int, float] | None = None,
+    beam_offsets: Mapping[int, float | Sequence[float]] | None = None,
     face_ids: Iterable[int] | None = None,
     seeding: Seeding | None = None,
     refinements: Iterable[Refinement] = (),
@@ -112,11 +112,10 @@ def generate_mesh(
 ) -> Mesh:
     """Mesh the faces of a geometry model, plus any edges carrying beams.
 
-    ``beam_offsets`` gives a stiffener an eccentricity: its nodes stand off the
-    plating along the plate normal and are coupled back to it, rather than
-    sharing the plate nodes.  That distinction matters -- a stiffener whose
-    neutral axis sits in the plate midsurface is a materially different
-    structure from one that stands proud of it.
+    ``beam_offsets`` gives a stiffener an eccentricity. A scalar stands the
+    nodes off along the attached plate normal (the historical contract); a
+    three-vector gives the exact global offset from the attachment line. Both
+    forms create kinematic couplings back to the plating.
 
     ``refinements`` are local size zones: the seeding integrates the resulting
     size field along each edge, and node placement follows the same field, so
@@ -198,8 +197,15 @@ def generate_mesh(
     offsets = dict(beam_offsets or {})
     offset_registry: dict[tuple[int, tuple[str, str, str]], int] = {}
     for edge_id in beam_edge_ids:
-        offset = float(offsets.get(edge_id, 0.0))
-        if offset:
+        offset = offsets.get(edge_id, 0.0)
+        offset_array = np.asarray(offset, dtype=float)
+        if offset_array.ndim > 1 or offset_array.size not in (1, 3):
+            raise MeshError(
+                f"beam offset for line {edge_id} must be a scalar or 3-vector"
+            )
+        if not np.all(np.isfinite(offset_array)):
+            raise MeshError(f"beam offset for line {edge_id} must be finite")
+        if np.any(offset_array != 0.0):
             _build_offset_nodes(
                 geometry,
                 mesh,
@@ -339,11 +345,11 @@ def _build_offset_nodes(
     geometry: GeometryModel,
     mesh: Mesh,
     edge_id: int,
-    offset: float,
+    offset: float | Sequence[float],
     next_node: "_Counter",
     registry: dict[tuple[int, tuple[str, str, str]], int],
 ) -> None:
-    """Stand a stiffener off the plating, along the plate normal."""
+    """Stand a stiffener off the plating by a scalar normal or exact vector."""
 
     target_faces = _offset_target_faces(geometry, edge_id)
     if not target_faces:
@@ -353,21 +359,29 @@ def _build_offset_nodes(
             "the member/sheet attachment."
         )
 
-    normals = nodal_normals(mesh)
     sequence = mesh.nodes_of_edge[edge_id]
-    for node in sequence:
-        if node not in normals:
-            normals[node] = _attached_face_normal(
-                geometry,
-                target_faces,
-                mesh.nodes[node],
-                edge_id=edge_id,
-                node_id=node,
-            )
+    raw_offset = np.asarray(offset, dtype=float).reshape(-1)
+    vector_offset = raw_offset if len(raw_offset) == 3 else None
+    normals: Dict[int, np.ndarray] = {}
+    if vector_offset is None:
+        normals = nodal_normals(mesh)
+        for node in sequence:
+            if node not in normals:
+                normals[node] = _attached_face_normal(
+                    geometry,
+                    target_faces,
+                    mesh.nodes[node],
+                    edge_id=edge_id,
+                    node_id=node,
+                )
 
     offset_nodes: List[int] = []
     for node in sequence:
-        displacement = offset * normals[node]
+        displacement = (
+            np.asarray(vector_offset, dtype=float)
+            if vector_offset is not None
+            else float(raw_offset[0]) * normals[node]
+        )
         key = (node, tuple(float(value).hex() for value in displacement))
         node_id = registry.get(key)
         if node_id is None:

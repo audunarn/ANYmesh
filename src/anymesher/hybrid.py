@@ -637,20 +637,25 @@ def _remap_edge_divisions(
 def _remap_edge_values(
     source: GeometryModel,
     source_to_working_edges: Mapping[int, Sequence[int]],
-    values: Mapping[int, float] | None,
+    values: Mapping[int, float | Sequence[float]] | None,
     *,
     label: str,
-) -> dict[int, float] | None:
+) -> dict[int, float | tuple[float, float, float]] | None:
     if values is None:
         return None
-    remapped: dict[int, float] = {}
+    remapped: dict[int, float | tuple[float, float, float]] = {}
     for raw_source_edge, raw_value in sorted(values.items()):
         source_edge = int(raw_source_edge)
         if source_edge not in source.edges:
             raise MeshError(f"{label} references missing source edge {source_edge}")
-        value = float(raw_value)
-        if not np.isfinite(value):
+        array = np.asarray(raw_value, dtype=float).reshape(-1)
+        if len(array) not in (1, 3) or not np.all(np.isfinite(array)):
             raise MeshError(f"{label} for edge {source_edge} must be finite")
+        value: float | tuple[float, float, float] = (
+            float(array[0])
+            if len(array) == 1
+            else tuple(float(item) for item in array)
+        )
         for descendant in source_to_working_edges.get(source_edge, (source_edge,)):
             descendant = int(descendant)
             previous = remapped.setdefault(descendant, value)
@@ -1118,7 +1123,7 @@ def generate_hybrid_mesh_result(
     strategy: MeshingStrategy | str = MeshingStrategy.AUTO,
     overrides: Mapping[int, int] | None = None,
     beam_edges: Iterable[int] = (),
-    beam_offsets: Mapping[int, float] | None = None,
+    beam_offsets: Mapping[int, float | Sequence[float]] | None = None,
     member_ids: Iterable[int] | None = None,
     face_ids: Iterable[int] | None = None,
     seeding: Seeding | None = None,
