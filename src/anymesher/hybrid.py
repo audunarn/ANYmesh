@@ -40,6 +40,7 @@ from .preparation import (
 from .quality_v2 import assert_valid_mesh, evaluate_quality
 from .refinement import Refinement, SizeField
 from .seeding import Seeding, edge_distribution, solve_seeding
+from .serialize import mesh_from_dict, mesh_to_dict
 from .structural_pipeline import (
     GeometryMutationPolicy,
     OverlapPolicy,
@@ -568,6 +569,156 @@ def _structured_quality_report(
             [first, second, ratio]
             for first, second, ratio in growth_pairs[:16]
         ],
+    }
+
+
+def _junction_growth_repair(
+    geometry: GeometryModel,
+    mesh: Mesh,
+    quality: Mapping[str, Any],
+    options: StructuredMeshingOptions,
+) -> tuple[Mesh | None, Mapping[str, Any], Mapping[str, Any]]:
+    """Repair marginal growth across declared plate junctions without topology edits."""
+
+    declared = {
+        tuple(sorted((int(first), int(second))))
+        for first, second in mesh.declared_plate_junction_edges
+    }
+    protected_nodes = {
+        int(node_id)
+        for sequence in mesh.nodes_of_edge.values()
+        for node_id in sequence
+    }
+    node_faces: dict[int, set[int]] = {}
+    for face_id, element_ids in mesh.elements_of_face.items():
+        for element_id in element_ids:
+            for node_id in mesh.corners_of(int(element_id)):
+                node_faces.setdefault(int(node_id), set()).add(int(face_id))
+
+    targets: dict[int, list[np.ndarray]] = {}
+    target_faces: dict[int, int] = {}
+    junctions: set[tuple[int, int]] = set()
+    for violation in quality.get("growth_violation_pairs", ()):
+        first_element, second_element = map(int, violation[:2])
+        first_corners = mesh.corners_of(first_element)
+        second_corners = mesh.corners_of(second_element)
+        shared = set(first_corners) & set(second_corners)
+        if len(shared) != 2:
+            continue
+        junction = tuple(sorted(int(value) for value in shared))
+        if junction not in declared:
+            continue
+        characteristic: dict[int, float] = {}
+        for element_id, corners in (
+            (first_element, first_corners),
+            (second_element, second_corners),
+        ):
+            characteristic[element_id] = float(
+                np.mean(
+                    [
+                        np.linalg.norm(mesh.nodes[second] - mesh.nodes[first])
+                        for first, second in zip(corners, corners[1:] + corners[:1])
+                    ]
+                )
+            )
+        larger = max(
+            (first_element, second_element),
+            key=lambda element_id: (characteristic[element_id], element_id),
+        )
+        midpoint = 0.5 * (mesh.nodes[junction[0]] + mesh.nodes[junction[1]])
+        movable: list[int] = []
+        for node_id in mesh.corners_of(larger):
+            owner_faces = node_faces.get(int(node_id), set())
+            if (
+                node_id in shared
+                or int(node_id) in protected_nodes
+                or len(owner_faces) != 1
+            ):
+                continue
+            owner_face = next(iter(owner_faces))
+            if owner_face not in geometry.faces or not isinstance(
+                geometry.faces[owner_face].surface, Plane
+            ):
+                continue
+            movable.append(int(node_id))
+            target_faces[int(node_id)] = owner_face
+        if not movable:
+            continue
+        junctions.add(junction)
+        for node_id in movable:
+            targets.setdefault(node_id, []).append(np.asarray(midpoint, dtype=float))
+
+    initial = {
+        "growth_violation_count": int(quality.get("growth_violation_count", 0)),
+        "maximum_adjacent_element_growth": float(
+            quality.get("maximum_adjacent_element_growth", 1.0)
+        ),
+        "maximum_aspect_ratio": float(quality.get("maximum_aspect_ratio", 1.0)),
+    }
+    if not targets:
+        return None, quality, {
+            "attempted": False,
+            "committed": False,
+            "junction_node_pairs": [],
+            "face_ids": [],
+            "moved_node_ids": [],
+            "relaxation": 0.0,
+            "initial_quality": initial,
+            "final_quality": initial,
+        }
+
+    for relaxation in (0.005, 0.01, 0.02, 0.04, 0.08):
+        candidate = mesh_from_dict(mesh_to_dict(mesh))
+        candidate.hybrid_diagnostics = dict(mesh.hybrid_diagnostics)
+        for node_id in sorted(targets):
+            target = np.mean(np.vstack(targets[node_id]), axis=0)
+            candidate.nodes[node_id] = (
+                mesh.nodes[node_id]
+                + relaxation * (target - mesh.nodes[node_id])
+            )
+        try:
+            candidate_core = _neutral_shell_core(candidate)
+            assert_valid_mesh(
+                candidate_core,
+                declared_plate_junction_edges=_declared_junction_core_edges(
+                    candidate, candidate_core
+                ),
+            )
+        except MeshError:
+            continue
+        candidate_quality = _structured_quality_report(candidate, options)
+        if not candidate_quality["accepted"]:
+            continue
+        final = {
+            "growth_violation_count": int(
+                candidate_quality.get("growth_violation_count", 0)
+            ),
+            "maximum_adjacent_element_growth": float(
+                candidate_quality.get("maximum_adjacent_element_growth", 1.0)
+            ),
+            "maximum_aspect_ratio": float(
+                candidate_quality.get("maximum_aspect_ratio", 1.0)
+            ),
+        }
+        return candidate, candidate_quality, {
+            "attempted": True,
+            "committed": True,
+            "junction_node_pairs": [list(pair) for pair in sorted(junctions)],
+            "face_ids": sorted(set(target_faces.values())),
+            "moved_node_ids": sorted(targets),
+            "relaxation": relaxation,
+            "initial_quality": initial,
+            "final_quality": final,
+        }
+    return None, quality, {
+        "attempted": True,
+        "committed": False,
+        "junction_node_pairs": [list(pair) for pair in sorted(junctions)],
+        "face_ids": sorted(set(target_faces.values())),
+        "moved_node_ids": [],
+        "relaxation": 0.0,
+        "initial_quality": initial,
+        "final_quality": initial,
     }
 
 
@@ -1670,10 +1821,29 @@ def generate_hybrid_mesh_result(
                 structured_report.plan.options,
             )
             if not fallback_quality["accepted"]:
-                fallback_message = _quality_rejection_message(fallback_quality)
-                raise MeshError(
-                    f"{message}; automatic native fallback also rejected: "
-                    f"{fallback_message}"
+                repaired_mesh, repaired_quality, repair_diagnostics = (
+                    _junction_growth_repair(
+                    source_geometry,
+                    fallback.mesh,
+                    fallback_quality,
+                    structured_report.plan.options,
+                    )
+                )
+                if repaired_mesh is None:
+                    fallback_message = _quality_rejection_message(fallback_quality)
+                    raise MeshError(
+                        f"{message}; automatic native fallback also rejected: "
+                        f"{fallback_message}; declared-junction transition repair "
+                        "did not produce an accepted candidate"
+                    )
+                fallback = replace(fallback, mesh=repaired_mesh)
+                fallback.mesh.hybrid_diagnostics["junction_growth_repair"] = dict(
+                    repair_diagnostics
+                )
+                fallback_quality = repaired_quality
+                _check_cancellation(
+                    cancellation_check,
+                    "declared-junction transition repair accepted",
                 )
             fallback_metrics = regularity_metrics(
                 fallback.mesh,
