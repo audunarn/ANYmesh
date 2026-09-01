@@ -242,6 +242,139 @@ def _segment_distance(point: np.ndarray, first: np.ndarray, second: np.ndarray) 
     return float(np.linalg.norm(point - (first + fraction * direction)))
 
 
+class _SegmentGrid:
+    """Deterministic uniform-grid lookup for protected-segment clearance."""
+
+    def __init__(
+        self,
+        segments: Sequence[tuple[np.ndarray, np.ndarray]],
+        radius: float,
+    ) -> None:
+        self.segments = tuple(
+            (np.asarray(first, dtype=float), np.asarray(second, dtype=float))
+            for first, second in segments
+        )
+        self.cell_size = max(float(radius), np.finfo(float).eps)
+        cells: dict[tuple[int, int], list[int]] = {}
+        for segment_id, (first, second) in enumerate(self.segments):
+            lower = np.floor((np.minimum(first, second) - radius) / self.cell_size).astype(int)
+            upper = np.floor((np.maximum(first, second) + radius) / self.cell_size).astype(int)
+            for first_cell in range(int(lower[0]), int(upper[0]) + 1):
+                for second_cell in range(int(lower[1]), int(upper[1]) + 1):
+                    cells.setdefault((first_cell, second_cell), []).append(segment_id)
+        self.cells = {
+            key: tuple(sorted(set(values))) for key, values in cells.items()
+        }
+
+    def within(self, point: np.ndarray, radius: float) -> tuple[bool, int]:
+        key = tuple(np.floor(np.asarray(point, dtype=float) / self.cell_size).astype(int))
+        checked = 0
+        for segment_id in self.cells.get((int(key[0]), int(key[1])), ()):
+            checked += 1
+            first, second = self.segments[segment_id]
+            if _segment_distance(point, first, second) <= radius:
+                return True, checked
+        return False, checked
+
+
+def _canonical_segments(
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    constraints: Sequence[np.ndarray],
+) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+    raw = [
+        (ring[index], ring[(index + 1) % len(ring)])
+        for ring in (outer, *holes)
+        for index in range(len(ring))
+    ]
+    raw.extend((segment[0], segment[1]) for segment in constraints)
+
+    def key(item: tuple[np.ndarray, np.ndarray]) -> tuple[float, ...]:
+        first = tuple(float(value) for value in item[0])
+        second = tuple(float(value) for value in item[1])
+        return (*min(first, second), *max(first, second))
+
+    return tuple(sorted(raw, key=key))
+
+
+def _edge_guided_points(
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    constraints: Sequence[np.ndarray],
+    size: float,
+    existing: np.ndarray,
+    *,
+    max_points: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Create soft, seed-phased rows beside topology-owned straight segments."""
+
+    segments = tuple(
+        sorted(
+            _canonical_segments(outer, holes, constraints),
+            key=lambda item: (
+                -float(np.linalg.norm(item[1] - item[0])),
+                tuple(float(value) for value in np.concatenate(item)),
+            ),
+        )
+    )
+    clearance = 0.25 * float(size)
+    offset = sqrt(3.0) * 0.5 * float(size)
+    segment_grid = _SegmentGrid(segments, clearance)
+    tolerance = max(float(size) * 1.0e-10, np.finfo(float).eps)
+    accepted: list[np.ndarray] = []
+    skipped = 0
+    distance_checks = 0
+    for first, second in segments:
+        direction = second - first
+        length = float(np.linalg.norm(direction))
+        if length <= tolerance:
+            skipped += 1
+            continue
+        tangent = direction / length
+        normal = np.asarray((-tangent[1], tangent[0]), dtype=float)
+        station_count = max(1, int(ceil(length / float(size))))
+        pair: list[np.ndarray] = []
+        for station in range(station_count):
+            phase = (float(station) + 0.5) / float(station_count)
+            center = first + phase * direction
+            for sign in (-1.0, 1.0):
+                point = center + sign * offset * normal
+                if not _inside(point, outer) or any(
+                    _inside(point, hole) for hole in holes
+                ):
+                    continue
+                too_close, checks = segment_grid.within(point, clearance)
+                distance_checks += checks
+                if too_close:
+                    continue
+                if len(existing) and np.any(
+                    np.linalg.norm(existing - point, axis=1) <= tolerance
+                ):
+                    continue
+                if any(
+                    float(np.linalg.norm(value - point)) <= tolerance
+                    for value in accepted
+                ):
+                    continue
+                pair.append(point)
+        if not pair:
+            skipped += 1
+            continue
+        accepted.extend(pair)
+        if len(accepted) >= max_points:
+            accepted = accepted[:max_points]
+            break
+    points = np.asarray(accepted, dtype=np.float64).reshape((-1, 2))
+    return points, {
+        "guide_count": len(segments),
+        "guide_ids": list(range(1, len(segments) + 1)),
+        "accepted_points": len(points),
+        "skipped_guides": skipped,
+        "distance_checks": distance_checks,
+        "soft_symmetry": True,
+    }
+
+
 def _target_points(
     outer: np.ndarray,
     holes: Sequence[np.ndarray],
@@ -252,6 +385,7 @@ def _target_points(
     *,
     max_lattice_points: int = 1_000_000,
     cancellation_check: Callable[[str], None] | None = None,
+    statistics: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """Generate a deterministic triangular lattice away from protected lines."""
 
@@ -355,16 +489,14 @@ def _target_points(
             f"{int(max_lattice_points)}; increase target size or the explicit budget"
         )
     ys = np.arange(minimum[1] + 0.5 * vertical, maximum[1], vertical)
-    protected_coordinates = [
-        (ring[index], ring[(index + 1) % len(ring)])
-        for ring in (local_outer, *local_holes)
-        for index in range(len(ring))
-    ]
-    protected_coordinates.extend(
-        (segment[0], segment[1]) for segment in local_constraints
+    protected_coordinates = _canonical_segments(
+        local_outer, local_holes, local_constraints
     )
     clearance = 0.25 * min(x_spacing, y_spacing)
+    segment_grid = _SegmentGrid(protected_coordinates, clearance)
     values: list[np.ndarray] = []
+    inspected = 0
+    distance_checks = 0
     for row, y in enumerate(ys):
         if cancellation_check is not None and row % 256 == 0:
             cancellation_check("native target lattice")
@@ -375,18 +507,28 @@ def _target_points(
             x_spacing,
         )
         for x in xs:
+            inspected += 1
             point = np.array((x, y), dtype=float)
             if not _inside(point, local_outer) or any(
                 _inside(point, hole) for hole in local_holes
             ):
                 continue
-            if any(
-                _segment_distance(point, first, second) <= clearance
-                for first, second in protected_coordinates
-            ):
+            too_close, checks = segment_grid.within(point, clearance)
+            distance_checks += checks
+            if too_close:
                 continue
             values.append(point)
     local = np.asarray(values, dtype=float).reshape((-1, 2))
+    if statistics is not None:
+        statistics.update(
+            {
+                "candidate_points": inspected,
+                "accepted_points": len(local),
+                "protected_segments": len(protected_coordinates),
+                "distance_checks": distance_checks,
+                "naive_distance_checks": inspected * len(protected_coordinates),
+            }
+        )
     return lift(local)
 
 
@@ -682,6 +824,141 @@ def _refinement_midpoints(
     return np.asarray(added, dtype=np.float64).reshape((-1, 2))
 
 
+def _run_quality_path(
+    name: str,
+    outer: np.ndarray,
+    holes: Sequence[np.ndarray],
+    constraints: Sequence[np.ndarray],
+    explicit_interior: np.ndarray,
+    generated: np.ndarray,
+    settings: SurfaceMeshOptions,
+    cancellation_check: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    """Triangulate and optimize one detached deterministic point candidate."""
+
+    triangulation_started = perf_counter()
+    interior = np.vstack((explicit_interior, generated))
+    triangulation = triangulate_polygon(
+        outer,
+        holes,
+        constraints,
+        interior_points=interior,
+        backend=settings.backend,
+        cancellation_check=cancellation_check,
+    )
+    triangulation_seconds = perf_counter() - triangulation_started
+
+    optimization_started = perf_counter()
+    if cancellation_check is not None and name == "staggered_chart":
+        cancellation_check("native surface triangulation complete")
+        cancellation_check("native surface quality optimization start")
+    initial = _make_candidate(
+        triangulation.points,
+        triangulation.triangles,
+        settings=settings,
+    )
+    current = _optimize_candidate(
+        initial,
+        triangulation.segments,
+        explicit_interior,
+        settings,
+    )
+    best = current if current.score < initial.score else initial
+    best_triangulation = triangulation
+    attempted_added_points = 0
+    attempted_rounds = 0
+    point_budget = int(0.5 * len(generated))
+
+    for round_number in range(1, 3):
+        if not best.report["poor_element_ids"] or attempted_added_points >= point_budget:
+            break
+        if cancellation_check is not None:
+            cancellation_check(
+                f"native surface {name} refinement round {round_number} start"
+            )
+        remaining_budget = point_budget - attempted_added_points
+        remaining_rounds = 3 - round_number
+        round_budget = max(
+            1,
+            (remaining_budget + remaining_rounds - 1) // remaining_rounds,
+        )
+        additions = _refinement_midpoints(
+            current,
+            triangulation.segments,
+            round_budget,
+        )
+        if not len(additions):
+            break
+        protected_nodes = {
+            int(node) for edge in triangulation.segments for node in edge
+        }
+        interior_rows = [
+            row for row in range(len(current.points)) if row not in protected_nodes
+        ]
+        retry_interior = np.vstack((current.points[interior_rows], additions))
+        retry_started = perf_counter()
+        retry_triangulation = triangulate_polygon(
+            outer,
+            holes,
+            constraints,
+            interior_points=retry_interior,
+            backend=settings.backend,
+            cancellation_check=cancellation_check,
+        )
+        triangulation_seconds += perf_counter() - retry_started
+        attempted_added_points += len(additions)
+        attempted_rounds += 1
+        retry = _make_candidate(
+            retry_triangulation.points,
+            retry_triangulation.triangles,
+            added_points=attempted_added_points,
+            rounds=attempted_rounds,
+            settings=settings,
+        )
+        retry = _optimize_candidate(
+            retry,
+            retry_triangulation.segments,
+            explicit_interior,
+            settings,
+        )
+        current = retry
+        triangulation = retry_triangulation
+        if retry.score < best.score and retry.score[0] == 0:
+            best = retry
+            best_triangulation = retry_triangulation
+        if cancellation_check is not None:
+            cancellation_check(
+                f"native surface {name} refinement round {round_number} complete"
+            )
+
+    return {
+        "name": name,
+        "generated": generated,
+        "initial": initial,
+        "best": best,
+        "triangulation": best_triangulation,
+        "attempted_added_points": attempted_added_points,
+        "attempted_rounds": attempted_rounds,
+        "point_budget": point_budget,
+        "target_met": (
+            best.report["invalid_element_count"] == 0
+            and (
+                not best.report["poor_element_ids"]
+                if settings.prefer_quality_policy
+                else best.report["elements_above_aspect_ratio_5"] == 0
+            )
+        ),
+        "triangulation_seconds": triangulation_seconds,
+        "optimization_seconds": perf_counter() - optimization_started,
+    }
+
+
+def _quality_path_key(path: dict[str, Any]) -> tuple[Any, ...]:
+    best: _QualityCandidate = path["best"]
+    connectivity = tuple(tuple(map(int, row)) for row in best.triangles)
+    return (*best.score, connectivity)
+
+
 def _next_ids(existing: np.ndarray, count: int) -> np.ndarray:
     used = {int(value) for value in existing}
     candidate = max(used, default=0) + 1
@@ -841,6 +1118,7 @@ def mesh_planar_surface(
     planar_interior = plane.project(raw_interior)
     explicit_interior = planar_interior.copy()
     generated = np.empty((0, 2), dtype=np.float64)
+    lattice_statistics: dict[str, Any] = {}
     phase_seconds["chart_projection_and_preparation"] = (
         perf_counter() - preparation_started
     )
@@ -862,105 +1140,101 @@ def mesh_planar_surface(
             settings.metric_tensor,
             max_lattice_points=settings.max_lattice_points,
             cancellation_check=cancellation_check,
+            statistics=lattice_statistics,
         )
-        planar_interior = np.vstack((planar_interior, generated))
         phase_seconds["target_point_generation"] = (
             perf_counter() - target_points_started
         )
     if cancellation_check is not None:
         cancellation_check("native surface triangulation start")
-    triangulation_started = perf_counter()
-    triangulation: PlanarTriangulation = triangulate_polygon(
-        planar_outer,
-        planar_holes,
-        planar_constraints,
-        interior_points=planar_interior,
-        backend=settings.backend,
-        cancellation_check=cancellation_check,
-    )
-    phase_seconds["triangulation_and_strict_qualification"] = (
-        perf_counter() - triangulation_started
-    )
-    if cancellation_check is not None:
-        cancellation_check("native surface triangulation complete")
-        cancellation_check("native surface quality optimization start")
-
-    optimization_started = perf_counter()
-    initial_candidate = _make_candidate(
-        triangulation.points,
-        triangulation.triangles,
-        settings=settings,
-    )
-    current = _optimize_candidate(
-        initial_candidate,
-        triangulation.segments,
-        explicit_interior,
-        settings,
-    )
-    best = current if current.score < initial_candidate.score else initial_candidate
-    best_triangulation = triangulation
-    attempted_added_points = 0
-    attempted_rounds = 0
-    point_budget = int(0.5 * len(generated))
-
-    for round_number in range(1, 3):
-        if not best.report["poor_element_ids"] or attempted_added_points >= point_budget:
-            break
-        if cancellation_check is not None:
-            cancellation_check(f"native surface quality refinement round {round_number} start")
-        remaining_budget = point_budget - attempted_added_points
-        remaining_rounds = 3 - round_number
-        round_budget = max(
-            1,
-            (remaining_budget + remaining_rounds - 1) // remaining_rounds,
-        )
-        additions = _refinement_midpoints(
-            current,
-            triangulation.segments,
-            round_budget,
-        )
-        if not len(additions):
-            break
-        protected_nodes = {int(node) for edge in triangulation.segments for node in edge}
-        interior_rows = [row for row in range(len(current.points)) if row not in protected_nodes]
-        retry_interior = np.vstack((current.points[interior_rows], additions))
-        retry_triangulation = triangulate_polygon(
+    candidate_paths = [
+        _run_quality_path(
+            "staggered_chart",
             planar_outer,
             planar_holes,
             planar_constraints,
-            interior_points=retry_interior,
-            backend=settings.backend,
-            cancellation_check=cancellation_check,
-        )
-        attempted_added_points += len(additions)
-        attempted_rounds += 1
-        retry = _make_candidate(
-            retry_triangulation.points,
-            retry_triangulation.triangles,
-            added_points=attempted_added_points,
-            rounds=attempted_rounds,
-            settings=settings,
-        )
-        retry = _optimize_candidate(
-            retry,
-            retry_triangulation.segments,
             explicit_interior,
+            generated,
             settings,
+            cancellation_check,
         )
-        current = retry
-        triangulation = retry_triangulation
-        if retry.score < best.score and retry.score[0] == 0:
-            best = retry
-            best_triangulation = retry_triangulation
-        if cancellation_check is not None:
-            cancellation_check(f"native surface quality refinement round {round_number} complete")
-
-    triangulation = best_triangulation
-    phase_seconds["quality_optimization"] = perf_counter() - optimization_started
-    target_met = (
-        best.report["invalid_element_count"] == 0
-        and not best.report["poor_element_ids"]
+    ]
+    guide_diagnostics: dict[str, Any] = {
+        "guide_count": 0,
+        "guide_ids": [],
+        "accepted_points": 0,
+        "skipped_guides": 0,
+        "distance_checks": 0,
+        "soft_symmetry": True,
+    }
+    candidate_generation_started = perf_counter()
+    if settings.target_size is not None and not candidate_paths[0]["target_met"]:
+        dominant_statistics: dict[str, Any] = {}
+        dominant = _target_points(
+            planar_outer,
+            planar_holes,
+            planar_constraints,
+            settings.target_size,
+            "dominant_boundary",
+            settings.metric_tensor,
+            max_lattice_points=settings.max_lattice_points,
+            cancellation_check=cancellation_check,
+            statistics=dominant_statistics,
+        )
+        dominant_path = _run_quality_path(
+            "dominant_edge",
+            planar_outer,
+            planar_holes,
+            planar_constraints,
+            explicit_interior,
+            dominant,
+            settings,
+            cancellation_check,
+        )
+        dominant_path["lattice_statistics"] = dominant_statistics
+        candidate_paths.append(dominant_path)
+        if not dominant_path["target_met"]:
+            guide_points, guide_diagnostics = _edge_guided_points(
+                planar_outer,
+                planar_holes,
+                planar_constraints,
+                settings.target_size,
+                np.vstack((explicit_interior, dominant)),
+                max_points=max(1, int(0.5 * max(len(dominant), 1))),
+            )
+            combined = np.vstack((dominant, guide_points))
+            candidate_paths.append(
+                _run_quality_path(
+                    "edge_guided_symmetric",
+                    planar_outer,
+                    planar_holes,
+                    planar_constraints,
+                    explicit_interior,
+                    combined,
+                    settings,
+                    cancellation_check,
+                )
+            )
+    phase_seconds["alternate_candidate_generation"] = (
+        perf_counter() - candidate_generation_started
     )
+    selected = min(candidate_paths, key=_quality_path_key)
+    generated = selected["generated"]
+    initial_candidate = selected["initial"]
+    best = selected["best"]
+    triangulation: PlanarTriangulation = selected["triangulation"]
+    attempted_added_points = int(selected["attempted_added_points"])
+    attempted_rounds = int(selected["attempted_rounds"])
+    point_budget = int(selected["point_budget"])
+    target_met = bool(selected["target_met"])
+    phase_seconds["triangulation_and_strict_qualification"] = sum(
+        float(path["triangulation_seconds"]) for path in candidate_paths
+    )
+    phase_seconds["quality_optimization"] = sum(
+        float(path["optimization_seconds"]) for path in candidate_paths
+    )
+    if cancellation_check is not None:
+        cancellation_check("native surface quality candidate selection complete")
     quality_diagnostics = {
         "initial_quality": dict(initial_candidate.report),
         "final_quality": dict(best.report),
@@ -975,6 +1249,20 @@ def mesh_planar_surface(
         "point_budget": point_budget,
         "target_met": target_met,
         "budget_exhausted": not target_met and attempted_added_points >= point_budget,
+        "selected_strategy": str(selected["name"]),
+        "candidate_count": len(candidate_paths),
+        "candidates": [
+            {
+                "strategy": str(path["name"]),
+                "generated_points": len(path["generated"]),
+                "target_met": bool(path["target_met"]),
+                "score": list(path["best"].score),
+                "final_quality": dict(path["best"].report),
+            }
+            for path in candidate_paths
+        ],
+        "lattice_statistics": lattice_statistics,
+        "edge_guides": guide_diagnostics,
     }
     if cancellation_check is not None:
         cancellation_check("native surface quality optimization complete")

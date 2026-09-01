@@ -63,6 +63,46 @@ def _pentagon() -> GeometryModel:
     )
 
 
+def _rotated_plate() -> GeometryModel:
+    angle = math.radians(23.0)
+    rotation = np.asarray(
+        ((math.cos(angle), -math.sin(angle)), (math.sin(angle), math.cos(angle))),
+        dtype=float,
+    )
+    values = np.asarray(((0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)))
+    rotated = values @ rotation.T
+    return _planar_model(tuple((float(x), float(y), 0.0) for x, y in rotated))
+
+
+def _thin_plate() -> GeometryModel:
+    return _planar_model(
+        ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (4.0, 0.2, 0.0), (0.0, 0.2, 0.0))
+    )
+
+
+def _three_plate_intersection() -> GeometryModel:
+    geometry = GeometryModel()
+    points = geometry.add_points(
+        (
+            (0.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (0.0, 2.0, 0.0),
+            (2.0, 2.0, 0.0),
+            (0.5, 0.5, 0.5),
+            (1.5, 0.5, 0.5),
+            (0.5, 1.5, 0.5),
+            (1.5, 1.5, 0.5),
+        )
+    )
+    support = geometry.add_plate((points[0], points[1], points[3], points[2]))
+    floating = geometry.add_plate((points[4], points[5], points[7], points[6]))
+    diagonal = geometry.add_line(points[1], points[2])
+    geometry.extrude((diagonal,), (0.0, 0.0, 1.0))
+    geometry.add_sheet((support,))
+    geometry.add_sheet((floating,))
+    return geometry
+
+
 def _cylinder() -> GeometryModel:
     geometry = GeometryModel()
     radius = 1.0
@@ -95,6 +135,12 @@ def _target_size(family: str, requested_elements: int) -> float:
     area = 1.0 if family == "mapped" else 2.377641290737884
     if family == "cylinder":
         area = math.pi * math.pi / 4.0
+    elif family == "rotated":
+        area = 2.0
+    elif family == "thin":
+        area = 0.8
+    elif family == "intersection":
+        area = 8.0 + 2.0 * math.sqrt(2.0)
     return math.sqrt(area / float(requested_elements))
 
 
@@ -106,6 +152,21 @@ def _mesh_factory(family: str, requested_elements: int) -> Callable[[], Any]:
         return lambda: generate_hybrid_mesh(
             _pentagon(), target_size=target_size, strategy="native",
             native_backend="native"
+        )
+    if family == "rotated":
+        return lambda: generate_hybrid_mesh(
+            _rotated_plate(), target_size=target_size, strategy="native",
+            native_backend="native"
+        )
+    if family == "thin":
+        return lambda: generate_hybrid_mesh(
+            _thin_plate(), target_size=target_size, strategy="native",
+            native_backend="native"
+        )
+    if family == "intersection":
+        return lambda: generate_hybrid_mesh(
+            _three_plate_intersection(), target_size=target_size,
+            strategy="native", native_backend="native"
         )
     if family == "cylinder":
         return lambda: generate_hybrid_mesh(
@@ -133,10 +194,18 @@ def _process_peak_rss_bytes() -> int:
 
         counters = ProcessMemoryCounters()
         counters.cb = ctypes.sizeof(counters)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        if not ctypes.windll.psapi.GetProcessMemoryInfo(
-            handle, ctypes.byref(counters), counters.cb
-        ):
+        get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_current_process.argtypes = []
+        get_current_process.restype = ctypes.c_void_p
+        get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_process_memory_info.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ProcessMemoryCounters),
+            ctypes.c_ulong,
+        )
+        get_process_memory_info.restype = ctypes.c_int
+        handle = get_current_process()
+        if not get_process_memory_info(handle, ctypes.byref(counters), counters.cb):
             raise OSError("GetProcessMemoryInfo failed")
         return int(counters.PeakWorkingSetSize)
     import resource
@@ -262,8 +331,18 @@ def _measure_case(
     arrays, array_seconds, array_peak, array_rss = _time_peak(lambda: _mesh_arrays(mesh))
     mesh_hash = _mesh_hash(arrays)
     core, core_seconds, core_peak, core_rss = _time_peak(lambda: _core_from(arrays))
+    node_rows = {
+        int(node_id): row for row, node_id in enumerate(arrays["node_ids"])
+    }
+    declared_junction_rows = tuple(
+        (node_rows[int(first)], node_rows[int(second)])
+        for first, second in getattr(mesh, "declared_plate_junction_edges", ())
+    )
     native_quality, native_quality_seconds, native_quality_peak, native_quality_rss = _time_peak(
-        lambda: evaluate_quality(core)
+        lambda: evaluate_quality(
+            core,
+            declared_plate_junction_edges=declared_junction_rows,
+        )
     )
     quality, quality_seconds, quality_peak, quality_rss = _time_peak(lambda: verify_mesh_quality(mesh))
 
@@ -362,7 +441,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sizes", type=int, nargs="+", default=(10_000, 100_000, 500_000))
     parser.add_argument(
-        "--families", nargs="+", choices=("mapped", "native", "cylinder"), default=("mapped", "native", "cylinder")
+        "--families",
+        nargs="+",
+        choices=("mapped", "native", "cylinder", "rotated", "thin", "intersection"),
+        default=("mapped", "native", "cylinder", "rotated", "thin", "intersection"),
     )
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--serialization-limit", type=int, default=100_000)
