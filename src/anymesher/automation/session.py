@@ -106,6 +106,7 @@ def _default_controls() -> dict[str, object]:
         "native_backend": "auto",
         "order": "linear",
         "recombine": True,
+        "qualified_s3": False,
         "structural_preparation": None,
         "structured_options": None,
         "face_ids": None,
@@ -331,6 +332,7 @@ class MeshAutomationSession:
                     "native_backend",
                     "order",
                     "recombine",
+                    "qualified_s3",
                     "structural_preparation",
                     "structured_options",
                 ),
@@ -354,6 +356,12 @@ class MeshAutomationSession:
                 if not isinstance(made["recombine"], bool):
                     raise _error("MALFORMED_REQUEST", "recombine must be Boolean")
                 normalized["recombine"] = made["recombine"]
+            if "qualified_s3" in made:
+                if not isinstance(made["qualified_s3"], bool):
+                    raise _error(
+                        "MALFORMED_REQUEST", "qualified_s3 must be Boolean"
+                    )
+                normalized["qualified_s3"] = made["qualified_s3"]
             for key in ("structural_preparation", "structured_options"):
                 if key in made:
                     value = made[key]
@@ -506,6 +514,7 @@ class MeshAutomationSession:
             "native_backend": controls["native_backend"],
             "order": controls["order"],
             "recombine": controls["recombine"],
+            "qualified_s3": controls["qualified_s3"],
             "overrides": {int(key): value for key, value in controls["seed_overrides"].items()},  # type: ignore[union-attr]
             "refinements": self._make_refinements(controls),
         }

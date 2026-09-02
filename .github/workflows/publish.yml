@@ -51,7 +51,7 @@ jobs:
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
-            --expect-version 0.3.1 --require-native
+            --expect-version 0.3.2 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4
@@ -90,10 +90,10 @@ jobs:
           from packaging.utils import canonicalize_name
 
           root = Path("dist")
-          sdist = root / "anymesher-0.3.1.tar.gz"
-          wheels = sorted(root.glob("anymesher-0.3.1-*.whl"))
+          sdist = root / "anymesher-0.3.2.tar.gz"
+          wheels = sorted(root.glob("anymesher-0.3.2-*.whl"))
           if not sdist.is_file():
-              raise SystemExit("missing exact ANYmesher 0.3.1 sdist")
+              raise SystemExit("missing exact ANYmesher 0.3.2 sdist")
           if len(wheels) != 12:
               raise SystemExit(f"expected 12 wheels, found {len(wheels)}")
 
@@ -157,7 +157,7 @@ jobs:
                       name for name in names if name.endswith(".dist-info/METADATA")
                   ]
                   metadata = email.message_from_bytes(archive.read(metadata_name))
-                  if metadata["Name"] != "ANYmesher" or metadata["Version"] != "0.3.1":
+                  if metadata["Name"] != "ANYmesher" or metadata["Version"] != "0.3.2":
                       raise SystemExit(f"metadata identity mismatch in {wheel.name}")
                   base_requirements = set()
                   for raw in metadata.get_all("Requires-Dist", []):
@@ -217,17 +217,17 @@ jobs:
                   }
               )
           records.sort(key=lambda row: row["filename"])
-          (root / "ANYmesher-0.3.1-SHA256SUMS.txt").write_text(
+          (root / "ANYmesher-0.3.2-SHA256SUMS.txt").write_text(
               "".join(f"{row['sha256']}  {row['filename']}\n" for row in records),
               encoding="ascii",
               newline="\n",
           )
-          (root / "ANYmesher-0.3.1-release-manifest.json").write_text(
+          (root / "ANYmesher-0.3.2-release-manifest.json").write_text(
               json.dumps(
                   {
                       "schema": "anymesher.release-artifacts/1",
                       "distribution": "ANYmesher",
-                      "version": "0.3.1",
+                      "version": "0.3.2",
                       "commit": os.environ["GITHUB_SHA"],
                       "upload_file_count": len(records),
                       "files": records,
@@ -243,11 +243,11 @@ jobs:
       - run: python -m twine check --strict dist/*.whl dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: ANYmesher-0.3.1-release-bundle
+          name: ANYmesher-0.3.2-release-bundle
           path: dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: ANYmesher-0.3.1-pypi-distributions
+          name: ANYmesher-0.3.2-pypi-distributions
           path: |
             dist/*.whl
             dist/*.tar.gz
@@ -263,6 +263,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: ANYmesher-0.3.1-pypi-distributions
+          name: ANYmesher-0.3.2-pypi-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
