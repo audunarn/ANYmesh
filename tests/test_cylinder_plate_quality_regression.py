@@ -38,23 +38,22 @@ def _cylinder_through_plate():
     return geometry
 
 
-def _contains_component_alignment_defer(value: object) -> bool:
+def _quality_reports(value: object) -> list[dict[str, object]]:
+    reports: list[dict[str, object]] = []
     if isinstance(value, dict):
-        if (
-            value.get("boundary_collar_skip_reason")
-            == "declared_junction_requires_component_aligned_transition"
-        ):
-            return True
-        return any(
-            _contains_component_alignment_defer(item) for item in value.values()
-        )
+        quality = value.get("quality_optimization")
+        if isinstance(quality, dict):
+            reports.append(quality)
+        for item in value.values():
+            reports.extend(_quality_reports(item))
     if isinstance(value, (list, tuple)):
-        return any(_contains_component_alignment_defer(item) for item in value)
-    return False
+        for item in value:
+            reports.extend(_quality_reports(item))
+    return reports
 
 
 @pytest.mark.parametrize("target_size", (0.20, 0.15))
-def test_automatic_fine_cylinder_plate_defers_component_alignment_safely(
+def test_automatic_fine_cylinder_plate_evaluates_component_alignment_safely(
     target_size: float,
 ) -> None:
     mesh = generate_hybrid_mesh(
@@ -71,6 +70,50 @@ def test_automatic_fine_cylinder_plate_defers_component_alignment_safely(
     assert mesh.num_elements > 0
     assert mesh.declared_plate_junction_edges
     assert mesh.hybrid_diagnostics["structured_quality"]["accepted"] is True
-    assert _contains_component_alignment_defer(
+    reports = _quality_reports(
         mesh.hybrid_diagnostics["triangulation_backend_by_face"]
+    )
+    junction_reports = [
+        report
+        for report in reports
+        if report.get("complex_geometry", {}).get("declared_junction") is True
+    ]
+    assert len(junction_reports) == 2
+    rejection = mesh.hybrid_diagnostics.get("alignment_candidate_rejected")
+    if rejection is None:
+        scopes = [
+            report["declared_junction_alignment_scope"]
+            for report in junction_reports
+        ]
+        assert sum(scope["outer_boundary"] == "evaluated" for scope in scopes) == 1
+        assert sum(
+            scope["outer_boundary"]
+            == "skipped_declared_junction_only_boundary"
+            for scope in scopes
+        ) == 1
+        assert all(
+            scope["hole_boundary"] == "skipped_declared_junction_interface"
+            for scope in scopes
+        )
+        assert any(
+            report["selected_strategy"] == "outer_boundary_collar"
+            for report in junction_reports
+        )
+    else:
+        assert rejection["reason"] == "whole_mesh_quality_regression"
+        assert rejection["aligned_quality"]["accepted"] is False
+        assert rejection["accepted_baseline_quality"]["accepted"] is True
+        assert all(
+            report["complex_geometry"]["alignment_evaluation"]
+            == "whole_mesh_quality_fallback"
+            for report in junction_reports
+        )
+        assert all(
+            report["boundary_collar_skip_reason"]
+            == "whole_mesh_quality_fallback"
+            for report in junction_reports
+        )
+    assert all(
+        report["final_quality"]["invalid_element_count"] == 0
+        for report in junction_reports
     )

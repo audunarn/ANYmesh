@@ -254,6 +254,8 @@ def _prepare_pslg(
     raw_holes: Sequence[Sequence[int]],
     raw_constraints: Sequence[Sequence[int]],
     tolerance: float | None,
+    *,
+    compiled_kernels: bool = False,
 ) -> _PreparedPSLG:
     points = np.asarray(raw_points, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 2 or len(points) < 3:
@@ -310,22 +312,31 @@ def _prepare_pslg(
                 mutable_points.append(crossing)
     points = np.asarray(mutable_points, dtype=np.float64)
 
+    compiled_memberships = None
+    if compiled_kernels:
+        from .native_cpp import pslg_segment_memberships
+
+        compiled_memberships = pslg_segment_memberships(
+            points,
+            np.asarray([(first, second) for first, second, _ in records], dtype=np.int64),
+            epsilon,
+        )
     split_records: list[tuple[int, int, str]] = []
-    for first, second, kind in records:
+    for record_index, (first, second, kind) in enumerate(records):
         start, end = points[first], points[second]
         direction = end - start
         denominator = float(np.dot(direction, direction))
-        members: list[tuple[float, int]] = []
-        for row, point in enumerate(points):
-            if _point_on_segment(point, start, end, epsilon):
-                parameter = float(np.dot(point - start, direction) / denominator)
-                if -epsilon <= parameter <= 1.0 + epsilon:
-                    members.append((min(1.0, max(0.0, parameter)), row))
-        members.sort(key=lambda item: (item[0], item[1]))
-        ordered: list[int] = []
-        for _, row in members:
-            if not ordered or row != ordered[-1]:
-                ordered.append(row)
+        if compiled_memberships is None:
+            members: list[tuple[float, int]] = []
+            for row, point in enumerate(points):
+                if _point_on_segment(point, start, end, epsilon):
+                    parameter = float(np.dot(point - start, direction) / denominator)
+                    if -epsilon <= parameter <= 1.0 + epsilon:
+                        members.append((min(1.0, max(0.0, parameter)), row))
+            members.sort(key=lambda item: (item[0], item[1]))
+            ordered = [row for _, row in members]
+        else:
+            ordered = list(compiled_memberships[record_index])
         for a, b in zip(ordered, ordered[1:]):
             if a != b:
                 split_records.append((a, b, kind))
@@ -334,14 +345,27 @@ def _prepare_pslg(
     mandatory_set = {_normal_edge(a, b) for a, b, kind in split_records if kind == "mandatory"}
     all_segments = sorted(boundary_set | mandatory_set)
 
-    for row, point in enumerate(points):
-        on_outer = any(_point_on_segment(point, points[a], points[b], epsilon) for a, b in _ring_segments(outer))
-        inside = _point_in_ring(point, points, outer, epsilon)
-        in_hole = any(
-            _point_in_ring(point, points, ring, epsilon)
-            and not any(_point_on_segment(point, points[a], points[b], epsilon) for a, b in _ring_segments(ring))
-            for ring in holes
+    compiled_domain = None
+    if compiled_kernels:
+        from .native_cpp import pslg_domain_classification
+
+        compiled_domain = pslg_domain_classification(
+            points,
+            np.asarray(outer, dtype=np.int64),
+            tuple(np.asarray(ring, dtype=np.int64) for ring in holes),
+            epsilon,
         )
+    for row, point in enumerate(points):
+        if compiled_domain is None:
+            on_outer = any(_point_on_segment(point, points[a], points[b], epsilon) for a, b in _ring_segments(outer))
+            inside = _point_in_ring(point, points, outer, epsilon)
+            in_hole = any(
+                _point_in_ring(point, points, ring, epsilon)
+                and not any(_point_on_segment(point, points[a], points[b], epsilon) for a, b in _ring_segments(ring))
+                for ring in holes
+            )
+        else:
+            on_outer, inside, in_hole = map(bool, compiled_domain[row])
         if not inside or (in_hole and not on_outer):
             is_hole_vertex = any(row in ring for ring in holes)
             if not is_hole_vertex:
@@ -901,6 +925,10 @@ def constrained_planar_triangulation(
         holes,
         constraints,
         tolerance,
+        compiled_kernels=(
+            selection is not None
+            and selection.name == "anymesher-cpp17"
+        ),
     )
 
     used_backend = "python"
@@ -924,12 +952,29 @@ def constrained_planar_triangulation(
             cancellation_check=cancellation_check,
         )
         result_points = native_result.points
-        strict_triangles = _strict_native_triangles(
-            result_points, native_result.triangles, prepared
-        )
-        result_triangles = _finish_triangles(
-            result_points, strict_triangles, prepared
-        )
+        validated = None
+        if selection.name == "anymesher-cpp17":
+            from .native_cpp import validate_native_triangulation
+
+            validated = validate_native_triangulation(
+                result_points,
+                native_result.triangles,
+                prepared.segments,
+                prepared.boundary_segments,
+                prepared.mandatory_segments,
+                prepared.outer,
+                prepared.holes,
+                prepared.tolerance,
+            )
+        if validated is None:
+            strict_triangles = _strict_native_triangles(
+                result_points, native_result.triangles, prepared
+            )
+            result_triangles = _finish_triangles(
+                result_points, strict_triangles, prepared
+            )
+        else:
+            result_triangles = validated
         used_backend = selection.name
         native_diagnostics = native_result.diagnostics
 

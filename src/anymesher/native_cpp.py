@@ -30,6 +30,19 @@ NATIVE_CPP_AVAILABLE = _compiled is not None
 COMPILED_TRIANGULATION_AVAILABLE = bool(
     _compiled is not None and callable(getattr(_compiled, "constrained_triangulate", None))
 )
+COMPILED_QUALITY_PIPELINE_AVAILABLE = bool(
+    _compiled is not None
+    and all(
+        callable(getattr(_compiled, name, None))
+        for name in (
+            "pslg_segment_memberships",
+            "pslg_domain_classification",
+            "validate_triangulation",
+            "recombine_decisions",
+            "element_quality",
+        )
+    )
+)
 
 
 class _CancellationSentinel(BaseException):
@@ -277,13 +290,172 @@ def triangle_edge_incidence(triangles: Any) -> np.ndarray:
     ).reshape((-1, 4))
 
 
+def pslg_segment_memberships(
+    points: Any, segments: Any, tolerance: float
+) -> tuple[tuple[int, ...], ...] | None:
+    if not COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        return None
+    made_points = _strict_float64_matrix(points, 2, "points")
+    made_segments = _strict_int64_matrix(segments, 2, "segments")
+    try:
+        rows = _compiled.pslg_segment_memberships(
+            made_points, made_segments, float(tolerance)
+        )
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+    return tuple(tuple(int(row) for row in item) for item in rows)
+
+
+def pslg_domain_classification(
+    points: Any,
+    outer: Any,
+    holes: Sequence[Any],
+    tolerance: float,
+) -> np.ndarray | None:
+    if not COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        return None
+    made_points = _strict_float64_matrix(points, 2, "points")
+    made_outer = _strict_int64_vector(outer, "outer")
+    made_holes = tuple(
+        _strict_int64_vector(hole, f"holes[{number}]")
+        for number, hole in enumerate(holes)
+    )
+    offsets = np.zeros(len(made_holes) + 1, dtype=np.int64)
+    if made_holes:
+        offsets[1:] = np.cumsum([len(hole) for hole in made_holes], dtype=np.int64)
+        indices = np.ascontiguousarray(np.concatenate(made_holes), dtype=np.int64)
+    else:
+        indices = np.empty(0, dtype=np.int64)
+    try:
+        return np.asarray(
+            _compiled.pslg_domain_classification(
+                made_points, made_outer, indices, offsets, float(tolerance)
+            ),
+            dtype=bool,
+        ).reshape((-1, 3))
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+
+
+def validate_native_triangulation(
+    points: Any,
+    triangles: Any,
+    segments: Any,
+    boundary_segments: Any,
+    mandatory_segments: Any,
+    outer: Any,
+    holes: Sequence[Any],
+    tolerance: float,
+) -> np.ndarray | None:
+    if not COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        return None
+    made_points = _strict_float64_matrix(points, 2, "points")
+    made_triangles = _strict_int64_matrix(triangles, 3, "triangles")
+    made_segments = _strict_int64_matrix(segments, 2, "segments")
+    made_boundary = _strict_int64_matrix(
+        boundary_segments, 2, "boundary_segments"
+    )
+    made_mandatory = _strict_int64_matrix(
+        mandatory_segments, 2, "mandatory_segments"
+    )
+    made_outer = _strict_int64_vector(outer, "outer")
+    made_holes = tuple(
+        _strict_int64_vector(hole, f"holes[{number}]")
+        for number, hole in enumerate(holes)
+    )
+    offsets = np.zeros(len(made_holes) + 1, dtype=np.int64)
+    if made_holes:
+        offsets[1:] = np.cumsum([len(hole) for hole in made_holes], dtype=np.int64)
+        indices = np.ascontiguousarray(np.concatenate(made_holes), dtype=np.int64)
+    else:
+        indices = np.empty(0, dtype=np.int64)
+    try:
+        rows = _compiled.validate_triangulation(
+            made_points,
+            made_triangles,
+            made_segments,
+            made_boundary,
+            made_mandatory,
+            made_outer,
+            indices,
+            offsets,
+            float(tolerance),
+        )
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+    return np.ascontiguousarray(rows, dtype=np.int64).reshape((-1, 3))
+
+
+def native_recombination_decisions(
+    points: Any,
+    triangles: Any,
+    triangle_ids: Any,
+    node_ids: Any,
+    active_rows: Any,
+    protected_edges: Any,
+    *,
+    min_scaled_jacobian: float,
+    max_aspect_ratio: float,
+    min_angle: float,
+    max_angle: float,
+    max_warpage: float,
+    max_exchange_work: int,
+) -> dict[str, Any] | None:
+    if not COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        return None
+    empty = np.empty(0, dtype=np.int64)
+    try:
+        return dict(
+            _compiled.recombine_decisions(
+                _strict_float64_matrix(points, 3, "points"),
+                _strict_int64_matrix(triangles, 3, "triangles"),
+                _strict_int64_vector(triangle_ids, "triangle_ids"),
+                _strict_int64_vector(node_ids, "node_ids"),
+                _strict_int64_vector(active_rows, "active_rows"),
+                _strict_int64_matrix(protected_edges, 2, "protected_edges"),
+                empty,
+                empty,
+                float(min_scaled_jacobian),
+                float(max_aspect_ratio),
+                float(min_angle),
+                float(max_angle),
+                float(max_warpage),
+                int(max_exchange_work),
+            )
+        )
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+
+
+def native_element_quality(
+    points: Any, cells: Any, corners: int
+) -> np.ndarray | None:
+    if not COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        return None
+    made_points = _strict_float64_matrix(points, 3, "points")
+    made_cells = _strict_int64_matrix(cells, int(corners), "cells")
+    try:
+        return np.asarray(
+            _compiled.element_quality(made_points, made_cells, int(corners)),
+            dtype=np.float64,
+        ).reshape((-1, 6))
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+
+
 __all__ = [
     "COMPILED_TRIANGULATION_AVAILABLE",
+    "COMPILED_QUALITY_PIPELINE_AVAILABLE",
     "CompiledNativeBoundary",
     "NATIVE_CPP_AVAILABLE",
     "compiled_native_boundary",
     "incircle",
     "orient2d",
     "orient2d_many",
+    "native_recombination_decisions",
+    "native_element_quality",
+    "pslg_domain_classification",
+    "pslg_segment_memberships",
     "triangle_edge_incidence",
+    "validate_native_triangulation",
 ]

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "_triangulation_native.hpp"
+#include "_quality_pipeline_native.hpp"
 
 namespace {
 
@@ -310,6 +311,16 @@ PyMethodDef methods[] = {
     {"triangle_adjacency", py_triangle_adjacency, METH_O, "Deterministic edge incidence for triangle connectivity."},
     {"constrained_triangulate", anymesher_native::py_constrained_triangulate, METH_VARARGS,
      "Deterministic constrained triangulation over canonical prepared PSLG buffers."},
+    {"pslg_segment_memberships", anymesher_quality_native::py_pslg_segment_memberships, METH_VARARGS,
+     "Batch deterministic point-on-segment memberships."},
+    {"pslg_domain_classification", anymesher_quality_native::py_pslg_domain_classification, METH_VARARGS,
+     "Batch deterministic PSLG domain classification."},
+    {"validate_triangulation", anymesher_quality_native::py_validate_triangulation, METH_VARARGS,
+     "Validate and canonicalize a compiled triangulation."},
+    {"recombine_decisions", anymesher_quality_native::py_recombine_decisions, METH_VARARGS,
+     "Select deterministic quality-qualified triangle pairs."},
+    {"element_quality", anymesher_quality_native::py_element_quality, METH_VARARGS,
+     "Evaluate triangle or quadrilateral quality in one native batch."},
     {nullptr, nullptr, 0, nullptr},
 };
 

@@ -10,6 +10,7 @@ import numpy as np
 
 from .core import MeshCore, corner_edges
 from .errors import MeshError
+from .native_cpp import native_element_quality
 
 __all__ = [
     "ElementQuality",
@@ -153,20 +154,29 @@ def triangle_quality(
         raise MeshError("triangle connectivity must be T3 or T6")
     count = len(connectivity)
     ids = np.arange(1, count + 1) if element_ids is None else np.asarray(element_ids, dtype=np.int64)
-    area = np.empty(count)
-    aspect = np.empty(count)
-    min_angle = np.empty(count)
-    max_angle = np.empty(count)
-    jacobian = np.empty(count)
-    for row, element in enumerate(connectivity):
-        corners = coordinates[element[:3]]
-        lengths, angles, jacobians = _corner_data(corners)
-        area[row] = 0.5 * np.linalg.norm(np.cross(corners[1] - corners[0], corners[2] - corners[0]))
-        aspect[row] = float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-300))
-        min_angle[row] = float(np.min(angles))
-        max_angle[row] = float(np.max(angles))
-        jacobian[row] = float(np.min(jacobians))
-    return ElementQuality(ids, area, aspect, min_angle, max_angle, jacobian, np.zeros(count))
+    native_values = native_element_quality(
+        np.ascontiguousarray(coordinates, dtype=np.float64),
+        np.ascontiguousarray(connectivity[:, :3], dtype=np.int64),
+        3,
+    )
+    if native_values is None:
+        area = np.empty(count)
+        aspect = np.empty(count)
+        min_angle = np.empty(count)
+        max_angle = np.empty(count)
+        jacobian = np.empty(count)
+        for row, element in enumerate(connectivity):
+            corners = coordinates[element[:3]]
+            lengths, angles, jacobians = _corner_data(corners)
+            area[row] = 0.5 * np.linalg.norm(np.cross(corners[1] - corners[0], corners[2] - corners[0]))
+            aspect[row] = float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-300))
+            min_angle[row] = float(np.min(angles))
+            max_angle[row] = float(np.max(angles))
+            jacobian[row] = float(np.min(jacobians))
+        native_values = np.column_stack(
+            (area, aspect, min_angle, max_angle, jacobian, np.zeros(count))
+        )
+    return ElementQuality(ids, *(native_values[:, column] for column in range(6)))
 
 
 def _quad_values(corners: np.ndarray) -> tuple[float, float, float, float, float, float]:
@@ -217,9 +227,15 @@ def quad_quality(
         raise MeshError("quadrilateral connectivity must be Q4 or Q8")
     count = len(connectivity)
     ids = np.arange(1, count + 1) if element_ids is None else np.asarray(element_ids, dtype=np.int64)
-    values = np.asarray([_quad_values(coordinates[element[:4]]) for element in connectivity], dtype=float)
-    if count == 0:
-        values = np.empty((0, 6), dtype=float)
+    values = native_element_quality(
+        np.ascontiguousarray(coordinates, dtype=np.float64),
+        np.ascontiguousarray(connectivity[:, :4], dtype=np.int64),
+        4,
+    )
+    if values is None:
+        values = np.asarray([_quad_values(coordinates[element[:4]]) for element in connectivity], dtype=float)
+        if count == 0:
+            values = np.empty((0, 6), dtype=float)
     return ElementQuality(ids, *(values[:, column] for column in range(6)))
 
 

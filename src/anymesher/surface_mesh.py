@@ -1716,6 +1716,8 @@ def mesh_planar_surface(
     options: SurfaceMeshOptions | None = None,
     cancellation_check: Callable[[str], None] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    _evaluate_boundary_alignment: bool = True,
+    _evaluate_hole_alignment: bool = True,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -1815,13 +1817,10 @@ def mesh_planar_surface(
     strict_baseline_complete = (
         settings.prefer_quality_policy and bool(candidate_paths[0]["target_met"])
     )
-    component_alignment_deferred = bool(
-        strict_baseline_complete and settings.declared_junction
-    )
     if (
         settings.target_size is not None
         and settings.recombine
-        and not component_alignment_deferred
+        and _evaluate_boundary_alignment
     ):
         collar_preparation_cache: dict[str, Any] = {}
         outer_collar = _collar_candidate(
@@ -1860,7 +1859,7 @@ def mesh_planar_surface(
                 path["collar"] = outer_report
                 candidate_paths.append(path)
                 collar_diagnostics.append(outer_report)
-        if planar_holes:
+        if planar_holes and _evaluate_hole_alignment:
             complete_collar = _collar_candidate(
                 planar_outer,
                 planar_holes,
@@ -1898,9 +1897,7 @@ def mesh_planar_surface(
                     candidate_paths.append(path)
                     collar_diagnostics.append(complete_report)
     elif settings.target_size is not None and settings.recombine:
-        collar_skipped_reason = (
-            "declared_junction_requires_component_aligned_transition"
-        )
+        collar_skipped_reason = "whole_mesh_quality_fallback"
     elif settings.target_size is not None and not candidate_paths[0]["target_met"]:
         dominant_statistics: dict[str, Any] = {}
         dominant = _target_points(
@@ -2037,9 +2034,13 @@ def mesh_planar_surface(
             "candidate_count": int(len(candidate_paths)),
             "declared_junction": bool(settings.declared_junction),
             "alignment_evaluation": (
-                "component_deferred"
-                if component_alignment_deferred
-                else ("evaluated" if settings.recombine else "not_requested")
+                "evaluated"
+                if settings.recombine and _evaluate_boundary_alignment
+                else (
+                    "whole_mesh_quality_fallback"
+                    if settings.recombine
+                    else "not_requested"
+                )
             ),
         },
         "published_alignment": (

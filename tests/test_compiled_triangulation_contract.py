@@ -190,6 +190,42 @@ def test_compiled_square_matches_python_oracle_exactly() -> None:
     not COMPILED_TRIANGULATION_AVAILABLE,
     reason="compiled triangulation extension has not been rebuilt",
 )
+def test_compiled_preparation_and_validation_match_hole_constraint_oracle() -> None:
+    points = np.asarray(
+        (
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 4.0),
+            (0.0, 4.0),
+            (1.5, 1.5),
+            (1.5, 2.5),
+            (2.5, 2.5),
+            (2.5, 1.5),
+            (0.5, 0.5),
+            (3.5, 0.5),
+        ),
+        dtype=np.float64,
+    )
+    kwargs = {
+        "outer": (0, 1, 2, 3),
+        "holes": ((4, 5, 6, 7),),
+        "constraints": ((8, 9),),
+    }
+
+    python = constrained_planar_triangulation(points, backend="python", **kwargs)
+    compiled = constrained_planar_triangulation(points, backend="native", **kwargs)
+
+    assert compiled.points.tobytes() == python.points.tobytes()
+    np.testing.assert_array_equal(compiled.segments, python.segments)
+    np.testing.assert_array_equal(compiled.boundary_segments, python.boundary_segments)
+    np.testing.assert_array_equal(compiled.mandatory_segments, python.mandatory_segments)
+    np.testing.assert_array_equal(compiled.triangles, python.triangles)
+
+
+@pytest.mark.skipif(
+    not COMPILED_TRIANGULATION_AVAILABLE,
+    reason="compiled triangulation extension has not been rebuilt",
+)
 def test_compiled_boundary_rejects_noncanonical_input_before_coercion() -> None:
     boundary = compiled_native_boundary()
     assert boundary is not None

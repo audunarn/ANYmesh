@@ -1062,6 +1062,7 @@ def _mesh_native_face(
     native_backend: Any,
     quality_options: StructuredMeshingOptions | None,
     declared_junction_edges: Iterable[int],
+    evaluate_declared_junction_alignment: bool,
     cancellation_check: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     boundary_started = perf_counter()
@@ -1136,11 +1137,22 @@ def _mesh_native_face(
             for boundary in (face.loop, *getattr(face, "holes", ()))
             for item in boundary
         }
+        outer_edge_ids = {int(item.edge) for item in face.loop}
+        declared_edge_ids = {int(edge_id) for edge_id in declared_junction_edges}
         has_declared_junction = bool(
-            face_edge_ids.intersection(
-                int(edge_id) for edge_id in declared_junction_edges
+            face_edge_ids.intersection(declared_edge_ids)
+        )
+        has_unconstrained_outer_boundary = bool(
+            outer_edge_ids.difference(declared_edge_ids)
+        )
+        evaluate_outer_alignment = (
+            not has_declared_junction
+            or (
+                evaluate_declared_junction_alignment
+                and has_unconstrained_outer_boundary
             )
         )
+        evaluate_hole_alignment = not has_declared_junction
         surface_options = SurfaceMeshOptions(
             recombine=recombine,
             order=order,
@@ -1162,6 +1174,8 @@ def _mesh_native_face(
             owner=geometry.handle("face", face_id),
             cancellation_check=cancellation_check,
             diagnostics=surface_diagnostics,
+            _evaluate_boundary_alignment=evaluate_outer_alignment,
+            _evaluate_hole_alignment=evaluate_hole_alignment,
         )
         if (
             isinstance(face.surface, Plane)
@@ -1178,6 +1192,8 @@ def _mesh_native_face(
                 owner=geometry.handle("face", face_id),
                 cancellation_check=cancellation_check,
                 diagnostics=parameter_diagnostics,
+                _evaluate_boundary_alignment=evaluate_outer_alignment,
+                _evaluate_hole_alignment=evaluate_hole_alignment,
             )
             if parameter_diagnostics.get("quality_policy", {}).get(
                 "accepted", False
@@ -1192,6 +1208,29 @@ def _mesh_native_face(
                 chart_inverse = np.eye(2, dtype=float)
                 chart_loops = tuple(
                     np.asarray(loop.uv, dtype=float) for loop in loops
+                )
+        if has_declared_junction:
+            alignment_scope = {
+                "outer_boundary": (
+                    "evaluated"
+                    if evaluate_outer_alignment
+                    else "skipped_declared_junction_only_boundary"
+                ),
+                "hole_boundary": "skipped_declared_junction_interface",
+            }
+            surface_diagnostics["declared_junction_alignment_scope"] = (
+                alignment_scope
+            )
+            complex_geometry = surface_diagnostics.setdefault(
+                "complex_geometry", {}
+            )
+            complex_geometry["alignment_scope"] = alignment_scope
+            if not evaluate_outer_alignment:
+                complex_geometry["alignment_evaluation"] = (
+                    "skipped_declared_junction_only_boundary"
+                )
+                surface_diagnostics["boundary_collar_skip_reason"] = (
+                    "declared_junction_only_boundary"
                 )
     surface_diagnostics.setdefault("phase_seconds", {})[
         "boundary_registration"
@@ -1334,6 +1373,7 @@ def generate_hybrid_mesh_result(
     audit_policy: Any | None = None,
     cancellation_check: Callable[[str], None] | None = None,
     _native_surface_options: StructuredMeshingOptions | None = None,
+    _evaluate_declared_junction_alignment: bool = True,
 ) -> HybridMeshResult:
     """Generate a model-bound mapped/native mesh without rewriting geometry.
 
@@ -1714,6 +1754,9 @@ def generate_hybrid_mesh_result(
                 )
             ),
             declared_junction_edges=final_declared_junction_edges,
+            evaluate_declared_junction_alignment=(
+                _evaluate_declared_junction_alignment
+            ),
             cancellation_check=cancellation_check,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
@@ -1844,6 +1887,61 @@ def generate_hybrid_mesh_result(
                 fallback.mesh,
                 structured_report.plan.options,
             )
+            if (
+                not fallback_quality["accepted"]
+                and _evaluate_declared_junction_alignment
+                and fallback.mesh.declared_plate_junction_edges
+            ):
+                aligned_quality = fallback_quality
+                aligned_strategies = {
+                    str(face_id): values.get("quality_optimization", {}).get(
+                        "selected_strategy"
+                    )
+                    for face_id, values in sorted(
+                        fallback.triangulation_backend_by_face.items()
+                    )
+                    if isinstance(values, Mapping)
+                }
+                conservative = generate_hybrid_mesh_result(
+                    source_geometry,
+                    target_size=target_size,
+                    strategy=MeshingStrategy.AUTO,
+                    overrides=overrides,
+                    beam_edges=requested_beam_edges,
+                    beam_offsets=beam_offsets,
+                    member_ids=requested_member_ids,
+                    face_ids=requested_face_ids,
+                    seeding=requested_seeding,
+                    refinements=requested_refinements,
+                    order=order,
+                    recombine=recombine,
+                    native_backend=native_backend,
+                    structured_options=None,
+                    structural_preparation=structural_preparation,
+                    overlap_policy=overlap_policy,
+                    mutation_policy=mutation_policy,
+                    certification_mode=certification_mode,
+                    change_set=change_set,
+                    audit_policy=audit_policy,
+                    cancellation_check=cancellation_check,
+                    _native_surface_options=structured_report.plan.options,
+                    _evaluate_declared_junction_alignment=False,
+                )
+                conservative_quality = _structured_quality_report(
+                    conservative.mesh,
+                    structured_report.plan.options,
+                )
+                if conservative_quality["accepted"]:
+                    conservative.mesh.hybrid_diagnostics[
+                        "alignment_candidate_rejected"
+                    ] = {
+                        "reason": "whole_mesh_quality_regression",
+                        "aligned_selected_strategy_by_face": aligned_strategies,
+                        "aligned_quality": aligned_quality,
+                        "accepted_baseline_quality": conservative_quality,
+                    }
+                    fallback = conservative
+                    fallback_quality = conservative_quality
             if not fallback_quality["accepted"]:
                 repaired_mesh, repaired_quality, repair_diagnostics = (
                     _junction_growth_repair(
