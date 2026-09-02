@@ -59,7 +59,9 @@ def test_production_preparation_binds_deterministic_owner_and_nodal_normals() ->
 
     assert first_record == second_record
     assert first_record["status"] == "ADMITTED"
-    assert first_record["formulation_id"] == "E4_PL_QUALIFIED_S3_COMPANION_V1"
+    assert first_record["formulation_id"] == (
+        "CANDIDATE_E4_PL_S3_V2D_NATIVE_PARITY_V1"
+    )
     assert first_record["legacy_fallback"] == "FORBIDDEN"
     assert first_record["element_ids"] == sorted(first.mesh.tris)
     assert set(map(int, first_record["element_owner_normals"])) == set(

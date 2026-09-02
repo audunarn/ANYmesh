@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bind qualified triangle admission and deterministic bounded repair to the
+  accepted S3 V2D formulation identity for the coordinated 0.3.2 activation
+  candidate. Failed admission remains a typed failure with no legacy fallback.
+
 - Score and refine native surface candidates against angle, scaled-Jacobian, and adjacent-element-growth limits in addition to aspect ratio, preventing quality-invalid slivers from being selected for automatic fallback.
 
 - Propagate short imprint-edge spacing across arbitrary native face boundaries before triangulation, preventing acute and rapid-growth transitions without moving topology-owned nodes or relaxing quality policy.

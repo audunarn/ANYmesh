@@ -45,7 +45,9 @@ __all__ = [
 QUALIFIED_S3_PRODUCTION_CONTRACT_ID = (
     "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V1"
 )
-QUALIFIED_S3_FORMULATION_ID = "E4_PL_QUALIFIED_S3_COMPANION_V1"
+# Exact formulation identity qualified by ANYsolver's accepted V6W record.
+# The mesher binds this identity but does not import solver mechanics.
+QUALIFIED_S3_FORMULATION_ID = "CANDIDATE_E4_PL_S3_V2D_NATIVE_PARITY_V1"
 
 
 class S3OwnerAuthorityError(S3QualityError):
