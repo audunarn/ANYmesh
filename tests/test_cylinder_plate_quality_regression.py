@@ -52,7 +52,21 @@ def _quality_reports(value: object) -> list[dict[str, object]]:
     return reports
 
 
-@pytest.mark.parametrize("target_size", (0.20, 0.15))
+def _alignment_scopes(value: object) -> list[dict[str, object]]:
+    scopes: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        scope = value.get("declared_junction_alignment_scope")
+        if isinstance(scope, dict):
+            scopes.append(scope)
+        for item in value.values():
+            scopes.extend(_alignment_scopes(item))
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            scopes.extend(_alignment_scopes(item))
+    return scopes
+
+
+@pytest.mark.parametrize("target_size", (0.25, 0.20, 0.15))
 def test_automatic_fine_cylinder_plate_evaluates_component_alignment_safely(
     target_size: float,
 ) -> None:
@@ -63,11 +77,13 @@ def test_automatic_fine_cylinder_plate_evaluates_component_alignment_safely(
         beam_edges=(),
         member_ids=(),
         structured_options={"quality_policy": _POLICY},
+        structural_preparation=True,
         native_backend="python",
     )
 
     assert mesh.num_nodes > 0
     assert mesh.num_elements > 0
+    assert mesh.hybrid_diagnostics["requested_target_size"] == target_size
     assert mesh.declared_plate_junction_edges
     assert mesh.hybrid_diagnostics["structured_quality"]["accepted"] is True
     reports = _quality_reports(
@@ -80,11 +96,13 @@ def test_automatic_fine_cylinder_plate_evaluates_component_alignment_safely(
     ]
     assert len(junction_reports) == 2
     rejection = mesh.hybrid_diagnostics.get("alignment_candidate_rejected")
+    if target_size in {0.25, 0.20}:
+        assert rejection is None
     if rejection is None:
-        scopes = [
-            report["declared_junction_alignment_scope"]
-            for report in junction_reports
-        ]
+        scopes = _alignment_scopes(
+            mesh.hybrid_diagnostics["triangulation_backend_by_face"]
+        )
+        assert len(scopes) == 2
         assert sum(scope["outer_boundary"] == "evaluated" for scope in scopes) == 1
         assert sum(
             scope["outer_boundary"]
@@ -96,13 +114,17 @@ def test_automatic_fine_cylinder_plate_evaluates_component_alignment_safely(
             for scope in scopes
         )
         assert any(
-            report["selected_strategy"] == "outer_boundary_collar"
+            report["selected_strategy"].startswith("outer_boundary_collar")
             for report in junction_reports
         )
     else:
         assert rejection["reason"] == "whole_mesh_quality_regression"
         assert rejection["aligned_quality"]["accepted"] is False
         assert rejection["accepted_baseline_quality"]["accepted"] is True
+        comparison = rejection["comparison"]
+        assert comparison["rejection_metrics"]
+        assert comparison["aligned_growth_violation_count"] >= 0
+        assert comparison["baseline_growth_violation_count"] == 0
         assert all(
             report["complex_geometry"]["alignment_evaluation"]
             == "whole_mesh_quality_fallback"

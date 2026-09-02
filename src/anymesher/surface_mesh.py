@@ -434,9 +434,13 @@ def _collar_candidate(
     *,
     include_holes: bool,
     max_points: int,
+    requested_layers: int = 3,
     preparation_cache: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, tuple[np.ndarray, ...], dict[str, Any]] | None:
     """Create protected straight-span collars, with the outer loop first."""
+
+    if requested_layers not in {1, 2, 3}:
+        raise ValueError("requested_layers must be one of 1, 2, or 3")
 
     cache = preparation_cache if preparation_cache is not None else {}
     cached_segments = cache.get("base_segments")
@@ -448,7 +452,7 @@ def _collar_candidate(
     accepted_rings: list[np.ndarray] = []
     clearance_regions: list[tuple[_SegmentGrid, float]] = []
     diagnostics: dict[str, Any] = {
-        "requested_layers": 3,
+        "requested_layers": requested_layers,
         "outer": {},
         "holes": [],
         "shortened_rows": 0,
@@ -487,7 +491,7 @@ def _collar_candidate(
             (loop[index], loop[(index + 1) % len(loop)])
             for index in range(len(loop))
         )
-        for layer in range(1, 4):
+        for layer in range(1, requested_layers + 1):
             layer_distance = (float(layer) - 0.5) * float(size)
             station_points: dict[int, np.ndarray]
             if label == "outer" and layer > 1 and corner_indices:
@@ -573,7 +577,7 @@ def _collar_candidate(
         if layers:
             reach = layers * float(size) - 0.25 * float(size)
             clearance_regions.append((_SegmentGrid(source_segments, reach), reach))
-        skipped = 3 - layers
+        skipped = requested_layers - layers
         diagnostics["shortened_rows"] += skipped
         if skipped:
             diagnostics["transition_regions"] += 1
@@ -585,10 +589,11 @@ def _collar_candidate(
             "released_corner_stations": 0,
         }
 
-    cached_outer = cache.get("outer_collar")
+    outer_cache_key = f"outer_collar_{requested_layers}"
+    cached_outer = cache.get(outer_cache_key)
     if cached_outer is None:
         diagnostics["outer"] = add_loop(outer, "outer")
-        cache["outer_collar"] = {
+        cache[outer_cache_key] = {
             "rings": tuple(accepted_rings),
             "segments": tuple(accepted_segments),
             "clearance_regions": tuple(clearance_regions),
@@ -1561,10 +1566,17 @@ def _recombined_path_key(value: dict[str, Any]) -> tuple[Any, ...]:
     outer = value["outer_alignment"]
     hole = value["hole_alignment"]
     quality = value["quality_policy"]
+    collar = value["path"].get("collar")
+    collar_layers = (
+        int(collar.get("requested_layers", 0))
+        if isinstance(collar, dict)
+        else 0
+    )
     return (
         0 if value["quality_eligible"] and value["alignment_qualified"] else 1,
         float(outer["maximum_normal_error_degrees"]),
         float(outer["mean_normal_error_degrees"]),
+        -collar_layers,
         int(sum(quality["violation_counts"].values())),
         float(hole["maximum_normal_error_degrees"]),
         float(hole["mean_normal_error_degrees"]),
@@ -1590,7 +1602,7 @@ def _collar_alignment_qualified(
         return True
     candidate_outer = _alignment_score(candidate["outer_alignment"])
     baseline_outer = _alignment_score(baseline["outer_alignment"])
-    if name == "outer_boundary_collar":
+    if name.startswith("outer_boundary_collar"):
         return candidate_outer < baseline_outer
     if name == "outer_hole_collar":
         candidate_hole = _alignment_score(candidate["hole_alignment"])
@@ -1718,6 +1730,7 @@ def mesh_planar_surface(
     diagnostics: dict[str, Any] | None = None,
     _evaluate_boundary_alignment: bool = True,
     _evaluate_hole_alignment: bool = True,
+    _refine_boundary_transition: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -1823,21 +1836,30 @@ def mesh_planar_surface(
         and _evaluate_boundary_alignment
     ):
         collar_preparation_cache: dict[str, Any] = {}
-        outer_collar = _collar_candidate(
-            planar_outer,
-            planar_holes,
-            planar_constraints,
-            generated,
-            settings.target_size,
-            include_holes=False,
-            max_points=settings.max_lattice_points,
-            preparation_cache=collar_preparation_cache,
-        )
-        if outer_collar is not None:
+        outer_layer_variants = (3,)
+        for requested_layers in outer_layer_variants:
+            outer_collar = _collar_candidate(
+                planar_outer,
+                planar_holes,
+                planar_constraints,
+                generated,
+                settings.target_size,
+                include_holes=False,
+                max_points=settings.max_lattice_points,
+                requested_layers=requested_layers,
+                preparation_cache=collar_preparation_cache,
+            )
+            if outer_collar is None:
+                continue
             outer_points, outer_constraints, outer_report = outer_collar
+            strategy_name = (
+                "outer_boundary_collar"
+                if requested_layers == 3
+                else f"outer_boundary_collar_{requested_layers}_layer"
+            )
             try:
                 path = _run_quality_path(
-                    "outer_boundary_collar",
+                    strategy_name,
                     planar_outer,
                     planar_holes,
                     (*planar_constraints, *outer_constraints),
@@ -1845,7 +1867,10 @@ def mesh_planar_surface(
                     outer_points,
                     settings,
                     cancellation_check,
-                    allow_refinement=not strict_baseline_complete,
+                    allow_refinement=(
+                        _refine_boundary_transition
+                        or not strict_baseline_complete
+                    ),
                     preserve_protected_cells=True,
                 )
             except MeshError as error:
@@ -1882,7 +1907,10 @@ def mesh_planar_surface(
                         complete_points,
                         settings,
                         cancellation_check,
-                        allow_refinement=not strict_baseline_complete,
+                        allow_refinement=(
+                            _refine_boundary_transition
+                            or not strict_baseline_complete
+                        ),
                         preserve_protected_cells=True,
                     )
                 except MeshError as error:
@@ -2007,6 +2035,9 @@ def mesh_planar_surface(
         "attempted_rounds": attempted_rounds,
         "initial_generated_points": len(generated),
         "point_budget": point_budget,
+        "effective_target_size": (
+            None if settings.target_size is None else float(settings.target_size)
+        ),
         "target_met": target_met,
         "budget_exhausted": not target_met and attempted_added_points >= point_budget,
         "selected_strategy": str(selected["name"]),

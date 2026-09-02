@@ -738,6 +738,40 @@ def _quality_rejection_message(quality: Mapping[str, Any]) -> str:
     return f"structured mesh violates quality_v2 ({details or 'unspecified'}){suffix}"
 
 
+def _quality_rejection_details(
+    aligned: Mapping[str, Any], baseline: Mapping[str, Any]
+) -> dict[str, Any]:
+    aligned_counts = {
+        str(name): int(value)
+        for name, value in aligned.get("violation_counts", {}).items()
+    }
+    baseline_counts = {
+        str(name): int(value)
+        for name, value in baseline.get("violation_counts", {}).items()
+    }
+    rejection_metrics = sorted(
+        name for name, count in aligned_counts.items() if count > 0
+    )
+    aligned_growth = int(aligned.get("growth_violation_count", 0))
+    if aligned_growth:
+        rejection_metrics.append("element_growth")
+    return {
+        "rejection_metrics": rejection_metrics,
+        "aligned_violation_counts": aligned_counts,
+        "baseline_violation_counts": baseline_counts,
+        "aligned_growth_violation_count": aligned_growth,
+        "baseline_growth_violation_count": int(
+            baseline.get("growth_violation_count", 0)
+        ),
+        "aligned_maximum_adjacent_element_growth": float(
+            aligned.get("maximum_adjacent_element_growth", 1.0)
+        ),
+        "baseline_maximum_adjacent_element_growth": float(
+            baseline.get("maximum_adjacent_element_growth", 1.0)
+        ),
+    }
+
+
 def _compose_descendants(
     first: Mapping[int, Sequence[int]],
     second: Mapping[int, Sequence[int]],
@@ -1063,6 +1097,7 @@ def _mesh_native_face(
     quality_options: StructuredMeshingOptions | None,
     declared_junction_edges: Iterable[int],
     evaluate_declared_junction_alignment: bool,
+    refine_declared_junction_transition: bool,
     cancellation_check: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     boundary_started = perf_counter()
@@ -1176,6 +1211,7 @@ def _mesh_native_face(
             diagnostics=surface_diagnostics,
             _evaluate_boundary_alignment=evaluate_outer_alignment,
             _evaluate_hole_alignment=evaluate_hole_alignment,
+            _refine_boundary_transition=refine_declared_junction_transition,
         )
         if (
             isinstance(face.surface, Plane)
@@ -1194,6 +1230,7 @@ def _mesh_native_face(
                 diagnostics=parameter_diagnostics,
                 _evaluate_boundary_alignment=evaluate_outer_alignment,
                 _evaluate_hole_alignment=evaluate_hole_alignment,
+                _refine_boundary_transition=refine_declared_junction_transition,
             )
             if parameter_diagnostics.get("quality_policy", {}).get(
                 "accepted", False
@@ -1374,6 +1411,7 @@ def generate_hybrid_mesh_result(
     cancellation_check: Callable[[str], None] | None = None,
     _native_surface_options: StructuredMeshingOptions | None = None,
     _evaluate_declared_junction_alignment: bool = True,
+    _refine_declared_junction_transition: bool = False,
 ) -> HybridMeshResult:
     """Generate a model-bound mapped/native mesh without rewriting geometry.
 
@@ -1757,6 +1795,9 @@ def generate_hybrid_mesh_result(
             evaluate_declared_junction_alignment=(
                 _evaluate_declared_junction_alignment
             ),
+            refine_declared_junction_transition=(
+                _refine_declared_junction_transition
+            ),
             cancellation_check=cancellation_check,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
@@ -1894,54 +1935,130 @@ def generate_hybrid_mesh_result(
             ):
                 aligned_quality = fallback_quality
                 aligned_strategies = {
-                    str(face_id): values.get("quality_optimization", {}).get(
-                        "selected_strategy"
-                    )
-                    for face_id, values in sorted(
+                    str(working_face_id): working_values.get(
+                        "quality_optimization", {}
+                    ).get("selected_strategy")
+                    for _face_id, values in sorted(
                         fallback.triangulation_backend_by_face.items()
                     )
                     if isinstance(values, Mapping)
+                    for working_face_id, working_values in zip(
+                        values.get("working_face_ids", ()),
+                        values.get("working_face_diagnostics", ()),
+                    )
                 }
-                conservative = generate_hybrid_mesh_result(
-                    source_geometry,
-                    target_size=target_size,
-                    strategy=MeshingStrategy.AUTO,
-                    overrides=overrides,
-                    beam_edges=requested_beam_edges,
-                    beam_offsets=beam_offsets,
-                    member_ids=requested_member_ids,
-                    face_ids=requested_face_ids,
-                    seeding=requested_seeding,
-                    refinements=requested_refinements,
-                    order=order,
-                    recombine=recombine,
-                    native_backend=native_backend,
-                    structured_options=None,
-                    structural_preparation=structural_preparation,
-                    overlap_policy=overlap_policy,
-                    mutation_policy=mutation_policy,
-                    certification_mode=certification_mode,
-                    change_set=change_set,
-                    audit_policy=audit_policy,
-                    cancellation_check=cancellation_check,
-                    _native_surface_options=structured_report.plan.options,
-                    _evaluate_declared_junction_alignment=False,
+                repaired_mesh, repaired_quality, repair_diagnostics = (
+                    _junction_growth_repair(
+                        source_geometry,
+                        fallback.mesh,
+                        aligned_quality,
+                        structured_report.plan.options,
+                    )
                 )
-                conservative_quality = _structured_quality_report(
-                    conservative.mesh,
-                    structured_report.plan.options,
-                )
-                if conservative_quality["accepted"]:
-                    conservative.mesh.hybrid_diagnostics[
-                        "alignment_candidate_rejected"
+                if repaired_mesh is not None:
+                    fallback = replace(fallback, mesh=repaired_mesh)
+                    fallback.mesh.hybrid_diagnostics[
+                        "alignment_candidate_repaired"
                     ] = {
-                        "reason": "whole_mesh_quality_regression",
+                        "reason": "declared_junction_growth_transition",
                         "aligned_selected_strategy_by_face": aligned_strategies,
-                        "aligned_quality": aligned_quality,
-                        "accepted_baseline_quality": conservative_quality,
+                        "initial_quality": aligned_quality,
+                        "accepted_quality": repaired_quality,
+                        "repair": dict(repair_diagnostics),
                     }
-                    fallback = conservative
-                    fallback_quality = conservative_quality
+                    fallback.mesh.hybrid_diagnostics[
+                        "junction_growth_repair"
+                    ] = dict(repair_diagnostics)
+                    fallback_quality = repaired_quality
+                else:
+                    refined = generate_hybrid_mesh_result(
+                        source_geometry,
+                        target_size=target_size,
+                        strategy=MeshingStrategy.AUTO,
+                        overrides=overrides,
+                        beam_edges=requested_beam_edges,
+                        beam_offsets=beam_offsets,
+                        member_ids=requested_member_ids,
+                        face_ids=requested_face_ids,
+                        seeding=requested_seeding,
+                        refinements=requested_refinements,
+                        order=order,
+                        recombine=recombine,
+                        native_backend=native_backend,
+                        structured_options=None,
+                        structural_preparation=structural_preparation,
+                        overlap_policy=overlap_policy,
+                        mutation_policy=mutation_policy,
+                        certification_mode=certification_mode,
+                        change_set=change_set,
+                        audit_policy=audit_policy,
+                        cancellation_check=cancellation_check,
+                        _native_surface_options=structured_report.plan.options,
+                        _refine_declared_junction_transition=True,
+                    )
+                    refined_quality = _structured_quality_report(
+                        refined.mesh,
+                        structured_report.plan.options,
+                    )
+                    if refined_quality["accepted"]:
+                        refined.mesh.hybrid_diagnostics[
+                            "alignment_candidate_repaired"
+                        ] = {
+                            "reason": "local_collar_transition_refinement",
+                            "aligned_selected_strategy_by_face": aligned_strategies,
+                            "initial_quality": aligned_quality,
+                            "accepted_quality": refined_quality,
+                        }
+                        fallback = refined
+                        fallback_quality = refined_quality
+                    else:
+                        conservative = generate_hybrid_mesh_result(
+                            source_geometry,
+                            target_size=target_size,
+                            strategy=MeshingStrategy.AUTO,
+                            overrides=overrides,
+                            beam_edges=requested_beam_edges,
+                            beam_offsets=beam_offsets,
+                            member_ids=requested_member_ids,
+                            face_ids=requested_face_ids,
+                            seeding=requested_seeding,
+                            refinements=requested_refinements,
+                            order=order,
+                            recombine=recombine,
+                            native_backend=native_backend,
+                            structured_options=None,
+                            structural_preparation=structural_preparation,
+                            overlap_policy=overlap_policy,
+                            mutation_policy=mutation_policy,
+                            certification_mode=certification_mode,
+                            change_set=change_set,
+                            audit_policy=audit_policy,
+                            cancellation_check=cancellation_check,
+                            _native_surface_options=structured_report.plan.options,
+                            _evaluate_declared_junction_alignment=False,
+                        )
+                        conservative_quality = _structured_quality_report(
+                            conservative.mesh,
+                            structured_report.plan.options,
+                        )
+                        if conservative_quality["accepted"]:
+                            conservative.mesh.hybrid_diagnostics[
+                                "alignment_candidate_rejected"
+                            ] = {
+                                "reason": "whole_mesh_quality_regression",
+                                "aligned_selected_strategy_by_face": (
+                                    aligned_strategies
+                                ),
+                                "aligned_quality": aligned_quality,
+                                "refined_aligned_quality": refined_quality,
+                                "accepted_baseline_quality": conservative_quality,
+                                "comparison": _quality_rejection_details(
+                                    refined_quality, conservative_quality
+                                ),
+                                "repair": dict(repair_diagnostics),
+                            }
+                            fallback = conservative
+                            fallback_quality = conservative_quality
             if not fallback_quality["accepted"]:
                 repaired_mesh, repaired_quality, repair_diagnostics = (
                     _junction_growth_repair(
@@ -2050,6 +2167,7 @@ def generate_hybrid_mesh_result(
         structural_preparation=preparation_report,
     )
     mesh.hybrid_diagnostics = {
+        "requested_target_size": target_size,
         "complex_geometry": {
             "strategy_ladder": [
                 "mapped_or_structured",
