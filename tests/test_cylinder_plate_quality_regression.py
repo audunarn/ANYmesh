@@ -139,3 +139,29 @@ def test_automatic_fine_cylinder_plate_evaluates_component_alignment_safely(
         report["final_quality"]["invalid_element_count"] == 0
         for report in junction_reports
     )
+
+
+def test_qualified_s3_accepts_declared_cylinder_plate_four_way_junctions() -> None:
+    mesh = generate_hybrid_mesh(
+        _cylinder_through_plate(),
+        target_size=0.25,
+        strategy="auto",
+        beam_edges=(),
+        member_ids=(),
+        structured_options={"quality_policy": _POLICY},
+        structural_preparation=True,
+        native_backend="python",
+        qualified_s3=True,
+    )
+
+    assert mesh.quads
+    assert mesh.tris
+    record = mesh.structural_preparation["qualified_s3"]
+    qualified = {
+        tuple(int(value) for value in edge)
+        for edge in record["admission"]["qualified_junction_edges"]
+    }
+    assert record["status"] == "ADMITTED"
+    assert record["admission"]["topology_violations"] == []
+    assert len(qualified) == 6
+    assert qualified.issubset(set(mesh.declared_plate_junction_edges))

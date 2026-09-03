@@ -301,6 +301,10 @@ def prepare_qualified_s3_mesh(
     record = {
         "admission": {
             "elements": [_quality_record(item) for item in final_admission.elements],
+            "qualified_junction_edges": [
+                [int(first), int(second)]
+                for first, second in final_admission.qualified_junction_edges
+            ],
             "topology_violations": list(final_admission.topology_violations),
         },
         "authority_model": {

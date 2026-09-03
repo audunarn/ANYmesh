@@ -104,6 +104,7 @@ class S3ElementQuality:
 class S3AdmissionReport:
     elements: tuple[S3ElementQuality, ...]
     topology_violations: tuple[str, ...] = ()
+    qualified_junction_edges: tuple[tuple[int, int], ...] = ()
 
     @property
     def admitted(self) -> bool:
@@ -143,7 +144,7 @@ def _angles(corners: np.ndarray) -> np.ndarray:
 
 def _directed_edge_violations(
     mesh: Mesh, selected_triangles: frozenset[int]
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[tuple[int, int], ...]]:
     incidence: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
     for element_id, connectivity in sorted(mesh.shells.items()):
         corners = mesh.corners_of(element_id)
@@ -154,19 +155,62 @@ def _directed_edge_violations(
             incidence.setdefault(key, []).append((int(element_id), start, end))
 
     violations: list[str] = []
+    qualified_junction_edges: list[tuple[int, int]] = []
+    declared_junction_edges = {
+        tuple(sorted((int(first), int(second))))
+        for first, second in mesh.declared_plate_junction_edges
+    }
+    sheet_owners: dict[int, tuple[int, ...]] = {
+        element_id: tuple(
+            sorted(
+                int(sheet_id)
+                for sheet_id, element_ids in mesh.elements_of_sheet.items()
+                if element_id in element_ids
+            )
+        )
+        for element_id in mesh.shells
+    }
     for edge, attached in sorted(incidence.items()):
         if not any(item[0] in selected_triangles for item in attached):
             continue
         if len(attached) > 2:
             ids = tuple(item[0] for item in attached)
-            violations.append(f"edge {edge} is non-manifold; owners={ids}")
+            owners = tuple(sheet_owners[element_id] for element_id in ids)
+            by_sheet: dict[int, list[tuple[int, int, int]]] = {}
+            owner_authority_complete = all(len(values) == 1 for values in owners)
+            if owner_authority_complete:
+                for item, values in zip(attached, owners, strict=True):
+                    by_sheet.setdefault(values[0], []).append(item)
+            balanced_two_sheet_junction = (
+                edge in declared_junction_edges
+                and len(attached) == 4
+                and len(by_sheet) == 2
+                and all(
+                    len(values) == 2
+                    and values[0][1:] == values[1][1:][::-1]
+                    for values in by_sheet.values()
+                )
+            )
+            if balanced_two_sheet_junction:
+                qualified_junction_edges.append(edge)
+                continue
+            qualifier = (
+                "declared junction is not an exact balanced two-sheet/four-element "
+                "junction"
+                if edge in declared_junction_edges
+                else "junction is not explicitly declared"
+            )
+            violations.append(
+                f"edge {edge} is non-manifold; owners={ids}; "
+                f"sheet_owners={owners}; {qualifier}"
+            )
         elif len(attached) == 2:
             first, second = attached
             if first[1:] == second[1:]:
                 violations.append(
                     f"edge {edge} has equal traversal in elements {first[0]} and {second[0]}"
                 )
-    return tuple(violations)
+    return tuple(violations), tuple(qualified_junction_edges)
 
 
 def evaluate_s3_admission(
@@ -329,10 +373,15 @@ def evaluate_s3_admission(
             )
         )
 
-    topology_violations.extend(
-        _directed_edge_violations(mesh, frozenset(selected))
+    directed_violations, qualified_junction_edges = _directed_edge_violations(
+        mesh, frozenset(selected)
     )
-    return S3AdmissionReport(tuple(records), tuple(topology_violations))
+    topology_violations.extend(directed_violations)
+    return S3AdmissionReport(
+        tuple(records),
+        tuple(topology_violations),
+        qualified_junction_edges,
+    )
 
 
 def assert_s3_admissible(

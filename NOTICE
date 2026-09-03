@@ -1,0 +1,14 @@
+ANYmesher
+Copyright (c) Audun Nyhus
+
+This Source Code Form is subject to the terms of the Mozilla Public License,
+v. 2.0. If a copy of the MPL was not distributed with this file, You can
+obtain one at https://mozilla.org/MPL/2.0/.
+
+Starting with version 0.4.0, project-owned ANYmesher source code is distributed
+under MPL-2.0. Earlier published versions remain available under the license
+terms that applied to those versions. No Git history or historical release is
+relicensed by this notice.
+
+Third-party software and optional tools retain their own license terms. See
+THIRD_PARTY_NOTICES.md.

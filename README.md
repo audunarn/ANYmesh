@@ -6,9 +6,8 @@ refinement, a built-in mapped (transfinite Coons) mesher, mapped-face
 decomposition, optional Gmsh meshing, geometry-to-mesh associations, quality
 metrics, a tkinter mesher and a command-line interface.
 
-After the first package-index release, install with
-`python -m pip install ANYmesher`. Until then, use the editable development
-setup below.
+Install the released package with `python -m pip install ANYmesher`. For local
+development, use the editable setup below.
 
 The repository is `ANYmesh`, but `anymesh` was already taken on PyPI, so the
 distribution is **`ANYmesher`** and the import package is **`anymesher`**.
@@ -244,6 +243,17 @@ or `.inp` file belongs to [ANYfileio](https://github.com/audunarn/ANYfileIO), wh
 depends on this package — so the arrow cannot point back. The JSON in
 `anymesher.serialize` is the mesh container written out as itself, not an
 interchange format.
+
+## License
+
+Starting with version 0.4.0, ANYmesher source code is licensed under the
+Mozilla Public License 2.0. See `LICENSE` for the full terms and `NOTICE` for
+the prospective relicensing statement. Earlier published versions remain
+available under the license terms that applied to those versions.
+
+Original project documentation under `docs/` is licensed under Creative
+Commons Attribution 4.0 as described in `docs/LICENSE.md`. Dependency and
+optional-tool licenses are recorded in `THIRD_PARTY_NOTICES.md`.
 
 ## Units
 

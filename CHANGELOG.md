@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-03
+
+- Change the project license prospectively to the Mozilla Public License 2.0.
+  Earlier published versions retain their historical license terms.
+- Declare original project documentation under Creative Commons Attribution
+  4.0 and add an explicit third-party dependency notice inventory.
+- Add release-time assertions for the MPL SPDX expression and required license
+  and notice files in source and binary distributions.
+
 - Bind qualified triangle admission and deterministic bounded repair to the
   accepted S3 V2D formulation identity for the coordinated 0.3.2 activation
   candidate. Failed admission remains a typed failure with no legacy fallback.

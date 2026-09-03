@@ -145,6 +145,38 @@ def test_directed_shared_edge_must_have_opposite_traversal() -> None:
     )
 
 
+def test_declared_balanced_four_way_two_sheet_junction_is_qualified() -> None:
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((0.0, 1.0, 0.0)),
+            4: np.asarray((1.0, -1.0, 0.0)),
+            5: np.asarray((0.0, 0.0, 1.0)),
+            6: np.asarray((1.0, 0.0, -1.0)),
+            7: np.asarray((1.0, 0.0, 1.0)),
+            8: np.asarray((0.0, 0.0, -1.0)),
+        },
+        tris={10: (1, 2, 3), 20: (2, 1, 4)},
+        quads={30: (1, 2, 7, 5), 40: (2, 1, 8, 6)},
+        elements_of_sheet={101: [10, 20], 202: [30, 40]},
+        declared_plate_junction_edges=((1, 2),),
+    )
+    normals = {10: (0.0, 0.0, 1.0), 20: (0.0, 0.0, 1.0)}
+
+    report = evaluate_s3_admission(mesh, element_owner_normals=normals)
+
+    assert report.admitted
+    assert report.topology_violations == ()
+    assert report.qualified_junction_edges == ((1, 2),)
+
+    mesh.declared_plate_junction_edges = ()
+    rejected = evaluate_s3_admission(mesh, element_owner_normals=normals)
+    assert not rejected.admitted
+    assert rejected.qualified_junction_edges == ()
+    assert "junction is not explicitly declared" in rejected.topology_violations[0]
+
+
 def test_mixed_nodal_normals_include_triangles_and_follow_owner_normal() -> None:
     mesh = Mesh(
         nodes={

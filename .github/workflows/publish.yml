@@ -51,7 +51,7 @@ jobs:
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
-            --expect-version 0.3.2 --require-native
+            --expect-version 0.4.0 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4
@@ -83,6 +83,7 @@ jobs:
           import io
           import json
           import os
+          import tarfile
           import zipfile
           from pathlib import Path
 
@@ -90,10 +91,10 @@ jobs:
           from packaging.utils import canonicalize_name
 
           root = Path("dist")
-          sdist = root / "anymesher-0.3.2.tar.gz"
-          wheels = sorted(root.glob("anymesher-0.3.2-*.whl"))
+          sdist = root / "anymesher-0.4.0.tar.gz"
+          wheels = sorted(root.glob("anymesher-0.4.0-*.whl"))
           if not sdist.is_file():
-              raise SystemExit("missing exact ANYmesher 0.3.2 sdist")
+              raise SystemExit("missing exact ANYmesher 0.4.0 sdist")
           if len(wheels) != 12:
               raise SystemExit(f"expected 12 wheels, found {len(wheels)}")
 
@@ -121,6 +122,22 @@ jobs:
               ("numpy", ">=1.26", ()),
               ("anygeometry", "<0.5,>=0.4", ("planar",)),
           }
+          expected_license_files = {
+              "LICENSE",
+              "NOTICE",
+              "THIRD_PARTY_NOTICES.md",
+              "docs/LICENSE.md",
+          }
+          with tarfile.open(sdist, "r:gz") as archive:
+              prefix = "anymesher-0.4.0/"
+              members = set(archive.getnames())
+              missing = sorted(
+                  prefix + name
+                  for name in expected_license_files
+                  if prefix + name not in members
+              )
+              if missing:
+                  raise SystemExit(f"sdist missing license files: {missing}")
           for wheel in wheels:
               with zipfile.ZipFile(wheel) as archive:
                   names = archive.namelist()
@@ -157,8 +174,21 @@ jobs:
                       name for name in names if name.endswith(".dist-info/METADATA")
                   ]
                   metadata = email.message_from_bytes(archive.read(metadata_name))
-                  if metadata["Name"] != "ANYmesher" or metadata["Version"] != "0.3.2":
+                  if metadata["Name"] != "ANYmesher" or metadata["Version"] != "0.4.0":
                       raise SystemExit(f"metadata identity mismatch in {wheel.name}")
+                  if metadata["License-Expression"] != "MPL-2.0":
+                      raise SystemExit(f"license expression mismatch in {wheel.name}")
+                  marker = ".dist-info/licenses/"
+                  packaged_licenses = {
+                      name.split(marker, 1)[1]
+                      for name in names
+                      if marker in name and not name.endswith("/")
+                  }
+                  if packaged_licenses != expected_license_files:
+                      raise SystemExit(
+                          f"license file set mismatch in {wheel.name}: "
+                          f"{sorted(packaged_licenses)}"
+                      )
                   base_requirements = set()
                   for raw in metadata.get_all("Requires-Dist", []):
                       requirement = Requirement(raw)
@@ -217,17 +247,17 @@ jobs:
                   }
               )
           records.sort(key=lambda row: row["filename"])
-          (root / "ANYmesher-0.3.2-SHA256SUMS.txt").write_text(
+          (root / "ANYmesher-0.4.0-SHA256SUMS.txt").write_text(
               "".join(f"{row['sha256']}  {row['filename']}\n" for row in records),
               encoding="ascii",
               newline="\n",
           )
-          (root / "ANYmesher-0.3.2-release-manifest.json").write_text(
+          (root / "ANYmesher-0.4.0-release-manifest.json").write_text(
               json.dumps(
                   {
                       "schema": "anymesher.release-artifacts/1",
                       "distribution": "ANYmesher",
-                      "version": "0.3.2",
+                      "version": "0.4.0",
                       "commit": os.environ["GITHUB_SHA"],
                       "upload_file_count": len(records),
                       "files": records,
@@ -243,11 +273,11 @@ jobs:
       - run: python -m twine check --strict dist/*.whl dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: ANYmesher-0.3.2-release-bundle
+          name: ANYmesher-0.4.0-release-bundle
           path: dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: ANYmesher-0.3.2-pypi-distributions
+          name: ANYmesher-0.4.0-pypi-distributions
           path: |
             dist/*.whl
             dist/*.tar.gz
@@ -263,6 +293,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: ANYmesher-0.3.2-pypi-distributions
+          name: ANYmesher-0.4.0-pypi-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1

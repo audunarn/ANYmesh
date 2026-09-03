@@ -1817,6 +1817,16 @@ def generate_hybrid_mesh_result(
         }
         mesh.elements_of_sheet[int(sheet_id)] = sorted(element_ids)
 
+    # Qualified-S3 topology admission needs the same explicit junction authority
+    # as the later whole-mesh quality gate.  Publish it before S3 preparation;
+    # the post-remap assignment below remains the final canonicalization step.
+    if preparation_report is not None:
+        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
+            mesh,
+            preparation_report,
+            prepared_to_final_edges,
+        )
+
     qualified_s3_record: dict[str, Any] | None = None
     if qualified_s3:
         qualified_s3_started = perf_counter()
