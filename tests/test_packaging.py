@@ -134,7 +134,7 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "069f22f3682ab97c89eb7824d53010c0b60dd575"
+    geometry_ref = "dd954f088a4cb95e267280cc4777b09e16232bd9"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
