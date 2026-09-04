@@ -129,6 +129,33 @@ def test_clone_only_mode_preserves_vertex_bound_refinement() -> None:
     assert to_dict(geometry) == before
 
 
+def test_prepared_working_copy_can_skip_the_second_clone(monkeypatch) -> None:
+    geometry = GeometryModel()
+    face = geometry.add_plate(
+        geometry.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)))
+    )
+    geometry.add_sheet((face,))
+    before = to_dict(geometry)
+
+    def unexpected_clone(*_args, **_kwargs):
+        raise AssertionError("an explicit prepared working copy was cloned")
+
+    monkeypatch.setattr(GeometryModel, "clone", unexpected_clone)
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.5,
+        strategy="mapped",
+        structural_preparation=False,
+        mutation_policy="working_copy",
+    )
+
+    assert result.mesh.elements_of_face[face]
+    assert result.structural_preparation is not None
+    assert result.structural_preparation.applications == 0
+    assert result.mesh.hybrid_diagnostics["reused_prepared_working_copy"] is True
+    assert to_dict(geometry) == before
+
+
 def test_default_coplanar_stiffener_connects_and_retains_eccentricity() -> None:
     geometry = GeometryModel()
     face = geometry.add_plate(

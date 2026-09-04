@@ -672,12 +672,14 @@ def prepare_structural_closure(
     beam_edges: Iterable[int] = (),
     options: StructuralPreparationOptions | Mapping[str, Any] | bool | None = None,
     cancellation_check: CancellationCheck | None = None,
+    reuse_working_copy: bool = False,
 ) -> tuple[GeometryModel, StructuralPreparationReport | None]:
     """Return an exact, source-bound structural working closure.
 
-    ``False`` disables automatic relationship creation but still returns a
-    detached clone.  Every path therefore gives the mesh job an immutable
-    working document and is resource bounded.
+    ``False`` disables automatic relationship creation. By default every path
+    returns a detached clone. ``reuse_working_copy`` is reserved for callers
+    that already own an isolated mesh-job closure and explicitly permit owner
+    finalization on that closure.
     """
 
     policy = StructuralPreparationOptions.create(options)
@@ -733,7 +735,11 @@ def prepare_structural_closure(
             f"({detail}); run the previewable Fragment Overlaps geometry command"
         )
 
-    working = geometry.clone(include_features=False)
+    working = (
+        geometry
+        if reuse_working_copy
+        else geometry.clone(include_features=False)
+    )
     temporary_sheets: list[int] = []
     temporary_members: list[int] = []
     diagnostics: list[str] = []

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
-from math import fsum
+from math import floor, fsum, hypot
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -28,6 +28,9 @@ __all__ = [
 ]
 
 
+_FLOAT_EPSILON = np.finfo(np.float64).eps
+
+
 def _decimal(value: float) -> Decimal:
     return Decimal.from_float(float(value))
 
@@ -40,7 +43,7 @@ def orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[fl
     bx = float(second[0]) - float(third[0])
     by = float(second[1]) - float(third[1])
     determinant = ax * by - ay * bx
-    error = 8.0 * np.finfo(float).eps * (abs(ax * by) + abs(ay * bx))
+    error = 8.0 * _FLOAT_EPSILON * (abs(ax * by) + abs(ay * bx))
     if abs(determinant) > error:
         return determinant
     with localcontext() as context:
@@ -77,7 +80,7 @@ def incircle(
         + abs(blift * (ax * cy - ay * cx))
         + abs(clift * (ax * by - ay * bx))
     )
-    if abs(determinant) <= 32.0 * np.finfo(float).eps * scale:
+    if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale:
         with localcontext() as context:
             context.prec = 80
             point_x, point_y = _decimal(point[0]), _decimal(point[1])
@@ -110,11 +113,19 @@ def _ring_area(points: np.ndarray, ring: Sequence[int]) -> float:
 
 
 def _point_on_segment(point: np.ndarray, first: np.ndarray, second: np.ndarray, tolerance: float) -> bool:
-    if abs(orient2d(first, second, point)) > tolerance * max(1.0, np.linalg.norm(second - first)):
+    first_x, first_y = float(first[0]), float(first[1])
+    second_x, second_y = float(second[0]), float(second[1])
+    point_x, point_y = float(point[0]), float(point[1])
+    length = hypot(second_x - first_x, second_y - first_y)
+    if abs(orient2d(first, second, point)) > tolerance * max(1.0, length):
         return False
-    return bool(
-        np.all(point >= np.minimum(first, second) - tolerance)
-        and np.all(point <= np.maximum(first, second) + tolerance)
+    return (
+        min(first_x, second_x) - tolerance
+        <= point_x
+        <= max(first_x, second_x) + tolerance
+        and min(first_y, second_y) - tolerance
+        <= point_y
+        <= max(first_y, second_y) + tolerance
     )
 
 
@@ -192,16 +203,37 @@ def _deduplicate(
     constraints: Sequence[Sequence[int]],
     tolerance: float,
 ) -> tuple[np.ndarray, list[int], list[list[int]], list[tuple[int, int]]]:
+    # A linear scan of every prior unique point made PSLG preparation
+    # quadratic before the triangulator even started. Tolerance-sized buckets
+    # preserve the same earliest-match semantics: any point within tolerance
+    # must be in its own or one of the eight neighbouring cells.
     unique: list[np.ndarray] = []
+    buckets: dict[tuple[int, int], list[int]] = {}
     remap = np.empty(len(points), dtype=np.int64)
+    tolerance_squared = tolerance * tolerance
     for index, point in enumerate(points):
-        match = next(
-            (row for row, candidate in enumerate(unique) if np.linalg.norm(point - candidate) <= tolerance),
-            -1,
+        cell = (
+            floor(float(point[0]) / tolerance),
+            floor(float(point[1]) / tolerance),
         )
+        match = -1
+        for x_offset in (-1, 0, 1):
+            for y_offset in (-1, 0, 1):
+                for row in buckets.get(
+                    (cell[0] + x_offset, cell[1] + y_offset), ()
+                ):
+                    delta_x = float(point[0]) - float(unique[row][0])
+                    delta_y = float(point[1]) - float(unique[row][1])
+                    if (
+                        delta_x * delta_x + delta_y * delta_y
+                        <= tolerance_squared
+                        and (match < 0 or row < match)
+                    ):
+                        match = row
         if match < 0:
             unique.append(np.array(point, copy=True))
             match = len(unique) - 1
+            buckets.setdefault(cell, []).append(match)
         remap[index] = match
     mapped_outer = _normal_ring([int(remap[index]) for index in outer], len(unique), "outer loop")
     mapped_holes = [
@@ -226,15 +258,63 @@ def _ring_segments(ring: Sequence[int]) -> list[tuple[int, int]]:
     return [(int(ring[index]), int(ring[(index + 1) % len(ring)])) for index in range(len(ring))]
 
 
+def _segment_candidate_pairs(
+    points: np.ndarray,
+    segments: Sequence[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Return deterministic AABB candidates without an all-pairs scan."""
+
+    if len(segments) < 2:
+        return []
+    minimum = np.min(points, axis=0)
+    extent = max(float(np.ptp(points[:, 0])), float(np.ptp(points[:, 1])))
+    bucket_count = max(1, int(len(segments) ** 0.5))
+    cell_size = extent / bucket_count if extent > 0.0 else 1.0
+    boxes: list[tuple[float, float, float, float]] = []
+    buckets: dict[tuple[int, int], list[int]] = {}
+    candidates: set[tuple[int, int]] = set()
+
+    for index, (first, second) in enumerate(segments):
+        first_point, second_point = points[first], points[second]
+        min_x = min(float(first_point[0]), float(second_point[0]))
+        max_x = max(float(first_point[0]), float(second_point[0]))
+        min_y = min(float(first_point[1]), float(second_point[1]))
+        max_y = max(float(first_point[1]), float(second_point[1]))
+        box = (min_x, max_x, min_y, max_y)
+        boxes.append(box)
+        first_x = floor((min_x - float(minimum[0])) / cell_size)
+        last_x = floor((max_x - float(minimum[0])) / cell_size)
+        first_y = floor((min_y - float(minimum[1])) / cell_size)
+        last_y = floor((max_y - float(minimum[1])) / cell_size)
+        cells = [
+            (x_cell, y_cell)
+            for x_cell in range(first_x, last_x + 1)
+            for y_cell in range(first_y, last_y + 1)
+        ]
+        for cell in cells:
+            candidates.update((prior, index) for prior in buckets.get(cell, ()))
+        for cell in cells:
+            buckets.setdefault(cell, []).append(index)
+
+    return [
+        (first, second)
+        for first, second in sorted(candidates)
+        if boxes[first][0] <= boxes[second][1]
+        and boxes[second][0] <= boxes[first][1]
+        and boxes[first][2] <= boxes[second][3]
+        and boxes[second][2] <= boxes[first][3]
+    ]
+
+
 def _validate_ring(points: np.ndarray, ring: Sequence[int], name: str) -> None:
     segments = _ring_segments(ring)
-    for first_index, (a, b) in enumerate(segments):
-        for second_index in range(first_index + 1, len(segments)):
-            c, d = segments[second_index]
-            if len({a, b, c, d}) < 4:
-                continue
-            if _proper_intersection(points[a], points[b], points[c], points[d]):
-                raise MeshError(f"{name} is self-intersecting")
+    for first_index, second_index in _segment_candidate_pairs(points, segments):
+        a, b = segments[first_index]
+        c, d = segments[second_index]
+        if len({a, b, c, d}) < 4:
+            continue
+        if _proper_intersection(points[a], points[b], points[c], points[d]):
+            raise MeshError(f"{name} is self-intersecting")
 
 
 @dataclass(frozen=True)
@@ -295,21 +375,23 @@ def _prepare_pslg(
     # explicit vertex before Delaunay construction; crossings with a domain
     # boundary are invalid rather than silently clipping the constraint.
     mutable_points = [np.array(point, copy=True) for point in points]
-    for first_index, (a, b, first_kind) in enumerate(records):
-        for c, d, second_kind in records[first_index + 1:]:
-            if len({a, b, c, d}) < 4:
-                continue
-            if not _proper_intersection(
-                mutable_points[a], mutable_points[b], mutable_points[c], mutable_points[d]
-            ):
-                continue
-            if first_kind == "boundary" or second_kind == "boundary":
-                raise MeshError("a mandatory constraint crosses the domain boundary")
-            _, crossing = _intersection(
-                mutable_points[a], mutable_points[b], mutable_points[c], mutable_points[d]
-            )
-            if not any(np.linalg.norm(crossing - candidate) <= epsilon for candidate in mutable_points):
-                mutable_points.append(crossing)
+    segment_rows = [(first, second) for first, second, _kind in records]
+    for first_index, second_index in _segment_candidate_pairs(points, segment_rows):
+        a, b, first_kind = records[first_index]
+        c, d, second_kind = records[second_index]
+        if len({a, b, c, d}) < 4:
+            continue
+        if not _proper_intersection(
+            mutable_points[a], mutable_points[b], mutable_points[c], mutable_points[d]
+        ):
+            continue
+        if first_kind == "boundary" or second_kind == "boundary":
+            raise MeshError("a mandatory constraint crosses the domain boundary")
+        _, crossing = _intersection(
+            mutable_points[a], mutable_points[b], mutable_points[c], mutable_points[d]
+        )
+        if not any(np.linalg.norm(crossing - candidate) <= epsilon for candidate in mutable_points):
+            mutable_points.append(crossing)
     points = np.asarray(mutable_points, dtype=np.float64)
 
     compiled_memberships = None

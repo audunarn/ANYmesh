@@ -1415,10 +1415,13 @@ def generate_hybrid_mesh_result(
     _evaluate_declared_junction_alignment: bool = True,
     _refine_declared_junction_transition: bool = False,
 ) -> HybridMeshResult:
-    """Generate a model-bound mapped/native mesh without rewriting geometry.
+    """Generate a model-bound mapped/native mesh from an explicit ownership policy.
 
     ``cancellation_check`` receives diagnostic safe-phase names. Cancellation is
     cooperative, so its latency is bounded by the current uninterrupted phase.
+    The default read-only policy protects editable source geometry.  A caller
+    selecting ``working_copy`` declares that the supplied model is already an
+    isolated mesh-job closure and may be finalized in place.
     """
 
     phase_seconds: dict[str, float] = {}
@@ -1479,12 +1482,16 @@ def generate_hybrid_mesh_result(
         raise MeshError(f"structural meshing preflight blocked generation: {detail}")
 
     preparation_started = perf_counter()
+    reuse_prepared_working_copy = (
+        mutation_policy is GeometryMutationPolicy.WORKING_COPY
+    )
     geometry, preparation_report = prepare_structural_closure(
         source_geometry,
         face_ids=source_faces,
         beam_edges=source_beams,
         options=structural_preparation,
         cancellation_check=cancellation_check,
+        reuse_working_copy=reuse_prepared_working_copy,
     )
     phase_seconds["structural_preparation"] = perf_counter() - preparation_started
     if preparation_report is None:
@@ -2265,6 +2272,8 @@ def generate_hybrid_mesh_result(
                 "status": qualified_s3_record["status"],
             }
         ),
+        "reused_prepared_working_copy": reuse_prepared_working_copy,
+        "phase_seconds": dict(phase_seconds),
         "completed_phases": sorted(phase_seconds),
     }
     mesh.boundary_registry = boundary_registry

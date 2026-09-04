@@ -52,7 +52,13 @@ class OverlapPolicy(StrEnum):
 
 
 class GeometryMutationPolicy(StrEnum):
-    """Permission for topology preparation; source geometry is never mutated."""
+    """Ownership contract for geometry supplied to one mesh generation.
+
+    ``READ_ONLY`` preserves an editable source by preparing on a clone.
+    ``WORKING_COPY`` declares that the caller already owns an isolated mesh-job
+    copy. That copy can be consumed and structurally finalized directly without
+    another full topology clone.
+    """
 
     READ_ONLY = "read_only"
     WORKING_COPY = "working_copy"
