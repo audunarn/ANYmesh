@@ -6,6 +6,7 @@ import pytest
 
 from anygeometry.generators.structural import cylinder
 from anymesher.hybrid import generate_hybrid_mesh
+from anymesher.preparation import prepare_structural_closure
 
 
 _POLICY = {
@@ -165,3 +166,39 @@ def test_qualified_s3_accepts_declared_cylinder_plate_four_way_junctions() -> No
     assert record["admission"]["topology_violations"] == []
     assert len(qualified) == 6
     assert qualified.issubset(set(mesh.declared_plate_junction_edges))
+
+
+def test_qualified_s3_is_applied_after_rejected_layout_fallback() -> None:
+    geometry = _cylinder_through_plate()
+    plate = max(geometry.faces)
+    geometry.add_sheet((plate,), name="deck")
+    working, preparation = prepare_structural_closure(
+        geometry,
+        face_ids=tuple(geometry.faces),
+        beam_edges=(),
+        options=True,
+    )
+
+    assert preparation is not None
+    mesh = generate_hybrid_mesh(
+        working,
+        target_size=0.25,
+        strategy="auto",
+        beam_edges=(),
+        member_ids=(),
+        face_ids=tuple(working.faces),
+        structured_options={"quality_policy": _POLICY},
+        structural_preparation={
+            "automatic_face_connections": False,
+            "automatic_member_connections": False,
+            "automatic_member_sheet_connections": False,
+            "declare_missing_owners": True,
+        },
+        mutation_policy="working_copy",
+        native_backend="python",
+        qualified_s3=True,
+    )
+
+    assert mesh.hybrid_diagnostics["structured_layout_status"] == "rejected_fallback"
+    assert mesh.structural_preparation["qualified_s3"]["status"] == "ADMITTED"
+    assert len(mesh.declared_plate_junction_edges) == 12

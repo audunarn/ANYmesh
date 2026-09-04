@@ -127,10 +127,108 @@ class S3RepairError(S3QualityError):
         *,
         attempts: Sequence[S3RepairAttempt],
         admission: S3AdmissionReport | None = None,
+        quality_policy: S3QualityPolicy | None = None,
     ) -> None:
         super().__init__(message)
         self.attempts = tuple(attempts)
         self.admission = admission
+        self.quality_policy = quality_policy
+
+    def to_diagnostic(self) -> dict[str, object]:
+        """Return bounded, JSON-safe evidence for application diagnostics."""
+
+        attempts = self.attempts
+        sampled_attempts = (
+            attempts
+            if len(attempts) <= 30
+            else (*attempts[:10], *attempts[-20:])
+        )
+        admission = self.admission
+        failing = (
+            ()
+            if admission is None
+            else tuple(item for item in admission.elements if not item.admitted)
+        )
+        sampled_failing = failing[:50]
+        policy = self.quality_policy
+        return {
+            "schema": "anymesher.s3-repair-error-diagnostic-v1",
+            "contract_id": S3_REPAIR_CONTRACT_ID,
+            "message": str(self),
+            "quality_policy": (
+                None
+                if policy is None
+                else {
+                    "minimum_angle_deg": float(policy.minimum_angle_deg),
+                    "maximum_angle_deg": float(policy.maximum_angle_deg),
+                    "maximum_edge_ratio": float(policy.maximum_edge_ratio),
+                    "minimum_scaled_jacobian": float(
+                        policy.minimum_scaled_jacobian
+                    ),
+                    "minimum_normalized_area": float(
+                        policy.minimum_normalized_area
+                    ),
+                    "minimum_signed_area_ratio": float(
+                        policy.minimum_signed_area_ratio
+                    ),
+                    "minimum_owner_normal_alignment": float(
+                        policy.minimum_owner_normal_alignment
+                    ),
+                    "require_authoritative_normals": bool(
+                        policy.require_authoritative_normals
+                    ),
+                }
+            ),
+            "admission": (
+                None
+                if admission is None
+                else {
+                    "element_count": len(admission.elements),
+                    "failing_element_count": len(failing),
+                    "omitted_failing_element_count": max(
+                        0, len(failing) - len(sampled_failing)
+                    ),
+                    "topology_violations": list(admission.topology_violations),
+                    "qualified_junction_edge_count": len(
+                        admission.qualified_junction_edges
+                    ),
+                    "failing_elements": [
+                        {
+                            "element_id": int(item.element_id),
+                            "minimum_angle_deg": float(item.minimum_angle_deg),
+                            "maximum_angle_deg": float(item.maximum_angle_deg),
+                            "edge_ratio": float(item.edge_ratio),
+                            "minimum_scaled_jacobian": float(
+                                item.minimum_scaled_jacobian
+                            ),
+                            "normalized_area": float(item.normalized_area),
+                            "owner_normal_alignment": float(
+                                item.owner_normal_alignment
+                            ),
+                            "violations": list(item.violations),
+                        }
+                        for item in sampled_failing
+                    ],
+                }
+            ),
+            "repair": {
+                "attempt_count": len(attempts),
+                "omitted_attempt_count": max(
+                    0, len(attempts) - len(sampled_attempts)
+                ),
+                "attempts": [
+                    {
+                        "sequence": int(item.sequence),
+                        "action": str(item.action),
+                        "status": str(item.status),
+                        "element_ids": list(item.element_ids),
+                        "edge": list(item.edge),
+                        "detail": str(item.detail),
+                    }
+                    for item in sampled_attempts
+                ],
+            },
+        }
 
 
 def _unit_owner(value: Sequence[float], element_id: int) -> np.ndarray:
@@ -755,6 +853,7 @@ def repair_s3_admission(
             "bounded qualified-S3 repair did not satisfy the admission contract",
             attempts=attempts,
             admission=report,
+            quality_policy=quality_policy,
         )
 
     _record(

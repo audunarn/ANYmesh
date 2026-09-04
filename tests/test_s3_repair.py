@@ -163,6 +163,11 @@ def test_flip_limit_never_returns_a_legacy_or_partial_mesh() -> None:
     )
     assert caught.value.attempts[-1].action == "adjudication"
     assert caught.value.attempts[-1].status == "rejected"
+    diagnostic = caught.value.to_diagnostic()
+    assert diagnostic["schema"] == "anymesher.s3-repair-error-diagnostic-v1"
+    assert diagnostic["admission"]["failing_element_count"] == 2
+    assert diagnostic["repair"]["attempt_count"] == len(caught.value.attempts)
+    assert diagnostic["quality_policy"]["minimum_angle_deg"] == 30.0
 
 
 def test_candidate_attempt_limits_bound_rejected_work() -> None:

@@ -181,22 +181,30 @@ def _directed_edge_violations(
             if owner_authority_complete:
                 for item, values in zip(attached, owners, strict=True):
                     by_sheet.setdefault(values[0], []).append(item)
-            balanced_two_sheet_junction = (
+            # A structural junction is not limited to an X-junction between
+            # two continuous sheets.  A T-junction has two opposite shell
+            # traversals from the host sheet and one boundary traversal from
+            # the branch sheet; several branches may meet the same declared
+            # line.  Exact sheet ownership plus at most two opposite
+            # traversals per sheet is the topology authority we need.
+            exact_declared_junction = (
                 edge in declared_junction_edges
-                and len(attached) == 4
-                and len(by_sheet) == 2
+                and len(by_sheet) >= 2
                 and all(
-                    len(values) == 2
-                    and values[0][1:] == values[1][1:][::-1]
+                    len(values) == 1
+                    or (
+                        len(values) == 2
+                        and values[0][1:] == values[1][1:][::-1]
+                    )
                     for values in by_sheet.values()
                 )
             )
-            if balanced_two_sheet_junction:
+            if exact_declared_junction:
                 qualified_junction_edges.append(edge)
                 continue
             qualifier = (
-                "declared junction is not an exact balanced two-sheet/four-element "
-                "junction"
+                "declared junction lacks exact one-or-two opposite traversals "
+                "per authoritative Sheet"
                 if edge in declared_junction_edges
                 else "junction is not explicitly declared"
             )
@@ -207,9 +215,31 @@ def _directed_edge_violations(
         elif len(attached) == 2:
             first, second = attached
             if first[1:] == second[1:]:
-                violations.append(
-                    f"edge {edge} has equal traversal in elements {first[0]} and {second[0]}"
+                owners = (sheet_owners[first[0]], sheet_owners[second[0]])
+                exact_declared_fold = (
+                    edge in declared_junction_edges
+                    and all(len(values) == 1 for values in owners)
+                    and owners[0] != owners[1]
                 )
+                if exact_declared_fold:
+                    # Two independently authored Sheets may meet along a
+                    # declared crease with the same local edge direction.
+                    # Reversing either element merely to satisfy the ordinary
+                    # manifold rule would contradict its authoritative Sheet
+                    # normal, so the declaration and exact ownership qualify
+                    # the fold instead.
+                    qualified_junction_edges.append(edge)
+                else:
+                    qualifier = (
+                        f"; sheet_owners={owners}; declared junction does not "
+                        "have two distinct authoritative Sheets"
+                        if edge in declared_junction_edges
+                        else ""
+                    )
+                    violations.append(
+                        f"edge {edge} has equal traversal in elements "
+                        f"{first[0]} and {second[0]}{qualifier}"
+                    )
     return tuple(violations), tuple(qualified_junction_edges)
 
 

@@ -177,6 +177,134 @@ def test_declared_balanced_four_way_two_sheet_junction_is_qualified() -> None:
     assert "junction is not explicitly declared" in rejected.topology_violations[0]
 
 
+def test_declared_three_way_sheet_t_junction_is_qualified() -> None:
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((0.0, 1.0, 0.0)),
+            4: np.asarray((1.0, -1.0, 0.0)),
+            5: np.asarray((0.0, 0.0, 1.0)),
+            6: np.asarray((1.0, 0.0, 1.0)),
+        },
+        tris={
+            10: (1, 2, 3),
+            20: (2, 1, 4),
+            30: (1, 2, 5),
+        },
+        elements_of_sheet={101: [10, 20], 202: [30]},
+        declared_plate_junction_edges=((1, 2),),
+    )
+    permissive = S3QualityPolicy(
+        minimum_angle_deg=1.0,
+        maximum_angle_deg=179.0,
+        maximum_edge_ratio=100.0,
+        minimum_scaled_jacobian=1.0e-6,
+        minimum_normalized_area=1.0e-6,
+    )
+
+    report = evaluate_s3_admission(
+        mesh,
+        element_owner_normals={
+            10: (0.0, 0.0, 1.0),
+            20: (0.0, 0.0, 1.0),
+            30: (0.0, -1.0, 0.0),
+        },
+        policy=permissive,
+    )
+
+    assert report.admitted
+    assert report.qualified_junction_edges == ((1, 2),)
+
+
+def test_declared_two_sheet_fold_with_equal_traversal_is_qualified() -> None:
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((0.0, 1.0, 0.0)),
+            4: np.asarray((0.0, 0.0, 1.0)),
+        },
+        tris={10: (1, 2, 3), 20: (1, 2, 4)},
+        elements_of_sheet={101: [10], 202: [20]},
+        declared_plate_junction_edges=((1, 2),),
+    )
+    permissive = S3QualityPolicy(
+        minimum_angle_deg=1.0,
+        maximum_angle_deg=179.0,
+        maximum_edge_ratio=100.0,
+        minimum_scaled_jacobian=1.0e-6,
+        minimum_normalized_area=1.0e-6,
+    )
+
+    report = evaluate_s3_admission(
+        mesh,
+        element_owner_normals={
+            10: (0.0, 0.0, 1.0),
+            20: (0.0, -1.0, 0.0),
+        },
+        policy=permissive,
+    )
+
+    assert report.admitted
+    assert report.qualified_junction_edges == ((1, 2),)
+
+    mesh.declared_plate_junction_edges = ()
+    rejected = evaluate_s3_admission(
+        mesh,
+        element_owner_normals={
+            10: (0.0, 0.0, 1.0),
+            20: (0.0, -1.0, 0.0),
+        },
+        policy=permissive,
+    )
+    assert not rejected.admitted
+    assert "equal traversal" in rejected.topology_violations[0]
+
+
+def test_declared_junction_rejects_three_traversals_from_one_sheet() -> None:
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((0.0, 1.0, 0.0)),
+            4: np.asarray((1.0, -1.0, 0.0)),
+            5: np.asarray((0.0, 0.0, 1.0)),
+            6: np.asarray((1.0, 0.0, 1.0)),
+            7: np.asarray((0.0, 0.0, -1.0)),
+        },
+        tris={
+            10: (1, 2, 3),
+            20: (2, 1, 4),
+            30: (1, 2, 5),
+            40: (2, 1, 7),
+        },
+        elements_of_sheet={101: [10, 20, 30], 202: [40]},
+        declared_plate_junction_edges=((1, 2),),
+    )
+    permissive = S3QualityPolicy(
+        minimum_angle_deg=1.0,
+        maximum_angle_deg=179.0,
+        maximum_edge_ratio=100.0,
+        minimum_scaled_jacobian=1.0e-6,
+        minimum_normalized_area=1.0e-6,
+    )
+
+    report = evaluate_s3_admission(
+        mesh,
+        element_owner_normals={
+            10: (0.0, 0.0, 1.0),
+            20: (0.0, 0.0, 1.0),
+            30: (0.0, -1.0, 0.0),
+            40: (0.0, 1.0, 0.0),
+        },
+        policy=permissive,
+    )
+
+    assert not report.admitted
+    assert "one-or-two opposite traversals" in report.topology_violations[0]
+
+
 def test_mixed_nodal_normals_include_triangles_and_follow_owner_normal() -> None:
     mesh = Mesh(
         nodes={

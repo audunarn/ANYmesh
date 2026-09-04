@@ -437,16 +437,23 @@ def _topology_plate_junction_edges(
     mesh: Mesh,
     geometry: GeometryModel,
 ) -> tuple[tuple[int, int], ...]:
-    """Return seeded mesh edges explicitly shared by model-owned faces."""
+    """Return seeded mesh edges shared by distinct structural Sheets.
+
+    Ordinary internal face boundaries in one Sheet (for example the facets of
+    a cylinder) are manifold shell edges, not structural junctions.  Treating
+    them as junctions makes the published connection set both misleading and
+    far larger than the actual plate-to-plate interface.
+    """
 
     step = 2 if mesh.is_quadratic else 1
     result: set[tuple[int, int]] = set()
     for edge_id in sorted(geometry.edges):
-        incident_faces = {
-            int(geometry.face_uses[face_use_id].face_id)
-            for face_use_id in geometry.face_uses_using_edge(int(edge_id))
-        }
-        if len(incident_faces) < 2:
+        sheet_ids = geometry.sheets_using_edge(int(edge_id))
+        declared_non_manifold = any(
+            int(edge_id) in geometry.sheets[sheet_id].declared_non_manifold_edges
+            for sheet_id in sheet_ids
+        )
+        if len(sheet_ids) < 2 and not declared_non_manifold:
             continue
         sequence = mesh.nodes_of_edge.get(int(edge_id))
         if sequence is None or len(sequence) < step + 1:
@@ -1828,14 +1835,34 @@ def generate_hybrid_mesh_result(
     # as the later whole-mesh quality gate.  Publish it before S3 preparation;
     # the post-remap assignment below remains the final canonicalization step.
     if preparation_report is not None:
-        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
-            mesh,
-            preparation_report,
-            prepared_to_final_edges,
+        mesh.declared_plate_junction_edges = tuple(
+            sorted(
+                set(
+                    _prepared_plate_junction_edges(
+                        mesh,
+                        preparation_report,
+                        prepared_to_final_edges,
+                    )
+                )
+                | set(_topology_plate_junction_edges(mesh, geometry))
+            )
         )
 
     qualified_s3_record: dict[str, Any] | None = None
-    if qualified_s3:
+    # Structured/hybrid generation has an established quality fallback below.
+    # Do not ask the bounded S3 repairer to qualify a candidate that the
+    # mesher already knows it will discard: complex junction transitions can
+    # contain hundreds of poor triangles while the deterministic native
+    # fallback is admissible without repair.  The recursive fallback has no
+    # structured report and therefore reaches the S3 gate normally.
+    defer_qualified_s3 = bool(
+        qualified_s3
+        and structured_report is not None
+        and not _structured_quality_report(
+            mesh, structured_report.plan.options
+        )["accepted"]
+    )
+    if qualified_s3 and not defer_qualified_s3:
         qualified_s3_started = perf_counter()
         _check_cancellation(
             cancellation_check, "qualified S3 production preparation start"
@@ -2194,6 +2221,29 @@ def generate_hybrid_mesh_result(
                 "structured quality fallback accepted",
             )
             return replace(fallback, structured_layout=structured_report)
+    if defer_qualified_s3:
+        # Reaching this point means the later authoritative quality check did
+        # not take the fallback return.  Qualify the retained, now-published
+        # mesh against the source-side associations.
+        qualified_s3_started = perf_counter()
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation start"
+        )
+        mesh, qualified_s3_record = prepare_qualified_s3_mesh(
+            mesh, source_geometry
+        )
+        qualified_s3_record["authority_model"].update(
+            {
+                "source_model_id": str(source_geometry.model_id),
+                "source_revision": int(source_geometry.revision),
+            }
+        )
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation complete"
+        )
+        phase_seconds["qualified_s3_preparation"] = (
+            perf_counter() - qualified_s3_started
+        )
     preparation_payload = _preparation_payload(
         preparation_report,
         structured_report,
