@@ -469,6 +469,31 @@ def _topology_plate_junction_edges(
     return tuple(sorted(result))
 
 
+def _geometry_plate_junction_edge_ids(
+    geometry: GeometryModel,
+) -> tuple[int, ...]:
+    """Return exact geometry edges carrying structural plate junctions.
+
+    A caller may provide a closure that has already been imprinted by the
+    public structural-preparation workflow.  Such a call intentionally has no
+    new ``StructuralPreparationReport``; the committed Sheet ownership is then
+    the junction authority.  Recovering these exact edge IDs keeps planning
+    and native boundary alignment identical to a closure prepared inside this
+    function, without proximity matching or hidden welding.
+    """
+
+    result: list[int] = []
+    for edge_id in sorted(geometry.edges):
+        sheet_ids = geometry.sheets_using_edge(int(edge_id))
+        declared_non_manifold = any(
+            int(edge_id) in geometry.sheets[sheet_id].declared_non_manifold_edges
+            for sheet_id in sheet_ids
+        )
+        if len(sheet_ids) >= 2 or declared_non_manifold:
+            result.append(int(edge_id))
+    return tuple(result)
+
+
 def _element_growth(
     mesh: Mesh,
     *,
@@ -1562,10 +1587,15 @@ def generate_hybrid_mesh_result(
             explicit_seeding=seeding is not None,
             overrides=prepared_overrides,
             protected_edge_ids=prepared_beams,
-            allowed_non_manifold_edge_ids=(
-                ()
-                if preparation_report is None
-                else preparation_report.declared_face_connection_edges
+            allowed_non_manifold_edge_ids=tuple(
+                sorted(
+                    set(_geometry_plate_junction_edge_ids(geometry))
+                    | (
+                        set()
+                        if preparation_report is None
+                        else set(preparation_report.declared_face_connection_edges)
+                    )
+                )
             ),
             cancellation_check=cancellation_check,
         )
@@ -1781,13 +1811,16 @@ def generate_hybrid_mesh_result(
         size_field,
         order,
     )
+    prepared_declared_junction_edges = set(
+        _geometry_plate_junction_edge_ids(geometry)
+    ) | (
+        set()
+        if preparation_report is None
+        else set(preparation_report.declared_face_connection_edges)
+    )
     final_declared_junction_edges = frozenset(
         final_edge
-        for prepared_edge in (
-            ()
-            if preparation_report is None
-            else preparation_report.declared_face_connection_edges
-        )
+        for prepared_edge in prepared_declared_junction_edges
         for final_edge in prepared_to_final_edges.get(
             int(prepared_edge), (int(prepared_edge),)
         )
@@ -1834,19 +1867,23 @@ def generate_hybrid_mesh_result(
     # Qualified-S3 topology admission needs the same explicit junction authority
     # as the later whole-mesh quality gate.  Publish it before S3 preparation;
     # the post-remap assignment below remains the final canonicalization step.
-    if preparation_report is not None:
-        mesh.declared_plate_junction_edges = tuple(
-            sorted(
-                set(
-                    _prepared_plate_junction_edges(
-                        mesh,
-                        preparation_report,
-                        prepared_to_final_edges,
-                    )
-                )
-                | set(_topology_plate_junction_edges(mesh, geometry))
+    prepared_mesh_junction_edges = (
+        set()
+        if preparation_report is None
+        else set(
+            _prepared_plate_junction_edges(
+                mesh,
+                preparation_report,
+                prepared_to_final_edges,
             )
         )
+    )
+    mesh.declared_plate_junction_edges = tuple(
+        sorted(
+            prepared_mesh_junction_edges
+            | set(_topology_plate_junction_edges(mesh, geometry))
+        )
+    )
 
     qualified_s3_record: dict[str, Any] | None = None
     # Structured/hybrid generation has an established quality fallback below.
@@ -2199,6 +2236,44 @@ def generate_hybrid_mesh_result(
             fallback_qualified_s3 = fallback.mesh.structural_preparation.get(
                 "qualified_s3"
             )
+            if qualified_s3 and fallback_qualified_s3 is None:
+                # Alignment/refinement is allowed to replace the first native
+                # fallback.  Those candidates are intentionally generated
+                # without qualified-S3 preparation so they can be compared by
+                # the whole-mesh policy first.  Qualify the candidate that was
+                # actually selected; never publish an accepted fallback with
+                # a missing (or candidate-stale) solver admission record.
+                qualified_s3_started = perf_counter()
+                _check_cancellation(
+                    cancellation_check,
+                    "selected fallback qualified S3 preparation start",
+                )
+                selected_seeding = fallback.mesh.seeding
+                qualifying_mesh = mesh_from_dict(mesh_to_dict(fallback.mesh))
+                fallback_mesh, fallback_qualified_s3 = prepare_qualified_s3_mesh(
+                    qualifying_mesh,
+                    source_geometry,
+                )
+                fallback_mesh.seeding = selected_seeding
+                fallback_qualified_s3["authority_model"].update(
+                    {
+                        "source_model_id": str(source_geometry.model_id),
+                        "source_revision": int(source_geometry.revision),
+                    }
+                )
+                fallback = replace(fallback, mesh=fallback_mesh)
+                fallback.mesh.hybrid_diagnostics[
+                    "qualified_s3_preparation"
+                ] = True
+                fallback.mesh.hybrid_diagnostics.setdefault(
+                    "phase_seconds", {}
+                )["qualified_s3_preparation"] = (
+                    perf_counter() - qualified_s3_started
+                )
+                _check_cancellation(
+                    cancellation_check,
+                    "selected fallback qualified S3 preparation complete",
+                )
             fallback_payload = _preparation_payload(
                 fallback_preparation,
                 structured_report,

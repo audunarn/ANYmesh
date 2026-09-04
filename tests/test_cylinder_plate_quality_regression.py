@@ -168,7 +168,18 @@ def test_qualified_s3_accepts_declared_cylinder_plate_four_way_junctions() -> No
     assert qualified.issubset(set(mesh.declared_plate_junction_edges))
 
 
-def test_qualified_s3_is_applied_after_rejected_layout_fallback() -> None:
+@pytest.mark.parametrize(
+    ("target_size", "expected_status", "expected_junction_segments"),
+    (
+        (0.25, "applied", 12),
+        (0.20, "rejected_fallback", 24),
+    ),
+)
+def test_qualified_s3_uses_topology_authority_for_prepared_closure(
+    target_size: float,
+    expected_status: str,
+    expected_junction_segments: int,
+) -> None:
     geometry = _cylinder_through_plate()
     plate = max(geometry.faces)
     geometry.add_sheet((plate,), name="deck")
@@ -182,7 +193,7 @@ def test_qualified_s3_is_applied_after_rejected_layout_fallback() -> None:
     assert preparation is not None
     mesh = generate_hybrid_mesh(
         working,
-        target_size=0.25,
+        target_size=target_size,
         strategy="auto",
         beam_edges=(),
         member_ids=(),
@@ -199,6 +210,13 @@ def test_qualified_s3_is_applied_after_rejected_layout_fallback() -> None:
         qualified_s3=True,
     )
 
-    assert mesh.hybrid_diagnostics["structured_layout_status"] == "rejected_fallback"
-    assert mesh.structural_preparation["qualified_s3"]["status"] == "ADMITTED"
-    assert len(mesh.declared_plate_junction_edges) == 12
+    assert mesh.hybrid_diagnostics["structured_layout_status"] == expected_status
+    record = mesh.structural_preparation["qualified_s3"]
+    qualified = {
+        tuple(int(value) for value in edge)
+        for edge in record["admission"]["qualified_junction_edges"]
+    }
+    assert record["status"] == "ADMITTED"
+    assert record["admission"]["topology_violations"] == []
+    assert len(mesh.declared_plate_junction_edges) == expected_junction_segments
+    assert qualified.issubset(set(mesh.declared_plate_junction_edges))
