@@ -247,6 +247,13 @@ class SizeField:
             f"zone(s), finest {finest:g} m"
         )
 
+    def metric_spec(self):
+        """Translate this compatibility field to the serializable metric model."""
+
+        from .metric import MetricFieldSpec
+
+        return MetricFieldSpec.from_size_field(self)
+
 
 def _nearest_distance(points: np.ndarray, sources: np.ndarray) -> np.ndarray:
     """Distance from every point to the nearest source point.

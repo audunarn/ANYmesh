@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from anygeometry.curves import Straight
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
@@ -39,6 +40,12 @@ from .preparation import (
 )
 from .quality_v2 import assert_valid_mesh, evaluate_quality
 from .refinement import Refinement, SizeField
+from .metric import (
+    ExperimentalMetricProvider,
+    IsotropicMetricControl,
+    MetricFieldSpec,
+)
+from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .s3_production import prepare_qualified_s3_mesh
 from .seeding import Seeding, edge_distribution, solve_seeding
 from .serialize import mesh_from_dict, mesh_to_dict
@@ -104,6 +111,7 @@ class _LoopBoundary:
     node_ids: tuple[int, ...]
     midside_ids: tuple[int, ...]
     uv: np.ndarray
+    segment_specs: tuple[tuple[int, float, float] | None, ...]
 
 
 def _enum_value(value: Any, enum_type: type[Enum], name: str) -> Any:
@@ -1014,12 +1022,20 @@ def _reverse_loop(boundary: _LoopBoundary) -> _LoopBoundary:
     nodes = tuple(reversed(boundary.node_ids))
     uv = boundary.uv[::-1].copy()
     if not boundary.midside_ids:
-        return _LoopBoundary(nodes, (), uv)
+        specs = tuple(
+            boundary.segment_specs[(count - 2 - index) % count]
+            for index in range(count)
+        )
+        return _LoopBoundary(nodes, (), uv, specs)
     mids = tuple(
         boundary.midside_ids[(count - 2 - index) % count]
         for index in range(count)
     )
-    return _LoopBoundary(nodes, mids, uv)
+    specs = tuple(
+        boundary.segment_specs[(count - 2 - index) % count]
+        for index in range(count)
+    )
+    return _LoopBoundary(nodes, mids, uv, specs)
 
 
 def _loop_boundary(
@@ -1030,9 +1046,12 @@ def _loop_boundary(
     *,
     quadratic: bool,
     counter_clockwise: bool,
+    boundary_registry: GlobalEdgeBoundaryRegistry,
+    automatically_seeded_shared_edges: frozenset[int],
 ) -> _LoopBoundary:
     corner_nodes: list[int] = []
     midside_nodes: list[int] = []
+    segment_specs: list[tuple[int, float, float] | None] = []
     for oriented in loop:
         sequence = list(mesh.nodes_of_edge[oriented.edge])
         if not oriented.forward:
@@ -1048,6 +1067,24 @@ def _loop_boundary(
         else:
             edge_corners = sequence
         corner_nodes.extend(edge_corners[:-1])
+        if int(oriented.edge) in automatically_seeded_shared_edges:
+            parameter_by_node = {
+                int(entry.node_id): float(entry.key.parameter)
+                for entry in boundary_registry.entries(int(oriented.edge))
+                if entry.node_id is not None
+            }
+            for first_node, second_node in zip(edge_corners[:-1], edge_corners[1:]):
+                first_parameter = parameter_by_node[int(first_node)]
+                second_parameter = parameter_by_node[int(second_node)]
+                segment_specs.append(
+                    (
+                        int(oriented.edge),
+                        min(first_parameter, second_parameter),
+                        max(first_parameter, second_parameter),
+                    )
+                )
+        else:
+            segment_specs.extend(None for _ in range(len(edge_corners) - 1))
     if len(corner_nodes) < 3:
         raise MeshError(f"face {face_id} has fewer than three boundary stations")
     if quadratic and len(midside_nodes) != len(corner_nodes):
@@ -1068,7 +1105,9 @@ def _loop_boundary(
         ) from error
     if uv.shape != (len(corner_nodes), 2) or not np.all(np.isfinite(uv)):
         raise MeshError(f"face {face_id} surface chart returned invalid UV coordinates")
-    boundary = _LoopBoundary(tuple(corner_nodes), tuple(midside_nodes), uv)
+    boundary = _LoopBoundary(
+        tuple(corner_nodes), tuple(midside_nodes), uv, tuple(segment_specs)
+    )
     area = _signed_area(uv)
     scale = max(float(np.max(np.abs(uv))), 1.0)
     if abs(area) <= 128.0 * np.finfo(float).eps * scale * scale:
@@ -1127,6 +1166,13 @@ def _mesh_native_face(
     order: str,
     recombine: bool,
     native_backend: Any,
+    native_options: NativeMeshingOptions,
+    size_field: SizeField,
+    metric_model_uuid: str,
+    metric_geometry_revision: int,
+    boundary_registry: GlobalEdgeBoundaryRegistry,
+    automatically_seeded_shared_edges: frozenset[int],
+    component_seed_registry: ComponentSeedRegistry,
     quality_options: StructuredMeshingOptions | None,
     declared_junction_edges: Iterable[int],
     evaluate_declared_junction_alignment: bool,
@@ -1144,6 +1190,8 @@ def _mesh_native_face(
         face.loop,
         quadratic=quadratic,
         counter_clockwise=True,
+        boundary_registry=boundary_registry,
+        automatically_seeded_shared_edges=automatically_seeded_shared_edges,
     )
     holes = tuple(
         _loop_boundary(
@@ -1153,6 +1201,8 @@ def _mesh_native_face(
             loop,
             quadratic=quadratic,
             counter_clockwise=False,
+            boundary_registry=boundary_registry,
+            automatically_seeded_shared_edges=automatically_seeded_shared_edges,
         )
         for loop in face.holes
     )
@@ -1170,11 +1220,40 @@ def _mesh_native_face(
         )
         chart_transform = np.linalg.cholesky(metric)
     chart_inverse = np.linalg.inv(chart_transform)
+    physical_jacobian = np.column_stack((
+        np.asarray(face.surface.u_vector, dtype=np.float64),
+        np.asarray(face.surface.v_vector, dtype=np.float64),
+    )) @ chart_inverse.T if isinstance(face.surface, Plane) else None
+    metric_to_physical = None
+    if isinstance(face.surface, Plane):
+        metric_origin = np.asarray(face.surface.origin, dtype=np.float64)
+        metric_u = np.asarray(face.surface.u_vector, dtype=np.float64)
+        metric_v = np.asarray(face.surface.v_vector, dtype=np.float64)
+
+        def metric_to_physical(chart_points: np.ndarray) -> np.ndarray:
+            parameter_points = np.asarray(chart_points, dtype=np.float64) @ chart_inverse
+            return (
+                metric_origin[None, :]
+                + parameter_points[:, 0, None] * metric_u[None, :]
+                + parameter_points[:, 1, None] * metric_v[None, :]
+            )
     chart_outer = np.asarray(outer.uv, dtype=float) @ chart_transform
     chart_holes = tuple(
         np.asarray(loop.uv, dtype=float) @ chart_transform for loop in holes
     )
     chart_loops = (chart_outer, *chart_holes)
+    automatically_seeded_shared_segments: dict[
+        tuple[int, int], tuple[int, float, float]
+    ] = {}
+    boundary_offset = 0
+    for loop in loops:
+        count = len(loop.node_ids)
+        for local, specification in enumerate(loop.segment_specs):
+            if specification is not None:
+                automatically_seeded_shared_segments[
+                    tuple(sorted((boundary_offset + local, boundary_offset + (local + 1) % count)))
+                ] = specification
+        boundary_offset += count
     segments = [
         float(np.linalg.norm(loop[(index + 1) % len(loop)] - loop[index]))
         for loop in chart_loops
@@ -1185,6 +1264,52 @@ def _mesh_native_face(
     # chart segment lets the surface filler add interior points without adding
     # unregistered boundary stations.
     chart_size = max(segments) * (1.0 + 64.0 * np.finfo(float).eps)
+    face_native_options = native_options
+    if native_options.point_placement == "frontal_delaunay" and not isinstance(
+        face.surface, Plane
+    ):
+        raise MeshError(
+            "frontal_delaunay activation is currently limited to planar faces"
+        )
+    size_metric_spec = MetricFieldSpec.from_size_field(size_field)
+    supplemental_metric_field = None
+    if (
+        native_options.metric_mode == "isotropic_spatial"
+        and isinstance(face.surface, Plane)
+    ):
+        if native_options.metric_field is not None:
+            explicit = native_options.metric_field
+            face_native_options = replace(
+                native_options,
+                metric_field=MetricFieldSpec(
+                    IsotropicMetricControl(
+                        min(
+                            explicit.global_control.target_size,
+                            size_metric_spec.global_control.target_size,
+                        )
+                    ),
+                    feature_controls=(
+                        *explicit.feature_controls,
+                        *size_metric_spec.feature_controls,
+                    ),
+                    imported_samples=explicit.imported_samples,
+                    maximum_anisotropy=min(
+                        explicit.maximum_anisotropy,
+                        size_metric_spec.maximum_anisotropy,
+                    ),
+                    maximum_gradation=min(
+                        explicit.maximum_gradation,
+                        size_metric_spec.maximum_gradation,
+                    ),
+                ),
+            )
+        elif native_options.experimental_metric_provider is None:
+            face_native_options = replace(
+                native_options,
+                metric_field=size_metric_spec,
+            )
+        else:
+            supplemental_metric_field = size_metric_spec
     surface_diagnostics: dict[str, Any] = {}
     if quality_options is None:
         core = mesh_planar_surface(
@@ -1197,6 +1322,14 @@ def _mesh_native_face(
             owner=geometry.handle("face", face_id),
             cancellation_check=cancellation_check,
             diagnostics=surface_diagnostics,
+            native_options=face_native_options,
+            _metric_model_uuid=metric_model_uuid,
+            _metric_geometry_revision=metric_geometry_revision,
+            _metric_to_physical=metric_to_physical,
+            _metric_jacobian=physical_jacobian,
+            _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
+            _component_seed_registry=component_seed_registry,
+            _supplemental_metric_field=supplemental_metric_field,
         )
     else:
         quality_policy = quality_options.quality_policy
@@ -1234,6 +1367,7 @@ def _mesh_native_face(
             max_element_growth=quality_options.max_element_growth,
             prefer_quality_policy=True,
             declared_junction=has_declared_junction,
+            native_options=face_native_options,
         )
         core = mesh_planar_surface(
             chart_outer,
@@ -1245,6 +1379,13 @@ def _mesh_native_face(
             _evaluate_boundary_alignment=evaluate_outer_alignment,
             _evaluate_hole_alignment=evaluate_hole_alignment,
             _refine_boundary_transition=refine_declared_junction_transition,
+            _metric_model_uuid=metric_model_uuid,
+            _metric_geometry_revision=metric_geometry_revision,
+            _metric_to_physical=metric_to_physical,
+            _metric_jacobian=physical_jacobian,
+            _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
+            _component_seed_registry=component_seed_registry,
+            _supplemental_metric_field=supplemental_metric_field,
         )
         if (
             isinstance(face.surface, Plane)
@@ -1264,6 +1405,17 @@ def _mesh_native_face(
                 _evaluate_boundary_alignment=evaluate_outer_alignment,
                 _evaluate_hole_alignment=evaluate_hole_alignment,
                 _refine_boundary_transition=refine_declared_junction_transition,
+                _metric_model_uuid=metric_model_uuid,
+                _metric_geometry_revision=metric_geometry_revision,
+                _metric_to_physical=lambda parameter_points: (
+                    metric_origin[None, :]
+                    + np.asarray(parameter_points, dtype=np.float64)[:, 0, None] * metric_u[None, :]
+                    + np.asarray(parameter_points, dtype=np.float64)[:, 1, None] * metric_v[None, :]
+                ),
+                _metric_jacobian=np.column_stack((metric_u, metric_v)),
+                _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
+                _component_seed_registry=component_seed_registry,
+                _supplemental_metric_field=supplemental_metric_field,
             )
             if parameter_diagnostics.get("quality_policy", {}).get(
                 "accepted", False
@@ -1345,7 +1497,47 @@ def _mesh_native_face(
                     )
             offset += count
 
+    for record in surface_diagnostics.get("native_v2", {}).get("shared_nodes", ()):
+        core_node = int(record["local_node_id"])
+        node_id = int(record["node_id"])
+        edge_id = int(record["edge_id"])
+        if core_node in core_to_global or not 0 <= core_node < len(coordinates):
+            raise MeshError("native-v2 shared-node receipt conflicts with boundary topology")
+        u, v = (
+            float(value)
+            for value in (coordinates[core_node, :2] @ chart_inverse)
+        )
+        candidate = np.asarray(geometry.face_point(face_id, u, v), dtype=float)
+        edge_point, parameter, distance = geometry.closest_edge_point(edge_id, candidate)
+        tolerance = geometry.tolerance.effective_length(geometry.edge_length(edge_id))
+        if distance > tolerance:
+            raise MeshError("native-v2 shared split left its topology-owned edge")
+        exact_point = np.asarray(edge_point, dtype=float)
+        previous_point = mesh.nodes.get(node_id)
+        if previous_point is not None and not np.allclose(
+            previous_point, exact_point, rtol=0.0, atol=tolerance
+        ):
+            raise MeshError("component seed registry reused a node at another point")
+        mesh.nodes[node_id] = exact_point
+        sequence = mesh.nodes_of_edge[edge_id]
+        if node_id not in sequence:
+            sequence.append(node_id)
+            sequence.sort(
+                key=lambda value: geometry.closest_edge_point(
+                    edge_id, mesh.nodes[value]
+                )[1]
+            )
+        boundary_registry.register(
+            edge_id,
+            float(parameter),
+            exact_point,
+            node_id=node_id,
+            owner=geometry.handle("edge", edge_id),
+        )
+        core_to_global[core_node] = node_id
+
     next_node = _next_identifier(mesh.nodes)
+    reserved_node_ids = set(component_seed_registry.assigned_node_ids)
     for core_node in range(len(coordinates)):
         if core_node in core_to_global:
             continue
@@ -1356,6 +1548,8 @@ def _mesh_native_face(
         point = np.asarray(geometry.face_point(face_id, u, v), dtype=float)
         if point.shape != (3,) or not np.all(np.isfinite(point)):
             raise MeshError(f"face {face_id} surface evaluation returned an invalid point")
+        while next_node in reserved_node_ids or next_node in mesh.nodes:
+            next_node += 1
         core_to_global[core_node] = next_node
         mesh.nodes[next_node] = point
         next_node += 1
@@ -1432,6 +1626,7 @@ def generate_hybrid_mesh_result(
     order: str = "linear",
     recombine: bool = True,
     native_backend: Any = "auto",
+    native_options: NativeMeshingOptions | Mapping[str, Any] | None = None,
     structured_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
@@ -1461,6 +1656,7 @@ def generate_hybrid_mesh_result(
     target_size = float(target_size)
     if not np.isfinite(target_size) or target_size <= 0.0:
         raise MeshError("target_size must be finite and positive")
+    native_options = NativeMeshingOptions.coerce(native_options)
     if order not in ELEMENT_ORDERS:
         raise MeshError(
             f"unknown element order {order!r}; expected one of {', '.join(ELEMENT_ORDERS)}"
@@ -1738,6 +1934,7 @@ def generate_hybrid_mesh_result(
     phase_seconds["geometry_and_preflight"] = perf_counter() - preflight_started
 
     seeding_started = perf_counter()
+    supplied_seeding = seeding is not None
     size_field = (
         seeding.size_field
         if seeding is not None and seeding.size_field is not None
@@ -1818,6 +2015,35 @@ def generate_hybrid_mesh_result(
         if preparation_report is None
         else set(preparation_report.declared_face_connection_edges)
     )
+    native_face_set = set(native_faces)
+    edge_faces: dict[int, set[int]] = {}
+    for selected_face in faces:
+        selected = geometry.faces[selected_face]
+        for loop in (selected.loop, *selected.holes):
+            for oriented in loop:
+                edge_faces.setdefault(int(oriented.edge), set()).add(int(selected_face))
+    automatically_seeded_shared_edges = frozenset(
+        edge_id
+        for edge_id, incident_faces in edge_faces.items()
+        if len(incident_faces) > 1
+        and incident_faces.issubset(native_face_set)
+        and edge_id not in set(final_overrides or {})
+        and edge_id not in set(beams)
+        and isinstance(geometry.edges[edge_id].curve, Straight)
+        and not supplied_seeding
+        and order == "linear"
+    )
+    reserved_shared_node_ids: set[int] = set()
+
+    def allocate_shared_node_id() -> int:
+        node_id = max((*mesh.nodes, *reserved_shared_node_ids), default=0) + 1
+        reserved_shared_node_ids.add(node_id)
+        return node_id
+
+    component_seed_registry = ComponentSeedRegistry(
+        _next_identifier(mesh.nodes),
+        node_id_allocator=allocate_shared_node_id,
+    )
     final_declared_junction_edges = frozenset(
         final_edge
         for prepared_edge in prepared_declared_junction_edges
@@ -1833,6 +2059,13 @@ def generate_hybrid_mesh_result(
             order=order,
             recombine=bool(recombine),
             native_backend=native_backend,
+            native_options=native_options,
+            size_field=size_field,
+            metric_model_uuid=str(source_geometry.model_id),
+            metric_geometry_revision=int(source_geometry.revision),
+            boundary_registry=boundary_registry,
+            automatically_seeded_shared_edges=automatically_seeded_shared_edges,
+            component_seed_registry=component_seed_registry,
             quality_options=(
                 _native_surface_options
                 if _native_surface_options is not None

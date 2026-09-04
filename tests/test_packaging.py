@@ -47,9 +47,9 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
-def test_release_metadata_is_0_4_0_alpha_and_mpl_2_0() -> None:
+def test_release_metadata_is_0_5_0_alpha_and_mpl_2_0() -> None:
     project = _pyproject()["project"]
-    assert project["version"] == "0.4.0"
+    assert project["version"] == "0.5.0"
     assert project["requires-python"] == ">=3.11"
     assert project["license"] == "MPL-2.0"
     assert "Development Status :: 3 - Alpha" in project["classifiers"]
@@ -142,8 +142,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         encoding="utf-8"
     )
 
-    assert ci.count("repository: audunarn/ANYgeometry") == 4
-    assert ci.count(f"ref: {geometry_ref}") == 4
+    assert ci.count("repository: audunarn/ANYgeometry") == 5
+    assert ci.count(f"ref: {geometry_ref}") == 5
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {geometry_ref}") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
@@ -154,7 +154,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
 
     assert ci.count(
         'python -m pip install -e ".[dev,planar]"'
-    ) == 1
+    ) == 2
     assert ci.count(
         'python -m pip install -e ".[dev,gmsh,planar]"'
     ) == 1
@@ -163,7 +163,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     ) == 1
     assert 'python -m pip install -e ".[dev,gmsh]"' not in ci
     assert ci.count("tools/release_wheel_smoke.py") == 1
-    assert ci.count("--expect-version 0.4.0 --require-native") == 1
+    assert ci.count("--expect-version 0.5.0 --require-native") == 1
     assert ci.count("name: Install Ubuntu Gmsh runtime") == 1
     assert ci.count("if: runner.os == 'Linux'") == 1
     assert ci.count("sudo apt-get update") == 1
@@ -184,7 +184,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "skip-existing:" not in publish
     assert "name: pypi" in publish
     assert "url: https://pypi.org/p/ANYmesher" in publish
-    assert "name: ANYmesher-0.4.0-pypi-distributions" in publish
+    assert "name: ANYmesher-0.5.0-pypi-distributions" in publish
     assert "dist/*.whl" in publish
     assert "dist/*.tar.gz" in publish
     assert "permissions:\n  contents: read" in publish
@@ -197,12 +197,12 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
     assert "expected 12 wheels" in publish
     assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
-    assert 'name: ANYmesher-0.4.0-release-bundle' in publish
-    assert 'sdist = root / "anymesher-0.4.0.tar.gz"' in publish
-    assert 'root.glob("anymesher-0.4.0-*.whl")' in publish
-    assert '"version": "0.4.0"' in publish
-    assert "ANYmesher-0.4.0-SHA256SUMS.txt" in publish
-    assert "ANYmesher-0.4.0-release-manifest.json" in publish
+    assert 'name: ANYmesher-0.5.0-release-bundle' in publish
+    assert 'sdist = root / "anymesher-0.5.0.tar.gz"' in publish
+    assert 'root.glob("anymesher-0.5.0-*.whl")' in publish
+    assert '"version": "0.5.0"' in publish
+    assert "ANYmesher-0.5.0-SHA256SUMS.txt" in publish
+    assert "ANYmesher-0.5.0-release-manifest.json" in publish
     assert 'metadata["License-Expression"] != "MPL-2.0"' in publish
     assert "sdist missing license files" in publish
     assert "license file set mismatch" in publish
@@ -211,7 +211,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "RECORD self-row must be blank" in publish
     assert "RECORD integrity mismatch" in publish
     assert publish.count("tools/release_wheel_smoke.py") == 1
-    assert publish.count("--expect-version 0.4.0 --require-native") == 1
+    assert publish.count("--expect-version 0.5.0 --require-native") == 1
 
 
 @pytest.mark.skipif(

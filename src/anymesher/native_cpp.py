@@ -43,6 +43,42 @@ COMPILED_QUALITY_PIPELINE_AVAILABLE = bool(
         )
     )
 )
+_NATIVE_V2_REQUIRED_SYMBOLS = (
+    "native_v2_metric_lengths",
+    "native_v2_gradation_limit",
+    "native_v2_mutable_t3_insert",
+)
+
+
+def _native_v2_symbol_state() -> tuple[str, ...]:
+    if _compiled is None:
+        return ()
+    return tuple(
+        name
+        for name in _NATIVE_V2_REQUIRED_SYMBOLS
+        if callable(getattr(_compiled, name, None))
+    )
+
+
+def _complete_native_v2_available() -> bool:
+    """Return availability while rejecting every loaded incomplete v2 ABI."""
+
+    if _compiled is None:
+        return False
+    present = _native_v2_symbol_state()
+    if len(present) != len(_NATIVE_V2_REQUIRED_SYMBOLS):
+        raise RuntimeError(
+            "present ANYmesher native-v2 extension has an incomplete ABI: "
+            f"present={present!r}, required={_NATIVE_V2_REQUIRED_SYMBOLS!r}"
+        )
+    return True
+
+
+COMPILED_NATIVE_V2_AVAILABLE = _complete_native_v2_available()
+
+NATIVE_V2_SIGNAL_CHECK_INTERVAL = 4096
+_NATIVE_V2_GEOMETRY_LIMITED_PREFIX = "ANYMESHER_NATIVE_V2_GEOMETRY_LIMITED:"
+_NATIVE_V2_PREDICATE_UNCERTAIN_PREFIX = "ANYMESHER_NATIVE_V2_PREDICATE_UNCERTAIN:"
 
 
 class _CancellationSentinel(BaseException):
@@ -58,10 +94,11 @@ def _strict_float64_matrix(value: Any, columns: int, name: str) -> np.ndarray:
         or value.ndim != 2
         or value.shape[1] != columns
         or not value.flags.c_contiguous
+        or not value.flags.aligned
         or not np.all(np.isfinite(value))
     ):
         raise TypeError(
-            f"{name} must be a C-contiguous native float64 matrix with {columns} columns"
+            f"{name} must be an aligned C-contiguous native float64 matrix with {columns} columns"
         )
     return value
 
@@ -75,9 +112,10 @@ def _strict_int64_matrix(value: Any, columns: int, name: str) -> np.ndarray:
         or value.ndim != 2
         or value.shape[1] != columns
         or not value.flags.c_contiguous
+        or not value.flags.aligned
     ):
         raise TypeError(
-            f"{name} must be a C-contiguous native int64 matrix with {columns} columns"
+            f"{name} must be an aligned C-contiguous native int64 matrix with {columns} columns"
         )
     return value
 
@@ -90,8 +128,9 @@ def _strict_int64_vector(value: Any, name: str) -> np.ndarray:
         or not value.dtype.isnative
         or value.ndim != 1
         or not value.flags.c_contiguous
+        or not value.flags.aligned
     ):
-        raise TypeError(f"{name} must be a C-contiguous native int64 vector")
+        raise TypeError(f"{name} must be an aligned C-contiguous native int64 vector")
     return value
 
 
@@ -443,9 +482,100 @@ def native_element_quality(
         raise MeshError(str(error)) from error
 
 
+def native_metric_lengths(points: Any, edges: Any, tensors: Any) -> np.ndarray | None:
+    if not _complete_native_v2_available():
+        return None
+    made_tensors = _strict_float64_matrix(tensors, 3, "compressed_tensors")
+    try:
+        return np.asarray(
+            _compiled.native_v2_metric_lengths(
+                _strict_float64_matrix(points, 2, "points"),
+                _strict_int64_matrix(edges, 2, "edges"),
+                made_tensors,
+            ),
+            dtype=np.float64,
+        )
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+
+
+def native_gradation_limit(
+    points: Any,
+    edges: Any,
+    target_lengths: Any,
+    maximum_gradation: float,
+    max_iterations: int,
+) -> tuple[np.ndarray, int] | None:
+    if not _complete_native_v2_available():
+        return None
+    values = np.ascontiguousarray(target_lengths, dtype=np.float64)
+    if values.ndim != 1 or not np.all(np.isfinite(values)):
+        raise TypeError("target_lengths must be a contiguous finite float64 vector")
+    try:
+        limited, iterations = _compiled.native_v2_gradation_limit(
+            _strict_float64_matrix(points, 2, "points"),
+            _strict_int64_matrix(edges, 2, "edges"),
+            values,
+            float(maximum_gradation),
+            int(max_iterations),
+        )
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+    return np.ascontiguousarray(limited, dtype=np.float64), int(iterations)
+
+
+def native_mutable_t3_insert(
+    points: Any, triangles: Any, protected_edges: Any, candidate: Any
+) -> tuple[np.ndarray, dict[str, Any]] | None:
+    if not _complete_native_v2_available():
+        return None
+    value = np.asarray(candidate, dtype=np.float64)
+    if value.shape != (2,) or not np.all(np.isfinite(value)):
+        raise TypeError("candidate must be one finite 2D point")
+    try:
+        rows, diagnostics = _compiled.native_v2_mutable_t3_insert(
+            _strict_float64_matrix(points, 2, "points"),
+            _strict_int64_matrix(triangles, 3, "triangles"),
+            _strict_int64_matrix(protected_edges, 2, "protected_edges"),
+            float(value[0]),
+            float(value[1]),
+        )
+    except RuntimeError as error:
+        message = str(error)
+        if message.startswith(_NATIVE_V2_PREDICATE_UNCERTAIN_PREFIX):
+            return None
+        if message.startswith(_NATIVE_V2_GEOMETRY_LIMITED_PREFIX):
+            raise MeshError(
+                message.removeprefix(_NATIVE_V2_GEOMETRY_LIMITED_PREFIX)
+            ) from error
+        raise
+    return np.ascontiguousarray(rows, dtype=np.int64).reshape((-1, 3)), dict(diagnostics)
+
+
+def normalized_native_v2_insert_diagnostics(value: Any) -> dict[str, int]:
+    """Return implementation-neutral insertion diagnostics for parity checks."""
+
+    if not isinstance(value, dict):
+        raise TypeError("native-v2 insertion diagnostics must be a dictionary")
+    return {
+        "removed_triangles": int(value["removed_triangles"]),
+        "added_triangles": int(value["added_triangles"]),
+    }
+
+
+def native_v2_insert_provenance(value: Any) -> str:
+    """Keep implementation provenance separate from parity-bearing counters."""
+
+    if not isinstance(value, dict) or type(value.get("native")) is not bool:
+        raise TypeError("native-v2 insertion provenance must be Boolean")
+    return "anymesher-cpp17" if value["native"] else "python-reference"
+
+
 __all__ = [
     "COMPILED_TRIANGULATION_AVAILABLE",
     "COMPILED_QUALITY_PIPELINE_AVAILABLE",
+    "COMPILED_NATIVE_V2_AVAILABLE",
+    "NATIVE_V2_SIGNAL_CHECK_INTERVAL",
     "CompiledNativeBoundary",
     "NATIVE_CPP_AVAILABLE",
     "compiled_native_boundary",
@@ -454,6 +584,11 @@ __all__ = [
     "orient2d_many",
     "native_recombination_decisions",
     "native_element_quality",
+    "native_gradation_limit",
+    "native_metric_lengths",
+    "native_mutable_t3_insert",
+    "native_v2_insert_provenance",
+    "normalized_native_v2_insert_diagnostics",
     "pslg_domain_classification",
     "pslg_segment_memberships",
     "triangle_edge_incidence",

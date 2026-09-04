@@ -146,10 +146,26 @@ def test_auto_propagates_corrupt_native_boundary_errors(
         constrained_planar_triangulation(SQUARE, OUTER)
 
 
-def test_default_migration_remains_released_in_0_4_0() -> None:
+def test_present_partial_native_v2_abi_fails_hard(monkeypatch) -> None:
+    class PartialNativeV2:
+        @staticmethod
+        def native_v2_metric_lengths(*_args):
+            return ()
+
+    monkeypatch.setattr(native_cpp, "_compiled", PartialNativeV2())
+    monkeypatch.setattr(native_cpp, "COMPILED_NATIVE_V2_AVAILABLE", False)
+    with pytest.raises(RuntimeError, match="incomplete ABI"):
+        native_cpp.native_metric_lengths(
+            np.asarray(((0.0, 0.0), (1.0, 0.0))),
+            np.asarray(((0, 1),), dtype=np.int64),
+            np.asarray(((1.0, 0.0, 1.0), (1.0, 0.0, 1.0))),
+        )
+
+
+def test_default_migration_remains_released_in_0_5_0() -> None:
     project = tomllib.loads(
         (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     )
 
-    assert anymesher.__version__ == "0.4.0"
-    assert project["project"]["version"] == "0.4.0"
+    assert anymesher.__version__ == "0.5.0"
+    assert project["project"]["version"] == "0.5.0"

@@ -246,6 +246,29 @@ interchange format.
 
 ## License
 
+### Opt-in native-v2 planar meshing
+
+ANYmesher 0.5.0 adds provider-neutral, immutable controls for a bounded planar
+Frontal-Delaunay route while retaining the legacy native defaults:
+
+```python
+from anymesher import MetricFieldSpec, NativeMeshingOptions, generate_mesh
+
+mesh = generate_mesh(
+    geometry,
+    backend="native",
+    target_size=0.2,
+    native_options=NativeMeshingOptions(
+        point_placement="frontal_delaunay",
+        metric_mode="isotropic_spatial",
+        metric_field=MetricFieldSpec.uniform(0.2),
+    ),
+)
+```
+
+Metric specifications are strict serializable data. Runtime callbacks are
+explicitly experimental and cannot be serialized or passed through automation.
+
 Starting with version 0.4.0, ANYmesher source code is licensed under the
 Mozilla Public License 2.0. See `LICENSE` for the full terms and `NOTICE` for
 the prospective relicensing statement. Earlier published versions remain

@@ -61,6 +61,7 @@ if os.environ.get("ANYMESHER_DISABLE_NATIVE", "0") not in {"1", "true", "TRUE"}:
             depends=[
                 "src/anymesher/_triangulation_native.hpp",
                 "src/anymesher/_quality_pipeline_native.hpp",
+                "src/anymesher/_native_v2.hpp",
             ],
             language="c++",
             extra_compile_args=compile_args,

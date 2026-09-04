@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-04
+
+- Add immutable native-v2 options and serializable spatial metric controls while
+  retaining the byte-compatible legacy lattice and metric defaults.
+- Add deterministic SPD metric evaluation, physical/chart pullback, gradation
+  limiting, and optional GIL-releasing C++17 kernels with Python oracles.
+- Add an atomic mutable T3 topology, protected-edge contracts, component-owned
+  shared seed identities, and deterministic canonical export.
+- Add opt-in planar Frontal-Delaunay insertion with bounded queues, metric-aware
+  off-centres, cancellation, geometry-limited diagnostics, and quality guarding.
+- Add the frozen native-v2 baseline corpus and performance acceptance envelope.
+
 ## 0.4.0 - 2026-09-03
 
 - Change the project license prospectively to the Mozilla Public License 2.0.

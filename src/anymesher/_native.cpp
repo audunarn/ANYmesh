@@ -12,6 +12,7 @@
 
 #include "_triangulation_native.hpp"
 #include "_quality_pipeline_native.hpp"
+#include "_native_v2.hpp"
 
 namespace {
 
@@ -321,6 +322,12 @@ PyMethodDef methods[] = {
      "Select deterministic quality-qualified triangle pairs."},
     {"element_quality", anymesher_quality_native::py_element_quality, METH_VARARGS,
      "Evaluate triangle or quadrilateral quality in one native batch."},
+    {"native_v2_metric_lengths", anymesher_native_v2::py_metric_lengths, METH_VARARGS,
+     "Evaluate physical metric edge lengths with the GIL released."},
+    {"native_v2_gradation_limit", anymesher_native_v2::py_gradation_limit, METH_VARARGS,
+     "Apply deterministic scalar metric gradation limiting."},
+    {"native_v2_mutable_t3_insert", anymesher_native_v2::py_mutable_t3_insert, METH_VARARGS,
+     "Perform one atomic deterministic mutable-T3 cavity insertion."},
     {nullptr, nullptr, 0, nullptr},
 };
 

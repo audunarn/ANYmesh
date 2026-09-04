@@ -5,6 +5,25 @@ on:
   pull_request:
 
 jobs:
+  native-v2-contract:
+    name: Native-v2 bounded evidence contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: dd954f088a4cb95e267280cc4777b09e16232bd9
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]"
+      - run: python benchmarks/native_v2_baseline.py check-evidence
+
   pytest:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -109,7 +128,7 @@ jobs:
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
-            --expect-version 0.4.0 --require-native
+            --expect-version 0.5.0 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4

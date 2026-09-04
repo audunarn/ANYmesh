@@ -94,6 +94,18 @@ from .optimization import (
     constrained_smoothing,
     local_edge_flip,
 )
+from .metric import (
+    ExperimentalMetricProvider,
+    FeatureDistanceMetricControl,
+    ImportedMetricSamples,
+    IsotropicMetricControl,
+    MetricFieldSpec,
+    SpatialMetricField,
+    limit_metric_gradation,
+    metric_length,
+    pullback_metric,
+)
+from .native_v2 import ComponentSeedRegistry, MutableT3Topology, NativeMeshingOptions
 from .primitives import (
     PANEL_EDGE_IDS,
     PANEL_FACE_ID,
@@ -165,7 +177,7 @@ from .automation import (
     MeshPlan,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "ASPECT_RATIO_LIMIT",
@@ -185,6 +197,7 @@ __all__ = [
     "EntityRef",
     "Face",
     "FaceChart",
+    "FeatureDistanceMetricControl",
     "GeometryError",
     "GeometryModel",
     "HybridMeshResult",
@@ -200,6 +213,14 @@ __all__ = [
     "MeshQuality",
     "MeshQualityPolicy",
     "MetricField",
+    "MetricFieldSpec",
+    "IsotropicMetricControl",
+    "ImportedMetricSamples",
+    "ExperimentalMetricProvider",
+    "SpatialMetricField",
+    "NativeMeshingOptions",
+    "MutableT3Topology",
+    "ComponentSeedRegistry",
     "MeshingStrategy",
     "OrientedEdge",
     "EdgeFlipResult",
@@ -270,6 +291,9 @@ __all__ = [
     "mesh_to_dict",
     "metric_edge_lengths",
     "metric_tensors",
+    "metric_length",
+    "pullback_metric",
+    "limit_metric_gradation",
     "nodal_normals",
     "panel_edge_nodes",
     "punch_circular_hole",

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # The repository is ANYmesh, but `anymesh` was already taken on PyPI, so the
 # distribution and import package are `ANYmesher`/`anymesher`.
 name = "ANYmesher"
-version = "0.4.0"
+version = "0.5.0"
 description = "Native hybrid meshing for ANYgeometry shell and beam models"
 readme = "README.md"
 requires-python = ">=3.11"

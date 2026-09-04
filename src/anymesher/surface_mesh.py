@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from math import acos, ceil, degrees, sqrt
 from numbers import Integral
 from time import perf_counter
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
 from .core import MeshCore, corner_edges
 from .errors import MeshError
 from .native import NativeBoundary
+from .native_v2 import NativeMeshingOptions, frontal_delaunay_refine
 from .optimization import constrained_smoothing, local_edge_flip
 from .quality_v2 import MeshQualityV2, assert_valid_mesh, evaluate_quality
 from .recombine import recombine_triangles_with_report
@@ -48,12 +49,16 @@ class SurfaceMeshOptions:
     max_metric_aspect_ratio: float = 25.0
     max_recombination_work: int = 1_000_000
     declared_junction: bool = False
+    native_options: NativeMeshingOptions = NativeMeshingOptions()
 
     @property
     def quadratic(self) -> bool:
         return self.order in (2, "2", "quadratic", "T6/Q8", "t6/q8")
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "native_options", NativeMeshingOptions.coerce(self.native_options)
+        )
         if self.order not in (1, 2, "1", "2", "linear", "quadratic", "T3/Q4", "T6/Q8", "t3/q4", "t6/q8"):
             raise MeshError("order must select linear T3/Q4 or quadratic T6/Q8")
         if self.target_size is not None and (not np.isfinite(self.target_size) or self.target_size <= 0.0):
@@ -1384,6 +1389,92 @@ def _quality_path_key(path: dict[str, Any]) -> tuple[Any, ...]:
     return (*best.score, connectivity)
 
 
+def _run_frontal_quality_path(
+    baseline: dict[str, Any],
+    settings: SurfaceMeshOptions,
+    cancellation_check: Callable[[str], None] | None,
+    *,
+    model_uuid: str | None,
+    geometry_revision: int | None,
+    metric_to_physical: Callable[[np.ndarray], np.ndarray] | None,
+    metric_jacobian: np.ndarray | None,
+    automatically_seeded_shared_segments: Mapping[
+        tuple[int, int], int | tuple[int, Any, Any]
+    ] | None,
+    component_seed_registry: Any | None,
+    supplemental_metric_field: MetricFieldSpec | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply native-v2 local insertion to the qualified legacy CDT seed."""
+
+    if settings.target_size is None:
+        raise MeshError("frontal_delaunay point placement requires target_size")
+    started = perf_counter()
+    triangulation, report = frontal_delaunay_refine(
+        baseline["triangulation"],
+        settings.native_options,
+        target_size=settings.target_size,
+        cancellation_check=cancellation_check,
+        model_uuid=model_uuid,
+        geometry_revision=geometry_revision,
+        metric_to_physical=metric_to_physical,
+        metric_jacobian=metric_jacobian,
+        automatically_seeded_shared_segments=automatically_seeded_shared_segments,
+        component_seed_registry=component_seed_registry,
+        supplemental_metric_field=supplemental_metric_field,
+    )
+    initial = _make_candidate(
+        triangulation.points, triangulation.triangles, settings=settings
+    )
+    optimized = _optimize_candidate(
+        initial,
+        triangulation.segments,
+        np.empty((0, 2), dtype=np.float64),
+        settings,
+    )
+    best = min(
+        (initial, optimized),
+        key=lambda candidate: _candidate_selection_key(
+            candidate, prefer_growth=False
+        ),
+    )
+    if report["shared_segment_splits"] == 0 and _candidate_selection_key(
+        best, prefer_growth=False
+    ) > _candidate_selection_key(baseline["best"], prefer_growth=False):
+        guarded = dict(baseline)
+        guarded["name"] = "frontal_delaunay_quality_guard"
+        report = {
+            **report,
+            "selected_route": "legacy_seed_quality_guard",
+            "published_insertions": 0,
+            "shared_nodes": [],
+        }
+        guarded["native_v2"] = report
+        return guarded, report
+    target_met = (
+        best.report["invalid_element_count"] == 0
+        and (
+            not best.report["poor_element_ids"]
+            if settings.prefer_quality_policy
+            else best.report["elements_above_aspect_ratio_5"] == 0
+        )
+    )
+    report = {**report, "published_insertions": int(report["insertions"])}
+    return {
+        "name": "frontal_delaunay",
+        "generated": baseline["generated"],
+        "initial": initial,
+        "best": best,
+        "triangulation": triangulation,
+        "attempted_added_points": int(report["insertions"]),
+        "attempted_rounds": 0,
+        "point_budget": settings.native_options.max_insertions,
+        "target_met": target_met,
+        "triangulation_seconds": baseline["triangulation_seconds"],
+        "optimization_seconds": perf_counter() - started,
+        "native_v2": report,
+    }, report
+
+
 def _boundary_edge_groups(
     outer: np.ndarray,
     holes: Sequence[np.ndarray],
@@ -1724,6 +1815,7 @@ def mesh_planar_surface(
     target_size: float | None = None,
     backend: str | NativeBoundary | None = "auto",
     lattice_alignment: str = "chart",
+    native_options: NativeMeshingOptions | Mapping[str, Any] | None = None,
     owner: Any | None = None,
     options: SurfaceMeshOptions | None = None,
     cancellation_check: Callable[[str], None] | None = None,
@@ -1731,6 +1823,15 @@ def mesh_planar_surface(
     _evaluate_boundary_alignment: bool = True,
     _evaluate_hole_alignment: bool = True,
     _refine_boundary_transition: bool = False,
+    _metric_model_uuid: str | None = None,
+    _metric_geometry_revision: int | None = None,
+    _metric_to_physical: Callable[[np.ndarray], np.ndarray] | None = None,
+    _metric_jacobian: np.ndarray | None = None,
+    _automatically_seeded_shared_segments: Mapping[
+        tuple[int, int], int | tuple[int, Any, Any]
+    ] | None = None,
+    _component_seed_registry: Any | None = None,
+    _supplemental_metric_field: MetricFieldSpec | None = None,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -1749,10 +1850,20 @@ def mesh_planar_surface(
         target_size=target_size,
         backend=backend,
         lattice_alignment=lattice_alignment,
+        native_options=NativeMeshingOptions.coerce(native_options),
     )
+    if options is not None and native_options is not None:
+        raise MeshError("give native options through options or native_options, not both")
     raw_outer = np.asarray(outer, dtype=np.float64)
     plane = _plane_from_outer(raw_outer)
     dimension = raw_outer.shape[1]
+    if dimension == 3 and _metric_to_physical is None:
+        _metric_to_physical = lambda points: (
+            plane.origin[None, :]
+            + np.asarray(points, dtype=np.float64)[:, 0, None] * plane.first[None, :]
+            + np.asarray(points, dtype=np.float64)[:, 1, None] * plane.second[None, :]
+        )
+        _metric_jacobian = np.column_stack((plane.first, plane.second))
     raw_holes = [_as_loop(hole, dimension, f"hole {number}") for number, hole in enumerate(holes)]
     raw_constraints = [np.asarray(segment, dtype=np.float64) for segment in constraints]
     if any(segment.shape != (2, dimension) for segment in raw_constraints):
@@ -1788,24 +1899,52 @@ def mesh_planar_surface(
             perf_counter() - densification_started
         )
         target_points_started = perf_counter()
-        generated = _target_points(
-            planar_outer,
-            planar_holes,
-            planar_constraints,
-            settings.target_size,
-            settings.lattice_alignment,
-            settings.metric_tensor,
-            max_lattice_points=settings.max_lattice_points,
-            cancellation_check=cancellation_check,
-            statistics=lattice_statistics,
-        )
+        if settings.native_options.point_placement == "frontal_delaunay":
+            frame_origin = planar_outer[0].copy()
+            frame_first = planar_outer[1] - frame_origin
+            frame_first /= max(float(np.linalg.norm(frame_first)), 1.0e-30)
+            frame_second = np.asarray((-frame_first[1], frame_first[0]))
+            frame = np.column_stack((frame_first, frame_second))
+            local_outer = (planar_outer - frame_origin) @ frame
+            local_holes = [(hole - frame_origin) @ frame for hole in planar_holes]
+            local_constraints = [
+                (segment - frame_origin) @ frame for segment in planar_constraints
+            ]
+            local_metric = (
+                None
+                if settings.metric_tensor is None
+                else frame.T @ np.asarray(settings.metric_tensor, dtype=float) @ frame
+            )
+            local_generated = _target_points(
+                local_outer,
+                local_holes,
+                local_constraints,
+                settings.target_size,
+                "chart",
+                local_metric,
+                max_lattice_points=settings.max_lattice_points,
+                cancellation_check=cancellation_check,
+                statistics=lattice_statistics,
+            )
+            generated = local_generated @ frame.T + frame_origin
+        else:
+            generated = _target_points(
+                planar_outer,
+                planar_holes,
+                planar_constraints,
+                settings.target_size,
+                settings.lattice_alignment,
+                settings.metric_tensor,
+                max_lattice_points=settings.max_lattice_points,
+                cancellation_check=cancellation_check,
+                statistics=lattice_statistics,
+            )
         phase_seconds["target_point_generation"] = (
             perf_counter() - target_points_started
         )
     if cancellation_check is not None:
         cancellation_check("native surface triangulation start")
-    candidate_paths = [
-        _run_quality_path(
+    baseline_path = _run_quality_path(
             "staggered_chart",
             planar_outer,
             planar_holes,
@@ -1815,7 +1954,22 @@ def mesh_planar_surface(
             settings,
             cancellation_check,
         )
-    ]
+    candidate_paths = [baseline_path]
+    native_v2_report: dict[str, Any] | None = None
+    if settings.native_options.point_placement == "frontal_delaunay":
+        frontal_path, native_v2_report = _run_frontal_quality_path(
+            baseline_path,
+            settings,
+            cancellation_check,
+            model_uuid=_metric_model_uuid,
+            geometry_revision=_metric_geometry_revision,
+            metric_to_physical=_metric_to_physical,
+            metric_jacobian=_metric_jacobian,
+            automatically_seeded_shared_segments=_automatically_seeded_shared_segments,
+            component_seed_registry=_component_seed_registry,
+            supplemental_metric_field=_supplemental_metric_field,
+        )
+        candidate_paths = [frontal_path]
     guide_diagnostics: dict[str, Any] = {
         "guide_count": 0,
         "guide_ids": [],
@@ -1828,12 +1982,17 @@ def mesh_planar_surface(
     collar_skipped_reason: str | None = None
     candidate_generation_started = perf_counter()
     strict_baseline_complete = (
-        settings.prefer_quality_policy and bool(candidate_paths[0]["target_met"])
+        settings.native_options.point_placement == "frontal_delaunay"
+        or (
+            settings.prefer_quality_policy
+            and bool(candidate_paths[0]["target_met"])
+        )
     )
     if (
         settings.target_size is not None
         and settings.recombine
         and _evaluate_boundary_alignment
+        and settings.native_options.point_placement == "legacy_lattice"
     ):
         collar_preparation_cache: dict[str, Any] = {}
         outer_layer_variants = (3,)
@@ -2195,6 +2354,11 @@ def mesh_planar_surface(
                 ),
                 "max_lattice_points": settings.max_lattice_points,
                 "recombination": recombination_diagnostics,
+                **(
+                    {"native_v2": native_v2_report}
+                    if native_v2_report is not None
+                    else {}
+                ),
             }
         )
     if cancellation_check is not None:
