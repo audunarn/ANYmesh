@@ -225,8 +225,8 @@ def test_native_v2_material_loop_honors_python_signal() -> None:
     from anymesher.native_cpp import native_mutable_t3_insert
 
     points = np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)))
-    triangles = np.tile(np.asarray(((0, 1, 2),), dtype=np.int64), (150_000, 1))
-    timer = threading.Timer(0.001, _thread.interrupt_main)
+    triangles = np.tile(np.asarray(((0, 1, 2),), dtype=np.int64), (2_000_000, 1))
+    timer = threading.Timer(0.01, _thread.interrupt_main)
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -568,8 +568,8 @@ def test_native_local_edge_flip_honors_python_signal() -> None:
     from anymesher.native_cpp import native_local_edge_flip
 
     points = np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)))
-    triangles = np.tile(np.asarray(((0, 1, 2),), dtype=np.int64), (150_000, 1))
-    timer = threading.Timer(0.001, _thread.interrupt_main)
+    triangles = np.tile(np.asarray(((0, 1, 2),), dtype=np.int64), (2_000_000, 1))
+    timer = threading.Timer(0.01, _thread.interrupt_main)
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -781,7 +781,7 @@ def test_native_validation_rejects_float_connectivity_before_coercion(
 def test_native_constrained_smoothing_honors_python_signal() -> None:
     from anymesher.native_cpp import native_constrained_smoothing
 
-    width = 320
+    width = 1024
     points = np.asarray(
         tuple((float(column), float(row)) for row in range(width) for column in range(width))
     )
@@ -793,7 +793,7 @@ def test_native_constrained_smoothing_honors_python_signal() -> None:
         ),
         dtype=np.int64,
     )
-    timer = threading.Timer(0.001, _thread.interrupt_main)
+    timer = threading.Timer(0.01, _thread.interrupt_main)
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
