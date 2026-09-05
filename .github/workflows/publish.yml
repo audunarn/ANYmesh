@@ -2,6 +2,12 @@ name: Build release artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the validated bundle to production PyPI
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -283,6 +289,7 @@ jobs:
             dist/*.tar.gz
 
   publish:
+    if: ${{ inputs.publish }}
     needs: bundle
     runs-on: ubuntu-latest
     environment:

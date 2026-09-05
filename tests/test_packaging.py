@@ -175,6 +175,9 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.startswith(
         "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"
     )
+    assert "description: Publish the validated bundle to production PyPI" in publish
+    assert "required: true\n        type: boolean\n        default: false" in publish
+    assert "publish:\n    if: ${{ inputs.publish }}\n    needs: bundle" in publish
     assert "release:" not in publish
     assert "repository-url:" not in publish
     assert publish.count("id-token: write") == 1
