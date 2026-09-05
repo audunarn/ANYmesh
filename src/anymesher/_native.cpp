@@ -328,6 +328,10 @@ PyMethodDef methods[] = {
      "Apply deterministic scalar metric gradation limiting."},
     {"native_v2_mutable_t3_insert", anymesher_native_v2::py_mutable_t3_insert, METH_VARARGS,
      "Perform one atomic deterministic mutable-T3 cavity insertion."},
+    {"native_v2_local_edge_flip", anymesher_native_v2::py_local_edge_flip, METH_VARARGS,
+     "Perform deterministic metric local-edge flips with the GIL released."},
+    {"native_v2_constrained_smoothing", anymesher_native_v2::py_constrained_smoothing, METH_VARARGS,
+     "Perform deterministic constrained smoothing with the GIL released."},
     {nullptr, nullptr, 0, nullptr},
 };
 

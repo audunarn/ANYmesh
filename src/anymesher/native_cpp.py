@@ -47,6 +47,8 @@ _NATIVE_V2_REQUIRED_SYMBOLS = (
     "native_v2_metric_lengths",
     "native_v2_gradation_limit",
     "native_v2_mutable_t3_insert",
+    "native_v2_local_edge_flip",
+    "native_v2_constrained_smoothing",
 )
 
 
@@ -422,7 +424,14 @@ def validate_native_triangulation(
         )
     except RuntimeError as error:
         raise MeshError(str(error)) from error
-    return np.ascontiguousarray(rows, dtype=np.int64).reshape((-1, 3))
+    raw_rows = np.asarray(rows)
+    if (
+        raw_rows.dtype.kind not in "iu"
+        or raw_rows.ndim != 2
+        or raw_rows.shape[1:] != (3,)
+    ):
+        raise MeshError("native triangulation validation returned malformed connectivity")
+    return np.ascontiguousarray(raw_rows, dtype=np.int64)
 
 
 def native_recombination_decisions(
@@ -529,14 +538,20 @@ def native_mutable_t3_insert(
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
     if not _complete_native_v2_available():
         return None
+    made_points = _strict_float64_matrix(points, 2, "points")
+    made_triangles = _strict_int64_matrix(triangles, 3, "triangles")
+    made_protected = _strict_int64_matrix(protected_edges, 2, "protected_edges")
     value = np.asarray(candidate, dtype=np.float64)
     if value.shape != (2,) or not np.all(np.isfinite(value)):
         raise TypeError("candidate must be one finite 2D point")
+    from .triangulation import orient2d as orientation_oracle
+
     try:
-        rows, diagnostics = _compiled.native_v2_mutable_t3_insert(
-            _strict_float64_matrix(points, 2, "points"),
-            _strict_int64_matrix(triangles, 3, "triangles"),
-            _strict_int64_matrix(protected_edges, 2, "protected_edges"),
+        raw_rows, diagnostics = _compiled.native_v2_mutable_t3_insert(
+            made_points,
+            made_triangles,
+            made_protected,
+            orientation_oracle,
             float(value[0]),
             float(value[1]),
         )
@@ -545,11 +560,334 @@ def native_mutable_t3_insert(
         if message.startswith(_NATIVE_V2_PREDICATE_UNCERTAIN_PREFIX):
             return None
         if message.startswith(_NATIVE_V2_GEOMETRY_LIMITED_PREFIX):
-            raise MeshError(
-                message.removeprefix(_NATIVE_V2_GEOMETRY_LIMITED_PREFIX)
-            ) from error
+            return None
         raise
-    return np.ascontiguousarray(rows, dtype=np.int64).reshape((-1, 3)), dict(diagnostics)
+    rows = np.asarray(raw_rows)
+    if rows.ndim != 2 or rows.shape[1:] != (3,) or rows.dtype.kind not in "iu":
+        raise MeshError("native mutable T3 insertion connectivity is malformed")
+    rows = np.ascontiguousarray(rows, dtype=np.int64)
+    required = {"removed_triangles", "added_triangles", "native"}
+    if not isinstance(diagnostics, dict) or set(diagnostics) != required:
+        raise MeshError("native mutable T3 insertion diagnostics are malformed")
+    made_diagnostics = dict(diagnostics)
+    removed = made_diagnostics["removed_triangles"]
+    added = made_diagnostics["added_triangles"]
+    if (
+        type(removed) is not int
+        or type(added) is not int
+        or made_diagnostics["native"] is not True
+        or not 1 <= removed <= len(made_triangles)
+        or added < 3
+        or len(rows) != len(made_triangles) - removed + added
+        or np.any(rows < 0)
+        or np.any(rows > len(made_points))
+        or np.any(np.diff(np.sort(rows, axis=1), axis=1) == 0)
+    ):
+        raise MeshError("native mutable T3 insertion result is inconsistent")
+    identities = [tuple(map(int, row)) for row in rows]
+    if identities != sorted(set(identities)):
+        raise MeshError("native mutable T3 insertion is not canonical")
+    inserted = len(made_points)
+    old_identities = {tuple(map(int, row)) for row in made_triangles}
+    retained = sum(identity in old_identities for identity in identities)
+    if retained != len(made_triangles) - removed or sum(inserted in row for row in identities) != added:
+        raise MeshError("native mutable T3 insertion cavity accounting is inconsistent")
+    extended = np.vstack((made_points, value))
+    if any(
+        orientation_oracle(extended[a], extended[b], extended[c]) <= 0.0
+        for a, b, c in identities
+    ):
+        raise MeshError("native mutable T3 insertion returned a non-positive cell")
+    incidence: dict[tuple[int, int], int] = {}
+    for triangle in identities:
+        for index in range(3):
+            edge = tuple(sorted((triangle[index], triangle[(index + 1) % 3])))
+            incidence[edge] = incidence.get(edge, 0) + 1
+    if any(count > 2 for count in incidence.values()):
+        raise MeshError("native mutable T3 insertion returned non-manifold topology")
+    if any(tuple(sorted(map(int, edge))) not in incidence for edge in made_protected):
+        raise MeshError("native mutable T3 insertion removed a protected edge")
+    return rows, made_diagnostics
+
+
+def native_local_edge_flip(
+    points: Any,
+    triangles: Any,
+    protected_edges: Any,
+    metrics: Any,
+    flip_limit: int,
+) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Run the optional deterministic local-edge-flip kernel."""
+
+    if not _complete_native_v2_available():
+        return None
+    made_points = _strict_float64_matrix(points, 2, "points")
+    made_triangles = _strict_int64_matrix(triangles, 3, "triangles")
+    made_protected = _strict_int64_matrix(protected_edges, 2, "protected_edges")
+    made_metrics = np.asarray(metrics, dtype=np.float64)
+    if made_metrics.ndim != 3 or made_metrics.shape != (len(made_points), 2, 2):
+        raise TypeError("metrics must have shape (n, 2, 2)")
+    if not np.all(np.isfinite(made_metrics)):
+        raise TypeError("metrics must contain only finite values")
+    flattened_metrics = np.ascontiguousarray(made_metrics.reshape((-1, 4)))
+    from .triangulation import orient2d as orientation_oracle
+
+    try:
+        value = _compiled.native_v2_local_edge_flip(
+            made_points,
+            made_triangles,
+            made_protected,
+            flattened_metrics,
+            orientation_oracle,
+            int(flip_limit),
+        )
+    except RuntimeError as error:
+        if str(error).startswith(_NATIVE_V2_PREDICATE_UNCERTAIN_PREFIX):
+            return None
+        raise MeshError(str(error)) from error
+    if not isinstance(value, tuple) or len(value) != 2:
+        raise MeshError("native local-edge-flip result must be a two-item tuple")
+    raw_rows, diagnostics = value
+    raw_array = np.asarray(raw_rows)
+    if raw_array.dtype.kind not in "iu" or raw_array.shape != made_triangles.shape:
+        raise MeshError("native local-edge-flip connectivity has an invalid shape or type")
+    rows = np.ascontiguousarray(raw_array, dtype=np.int64)
+    if len(rows) and (int(rows.min()) < 0 or int(rows.max()) >= len(made_points)):
+        raise MeshError("native local-edge-flip connectivity references an invalid node")
+    if not isinstance(diagnostics, dict) or set(diagnostics) != {
+        "flip_count", "queue_visits", "converged"
+    }:
+        raise MeshError("native local-edge-flip diagnostics are malformed")
+    flip_count = diagnostics["flip_count"]
+    queue_visits = diagnostics["queue_visits"]
+    converged = diagnostics["converged"]
+    if (
+        type(flip_count) is not int
+        or type(queue_visits) is not int
+        or type(converged) is not bool
+        or flip_count < 0
+        or flip_count > int(flip_limit)
+        or queue_visits < flip_count
+    ):
+        raise MeshError("native local-edge-flip counters are malformed")
+    changed_rows = int(np.count_nonzero(np.any(rows != made_triangles, axis=1)))
+    if changed_rows > 2 * flip_count:
+        raise MeshError("native local-edge-flip row changes exceed its flip count")
+    for row, triangle in enumerate(rows):
+        if len(set(map(int, triangle))) != 3:
+            raise MeshError(f"native local-edge-flip triangle {row} repeats a node")
+        first, second, third = made_points[triangle]
+        determinant = float(orientation_oracle(first, second, third))
+        if not determinant > 0.0:
+            raise MeshError(f"native local-edge-flip triangle {row} is not strict CCW")
+    triangle_keys = [tuple(sorted(map(int, triangle))) for triangle in rows]
+    if len(set(triangle_keys)) != len(triangle_keys):
+        raise MeshError("native local-edge-flip result contains duplicate triangles")
+
+    def edge_incidence(values: np.ndarray) -> dict[tuple[int, int], int]:
+        incidence: dict[tuple[int, int], int] = {}
+        for triangle in values:
+            for edge_index in range(3):
+                edge = tuple(
+                    sorted(
+                        (
+                            int(triangle[edge_index]),
+                            int(triangle[(edge_index + 1) % 3]),
+                        )
+                    )
+                )
+                incidence[edge] = incidence.get(edge, 0) + 1
+        return incidence
+
+    before_incidence = edge_incidence(made_triangles)
+    after_incidence = edge_incidence(rows)
+    if any(count > 2 for count in after_incidence.values()):
+        raise MeshError("native local-edge-flip result is non-manifold")
+    before_boundary = {
+        edge for edge, count in before_incidence.items() if count == 1
+    }
+    after_boundary = {edge for edge, count in after_incidence.items() if count == 1}
+    if after_boundary != before_boundary:
+        raise MeshError("native local-edge-flip result changed the domain boundary")
+    before_edges = set(before_incidence)
+    after_edges = set(after_incidence)
+    if (
+        len(before_edges - after_edges) > flip_count
+        or len(after_edges - before_edges) > flip_count
+    ):
+        raise MeshError("native local-edge-flip topology exceeds its flip count")
+    before_area = sum(
+        float(orientation_oracle(*made_points[triangle]))
+        for triangle in made_triangles
+    )
+    after_area = sum(
+        float(orientation_oracle(*made_points[triangle])) for triangle in rows
+    )
+    area_scale = max(1.0, abs(before_area), abs(after_area))
+    if abs(after_area - before_area) > 1.0e-12 * area_scale:
+        raise MeshError("native local-edge-flip result changed domain coverage")
+    for edge in map(tuple, made_protected):
+        canonical = tuple(sorted(map(int, edge)))
+        if canonical in before_edges and canonical not in after_edges:
+            raise MeshError("native local-edge-flip result removed a protected edge")
+    return rows, {
+        "flip_count": flip_count,
+        "queue_visits": queue_visits,
+        "converged": converged,
+    }
+
+
+def native_constrained_smoothing(
+    points: Any,
+    cells: Any,
+    fixed_nodes: Any,
+    constrained_edges: Any,
+    preserve_boundary: bool,
+    metrics: Any,
+    iterations: int,
+    relaxation: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]] | None:
+    """Run the optional deterministic constrained-smoothing kernel."""
+
+    if not _complete_native_v2_available():
+        return None
+    made_points = _strict_float64_matrix(points, 2, "points")
+    made_cells = _strict_int64_matrix(cells, 4, "cells")
+    made_fixed = _strict_int64_matrix(fixed_nodes, 1, "fixed_nodes")
+    made_constraints = _strict_int64_matrix(
+        constrained_edges, 2, "constrained_edges"
+    )
+    made_metrics = np.asarray(metrics, dtype=np.float64)
+    if made_metrics.ndim != 3 or made_metrics.shape != (len(made_points), 2, 2):
+        raise TypeError("metrics must have shape (n, 2, 2)")
+    if not np.all(np.isfinite(made_metrics)):
+        raise TypeError("metrics must contain only finite values")
+    from .triangulation import orient2d as orientation_oracle
+
+    try:
+        value = _compiled.native_v2_constrained_smoothing(
+            made_points,
+            made_cells,
+            made_fixed,
+            made_constraints,
+            np.ascontiguousarray(made_metrics.reshape((-1, 4))),
+            orientation_oracle,
+            bool(preserve_boundary),
+            int(iterations),
+            float(relaxation),
+        )
+    except RuntimeError as error:
+        raise MeshError(str(error)) from error
+    if not isinstance(value, tuple) or len(value) != 3:
+        raise MeshError("native constrained-smoothing result must have three items")
+    raw_points, raw_moved, diagnostics = value
+    result_points = np.asarray(raw_points)
+    if result_points.dtype.kind != "f" or result_points.shape != made_points.shape:
+        raise MeshError("native constrained-smoothing points are malformed")
+    result_points = np.ascontiguousarray(result_points, dtype=np.float64)
+    if not np.all(np.isfinite(result_points)):
+        raise MeshError("native constrained-smoothing points are non-finite")
+    moved = np.asarray(raw_moved)
+    if moved.ndim != 1 or (moved.size and moved.dtype.kind not in "iu"):
+        raise MeshError("native constrained-smoothing moved nodes are malformed")
+    moved = np.ascontiguousarray(moved, dtype=np.int64)
+    if (
+        len(moved)
+        and (
+            int(moved.min()) < 0
+            or int(moved.max()) >= len(made_points)
+            or not np.array_equal(moved, np.unique(moved))
+        )
+    ):
+        raise MeshError("native constrained-smoothing moved nodes are invalid")
+    required = {"iterations", "accepted_moves", "rejected_moves", "converged"}
+    if not isinstance(diagnostics, dict) or set(diagnostics) != required:
+        raise MeshError("native constrained-smoothing diagnostics are malformed")
+    made_diagnostics = dict(diagnostics)
+    if (
+        type(made_diagnostics["iterations"]) is not int
+        or type(made_diagnostics["accepted_moves"]) is not int
+        or type(made_diagnostics["rejected_moves"]) is not int
+        or type(made_diagnostics["converged"]) is not bool
+        or not 0 <= made_diagnostics["iterations"] <= int(iterations)
+        or made_diagnostics["accepted_moves"] < len(moved)
+        or made_diagnostics["rejected_moves"] < 0
+    ):
+        raise MeshError("native constrained-smoothing counters are malformed")
+    topology = tuple(
+        tuple(int(value) for value in row if int(value) >= 0)
+        for row in made_cells
+    )
+    incidence: dict[tuple[int, int], int] = {}
+    for cell in topology:
+        for index in range(len(cell)):
+            edge = tuple(sorted((cell[index], cell[(index + 1) % len(cell)])))
+            incidence[edge] = incidence.get(edge, 0) + 1
+    boundary_nodes = np.asarray(
+        sorted(
+            {
+                node
+                for edge, attached in incidence.items()
+                if attached == 1
+                for node in edge
+            }
+        ),
+        dtype=np.int64,
+    )
+    fixed_flat = made_fixed.reshape(-1)
+    constrained_flat = made_constraints.reshape(-1)
+    immutable_parts = [fixed_flat, constrained_flat]
+    if preserve_boundary:
+        immutable_parts.append(boundary_nodes)
+    immutable = np.unique(np.concatenate(immutable_parts))
+    movable_count = len(made_points) - len(immutable)
+    maximum_attempts = made_diagnostics["iterations"] * movable_count
+    if len(immutable) and not np.array_equal(
+        result_points[immutable], made_points[immutable]
+    ):
+        raise MeshError("native constrained-smoothing moved a fixed node")
+    changed = np.flatnonzero(np.any(result_points != made_points, axis=1)).astype(
+        np.int64, copy=False
+    )
+    if not set(map(int, changed)).issubset(set(map(int, moved))):
+        raise MeshError("native constrained-smoothing moved-node report is inconsistent")
+    if len(np.intersect1d(moved, immutable, assume_unique=True)):
+        raise MeshError("native constrained-smoothing reported a fixed node as moved")
+    if (
+        made_diagnostics["accepted_moves"] + made_diagnostics["rejected_moves"]
+        > maximum_attempts
+        or (
+            made_diagnostics["iterations"] < int(iterations)
+            and not made_diagnostics["converged"]
+        )
+        or (
+            made_diagnostics["iterations"] == 0
+            and not made_diagnostics["converged"]
+        )
+    ):
+        raise MeshError("native constrained-smoothing counters are inconsistent")
+    for cell_number, cell in enumerate(topology):
+        for index in range(len(cell)):
+            previous = cell[(index - 1) % len(cell)]
+            current = cell[index]
+            following = cell[(index + 1) % len(cell)]
+            before = float(
+                orientation_oracle(
+                    made_points[previous], made_points[current], made_points[following]
+                )
+            )
+            after = float(
+                orientation_oracle(
+                    result_points[previous],
+                    result_points[current],
+                    result_points[following],
+                )
+            )
+            if before == 0.0 or before * after <= 0.0:
+                raise MeshError(
+                    f"native constrained-smoothing inverted cell {cell_number}"
+                )
+    return result_points, moved, made_diagnostics
 
 
 def normalized_native_v2_insert_diagnostics(value: Any) -> dict[str, int]:
@@ -586,6 +924,8 @@ __all__ = [
     "native_element_quality",
     "native_gradation_limit",
     "native_metric_lengths",
+    "native_constrained_smoothing",
+    "native_local_edge_flip",
     "native_mutable_t3_insert",
     "native_v2_insert_provenance",
     "normalized_native_v2_insert_diagnostics",

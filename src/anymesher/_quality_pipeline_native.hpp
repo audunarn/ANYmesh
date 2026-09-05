@@ -19,6 +19,26 @@
 
 namespace anymesher_quality_native {
 
+struct QualitySignalInterrupted {};
+
+class QualitySignalAwareGilRelease {
+public:
+    QualitySignalAwareGilRelease() : state_(PyEval_SaveThread()) {}
+    ~QualitySignalAwareGilRelease() {
+        if (state_ != nullptr) PyEval_RestoreThread(state_);
+    }
+    bool interrupted() {
+        PyEval_RestoreThread(state_);
+        state_ = nullptr;
+        if (PyErr_CheckSignals() != 0) return true;
+        state_ = PyEval_SaveThread();
+        return false;
+    }
+
+private:
+    PyThreadState* state_ = nullptr;
+};
+
 using anymesher_native::Index;
 using anymesher_native::Point;
 using anymesher_native::robust_orient;
@@ -425,6 +445,14 @@ struct ValidationEdge {
     }
 };
 
+struct ValidationEdgeBox {
+    ValidationEdge edge;
+    double minimum_x = 0.0;
+    double maximum_x = 0.0;
+    double minimum_y = 0.0;
+    double maximum_y = 0.0;
+};
+
 inline double ring_area(
     const std::vector<Point>& points,
     const std::vector<Index>& ring) {
@@ -499,8 +527,10 @@ inline PyObject* py_validate_triangulation(PyObject*, PyObject* args) {
     }
     std::vector<std::array<Index, 3>> canonical;
     std::string failure;
-    Py_BEGIN_ALLOW_THREADS
+    bool interrupted = false;
     try {
+        QualitySignalAwareGilRelease gil;
+        std::size_t work = 0;
         const auto points = load_points(points_buffer.view);
         const Index point_count = static_cast<Index>(points.size());
         const auto outer = load_vector(outer_buffer.view, point_count, "outer");
@@ -513,6 +543,9 @@ inline PyObject* py_validate_triangulation(PyObject*, PyObject* args) {
         std::map<ValidationEdge, std::vector<Index>> incidence;
         double area = 0.0;
         for (Py_ssize_t row = 0; row < triangles_buffer.view.shape[0]; ++row) {
+            if (++work % 4096 == 0 && gil.interrupted()) {
+                throw QualitySignalInterrupted{};
+            }
             std::array<Index, 3> triangle{
                 integer_at(triangles_buffer.view, row, 0),
                 integer_at(triangles_buffer.view, row, 1),
@@ -569,39 +602,109 @@ inline PyObject* py_validate_triangulation(PyObject*, PyObject* args) {
             }
         }
         for (const auto& edge : required) {
+            if (++work % 4096 == 0 && gil.interrupted()) {
+                throw QualitySignalInterrupted{};
+            }
             if (incidence.find(edge) == incidence.end()) {
                 throw std::runtime_error("native triangulation omitted mandatory segments");
             }
         }
         for (const auto& edge : boundary) {
+            if (++work % 4096 == 0 && gil.interrupted()) {
+                throw QualitySignalInterrupted{};
+            }
             const auto found = incidence.find(edge);
             if (found == incidence.end() || found->second.size() != 1) {
                 throw std::runtime_error("native triangulation returned invalid boundary incidence");
             }
         }
         for (const auto& item : incidence) {
+            if (++work % 4096 == 0 && gil.interrupted()) {
+                throw QualitySignalInterrupted{};
+            }
             if (item.second.size() == 1 && boundary.find(item.first) == boundary.end()) {
                 throw std::runtime_error("native triangulation left open interior edges");
             }
         }
         for (const auto& edge : mandatory) {
+            if (++work % 4096 == 0 && gil.interrupted()) {
+                throw QualitySignalInterrupted{};
+            }
             if (incidence.find(edge) == incidence.end()) {
                 throw std::runtime_error("native triangulation omitted a mandatory interior constraint");
             }
         }
-        std::vector<ValidationEdge> edges;
+        std::vector<ValidationEdgeBox> edges;
         edges.reserve(incidence.size());
         for (const auto& item : incidence) {
-            edges.push_back(item.first);
+            if (++work % 4096 == 0 && gil.interrupted()) {
+                throw QualitySignalInterrupted{};
+            }
+            const Point& first = points[static_cast<std::size_t>(item.first.first)];
+            const Point& second = points[static_cast<std::size_t>(item.first.second)];
+            edges.push_back({
+                item.first,
+                std::min(first.x, second.x),
+                std::max(first.x, second.x),
+                std::min(first.y, second.y),
+                std::max(first.y, second.y),
+            });
         }
+        std::sort(
+            edges.begin(), edges.end(),
+            [](const ValidationEdgeBox& first, const ValidationEdgeBox& second) {
+                return std::tie(
+                           first.minimum_x, first.maximum_x,
+                           first.minimum_y, first.maximum_y,
+                           first.edge.first, first.edge.second) <
+                       std::tie(
+                           second.minimum_x, second.maximum_x,
+                           second.minimum_y, second.maximum_y,
+                           second.edge.first, second.edge.second);
+            });
         for (std::size_t first_row = 0; first_row < edges.size(); ++first_row) {
-            const auto& first_edge = edges[first_row];
+            const auto& first_box = edges[first_row];
+            const auto& first_edge = first_box.edge;
             for (std::size_t second_row = first_row + 1; second_row < edges.size(); ++second_row) {
-                const auto& second_edge = edges[second_row];
-                if (first_edge.first == second_edge.first ||
+                if (++work % 4096 == 0 && gil.interrupted()) {
+                    throw QualitySignalInterrupted{};
+                }
+                const auto& second_box = edges[second_row];
+                if (second_box.minimum_x > first_box.maximum_x + tolerance) {
+                    break;
+                }
+                if (second_box.minimum_y > first_box.maximum_y + tolerance ||
+                    first_box.minimum_y > second_box.maximum_y + tolerance) {
+                    continue;
+                }
+                const auto& second_edge = second_box.edge;
+                const bool shared_endpoint =
+                    first_edge.first == second_edge.first ||
                     first_edge.first == second_edge.second ||
                     first_edge.second == second_edge.first ||
-                    first_edge.second == second_edge.second) {
+                    first_edge.second == second_edge.second;
+                if (shared_endpoint) {
+                    const Point& a = points[static_cast<std::size_t>(first_edge.first)];
+                    const Point& b = points[static_cast<std::size_t>(first_edge.second)];
+                    const Point& c = points[static_cast<std::size_t>(second_edge.first)];
+                    const Point& d = points[static_cast<std::size_t>(second_edge.second)];
+                    const bool overlap =
+                        (first_edge.first != second_edge.first &&
+                         first_edge.first != second_edge.second &&
+                         point_on_segment(a, c, d, tolerance)) ||
+                        (first_edge.second != second_edge.first &&
+                         first_edge.second != second_edge.second &&
+                         point_on_segment(b, c, d, tolerance)) ||
+                        (second_edge.first != first_edge.first &&
+                         second_edge.first != first_edge.second &&
+                         point_on_segment(c, a, b, tolerance)) ||
+                        (second_edge.second != first_edge.first &&
+                         second_edge.second != first_edge.second &&
+                         point_on_segment(d, a, b, tolerance));
+                    if (overlap) {
+                        throw std::runtime_error(
+                            "native triangulation returned crossing or overlapping edges");
+                    }
                     continue;
                 }
                 const Point& a = points[static_cast<std::size_t>(first_edge.first)];
@@ -632,10 +735,12 @@ inline PyObject* py_validate_triangulation(PyObject*, PyObject* args) {
                 "native triangulation coverage area does not match the prepared domain");
         }
         std::sort(canonical.begin(), canonical.end());
+    } catch (const QualitySignalInterrupted&) {
+        interrupted = true;
     } catch (const std::exception& error) {
         failure = error.what();
     }
-    Py_END_ALLOW_THREADS
+    if (interrupted) return nullptr;
     if (!failure.empty()) {
         PyErr_SetString(PyExc_RuntimeError, failure.c_str());
         return nullptr;

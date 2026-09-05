@@ -33,6 +33,8 @@ __all__ = [
     "frontal_delaunay_refine",
 ]
 
+_MAXIMUM_METRIC_EDGE_LENGTH = 1.4
+
 
 def _edge(first: int, second: int) -> tuple[int, int]:
     return (first, second) if first < second else (second, first)
@@ -328,20 +330,62 @@ class MutableT3Topology:
             cross = abs(float(edge_vector[0] * (candidate[1] - self._points[first, 1]) - edge_vector[1] * (candidate[0] - self._points[first, 0])))
             if cross <= tolerance * max(float(np.linalg.norm(edge_vector)), 1.0) and np.all(candidate >= np.minimum(self._points[first], self._points[second]) - tolerance) and np.all(candidate <= np.maximum(self._points[first], self._points[second]) + tolerance):
                 raise _GeometryLimited("frontal candidate encroaches an unsplittable protected edge")
-        cavity = []
+        bad_triangles = []
         for row, triangle in enumerate(self._triangles):
             if cancellation_check is not None and row % 4096 == 0:
                 cancellation_check("native-v2 cavity scan")
             a, b, c = (self._points[int(value)] for value in triangle)
             if incircle(a, b, c, candidate) > tolerance * tolerance:
-                cavity.append(row)
-        if not cavity:
+                bad_triangles.append(row)
+        seed = None
+        for bad_number, row in enumerate(bad_triangles):
+            if cancellation_check is not None and bad_number % 4096 == 0:
+                cancellation_check("native-v2 cavity seed scan")
+            if min(
+                orient2d(
+                    self._points[int(self._triangles[row, index])],
+                    self._points[int(self._triangles[row, (index + 1) % 3])],
+                    candidate,
+                )
+                for index in range(3)
+            ) >= -tolerance:
+                seed = row
+                break
+        if seed is None:
             located = self.locate(
                 candidate, cancellation_check=cancellation_check
             )
             if located is None:
                 raise _GeometryLimited("frontal candidate lies outside the mutable triangulation")
             cavity = [located]
+        else:
+            edge_rows: dict[tuple[int, int], list[int]] = {}
+            for bad_number, row in enumerate(bad_triangles):
+                if cancellation_check is not None and bad_number % 4096 == 0:
+                    cancellation_check("native-v2 cavity adjacency scan")
+                triangle = self._triangles[row]
+                for index in range(3):
+                    edge_rows.setdefault(
+                        _edge(int(triangle[index]), int(triangle[(index + 1) % 3])),
+                        [],
+                    ).append(row)
+            selected = {seed}
+            frontier = [seed]
+            for frontier_number, row in enumerate(frontier):
+                if cancellation_check is not None and frontier_number % 4096 == 0:
+                    cancellation_check("native-v2 cavity component scan")
+                triangle = self._triangles[row]
+                adjacent = {
+                    other
+                    for index in range(3)
+                    for other in edge_rows[
+                        _edge(int(triangle[index]), int(triangle[(index + 1) % 3]))
+                    ]
+                }
+                for other in sorted(adjacent.difference(selected)):
+                    selected.add(other)
+                    frontier.append(other)
+            cavity = sorted(selected)
         counts: dict[tuple[int, int], int] = {}
         edge_owners: dict[tuple[int, int], list[int]] = {}
         for row in cavity:
@@ -381,6 +425,46 @@ class MutableT3Topology:
         triangles, _owners, report = self._python_insert_with_owners(candidate)
         return triangles, report
 
+    def _native_insert_owners(
+        self,
+        triangles: np.ndarray,
+        *,
+        inserted_node: int,
+        owner: int,
+    ) -> np.ndarray:
+        retained_owners = {
+            tuple(map(int, triangle)): int(self.triangle_owners[row])
+            for row, triangle in enumerate(self._triangles)
+        }
+        result_identities = {tuple(map(int, triangle)) for triangle in triangles}
+        edge_owners: dict[tuple[int, int], list[int]] = {}
+        for row, triangle in enumerate(self._triangles):
+            if tuple(map(int, triangle)) in result_identities:
+                continue
+            triangle_owner = int(self.triangle_owners[row])
+            for index in range(3):
+                edge = _edge(
+                    int(triangle[index]), int(triangle[(index + 1) % 3])
+                )
+                edge_owners.setdefault(edge, []).append(triangle_owner)
+        values: list[int] = []
+        for triangle in triangles:
+            identity = tuple(map(int, triangle))
+            retained = retained_owners.get(identity)
+            if retained is not None:
+                values.append(retained)
+                continue
+            if inserted_node not in identity:
+                raise MeshError("compiled mutable T3 insertion returned an unknown cell")
+            opposite = [value for value in identity if value != inserted_node]
+            sources = edge_owners.get(_edge(opposite[0], opposite[1]))
+            if not sources:
+                raise MeshError(
+                    "compiled mutable T3 insertion returned an ownerless cavity cell"
+                )
+            values.append(int(owner) if int(owner) != -1 else sources[0])
+        return np.asarray(values, dtype=np.int64)
+
     def insert_point(
         self,
         point: Sequence[float],
@@ -393,14 +477,17 @@ class MutableT3Topology:
             raise MeshError("frontal insertion point must be one finite 2D coordinate")
         if cancellation_check is not None:
             cancellation_check("native-v2 mutable insertion start")
-        reference_triangles, reference_owners, reference_report = self._python_insert_with_owners(
-            candidate,
-            owner=owner,
-            cancellation_check=cancellation_check,
-        )
+        bounded_oracle = len(self._triangles) <= 4096
+        reference: tuple[np.ndarray, np.ndarray, dict[str, Any]] | None = None
+        if bounded_oracle or cancellation_check is not None:
+            reference = self._python_insert_with_owners(
+                candidate,
+                owner=owner,
+                cancellation_check=cancellation_check,
+            )
         native = (
             None
-            if cancellation_check is not None and len(self._triangles) > 4096
+            if cancellation_check is not None and not bounded_oracle
             else native_mutable_t3_insert(
                 self._points,
                 self._triangles,
@@ -409,11 +496,23 @@ class MutableT3Topology:
             )
         )
         if native is None:
-            new_triangles, report = reference_triangles, reference_report
+            if reference is None:
+                reference = self._python_insert_with_owners(candidate, owner=owner)
+            new_triangles, reference_owners, report = reference
         else:
             new_triangles, report = native
-            if not np.array_equal(new_triangles, reference_triangles):
-                raise MeshError("compiled mutable T3 insertion disagrees with the Python oracle")
+            if reference is not None:
+                reference_triangles, reference_owners, _ = reference
+                if not np.array_equal(new_triangles, reference_triangles):
+                    raise MeshError(
+                        "compiled mutable T3 insertion disagrees with the Python oracle"
+                    )
+            else:
+                reference_owners = self._native_insert_owners(
+                    new_triangles,
+                    inserted_node=len(self._points),
+                    owner=owner,
+                )
         if cancellation_check is not None:
             cancellation_check("native-v2 mutable insertion commit")
         old_points = self._points
@@ -657,6 +756,7 @@ def frontal_delaunay_refine(
     ] | None = None,
     component_seed_registry: ComponentSeedRegistry | None = None,
     supplemental_metric_field: MetricFieldSpec | None = None,
+    qualified_seed: bool = False,
 ) -> tuple[PlanarTriangulation, dict[str, Any]]:
     """Refine one qualified planar CDT through a deterministic bounded queue."""
 
@@ -759,6 +859,7 @@ def frontal_delaunay_refine(
     insertions = 0
     operations = 0
     geometry_limited = 0
+    geometry_limited_triangles: set[tuple[int, int, int]] = set()
     stale_entries = 0
     shared_segment_splits = 0
     gradation_iterations = 0
@@ -812,8 +913,10 @@ def frontal_delaunay_refine(
         ):
             if cancellation_check is not None and edge_number % options.cancellation_interval == 0:
                 cancellation_check("native-v2 segment queue scan")
-            if length > 1.35 * (1.0 + 1.0e-12):
-                heapq.heappush(segment_queue, (-length / 1.35, edge))
+            if length > _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12):
+                heapq.heappush(
+                    segment_queue, (-length / _MAXIMUM_METRIC_EDGE_LENGTH, edge)
+                )
         if segment_queue:
             _, edge = heapq.heappop(segment_queue)
             operations += 1
@@ -824,6 +927,19 @@ def frontal_delaunay_refine(
             insertions += 1
             shared_segment_splits += 1
             continue
+        if qualified_seed and operations == 0:
+            qualified_lengths = _metric_lengths(
+                points,
+                topology_edges,
+                tensors,
+                cancellation_check=cancellation_check,
+                cancellation_interval=options.cancellation_interval,
+            )
+            if not len(qualified_lengths) or float(
+                np.max(qualified_lengths)
+            ) <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12):
+                route = "frontal_delaunay_baseline_satisfied"
+                break
         queue: list[tuple[float, int, tuple[int, int, int], int]] = []
         for triangle_number, triangle in enumerate(triangles):
             if cancellation_check is not None and triangle_number % options.cancellation_interval == 0:
@@ -835,11 +951,33 @@ def frontal_delaunay_refine(
                 delta = coordinates[(index + 1) % 3] - coordinates[index]
                 metric_lengths.append(sqrt(max(float(delta @ center_tensor @ delta), 0.0)))
             angles = _angles(coordinates)
-            severity = max(max(metric_lengths) / 1.35, 30.0 / max(min(angles), 1.0e-12))
+            maximum_metric_length = max(metric_lengths)
+            minimum_angle = min(angles)
+            minimum_angle_index = int(np.argmin(angles))
+            corner = int(triangle[minimum_angle_index])
+            prior = int(triangle[(minimum_angle_index - 1) % 3])
+            following = int(triangle[(minimum_angle_index + 1) % 3])
+            fixed_corner_edges = {_edge(corner, prior), _edge(corner, following)}
+            identity = tuple(map(int, triangle))
+            if (
+                minimum_angle < 30.0
+                and maximum_metric_length
+                <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12)
+                and fixed_corner_edges.issubset(topology.protected_edges)
+            ):
+                if identity not in geometry_limited_triangles:
+                    geometry_limited_triangles.add(identity)
+                    geometry_limited += 1
+                continue
+            severity = max(
+                maximum_metric_length / _MAXIMUM_METRIC_EDGE_LENGTH,
+                30.0 / max(minimum_angle, 1.0e-12),
+            )
             if severity > 1.0 + 1.0e-12:
-                identity = tuple(map(int, triangle))
                 heapq.heappush(queue, (-severity, 1, identity, topology.epoch))
         if not queue:
+            if geometry_limited:
+                route = "frontal_delaunay_geometry_limited"
             break
         accepted = False
         triangle_lookup: dict[tuple[int, int, int], np.ndarray] = {}

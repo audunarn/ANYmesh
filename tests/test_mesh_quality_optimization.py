@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from hashlib import sha256
+
 import numpy as np
 import pytest
 
@@ -12,11 +14,12 @@ from anygeometry import (
 )
 from anymesher.errors import MeshError
 from anymesher.hybrid import generate_hybrid_mesh
+from anymesher import surface_mesh as surface_mesh_module
 from anymesher.preparation import prepare_structural_closure
 from anymesher.quality_v2 import assert_valid_mesh
 from anymesher.seeding import edge_demand, solve_seeding
 from anymesher.serialize import mesh_to_dict
-from anymesher.surface_mesh import mesh_planar_surface
+from anymesher.surface_mesh import SurfaceMeshOptions, _triangle_quality, mesh_planar_surface
 
 
 OUTER = np.asarray(((0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)))
@@ -54,11 +57,85 @@ def _edges(mesh) -> set[tuple[int, int]]:
     }
 
 
+def _deterministic_mesh_payload(mesh):
+    """Retain phase membership while excluding noncanonical elapsed samples."""
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {
+                key: (
+                    sorted(item)
+                    if key == "phase_seconds" and isinstance(item, dict)
+                    else normalize(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        return value
+
+    return normalize(mesh_to_dict(mesh))
+
+
+def _selected_mesh_digest(mesh) -> str:
+    digest = sha256()
+    for values in (
+        mesh.node_coordinates,
+        mesh.node_ids,
+        mesh.triangle_connectivity,
+        mesh.triangle_ids,
+        mesh.quad_connectivity,
+        mesh.quad_ids,
+    ):
+        array = np.ascontiguousarray(values)
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
 def _plate(model: GeometryModel, coordinates):
     points = [model.add_point(*coordinates) for coordinates in coordinates]
     face = model.add_plate(points)
     edges = tuple(oriented.edge for oriented in model.faces[face].loop)
     return face, edges
+
+
+def test_segment_grid_is_a_deterministic_conservative_segment_aabb_index() -> None:
+    base_segments = (
+        (np.asarray((-4.0, -1.0)), np.asarray((4.0, -1.0))),
+        (np.asarray((-0.5, -4.0)), np.asarray((-0.5, 4.0))),
+        (np.asarray((2.5, 2.5)), np.asarray((4.0, 3.0))),
+        (np.asarray((-4.0, 2.0)), np.asarray((-3.0, 2.25))),
+    )
+    base_query = (np.asarray((-2.0, -1.1)), np.asarray((2.0, -0.9)))
+    padding = 0.05
+
+    for angle in (0.0, 0.37):
+        rotation = np.asarray(
+            ((np.cos(angle), -np.sin(angle)), (np.sin(angle), np.cos(angle)))
+        )
+        segments = tuple(
+            (first @ rotation.T, second @ rotation.T) for first, second in base_segments
+        )
+        first, second = (value @ rotation.T for value in base_query)
+        grid = surface_mesh_module._SegmentGrid(segments, radius=0.2)
+        candidates = grid.candidates_for_segment(first, second, padding)
+        repeated = grid.candidates_for_segment(second, first, padding)
+
+        query_lower = np.minimum(first, second) - padding
+        query_upper = np.maximum(first, second) + padding
+        exact_aabb = {
+            index
+            for index, (start, end) in enumerate(segments)
+            if np.all(
+                np.maximum(np.minimum(start, end), query_lower)
+                <= np.minimum(np.maximum(start, end), query_upper)
+            )
+        }
+        assert candidates == repeated
+        assert candidates == tuple(sorted(set(candidates)))
+        assert exact_aabb.issubset(candidates)
 
 
 def test_diagonal_plate_quality_is_valid_bounded_and_deterministic() -> None:
@@ -158,6 +235,190 @@ def test_quality_cancellation_stops_at_a_safe_boundary() -> None:
     assert phases[-1] == "native surface quality optimization start"
 
 
+@pytest.mark.skipif(
+    not surface_mesh_module._native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE,
+    reason="compiled quality pipeline is unavailable",
+)
+@pytest.mark.parametrize(
+    ("points", "triangles"),
+    (
+        (
+            np.asarray(
+                ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (5.0, 0.0))
+            ),
+            np.asarray(((0, 1, 2), (1, 3, 2))),
+        ),
+        (
+            np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0e-13, 1.0e-15))),
+            np.asarray(((0, 2, 1),)),
+        ),
+        (
+            np.asarray(
+                ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
+            ),
+            np.asarray(((2, 3, 0), (3, 1, 0))),
+        ),
+        (
+            np.asarray(
+                (
+                    (0.0, 0.0),
+                    (1.0, 0.0),
+                    (0.8660254037844386, 0.5),
+                    (3.0, 0.0),
+                    (4.0, 0.0),
+                    (2.133974596215561, 0.5),
+                )
+            ),
+            np.asarray(((0, 1, 2), (3, 4, 5))),
+        ),
+    ),
+)
+def test_triangle_quality_compiled_matches_python_report_score_and_aspects(
+    monkeypatch, points, triangles
+) -> None:
+    settings = SurfaceMeshOptions(
+        prefer_quality_policy=True,
+        max_element_growth=1.25,
+    )
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "COMPILED_QUALITY_PIPELINE_AVAILABLE",
+        False,
+    )
+    python_report, python_score, python_aspects = _triangle_quality(
+        points, triangles, settings
+    )
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "COMPILED_QUALITY_PIPELINE_AVAILABLE",
+        True,
+    )
+    native_report, native_score, native_aspects = _triangle_quality(
+        points, triangles, settings
+    )
+
+    assert native_report.keys() == python_report.keys()
+    for key in native_report:
+        if isinstance(native_report[key], float):
+            assert native_report[key] == pytest.approx(
+                python_report[key], rel=1.0e-12, abs=1.0e-12
+            )
+        else:
+            assert native_report[key] == python_report[key]
+    assert native_score[:3] == python_score[:3]
+    assert native_score[3:] == pytest.approx(
+        python_score[3:], rel=1.0e-12, abs=1.0e-12
+    )
+    np.testing.assert_array_equal(native_aspects, python_aspects)
+
+
+@pytest.mark.skipif(
+    not surface_mesh_module._native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE,
+    reason="compiled quality pipeline is unavailable",
+)
+def test_compiled_triangle_quality_preserves_selected_mesh(monkeypatch) -> None:
+    diagnostics = {}
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "COMPILED_QUALITY_PIPELINE_AVAILABLE",
+        False,
+    )
+    python_mesh = mesh_planar_surface(
+        OUTER,
+        constraints=(DIAGONAL,),
+        target_size=0.25,
+        backend="python",
+        recombine=False,
+        diagnostics=diagnostics,
+    )
+    python_quality = diagnostics["quality_optimization"]
+    diagnostics = {}
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "COMPILED_QUALITY_PIPELINE_AVAILABLE",
+        True,
+    )
+    native_mesh = mesh_planar_surface(
+        OUTER,
+        constraints=(DIAGONAL,),
+        target_size=0.25,
+        backend="python",
+        recombine=False,
+        diagnostics=diagnostics,
+    )
+    native_quality = diagnostics["quality_optimization"]
+
+    np.testing.assert_array_equal(
+        native_mesh.node_coordinates, python_mesh.node_coordinates
+    )
+    np.testing.assert_array_equal(
+        native_mesh.triangle_connectivity, python_mesh.triangle_connectivity
+    )
+    np.testing.assert_array_equal(
+        native_mesh.quad_connectivity, python_mesh.quad_connectivity
+    )
+    assert _selected_mesh_digest(native_mesh) == _selected_mesh_digest(python_mesh)
+    for stage in ("initial_quality", "final_quality"):
+        assert native_quality[stage].keys() == python_quality[stage].keys()
+        for key, native_value in native_quality[stage].items():
+            python_value = python_quality[stage][key]
+            if isinstance(native_value, float):
+                assert native_value == pytest.approx(
+                    python_value, rel=1.0e-12, abs=1.0e-12
+                )
+            else:
+                assert native_value == python_value
+    assert native_quality["candidates"][0]["score"] == pytest.approx(
+        python_quality["candidates"][0]["score"],
+        rel=1.0e-12,
+        abs=1.0e-12,
+    )
+
+
+def test_present_compiled_triangle_quality_rejects_malformed_batches(
+    monkeypatch,
+) -> None:
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)))
+    triangles = np.asarray(((0, 1, 2),))
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "COMPILED_QUALITY_PIPELINE_AVAILABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "native_element_quality",
+        lambda *_args: np.zeros((1, 5)),
+    )
+    with pytest.raises(MeshError, match="malformed output"):
+        _triangle_quality(points, triangles)
+
+
+def test_compiled_triangle_incidence_rejects_repeated_cell_attachment(
+    monkeypatch,
+) -> None:
+    points = np.asarray(
+        ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    )
+    triangles = np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int64)
+    monkeypatch.setattr(
+        surface_mesh_module._native_cpp,
+        "triangle_edge_incidence",
+        lambda _triangles: np.asarray(
+            (
+                (0, 1, 0, -1),
+                (0, 2, 0, 0),
+                (0, 3, 1, -1),
+                (1, 2, 0, -1),
+                (2, 3, 1, -1),
+            ),
+            dtype=np.int64,
+        ),
+    )
+    with pytest.raises(MeshError, match="repeats an attachment"):
+        _triangle_quality(points, triangles)
+
+
 def test_three_plate_connect_quality_and_shared_identity_are_deterministic() -> None:
     geometry = GeometryModel()
     support, support_edges = _plate(
@@ -207,7 +468,7 @@ def test_three_plate_connect_quality_and_shared_identity_are_deterministic() -> 
 
     assert application.face_intersection is not None
     assert application.face_intersection.edge.id == diagonal
-    assert mesh_to_dict(first) == mesh_to_dict(second)
+    assert _deterministic_mesh_payload(first) == _deterministic_mesh_payload(second)
     for edge_id, expected_wall in (
         (support_edges[0], edge_wall),
         (diagonal, diagonal_wall),
@@ -301,7 +562,7 @@ def test_two_level_plate_intersections_refine_thin_wall_strips_compatibly() -> N
         strategy="native",
         native_backend="python",
     )
-    assert mesh_to_dict(first) == mesh_to_dict(second)
+    assert _deterministic_mesh_payload(first) == _deterministic_mesh_payload(second)
     face_diagnostics = first.hybrid_diagnostics["triangulation_backend_by_face"]
     wall_quality = [
         item["quality_optimization"]["final_quality"]
@@ -356,6 +617,8 @@ def test_anyfem_exact_floating_plate_and_diagonal_extrusion_meshes_automatically
     first_mesh = generate_hybrid_mesh(geometry, **options)
     second_mesh = generate_hybrid_mesh(geometry, **options)
 
-    assert mesh_to_dict(first_mesh) == mesh_to_dict(second_mesh)
+    assert _deterministic_mesh_payload(first_mesh) == _deterministic_mesh_payload(
+        second_mesh
+    )
     assert first_mesh.automatic_intersections == 2
     assert first_mesh.declared_plate_junction_edges

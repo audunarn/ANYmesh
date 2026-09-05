@@ -7,6 +7,7 @@ import threading
 import numpy as np
 import pytest
 import anymesher.native_v2 as native_v2_module
+import anymesher.optimization as optimization_module
 
 from anymesher import (
     ComponentSeedRegistry,
@@ -24,6 +25,7 @@ from anymesher import (
 )
 from anymesher.errors import MeshError
 from anymesher.native_cpp import COMPILED_NATIVE_V2_AVAILABLE
+from anymesher.optimization import local_edge_flip
 
 
 def test_native_options_are_strict_canonical_and_do_not_expose_future_modes() -> None:
@@ -338,6 +340,14 @@ def test_native_v2_operational_failure_is_not_geometry_limited(monkeypatch) -> N
         def native_v2_mutable_t3_insert(*_args):
             raise RuntimeError("allocator or ABI failure")
 
+        @staticmethod
+        def native_v2_local_edge_flip(*_args):
+            return (), {}
+
+        @staticmethod
+        def native_v2_constrained_smoothing(*_args):
+            return (), (), {}
+
     monkeypatch.setattr(native_cpp, "COMPILED_NATIVE_V2_AVAILABLE", True)
     monkeypatch.setattr(native_cpp, "_compiled", BrokenKernel())
     points = np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)))
@@ -349,6 +359,457 @@ def test_native_v2_operational_failure_is_not_geometry_limited(monkeypatch) -> N
             np.empty((0, 2), dtype=np.int64),
             (0.2, 0.2),
         )
+
+
+def _python_flip(monkeypatch, points, triangles, **kwargs):
+    with monkeypatch.context() as context:
+        context.setattr(optimization_module, "native_local_edge_flip", lambda *_args: None)
+        return local_edge_flip(points, triangles, **kwargs)
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+@pytest.mark.parametrize("reversed_rows", (False, True))
+def test_local_edge_flip_native_parity_protected_rotated_and_reversed(
+    monkeypatch, reversed_rows
+) -> None:
+    points = np.asarray(((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 0.2)))
+    angle = 0.37
+    rotation = np.asarray(
+        ((np.cos(angle), -np.sin(angle)), (np.sin(angle), np.cos(angle)))
+    )
+    points = np.ascontiguousarray(points @ rotation.T)
+    triangles = np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int64)
+    if reversed_rows:
+        triangles = np.ascontiguousarray(triangles[:, ::-1])
+    metrics = (
+        np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+        np.repeat(np.asarray((((3.0, 0.25), (0.25, 1.5)),)), len(points), axis=0),
+    )
+    for metric in metrics:
+        expected = _python_flip(monkeypatch, points, triangles, metric=metric, max_flips=4)
+        actual = local_edge_flip(points, triangles, metric=metric, max_flips=4)
+        np.testing.assert_array_equal(actual.triangles, expected.triangles)
+        assert (actual.flip_count, actual.queue_visits, actual.converged) == (
+            expected.flip_count, expected.queue_visits, expected.converged
+        )
+    assert _python_flip(monkeypatch, points, triangles, max_flips=4).flip_count == 1
+
+    protected_expected = _python_flip(
+        monkeypatch, points, triangles, protected_edges=((0, 2),), max_flips=4
+    )
+    protected_actual = local_edge_flip(
+        points, triangles, protected_edges=((0, 2),), max_flips=4
+    )
+    np.testing.assert_array_equal(protected_actual.triangles, protected_expected.triangles)
+    assert protected_actual.flip_count == protected_expected.flip_count == 0
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+def test_local_edge_flip_native_parity_near_degenerate_and_capped(monkeypatch) -> None:
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 2.0**-30), (0.0, 1.0)))
+    triangles = np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int64)
+    for limit in (0, 1, None):
+        expected = _python_flip(monkeypatch, points, triangles, max_flips=limit)
+        actual = local_edge_flip(points, triangles, max_flips=limit)
+        np.testing.assert_array_equal(actual.triangles, expected.triangles)
+        assert (actual.flip_count, actual.queue_visits, actual.converged) == (
+            expected.flip_count, expected.queue_visits, expected.converged
+        )
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+def test_native_local_edge_flip_accepts_exact_collinear_regular_lattice(monkeypatch) -> None:
+    from anymesher.native_cpp import native_local_edge_flip
+
+    width = 32
+    points = np.asarray(
+        tuple((float(column), float(row)) for row in range(width) for column in range(width))
+    )
+    triangles = np.asarray(
+        tuple(
+            triangle
+            for row in range(width - 1)
+            for column in range(width - 1)
+            for triangle in (
+                (
+                    row * width + column,
+                    row * width + column + 1,
+                    (row + 1) * width + column + 1,
+                ),
+                (
+                    row * width + column,
+                    (row + 1) * width + column + 1,
+                    (row + 1) * width + column,
+                ),
+            )
+        ),
+        dtype=np.int64,
+    )
+    flip_limit = max(16, 8 * len(triangles))
+    expected = _python_flip(monkeypatch, points, triangles)
+    result = native_local_edge_flip(
+        points,
+        triangles,
+        np.empty((0, 2), dtype=np.int64),
+        np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+        flip_limit,
+    )
+    assert result is not None
+    np.testing.assert_array_equal(result[0], expected.triangles)
+    assert result[1] == {
+        "flip_count": expected.flip_count,
+        "queue_visits": expected.queue_visits,
+        "converged": expected.converged,
+    }
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+def test_native_local_edge_flip_adapts_nonzero_uncertain_orientation(monkeypatch) -> None:
+    from anymesher.native_cpp import native_local_edge_flip
+
+    points = np.asarray(
+        ((0.0, 0.0), (1.0e16, 1.0e16), (2.0e16, 2.0e16 + 4.0))
+    )
+    triangles = np.asarray(((0, 1, 2),), dtype=np.int64)
+    expected = _python_flip(monkeypatch, points, triangles)
+    result = native_local_edge_flip(
+        points,
+        triangles,
+        np.empty((0, 2), dtype=np.int64),
+        np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+        16,
+    )
+    assert result is not None
+    np.testing.assert_array_equal(result[0], expected.triangles)
+    assert result[1]["queue_visits"] == expected.queue_visits
+
+
+def test_local_edge_flip_malformed_native_result_fails_hard(monkeypatch) -> None:
+    import anymesher.native_cpp as native_cpp
+
+    class MalformedKernel:
+        @staticmethod
+        def native_v2_metric_lengths(*_args):
+            return ()
+
+        @staticmethod
+        def native_v2_gradation_limit(*_args):
+            return (), 0
+
+        @staticmethod
+        def native_v2_mutable_t3_insert(*_args):
+            return (), {"removed_triangles": 0, "added_triangles": 0, "native": True}
+
+        @staticmethod
+        def native_v2_local_edge_flip(*_args):
+            return [[0, 1, 2], [0, 1, 3]], {
+                "flip_count": 1,
+                "queue_visits": 1,
+                "converged": True,
+            }
+
+        @staticmethod
+        def native_v2_constrained_smoothing(*_args):
+            return (), (), {
+                "iterations": 0,
+                "accepted_moves": 1,
+                "rejected_moves": 0,
+                "converged": True,
+            }
+
+    monkeypatch.setattr(native_cpp, "_compiled", MalformedKernel())
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)))
+    triangles = np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int64)
+    with pytest.raises(MeshError, match="changed the domain boundary"):
+        native_cpp.native_local_edge_flip(
+            points,
+            triangles,
+            np.empty((0, 2), dtype=np.int64),
+            np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+            4,
+        )
+    with pytest.raises(MeshError, match="connectivity is malformed"):
+        native_cpp.native_mutable_t3_insert(
+            points,
+            triangles,
+            np.empty((0, 2), dtype=np.int64),
+            (0.5, 0.5),
+        )
+
+
+def test_local_edge_flip_rejects_unreported_row_reordering(monkeypatch) -> None:
+    import anymesher.native_cpp as native_cpp
+
+    class ReorderingKernel:
+        @staticmethod
+        def native_v2_local_edge_flip(*_args):
+            return [[0, 2, 3], [0, 1, 2]], {
+                "flip_count": 0,
+                "queue_visits": 0,
+                "converged": True,
+            }
+
+    monkeypatch.setattr(native_cpp, "_compiled", ReorderingKernel())
+    monkeypatch.setattr(native_cpp, "_complete_native_v2_available", lambda: True)
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)))
+    triangles = np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int64)
+    with pytest.raises(MeshError, match="row changes exceed"):
+        native_cpp.native_local_edge_flip(
+            points,
+            triangles,
+            np.empty((0, 2), dtype=np.int64),
+            np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+            4,
+        )
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+def test_native_local_edge_flip_honors_python_signal() -> None:
+    from anymesher.native_cpp import native_local_edge_flip
+
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)))
+    triangles = np.tile(np.asarray(((0, 1, 2),), dtype=np.int64), (150_000, 1))
+    timer = threading.Timer(0.001, _thread.interrupt_main)
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            native_local_edge_flip(
+                points,
+                triangles,
+                np.empty((0, 2), dtype=np.int64),
+                np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+                16,
+            )
+    finally:
+        timer.cancel()
+        timer.join()
+
+
+def _python_smoothing(monkeypatch, points, cells, **kwargs):
+    with monkeypatch.context() as context:
+        context.setattr(
+            optimization_module, "native_constrained_smoothing", lambda *_args: None
+        )
+        return optimization_module.constrained_smoothing(points, cells, **kwargs)
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+@pytest.mark.parametrize("reverse", (False, True))
+def test_constrained_smoothing_native_planar_rotated_reversed_parity(
+    monkeypatch, reverse
+) -> None:
+    width = 6
+    points = np.asarray(
+        tuple((float(column), float(row)) for row in range(width) for column in range(width))
+    )
+    points[width + 1:-width - 1:width + 1] += (0.13, -0.07)
+    angle = 0.31
+    rotation = np.asarray(
+        ((np.cos(angle), -np.sin(angle)), (np.sin(angle), np.cos(angle)))
+    )
+    points = np.ascontiguousarray(points @ rotation.T)
+    cells = np.asarray(
+        tuple(
+            (row * width + column, row * width + column + 1,
+             (row + 1) * width + column + 1, (row + 1) * width + column)
+            for row in range(width - 1) for column in range(width - 1)
+        ),
+        dtype=np.int64,
+    )
+    if reverse:
+        cells = np.ascontiguousarray(cells[:, ::-1])
+    kwargs = {
+        "fixed_nodes": (width + 1,),
+        "constrained_edges": ((2 * width + 2, 2 * width + 3),),
+        "preserve_boundary": True,
+        "iterations": 4,
+        "relaxation": 0.6,
+    }
+    expected = _python_smoothing(monkeypatch, points, cells, **kwargs)
+    actual = optimization_module.constrained_smoothing(points, cells, **kwargs)
+    np.testing.assert_allclose(actual.points, expected.points, rtol=0.0, atol=2e-15)
+    np.testing.assert_array_equal(actual.moved_nodes, expected.moved_nodes)
+    assert (
+        actual.iterations,
+        actual.accepted_moves,
+        actual.rejected_moves,
+        actual.converged,
+    ) == (
+        expected.iterations,
+        expected.accepted_moves,
+        expected.rejected_moves,
+        expected.converged,
+    )
+    np.testing.assert_array_equal(actual.points[width + 1], points[width + 1])
+    np.testing.assert_array_equal(actual.points[2 * width + 2], points[2 * width + 2])
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+def test_constrained_smoothing_native_early_convergence_and_arbitrary_controls(
+    monkeypatch,
+) -> None:
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)))
+    cells = np.asarray(((0, 1, 2, 3),), dtype=np.int64)
+    expected = _python_smoothing(
+        monkeypatch, points, cells, preserve_boundary=False, iterations=7, relaxation=0.37
+    )
+    actual = optimization_module.constrained_smoothing(
+        points, cells, preserve_boundary=False, iterations=7, relaxation=0.37
+    )
+    np.testing.assert_array_equal(actual.points, expected.points)
+    np.testing.assert_array_equal(actual.moved_nodes, expected.moved_nodes)
+    assert actual.iterations == expected.iterations
+    assert actual.accepted_moves == expected.accepted_moves
+    assert actual.rejected_moves == expected.rejected_moves
+    assert actual.converged == expected.converged
+
+
+def test_constrained_smoothing_malformed_native_output_fails_hard(monkeypatch) -> None:
+    import anymesher.native_cpp as native_cpp
+
+    class MalformedSmoothingKernel:
+        @staticmethod
+        def native_v2_metric_lengths(*_args):
+            return ()
+
+        @staticmethod
+        def native_v2_gradation_limit(*_args):
+            return (), 0
+
+        @staticmethod
+        def native_v2_mutable_t3_insert(*_args):
+            return (), {"removed_triangles": 0, "added_triangles": 0, "native": True}
+
+        @staticmethod
+        def native_v2_local_edge_flip(*_args):
+            return (), {"flip_count": 0, "queue_visits": 0, "converged": True}
+
+        @staticmethod
+        def native_v2_constrained_smoothing(*_args):
+            return np.zeros((1, 2)), np.asarray((99,)), {
+                "iterations": 1,
+                "accepted_moves": 1,
+                "rejected_moves": 0,
+                "converged": False,
+            }
+
+    monkeypatch.setattr(native_cpp, "_compiled", MalformedSmoothingKernel())
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)))
+    cells = np.asarray(((0, 1, 2, 3),), dtype=np.int64)
+    with pytest.raises(MeshError):
+        optimization_module.constrained_smoothing(
+            points, cells, preserve_boundary=False, iterations=1
+        )
+
+    MalformedSmoothingKernel.native_v2_constrained_smoothing = staticmethod(
+        lambda *_args: (
+            points.copy(),
+            np.empty(0, dtype=np.int64),
+            {
+                "iterations": 1,
+                "accepted_moves": 99,
+                "rejected_moves": 99,
+                "converged": False,
+            },
+        )
+    )
+    with pytest.raises(MeshError, match="counters are inconsistent"):
+        optimization_module.constrained_smoothing(
+            points, cells, preserve_boundary=False, iterations=1
+        )
+
+
+def test_native_smoothing_cannot_move_a_preserved_boundary(monkeypatch) -> None:
+    import anymesher.native_cpp as native_cpp
+
+    points = np.asarray(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)))
+    cells = np.asarray(((0, 1, 2, 3),), dtype=np.int64)
+
+    class BoundaryMovingKernel:
+        @staticmethod
+        def native_v2_constrained_smoothing(*_args):
+            changed = points.copy()
+            changed[0] = (0.1, 0.1)
+            return changed, [0], {
+                "iterations": 1,
+                "accepted_moves": 1,
+                "rejected_moves": 0,
+                "converged": False,
+            }
+
+    monkeypatch.setattr(native_cpp, "_compiled", BoundaryMovingKernel())
+    monkeypatch.setattr(native_cpp, "_complete_native_v2_available", lambda: True)
+    with pytest.raises(MeshError, match="moved a fixed node"):
+        native_cpp.native_constrained_smoothing(
+            points,
+            cells,
+            np.empty((0, 1), dtype=np.int64),
+            np.empty((0, 2), dtype=np.int64),
+            True,
+            np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+            1,
+            0.6,
+        )
+
+
+def test_native_validation_rejects_float_connectivity_before_coercion(
+    monkeypatch,
+) -> None:
+    import anymesher.native_cpp as native_cpp
+
+    class FloatConnectivityKernel:
+        @staticmethod
+        def validate_triangulation(*_args):
+            return np.asarray(((0.0, 1.0, 2.0),), dtype=np.float64)
+
+    monkeypatch.setattr(native_cpp, "_compiled", FloatConnectivityKernel())
+    monkeypatch.setattr(native_cpp, "COMPILED_QUALITY_PIPELINE_AVAILABLE", True)
+    with pytest.raises(MeshError, match="malformed connectivity"):
+        native_cpp.validate_native_triangulation(
+            np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))),
+            np.asarray(((0, 1, 2),), dtype=np.int64),
+            np.asarray(((0, 1), (1, 2), (0, 2)), dtype=np.int64),
+            np.asarray(((0, 1), (1, 2), (0, 2)), dtype=np.int64),
+            np.empty((0, 2), dtype=np.int64),
+            np.asarray((0, 1, 2), dtype=np.int64),
+            (),
+            1.0e-12,
+        )
+
+
+@pytest.mark.skipif(not COMPILED_NATIVE_V2_AVAILABLE, reason="optional C++17 module absent")
+def test_native_constrained_smoothing_honors_python_signal() -> None:
+    from anymesher.native_cpp import native_constrained_smoothing
+
+    width = 320
+    points = np.asarray(
+        tuple((float(column), float(row)) for row in range(width) for column in range(width))
+    )
+    cells = np.asarray(
+        tuple(
+            (row * width + column, row * width + column + 1,
+             (row + 1) * width + column + 1, (row + 1) * width + column)
+            for row in range(width - 1) for column in range(width - 1)
+        ),
+        dtype=np.int64,
+    )
+    timer = threading.Timer(0.001, _thread.interrupt_main)
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            native_constrained_smoothing(
+                points,
+                cells,
+                np.empty((0, 1), dtype=np.int64),
+                np.empty((0, 2), dtype=np.int64),
+                True,
+                np.repeat(np.eye(2)[None, :, :], len(points), axis=0),
+                4,
+                0.6,
+            )
+    finally:
+        timer.cancel()
+        timer.join()
 
 
 def test_mutable_t3_preserves_retained_owners_and_fails_hard_on_native_error(monkeypatch) -> None:
@@ -367,6 +828,83 @@ def test_mutable_t3_preserves_retained_owners_and_fails_hard_on_native_error(mon
     monkeypatch.setattr(native_v2_module, "native_mutable_t3_insert", fail_native)
     with pytest.raises(MeshError, match="compiled kernel failure"):
         _square_topology().insert_point((0.5, 0.5))
+
+
+def test_large_native_owner_reconstruction_uses_only_removed_cavity_owners() -> None:
+    boundary_count = 4_098
+    angles = np.linspace(0.0, 2.0 * np.pi, boundary_count, endpoint=False)
+    points = np.vstack((np.zeros((1, 2)), np.column_stack((np.cos(angles), np.sin(angles)))))
+    fan = [(0, index, index + 1) for index in range(1, boundary_count)]
+    retained_neighbor = fan[1]
+    removed = fan[0]
+    triangles = np.asarray((retained_neighbor, removed, *fan[2:]), dtype=np.int64)
+    owners = np.asarray((20, 10, *(30 for _ in fan[2:])), dtype=np.int64)
+    topology = MutableT3Topology(points, triangles, triangle_owners=owners)
+    assert len(topology.triangles) > 4_096
+
+    inserted = len(points)
+    result = np.asarray(
+        (
+            retained_neighbor,
+            *fan[2:],
+            (0, 1, inserted),
+            (1, 2, inserted),
+            (0, inserted, 2),
+        ),
+        dtype=np.int64,
+    )
+    reconstructed = topology._native_insert_owners(
+        result,
+        inserted_node=inserted,
+        owner=-1,
+    )
+    by_triangle = {
+        tuple(map(int, triangle)): int(owner)
+        for triangle, owner in zip(result, reconstructed, strict=True)
+    }
+    assert by_triangle[retained_neighbor] == 20
+    assert by_triangle[(0, 1, inserted)] == 10
+    assert by_triangle[(1, 2, inserted)] == 10
+    assert by_triangle[(0, inserted, 2)] == 10
+
+
+def test_mutable_insertion_ignores_disconnected_remote_circumcircle() -> None:
+    angles = np.asarray((0.0, 0.01, 0.02))
+    remote = np.column_stack((100.0 * np.cos(angles), 100.0 * np.sin(angles)))
+    points = np.vstack((np.asarray(((0.0, 0.0), (2.0, 0.0), (0.0, 2.0))), remote))
+    remote_triangle = (3, 4, 5)
+    topology = MutableT3Topology(
+        points,
+        np.asarray(((0, 1, 2), remote_triangle), dtype=np.int64),
+        triangle_owners=np.asarray((10, 20), dtype=np.int64),
+    )
+    topology.insert_point((0.25, 0.25))
+
+    exported = {tuple(map(int, row)) for row in topology.triangles}
+    assert remote_triangle in exported
+    assert 20 in topology.triangle_owners
+    incidence: dict[tuple[int, int], int] = {}
+    for triangle in topology.triangles:
+        for index in range(3):
+            edge = tuple(sorted((int(triangle[index]), int(triangle[(index + 1) % 3]))))
+            incidence[edge] = incidence.get(edge, 0) + 1
+    assert max(incidence.values()) <= 2
+
+    cancelled = MutableT3Topology(
+        points,
+        np.asarray(((0, 1, 2), remote_triangle), dtype=np.int64),
+    )
+    before = cancelled.canonical_export()
+
+    def stop(phase: str) -> None:
+        if phase == "native-v2 cavity adjacency scan":
+            raise RuntimeError("cancel cavity component")
+
+    with pytest.raises(RuntimeError, match="cancel cavity component"):
+        cancelled.insert_point((0.25, 0.25), cancellation_check=stop)
+    after = cancelled.canonical_export()
+    np.testing.assert_array_equal(after[0], before[0])
+    np.testing.assert_array_equal(after[1], before[1])
 
 
 def test_shared_segment_split_uses_registry_and_protected_edges_remain_fixed() -> None:

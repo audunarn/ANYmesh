@@ -83,6 +83,32 @@ def test_opt_in_frontal_route_is_deterministic_and_reports_budgets() -> None:
     assert first.num_nodes > 4
 
 
+def test_uniform_metric_stops_at_an_already_qualified_legacy_seed() -> None:
+    baseline = mesh_planar_surface(
+        SQUARE,
+        options=SurfaceMeshOptions(target_size=0.2, backend="python", recombine=False),
+    )
+    diagnostics: dict[str, object] = {}
+    frontal = mesh_planar_surface(
+        SQUARE,
+        options=SurfaceMeshOptions(
+            target_size=0.2,
+            backend="python",
+            recombine=False,
+            native_options=NativeMeshingOptions(
+                point_placement="frontal_delaunay",
+                metric_mode="isotropic_spatial",
+                metric_field=MetricFieldSpec.uniform(0.2),
+            ),
+        ),
+        diagnostics=diagnostics,
+    )
+    assert diagnostics["native_v2"]["selected_route"] == "frontal_delaunay_baseline_satisfied"
+    assert diagnostics["native_v2"]["insertions"] == 0
+    assert frontal.node_coordinates.tobytes() == baseline.node_coordinates.tobytes()
+    assert frontal.triangle_connectivity.tobytes() == baseline.triangle_connectivity.tobytes()
+
+
 def test_frontal_route_preserves_hole_boundary_and_transform_covariance() -> None:
     hole = np.asarray(((0.8, 0.8), (1.2, 0.8), (1.2, 1.2), (0.8, 1.2)))
     first = mesh_planar_surface(SQUARE, (hole,), options=_frontal_options())
@@ -110,6 +136,36 @@ def test_frontal_cancellation_propagates_without_publication() -> None:
     with pytest.raises(RuntimeError, match="cancel front"):
         mesh_planar_surface(acute, options=_frontal_options(), cancellation_check=cancel)
     assert "native-v2 frontal queue" in phases
+
+
+def test_fixed_acute_protected_corner_is_counted_once_as_geometry_limited() -> None:
+    from anymesher.native_v2 import frontal_delaunay_refine
+    from anymesher.triangulation import PlanarTriangulation
+
+    points = np.asarray(((0.0, 0.0), (2.0, 0.0), (0.02, 0.1)))
+    boundary = np.asarray(((0, 1), (1, 2), (0, 2)), dtype=np.int64)
+    triangulation = PlanarTriangulation(
+        points=points,
+        triangles=np.asarray(((0, 1, 2),), dtype=np.int64),
+        segments=boundary,
+        boundary_segments=boundary,
+        mandatory_segments=np.empty((0, 2), dtype=np.int64),
+        outer_loop=np.asarray((0, 1, 2), dtype=np.int64),
+        hole_loops=(),
+    )
+    _refined, report = frontal_delaunay_refine(
+        triangulation,
+        NativeMeshingOptions(
+            point_placement="frontal_delaunay",
+            metric_mode="isotropic_spatial",
+            max_insertions=8,
+            max_topology_operations=32,
+        ),
+        target_size=2.0,
+    )
+    assert report["selected_route"] == "frontal_delaunay_geometry_limited"
+    assert report["geometry_limited_regions"] == 1
+    assert report["insertions"] == 0
 
 
 def test_curved_activation_is_not_silently_exposed_by_planar_api_options() -> None:

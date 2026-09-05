@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from . import native_cpp as _native_cpp
 from .core import MeshCore, corner_edges
 from .errors import MeshError
 from .native import NativeBoundary
@@ -282,6 +283,26 @@ class _SegmentGrid:
                 return True, checked
         return False, checked
 
+    def candidates_for_segment(
+        self,
+        first: np.ndarray,
+        second: np.ndarray,
+        padding: float = 0.0,
+    ) -> tuple[int, ...]:
+        """Return canonical segment IDs whose grid cells overlap one segment AABB."""
+
+        lower = np.floor(
+            (np.minimum(first, second) - float(padding)) / self.cell_size
+        ).astype(int)
+        upper = np.floor(
+            (np.maximum(first, second) + float(padding)) / self.cell_size
+        ).astype(int)
+        candidates: set[int] = set()
+        for first_cell in range(int(lower[0]), int(upper[0]) + 1):
+            for second_cell in range(int(lower[1]), int(upper[1]) + 1):
+                candidates.update(self.cells.get((first_cell, second_cell), ()))
+        return tuple(sorted(candidates))
+
 
 def _canonical_segments(
     outer: np.ndarray,
@@ -410,21 +431,33 @@ def _offset_loop(
         (ring[index], ring[(index + 1) % len(ring)])
         for index in range(len(ring))
     )
+    grid_radius = max(float(size), tolerance)
+    segment_grid = _SegmentGrid(segments, grid_radius)
+    forbidden_grid = _SegmentGrid(forbidden, grid_radius) if forbidden else None
     for index, (first, second) in enumerate(segments):
         for fraction in (0.25, 0.50, 0.75):
             if not _domain_contains(
                 first + fraction * (second - first), outer, holes
             ):
                 return None, "offset_segment_left_material"
-        for other_index, (third, fourth) in enumerate(segments):
+        for other_index in segment_grid.candidates_for_segment(
+            first, second, tolerance
+        ):
             if other_index <= index or other_index in {
                 (index - 1) % len(segments),
                 (index + 1) % len(segments),
             }:
                 continue
+            third, fourth = segments[other_index]
             if _segments_cross(first, second, third, fourth, tolerance):
                 return None, "self_intersecting_offset"
-        for third, fourth in forbidden:
+        forbidden_ids = (
+            forbidden_grid.candidates_for_segment(first, second, tolerance)
+            if forbidden_grid is not None
+            else ()
+        )
+        for forbidden_id in forbidden_ids:
+            third, fourth = forbidden[forbidden_id]
             if _segments_cross(first, second, third, fourth, tolerance):
                 return None, "offset_crossed_protected_segment"
     return ring, None
@@ -535,11 +568,23 @@ def _collar_candidate(
                     for index, point in station_points.items()
                     if index in previous_stations
                 )
+                obstacles = (*base_segments, *accepted_segments)
+                obstacle_grid = _SegmentGrid(
+                    obstacles, max(float(size), tolerance)
+                )
                 if any(
                     not _domain_contains(0.5 * (first + second), outer, holes)
                     or any(
-                        _segments_cross(first, second, third, fourth, tolerance)
-                        for third, fourth in (*base_segments, *accepted_segments)
+                        _segments_cross(
+                            first,
+                            second,
+                            obstacles[obstacle_id][0],
+                            obstacles[obstacle_id][1],
+                            tolerance,
+                        )
+                        for obstacle_id in obstacle_grid.candidates_for_segment(
+                            first, second, tolerance
+                        )
                     )
                     for first, second in made
                 ):
@@ -910,64 +955,284 @@ def _triangle_quality(
     settings: SurfaceMeshOptions | None = None,
 ) -> tuple[dict[str, Any], tuple[int, int, float, float, float], np.ndarray]:
     policy = settings or SurfaceMeshOptions()
-    aspects: list[float] = []
-    jacobians: list[float] = []
-    minimum_angles: list[float] = []
-    maximum_angles: list[float] = []
-    characteristic: list[float] = []
-    incidence: dict[tuple[int, int], list[int]] = {}
-    invalid = 0
+    made_points = np.ascontiguousarray(points, dtype=np.float64)
+    made_triangles = np.ascontiguousarray(triangles, dtype=np.int64)
     scale = max(float(np.ptp(points, axis=0).max()), 1.0) if len(points) else 1.0
     area_tolerance = np.finfo(np.float64).eps * scale * scale * 32.0
-    for row, triangle in enumerate(triangles):
-        coordinates = points[np.asarray(triangle, dtype=np.int64)]
-        lengths = np.asarray(
-            (
-                np.linalg.norm(coordinates[1] - coordinates[0]),
-                np.linalg.norm(coordinates[2] - coordinates[1]),
-                np.linalg.norm(coordinates[0] - coordinates[2]),
-            ),
-            dtype=np.float64,
+    if _native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        coordinates = made_points[made_triangles]
+        lengths = np.linalg.norm(
+            coordinates[:, (1, 2, 0)] - coordinates,
+            axis=2,
         )
-        first = coordinates[1] - coordinates[0]
-        second = coordinates[2] - coordinates[0]
-        double_area = float(first[0] * second[1] - first[1] * second[0])
-        if double_area <= area_tolerance or float(np.min(lengths)) <= 0.0:
-            invalid += 1
-        aspects.append(float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-15)))
-        characteristic.append(float(np.mean(lengths)))
-        for index in range(3):
-            edge = tuple(
-                sorted(
-                    (
-                        int(triangle[index]),
-                        int(triangle[(index + 1) % 3]),
+        first = coordinates[:, 1] - coordinates[:, 0]
+        second = coordinates[:, 2] - coordinates[:, 0]
+        double_area = first[:, 0] * second[:, 1] - first[:, 1] * second[:, 0]
+        minimum_length = np.min(lengths, axis=1)
+        aspect_array = np.max(lengths, axis=1) / np.maximum(
+            minimum_length, 1.0e-15
+        )
+        characteristic = np.mean(lengths, axis=1)
+        native_points = (
+            made_points
+            if made_points.shape[1] == 3
+            else np.ascontiguousarray(
+                np.column_stack((made_points, np.zeros(len(made_points)))),
+                dtype=np.float64,
+            )
+        )
+        native_quality = _native_cpp.native_element_quality(
+            native_points, made_triangles, 3
+        )
+        if native_quality is None:
+            raise MeshError(
+                "present compiled quality pipeline returned no triangle quality"
+            )
+        native_quality = np.asarray(native_quality)
+        if (
+            native_quality.shape != (len(made_triangles), 6)
+            or native_quality.dtype.kind != "f"
+            or not np.all(np.isfinite(native_quality))
+        ):
+            raise MeshError("compiled triangle quality returned malformed output")
+        expected_area = 0.5 * np.abs(double_area)
+        regular = minimum_length >= 1.0e-15
+        if (
+            not np.allclose(
+                native_quality[:, 0],
+                expected_area,
+                rtol=1.0e-12,
+                atol=area_tolerance,
+            )
+            or not np.allclose(
+                native_quality[regular, 1],
+                aspect_array[regular],
+                rtol=1.0e-12,
+                atol=1.0e-14,
+            )
+            or np.any(native_quality[:, 2] < 0.0)
+            or np.any(native_quality[:, 3] > 180.0)
+            or np.any(native_quality[:, 2] > native_quality[:, 3])
+            or np.any(np.abs(native_quality[:, 4]) > 1.0 + 1.0e-12)
+        ):
+            raise MeshError("compiled triangle quality violated its result contract")
+        previous = coordinates[:, (2, 0, 1)] - coordinates
+        following = coordinates[:, (1, 2, 0)] - coordinates
+        denominators = np.maximum(
+            np.linalg.norm(previous, axis=2)
+            * np.linalg.norm(following, axis=2),
+            1.0e-30,
+        )
+        dot_products = np.sum(previous * following, axis=2)
+        cosines = np.clip(dot_products / denominators, -1.0, 1.0)
+        angles = np.degrees(np.arccos(cosines))
+        minimum_angle_array = np.min(angles, axis=1)
+        maximum_angle_array = np.max(angles, axis=1)
+        jacobian_array = np.min(double_area[:, None] / denominators, axis=1)
+        scalar_rows: set[int] = set(
+            map(
+                int,
+                np.flatnonzero(
+                    (double_area <= area_tolerance)
+                    | (minimum_length <= 0.0)
+                    | np.any(denominators <= 1.0e-28, axis=1)
+                    | (
+                        np.abs(minimum_angle_array - policy.min_angle)
+                        <= 1.0e-10
                     )
+                    | (
+                        np.abs(maximum_angle_array - policy.max_angle)
+                        <= 1.0e-10
+                    )
+                    | (
+                        np.abs(
+                            jacobian_array - policy.min_scaled_jacobian
+                        )
+                        <= 1.0e-12
+                    )
+                ),
+            )
+        )
+        if len(made_triangles):
+            scalar_rows.update(
+                (
+                    int(np.argmin(minimum_angle_array)),
+                    int(np.argmax(maximum_angle_array)),
+                    int(np.argmin(jacobian_array)),
                 )
             )
-            incidence.setdefault(edge, []).append(row)
-        angles: list[float] = []
-        corner_jacobians: list[float] = []
-        for corner in range(3):
-            previous = coordinates[(corner - 1) % 3] - coordinates[corner]
-            following = coordinates[(corner + 1) % 3] - coordinates[corner]
-            denominator = max(float(np.linalg.norm(previous) * np.linalg.norm(following)), 1.0e-30)
-            cosine = float(np.clip((previous @ following) / denominator, -1.0, 1.0))
-            angles.append(float(np.degrees(acos(cosine))))
-            corner_jacobians.append(double_area / denominator)
-        jacobians.append(min(corner_jacobians))
-        minimum_angles.append(min(angles))
-        maximum_angles.append(max(angles))
-    aspect_array = np.asarray(aspects, dtype=np.float64)
-    jacobian_array = np.asarray(jacobians, dtype=np.float64)
-    minimum_angle_array = np.asarray(minimum_angles, dtype=np.float64)
-    maximum_angle_array = np.asarray(maximum_angles, dtype=np.float64)
+        for row in sorted(scalar_rows):
+            triangle_coordinates = coordinates[row]
+            angles: list[float] = []
+            corner_jacobians: list[float] = []
+            for corner in range(3):
+                previous = (
+                    triangle_coordinates[(corner - 1) % 3]
+                    - triangle_coordinates[corner]
+                )
+                following = (
+                    triangle_coordinates[(corner + 1) % 3]
+                    - triangle_coordinates[corner]
+                )
+                denominator = max(
+                    float(np.linalg.norm(previous) * np.linalg.norm(following)),
+                    1.0e-30,
+                )
+                cosine = float(
+                    np.clip((previous @ following) / denominator, -1.0, 1.0)
+                )
+                angles.append(float(np.degrees(acos(cosine))))
+                corner_jacobians.append(float(double_area[row]) / denominator)
+            minimum_angle_array[row] = min(angles)
+            maximum_angle_array[row] = max(angles)
+            jacobian_array[row] = min(corner_jacobians)
+        native_incidence = _native_cpp.triangle_edge_incidence(made_triangles)
+        native_incidence = np.asarray(native_incidence)
+        if (
+            native_incidence.ndim != 2
+            or native_incidence.shape[1:] != (4,)
+            or native_incidence.dtype.kind not in "iu"
+            or np.any(native_incidence[:, 0] > native_incidence[:, 1])
+            or np.any(native_incidence[:, :2] < 0)
+            or np.any(native_incidence[:, :2] >= len(made_points))
+            or np.any(native_incidence[:, 2] < 0)
+            or np.any(native_incidence[:, 2] >= len(made_triangles))
+            or np.any(native_incidence[:, 3] < -1)
+            or np.any(native_incidence[:, 3] >= len(made_triangles))
+            or int(
+                len(native_incidence)
+                + np.count_nonzero(native_incidence[:, 3] >= 0)
+            )
+            != 3 * len(made_triangles)
+        ):
+            raise MeshError("compiled triangle incidence returned malformed output")
+        if len(native_incidence) > 1:
+            previous_edges = native_incidence[:-1, :2]
+            following_edges = native_incidence[1:, :2]
+            if np.any(
+                (following_edges[:, 0] < previous_edges[:, 0])
+                | (
+                    (following_edges[:, 0] == previous_edges[:, 0])
+                    & (following_edges[:, 1] <= previous_edges[:, 1])
+                )
+            ):
+                raise MeshError(
+                    "compiled triangle incidence is not canonically ordered"
+                )
+        for column in (2, 3):
+            attached = native_incidence[:, column]
+            selected = attached >= 0
+            if not np.any(selected):
+                continue
+            cells = made_triangles[attached[selected]]
+            first_present = np.any(
+                cells == native_incidence[selected, 0, None], axis=1
+            )
+            second_present = np.any(
+                cells == native_incidence[selected, 1, None], axis=1
+            )
+            if not np.all(first_present & second_present):
+                raise MeshError(
+                    "compiled triangle incidence does not match connectivity"
+                )
+        paired = native_incidence[:, 3] >= 0
+        if np.any(native_incidence[paired, 2] == native_incidence[paired, 3]):
+            raise MeshError("compiled triangle incidence repeats an attachment")
+        attachments = np.concatenate(
+            (
+                native_incidence[:, 2],
+                native_incidence[paired, 3],
+            )
+        )
+        attachment_counts = np.bincount(
+            attachments, minlength=len(made_triangles)
+        )
+        if len(attachment_counts) != len(made_triangles) or np.any(
+            attachment_counts != 3
+        ):
+            raise MeshError(
+                "compiled triangle incidence does not cover three distinct cell edges"
+            )
+        adjacent_rows = np.ascontiguousarray(
+            native_incidence[native_incidence[:, 3] >= 0, 2:4],
+            dtype=np.int64,
+        )
+        invalid = int(
+            np.count_nonzero(
+                (double_area <= area_tolerance) | (minimum_length <= 0.0)
+            )
+        )
+    else:
+        aspects: list[float] = []
+        jacobians: list[float] = []
+        minimum_angles: list[float] = []
+        maximum_angles: list[float] = []
+        characteristic_rows: list[float] = []
+        incidence: dict[tuple[int, int], list[int]] = {}
+        invalid = 0
+        for row, triangle in enumerate(made_triangles):
+            coordinates = made_points[triangle]
+            lengths = np.asarray(
+                (
+                    np.linalg.norm(coordinates[1] - coordinates[0]),
+                    np.linalg.norm(coordinates[2] - coordinates[1]),
+                    np.linalg.norm(coordinates[0] - coordinates[2]),
+                ),
+                dtype=np.float64,
+            )
+            first = coordinates[1] - coordinates[0]
+            second = coordinates[2] - coordinates[0]
+            double_area = float(
+                first[0] * second[1] - first[1] * second[0]
+            )
+            if double_area <= area_tolerance or float(np.min(lengths)) <= 0.0:
+                invalid += 1
+            aspects.append(
+                float(
+                    np.max(lengths)
+                    / max(float(np.min(lengths)), 1.0e-15)
+                )
+            )
+            characteristic_rows.append(float(np.mean(lengths)))
+            for index in range(3):
+                edge = tuple(
+                    sorted(
+                        (
+                            int(triangle[index]),
+                            int(triangle[(index + 1) % 3]),
+                        )
+                    )
+                )
+                incidence.setdefault(edge, []).append(row)
+            angles = []
+            corner_jacobians = []
+            for corner in range(3):
+                previous = coordinates[(corner - 1) % 3] - coordinates[corner]
+                following = coordinates[(corner + 1) % 3] - coordinates[corner]
+                denominator = max(
+                    float(np.linalg.norm(previous) * np.linalg.norm(following)),
+                    1.0e-30,
+                )
+                cosine = float(
+                    np.clip((previous @ following) / denominator, -1.0, 1.0)
+                )
+                angles.append(float(np.degrees(acos(cosine))))
+                corner_jacobians.append(double_area / denominator)
+            jacobians.append(min(corner_jacobians))
+            minimum_angles.append(min(angles))
+            maximum_angles.append(max(angles))
+        aspect_array = np.asarray(aspects, dtype=np.float64)
+        jacobian_array = np.asarray(jacobians, dtype=np.float64)
+        minimum_angle_array = np.asarray(minimum_angles, dtype=np.float64)
+        maximum_angle_array = np.asarray(maximum_angles, dtype=np.float64)
+        characteristic = np.asarray(characteristic_rows, dtype=np.float64)
+        adjacent_rows = np.asarray(
+            [rows for rows in incidence.values() if len(rows) == 2],
+            dtype=np.int64,
+        ).reshape((-1, 2))
     growth_array = np.ones(len(triangles), dtype=np.float64)
     growth_repair_rows: set[int] = set()
-    for attached in incidence.values():
-        if len(attached) != 2:
-            continue
-        first_row, second_row = attached
+    for first_row, second_row in adjacent_rows:
         small = min(characteristic[first_row], characteristic[second_row])
         ratio = (
             float("inf")
@@ -1007,9 +1272,9 @@ def _triangle_quality(
         dtype=np.int64,
     )
     maximum_aspect = float(np.max(aspect_array)) if len(aspect_array) else 1.0
-    minimum_jacobian = float(np.min(jacobians)) if jacobians else 1.0
-    minimum_angle = float(np.min(minimum_angles)) if minimum_angles else 60.0
-    maximum_angle = float(np.max(maximum_angles)) if maximum_angles else 60.0
+    minimum_jacobian = float(np.min(jacobian_array)) if len(jacobian_array) else 1.0
+    minimum_angle = float(np.min(minimum_angle_array)) if len(minimum_angle_array) else 60.0
+    maximum_angle = float(np.max(maximum_angle_array)) if len(maximum_angle_array) else 60.0
     report = {
         "invalid_element_count": invalid,
         "elements_above_aspect_ratio_5": int(
@@ -1421,6 +1686,7 @@ def _run_frontal_quality_path(
         automatically_seeded_shared_segments=automatically_seeded_shared_segments,
         component_seed_registry=component_seed_registry,
         supplemental_metric_field=supplemental_metric_field,
+        qualified_seed=bool(baseline["target_met"]),
     )
     initial = _make_candidate(
         triangulation.points, triangulation.triangles, settings=settings

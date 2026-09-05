@@ -10,6 +10,7 @@ import argparse
 from hashlib import sha256
 from importlib import metadata
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -70,6 +71,8 @@ REQUIRED_CORPUS = frozenset(
 )
 SOURCE_COMMIT_LENGTH = 40
 MAX_COMPARABLE_ELEMENT_RATIO = 1.20
+MIN_REQUESTED_SCALE_RATIO = 0.80
+MAX_REQUESTED_SCALE_RATIO = 1.20
 
 
 class _CancellationProbe(RuntimeError):
@@ -103,6 +106,13 @@ def _case(
     elif name not in {"planar", "mapped_zero_use"}:
         raise ValueError(name)
     return outer, holes, constraints, declared
+
+
+def _ring_area(ring: np.ndarray) -> float:
+    following = np.roll(ring, -1, axis=0)
+    return 0.5 * abs(
+        float(np.sum(ring[:, 0] * following[:, 1] - ring[:, 1] * following[:, 0]))
+    )
 
 
 def _mesh_digest(mesh: Any) -> str:
@@ -222,8 +232,18 @@ def _peak_rss() -> int | None:
 
             counters = Counters()
             counters.cb = ctypes.sizeof(counters)
-            if not ctypes.windll.psapi.GetProcessMemoryInfo(
-                ctypes.windll.kernel32.GetCurrentProcess(),
+            get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+            get_current_process.argtypes = []
+            get_current_process.restype = wintypes.HANDLE
+            get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(Counters),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            if not get_process_memory_info(
+                get_current_process(),
                 ctypes.byref(counters),
                 counters.cb,
             ):
@@ -283,7 +303,9 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError("source runs must not carry a wheel SHA-256")
 
     outer, holes, constraints, declared = _case(args.case)
-    target = (16.0 / requested_elements) ** 0.5
+    domain_area = _ring_area(outer) - sum(_ring_area(hole) for hole in holes)
+    target = (3.5 * domain_area / requested_elements) ** 0.5
+    mesher_backend = "native" if args.backend == "compiled" else args.backend
     native = NativeMeshingOptions()
     if args.route == "frontal":
         native = NativeMeshingOptions(
@@ -294,7 +316,7 @@ def _run(args: argparse.Namespace) -> int:
         )
     options = SurfaceMeshOptions(
         target_size=target,
-        backend=args.backend,
+        backend=mesher_backend,
         recombine=True,
         declared_junction=declared,
         native_options=native,
@@ -325,7 +347,7 @@ def _run(args: argparse.Namespace) -> int:
                 target_size=target,
                 strategy="mapped",
                 recombine=True,
-                native_backend=args.backend,
+                native_backend=mesher_backend,
                 native_options=native,
             )
             semantic_mesh = result.mesh
@@ -424,7 +446,14 @@ def _run(args: argparse.Namespace) -> int:
             "minimum_scaled_jacobian": quality.minimum_scaled_jacobian,
             "maximum_aspect_ratio": quality.maximum_aspect_ratio,
             "minimum_angle": quality.minimum_angle,
-            "maximum_angle": quality.maximum_angle,
+            "maximum_angle": max(
+                (
+                    float(np.max(values.maximum_angle))
+                    for values in (quality.triangles, quality.quadrilaterals)
+                    if values.maximum_angle.size
+                ),
+                default=90.0,
+            ),
             "maximum_warpage": quality.maximum_warpage,
         },
         "quality_policy": {
@@ -490,6 +519,24 @@ def _load_record(path: Path) -> dict[str, Any]:
         set(value["repetition_digests"])
     ) != 1:
         raise ValueError(f"non-deterministic benchmark evidence: {path}")
+    scale_ratio = float(value.get("element_count_ratio", float("nan")))
+    scale = str(value.get("scale", ""))
+    requested_elements = int(value.get("requested_elements", 0))
+    actual_elements = int(value.get("actual_elements", -1))
+    if scale == "workstation":
+        if requested_elements < 500_000:
+            raise ValueError(f"workstation benchmark scale is too small: {path}")
+    elif scale not in SCALES or requested_elements != SCALES[scale]:
+        raise ValueError(f"benchmark scale identity is inconsistent: {path}")
+    recomputed_ratio = actual_elements / requested_elements
+    if not math.isclose(scale_ratio, recomputed_ratio, rel_tol=0.0, abs_tol=1.0e-15):
+        raise ValueError(f"benchmark element-count ratio is inconsistent: {path}")
+    if not math.isfinite(scale_ratio) or not (
+        MIN_REQUESTED_SCALE_RATIO <= scale_ratio <= MAX_REQUESTED_SCALE_RATIO
+    ):
+        raise ValueError(
+            f"benchmark missed requested scale: {path} has ratio {scale_ratio!r}"
+        )
     return value
 
 
@@ -585,6 +632,10 @@ def _check_contract() -> int:
                     "mapped_zero_use_peak_rss_ratio": 1.05,
                     "native_v2_peak_rss_ratio": 2.0,
                     "comparable_element_ratio": MAX_COMPARABLE_ELEMENT_RATIO,
+                    "requested_scale_ratio": [
+                        MIN_REQUESTED_SCALE_RATIO,
+                        MAX_REQUESTED_SCALE_RATIO,
+                    ],
                 },
             },
             sort_keys=True,
@@ -632,8 +683,9 @@ def _check_evidence(evidence_pairs: list[tuple[Path, Path]]) -> int:
             {
                 "status": "evidence_contract_passed",
                 "corpus_paths": QUALIFICATION_CORPUS,
-                "performance_evidence": (
-                    outcomes if outcomes else "not_supplied_merge_blocker"
+                "performance_evidence": outcomes,
+                "performance_evidence_status": (
+                    "accepted" if outcomes else "not_supplied_merge_blocker"
                 ),
             },
             sort_keys=True,
