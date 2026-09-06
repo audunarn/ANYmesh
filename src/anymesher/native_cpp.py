@@ -533,8 +533,34 @@ def native_gradation_limit(
     return np.ascontiguousarray(limited, dtype=np.float64), int(iterations)
 
 
+def _native_t3_incidence_available() -> bool:
+    if not _complete_native_v2_available():
+        return False
+    names = ("native_v2_t3_incidence", "native_v2_t3_incidence_check")
+    present = tuple(hasattr(_compiled, name) for name in names)
+    if not any(present):
+        return False
+    if not all(present) or not all(callable(getattr(_compiled, name)) for name in names):
+        raise RuntimeError("compiled native T3 incidence ABI is incomplete")
+    return True
+
+
+def native_t3_incidence(triangles: Any, previous: Any = None) -> Any:
+    """Prepare an owned snapshot, or retain the supported old stateless ABI."""
+    if not _native_t3_incidence_available():
+        if previous is not None:
+            raise MeshError("native T3 incidence state requires its compiled capability")
+        return None
+    rows = np.ascontiguousarray(tuple(triangles), dtype=np.int64).reshape((-1, 3))
+    state = _compiled.native_v2_t3_incidence(rows, previous)
+    if _compiled.native_v2_t3_incidence_check(state, rows) is not True:
+        raise MeshError("compiled native T3 incidence snapshot validation failed")
+    return state
+
+
 def native_mutable_t3_insert(
-    points: Any, triangles: Any, protected_edges: Any, candidate: Any
+    points: Any, triangles: Any, protected_edges: Any, candidate: Any,
+    topology_state: Any = None,
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
     if not _complete_native_v2_available():
         return None
@@ -546,6 +572,9 @@ def native_mutable_t3_insert(
         raise TypeError("candidate must be one finite 2D point")
     from .triangulation import orient2d as orientation_oracle
 
+    if topology_state is not None and not _native_t3_incidence_available():
+        raise MeshError("native T3 incidence state requires its compiled capability")
+    state_arguments = () if topology_state is None else (topology_state,)
     try:
         raw_rows, diagnostics = _compiled.native_v2_mutable_t3_insert(
             made_points,
@@ -554,6 +583,7 @@ def native_mutable_t3_insert(
             orientation_oracle,
             float(value[0]),
             float(value[1]),
+            *state_arguments,
         )
     except RuntimeError as error:
         message = str(error)

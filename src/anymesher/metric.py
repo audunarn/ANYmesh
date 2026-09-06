@@ -30,6 +30,48 @@ __all__ = [
 ]
 
 _NATIVE_BATCH_THRESHOLD = 4096
+_METRIC_QUERY_CHUNK_SIZE = 256
+_METRIC_SOURCE_CHUNK_SIZE = 256
+
+
+def _bounded_metric_nearest(
+    points: np.ndarray,
+    sources: np.ndarray,
+    *,
+    return_indices: bool,
+    cancellation_check: Callable[[str], None] | None,
+    stage: str,
+) -> np.ndarray:
+    """Reduce distances over bounded tiles of validated float64 rows.
+
+    Sources are nonempty. The caller checkpoints before entry, and every
+    subsequent tile checks cancellation without publishing partial results.
+    Strict improvement preserves the first source on ties, including infinity.
+    """
+    result = np.empty(len(points), dtype=np.int64 if return_indices else np.float64)
+    for query_start in range(0, len(points), _METRIC_QUERY_CHUNK_SIZE):
+        query_stop = min(query_start + _METRIC_QUERY_CHUNK_SIZE, len(points))
+        chunk = points[query_start:query_stop]
+        best = np.full(len(chunk), np.inf, dtype=np.float64)
+        nearest = np.zeros(len(chunk), dtype=np.int64) if return_indices else None
+        for source_start in range(0, len(sources), _METRIC_SOURCE_CHUNK_SIZE):
+            if cancellation_check is not None and (query_start or source_start):
+                cancellation_check(stage)
+            source_stop = min(source_start + _METRIC_SOURCE_CHUNK_SIZE, len(sources))
+            squared = np.sum(
+                (chunk[:, None, :] - sources[None, source_start:source_stop, :]) ** 2,
+                axis=2,
+            )
+            if return_indices:
+                local = np.argmin(squared, axis=1)
+                candidate = squared[np.arange(len(chunk)), local]
+                better = candidate < best
+                nearest[better] = source_start + local[better]
+            else:
+                candidate = np.min(squared, axis=1)
+            np.minimum(best, candidate, out=best)
+        result[query_start:query_stop] = nearest if return_indices else best
+    return result
 
 
 def _positive(value: Any, label: str) -> float:
@@ -470,12 +512,12 @@ class SpatialMetricField:
                 stop = min(start + cancellation_interval, len(values))
                 chunk = values[start:stop]
                 distance[start:stop] = np.sqrt(
-                    np.min(
-                        np.sum(
-                            (chunk[:, None, :] - sources[None, :, :]) ** 2,
-                            axis=2,
-                        ),
-                        axis=1,
+                    _bounded_metric_nearest(
+                        chunk,
+                        sources,
+                        return_indices=False,
+                        cancellation_check=cancellation_check,
+                        stage="native-v2 feature metric evaluation",
                     )
                 )
             beyond = np.maximum(distance - control.influence_distance, 0.0)
@@ -498,12 +540,12 @@ class SpatialMetricField:
                 checkpoint("native-v2 imported metric lookup", start)
                 stop = min(start + cancellation_interval, len(values))
                 chunk = values[start:stop]
-                nearest[start:stop] = np.argmin(
-                    np.sum(
-                        (chunk[:, None, :] - samples[None, :, :]) ** 2,
-                        axis=2,
-                    ),
-                    axis=1,
+                nearest[start:stop] = _bounded_metric_nearest(
+                    chunk,
+                    samples,
+                    return_indices=True,
+                    cancellation_check=cancellation_check,
+                    stage="native-v2 imported metric lookup",
                 )
             for row, sample_row in enumerate(nearest):
                 checkpoint("native-v2 imported metric composition", row)

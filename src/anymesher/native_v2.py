@@ -9,11 +9,14 @@ import heapq
 import json
 from math import acos, sqrt
 from numbers import Integral
+from threading import RLock
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
 from .errors import MeshError
+from ._t3_incidence import T3IncidenceIndex
+from ._t3_runtime import TriangleWorkQueue
 from .metric import (
     ExperimentalMetricProvider,
     MetricFieldSpec,
@@ -154,27 +157,63 @@ class ComponentSeedRegistry:
         self._next = int(first_node_id)
         self._values: dict[tuple[int, int, int], int] = {}
         self._node_id_allocator = node_id_allocator
+        self._resolution_lock = RLock()
+        self._resolving = False
 
     def resolve(self, edge_id: int, numerator: int, denominator: int) -> int:
+        return self._resolve_and_publish(
+            edge_id, numerator, denominator, lambda node_id: node_id
+        )
+
+    def _resolve_and_publish(
+        self,
+        edge_id: int,
+        numerator: int,
+        denominator: int,
+        publish: Callable[[int], Any],
+    ) -> Any:
+        """Publish a prepared split while owning its provisional registration.
+
+        Only this operation's new entry is rolled back. External allocator side
+        effects cannot be undone, so callers must finish validation and all
+        cancellation checks before entering this synchronous commit section.
+        """
         if denominator <= 0 or numerator <= 0 or numerator >= denominator:
             raise MeshError("shared-edge split position must be strictly interior")
         common = np.gcd(numerator, denominator)
         key = (int(edge_id), int(numerator // common), int(denominator // common))
-        if key not in self._values:
-            node_id = (
-                self._next
-                if self._node_id_allocator is None
-                else int(self._node_id_allocator())
-            )
-            if node_id < 1 or node_id in self._values.values():
-                raise MeshError("component seed allocator returned an invalid node identity")
-            self._values[key] = node_id
-            self._next = max(self._next, node_id + 1)
-        return self._values[key]
+        with self._resolution_lock:
+            if self._resolving:
+                raise MeshError("component seed resolution is already active")
+            existed = key in self._values
+            previous_next = self._next
+            self._resolving = True
+            try:
+                if not existed:
+                    node_id = (
+                        self._next
+                        if self._node_id_allocator is None
+                        else int(self._node_id_allocator())
+                    )
+                    if node_id < 1 or node_id in self._values.values():
+                        raise MeshError("component seed allocator returned an invalid node identity")
+                    self._values[key] = node_id
+                    self._next = max(self._next, node_id + 1)
+                return publish(self._values[key])
+            except BaseException:
+                if not existed:
+                    self._values.pop(key, None)
+                self._next = previous_next
+                raise
+            finally:
+                self._resolving = False
 
     @property
     def assigned_node_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(self._values.values()))
+        with self._resolution_lock:
+            if self._resolving:
+                raise MeshError("component seed resolution is already active")
+            return tuple(sorted(self._values.values()))
 
 
 class MutableT3Topology:
@@ -222,6 +261,7 @@ class MutableT3Topology:
         self.quality_cache: dict[tuple[int, int, int], tuple[float, ...]] = {}
         self._shared_node_ids: dict[int, tuple[int, int, Fraction]] = {}
         self.validate()
+        self._topology_index = T3IncidenceIndex(self._triangles)
 
     @property
     def protected_edges(self) -> frozenset[tuple[int, int]]:
@@ -305,10 +345,10 @@ class MutableT3Topology:
         for row, triangle in enumerate(self._triangles):
             if cancellation_check is not None and row % cancellation_interval == 0:
                 cancellation_check("native-v2 fallback location scan")
-            coordinates = self._points[triangle]
+            record = self._topology_index.geometry(self._points, triangle)
+            coordinates = record.coordinates
             signs = [orient2d(coordinates[index], coordinates[(index + 1) % 3], value) for index in range(3)]
-            scale = max(float(np.ptp(coordinates, axis=0).max()), 1.0)
-            if min(signs) >= -64.0 * np.finfo(float).eps * scale * scale:
+            if min(signs) >= -record.location_tolerance:
                 return row
         return None
 
@@ -359,16 +399,11 @@ class MutableT3Topology:
                 raise _GeometryLimited("frontal candidate lies outside the mutable triangulation")
             cavity = [located]
         else:
-            edge_rows: dict[tuple[int, int], list[int]] = {}
+            bad_set: set[int] = set()
             for bad_number, row in enumerate(bad_triangles):
                 if cancellation_check is not None and bad_number % 4096 == 0:
                     cancellation_check("native-v2 cavity adjacency scan")
-                triangle = self._triangles[row]
-                for index in range(3):
-                    edge_rows.setdefault(
-                        _edge(int(triangle[index]), int(triangle[(index + 1) % 3])),
-                        [],
-                    ).append(row)
+                bad_set.add(row)
             selected = {seed}
             frontier = [seed]
             for frontier_number, row in enumerate(frontier):
@@ -378,9 +413,10 @@ class MutableT3Topology:
                 adjacent = {
                     other
                     for index in range(3)
-                    for other in edge_rows[
+                    for other in self._topology_index.attached(
                         _edge(int(triangle[index]), int(triangle[(index + 1) % 3]))
-                    ]
+                    )
+                    if other in bad_set
                 }
                 for other in sorted(adjacent.difference(selected)):
                     selected.add(other)
@@ -493,6 +529,8 @@ class MutableT3Topology:
                 self._triangles,
                 np.asarray(sorted(self.protected_edges), dtype=np.int64).reshape((-1, 2)),
                 candidate,
+                *((self._topology_index._native_state,)
+                  if self._topology_index._native_state is not None else ()),
             )
         )
         if native is None:
@@ -519,15 +557,20 @@ class MutableT3Topology:
         old_triangles = self._triangles
         old_node_owners = self.node_owners
         old_triangle_owners = self.triangle_owners
+        old_index = self._topology_index
         try:
             self._points = np.vstack((self._points, candidate))
             self._triangles = np.ascontiguousarray(new_triangles, dtype=np.int64)
             self.node_owners = np.append(self.node_owners, int(owner))
             self.triangle_owners = reference_owners
             self.validate()
+            self._topology_index = old_index.updated(
+                self._triangles, cancellation_check=cancellation_check
+            )
         except BaseException:
             self._points, self._triangles = old_points, old_triangles
             self.node_owners, self.triangle_owners = old_node_owners, old_triangle_owners
+            self._topology_index = old_index
             raise
         self.epoch += 1
         self.quality_cache.clear()
@@ -548,18 +591,15 @@ class MutableT3Topology:
         interval = self._splittable_intervals.get(target)
         if interval is None or self._seed_registry is None:
             raise MeshError("segment is not an automatically seeded shared edge")
-        attached = tuple(
-            self._incidence(cancellation_check=cancellation_check).get(target, ())
-        )
+        if cancellation_check is not None:
+            cancellation_check("native-v2 incidence scan")
+        attached = self._topology_index.attached(target)
         if not attached or len(attached) > 2:
             raise MeshError("shared segment has invalid mutable incidence")
         if cancellation_check is not None:
             cancellation_check("native-v2 shared segment split start")
         edge_id, lower, upper = interval
         station = (lower + upper) / 2
-        shared_node_id = self._seed_registry.resolve(
-            edge_id, station.numerator, station.denominator
-        )
         candidate = 0.5 * (self._points[target[0]] + self._points[target[1]])
         new_id = len(self._points)
         extended = np.vstack((self._points, candidate))
@@ -583,6 +623,35 @@ class MutableT3Topology:
         ordered = sorted(zip(retained_rows, retained_owners), key=lambda item: item[0])
         new_triangles = np.asarray([row for row, _ in ordered], dtype=np.int64)
         new_owners = np.asarray([value for _, value in ordered], dtype=np.int64)
+        new_node_owners = np.append(self.node_owners, int(owner))
+        new_intervals = dict(self._splittable_intervals)
+        del new_intervals[target]
+        new_intervals[_edge(target[0], new_id)] = (edge_id, lower, station)
+        new_intervals[_edge(new_id, target[1])] = (edge_id, station, upper)
+
+        # Reuse the exact validator on detached state, without constructing a
+        # second full incidence index or exposing a trial to cancellation hooks.
+        trial = object.__new__(MutableT3Topology)
+        trial._points = extended
+        trial._triangles = new_triangles
+        trial.node_owners = new_node_owners
+        trial.triangle_owners = new_owners
+        trial._protected_edges = self._protected_edges
+        trial._splittable_intervals = new_intervals
+        trial.validate()
+        new_index = self._topology_index.updated(
+            new_triangles, cancellation_check=cancellation_check
+        )
+        new_shared = dict(self._shared_node_ids)
+        new_epoch = self.epoch + 1
+        new_cache: dict[tuple[int, int, int], tuple[float, ...]] = {}
+        report = {
+            "epoch": new_epoch,
+            "point_id": new_id,
+            "shared_node_id": None,
+            "edge_id": edge_id,
+            "station": (station.numerator, station.denominator),
+        }
         if cancellation_check is not None:
             cancellation_check("native-v2 shared segment split commit")
         old_state = (
@@ -590,23 +659,31 @@ class MutableT3Topology:
             self._triangles,
             self.node_owners,
             self.triangle_owners,
-            dict(self._splittable_intervals),
-            dict(self._shared_node_ids),
+            self._splittable_intervals,
+            self._shared_node_ids,
+            self._topology_index,
+            self.epoch,
+            self.quality_cache,
         )
-        try:
+
+        def publish(shared_node_id: int) -> dict[str, Any]:
+            new_shared[new_id] = (shared_node_id, edge_id, station)
+            report["shared_node_id"] = shared_node_id
             self._points = extended
             self._triangles = new_triangles
-            self.node_owners = np.append(self.node_owners, int(owner))
+            self.node_owners = new_node_owners
             self.triangle_owners = new_owners
-            del self._splittable_intervals[target]
-            self._splittable_intervals[_edge(target[0], new_id)] = (
-                edge_id, lower, station
+            self._splittable_intervals = new_intervals
+            self._shared_node_ids = new_shared
+            self._topology_index = new_index
+            self.epoch = new_epoch
+            self.quality_cache = new_cache
+            return report
+
+        try:
+            return self._seed_registry._resolve_and_publish(
+                edge_id, station.numerator, station.denominator, publish
             )
-            self._splittable_intervals[_edge(new_id, target[1])] = (
-                edge_id, station, upper
-            )
-            self._shared_node_ids[new_id] = (shared_node_id, edge_id, station)
-            self.validate()
         except BaseException:
             (
                 self._points,
@@ -615,24 +692,18 @@ class MutableT3Topology:
                 self.triangle_owners,
                 self._splittable_intervals,
                 self._shared_node_ids,
+                self._topology_index,
+                self.epoch,
+                self.quality_cache,
             ) = old_state
             raise
-        self.epoch += 1
-        self.quality_cache.clear()
-        return {
-            "epoch": self.epoch,
-            "point_id": new_id,
-            "shared_node_id": shared_node_id,
-            "edge_id": edge_id,
-            "station": (station.numerator, station.denominator),
-        }
 
     def flip_edge(self, edge: tuple[int, int]) -> bool:
         target = _edge(*edge)
         if target in self.protected_edges:
             return False
-        incidence = self._incidence()
-        attached = incidence.get(target, ())
+        incidence = self._topology_index
+        attached = incidence.attached(target)
         if len(attached) != 2:
             return False
         first, second = (self._triangles[row] for row in attached)
@@ -658,14 +729,19 @@ class MutableT3Topology:
         ordered = sorted(trial, key=lambda item: item[0])
         previous = self._triangles
         previous_owners = self.triangle_owners
-        self._triangles = np.asarray([row for row, _ in ordered], dtype=np.int64)
-        self.triangle_owners = np.asarray([value for _, value in ordered], dtype=np.int64)
+        previous_index = self._topology_index
         try:
+            self._triangles = np.asarray([row for row, _ in ordered], dtype=np.int64)
+            self.triangle_owners = np.asarray([value for _, value in ordered], dtype=np.int64)
             self.validate()
-        except MeshError:
+            self._topology_index = previous_index.updated(self._triangles)
+        except BaseException as error:
             self._triangles = previous
             self.triangle_owners = previous_owners
-            return False
+            self._topology_index = previous_index
+            if isinstance(error, MeshError):
+                return False
+            raise
         self.epoch += 1
         self.quality_cache.clear()
         return True
@@ -866,6 +942,7 @@ def frontal_delaunay_refine(
     metric_minimum = float("inf")
     metric_maximum = 0.0
     route = "frontal_delaunay"
+    queue = TriangleWorkQueue(cancellation_check, options.cancellation_interval)
     while insertions < options.max_insertions and operations < options.max_topology_operations:
         if cancellation_check is not None and operations % options.cancellation_interval == 0:
             cancellation_check("native-v2 frontal queue")
@@ -940,64 +1017,67 @@ def frontal_delaunay_refine(
             ) <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12):
                 route = "frontal_delaunay_baseline_satisfied"
                 break
-        queue: list[tuple[float, int, tuple[int, int, int], int]] = []
+        queue.begin_round()
         for triangle_number, triangle in enumerate(triangles):
             if cancellation_check is not None and triangle_number % options.cancellation_interval == 0:
                 cancellation_check("native-v2 triangle queue scan")
-            coordinates = points[triangle]
-            center_tensor = np.mean(tensors[triangle], axis=0)
-            metric_lengths = []
-            for index in range(3):
-                delta = coordinates[(index + 1) % 3] - coordinates[index]
-                metric_lengths.append(sqrt(max(float(delta @ center_tensor @ delta), 0.0)))
-            angles = _angles(coordinates)
-            maximum_metric_length = max(metric_lengths)
+            identity = tuple(map(int, triangle))
+            record = topology._topology_index.geometry(points, identity)
+            coordinates = record.coordinates
+            if record.angles is None:
+                record.angles = _angles(coordinates)
+            angles = record.angles
             minimum_angle = min(angles)
             minimum_angle_index = int(np.argmin(angles))
             corner = int(triangle[minimum_angle_index])
             prior = int(triangle[(minimum_angle_index - 1) % 3])
             following = int(triangle[(minimum_angle_index + 1) % 3])
             fixed_corner_edges = {_edge(corner, prior), _edge(corner, following)}
-            identity = tuple(map(int, triangle))
-            if (
-                minimum_angle < 30.0
-                and maximum_metric_length
-                <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12)
-                and fixed_corner_edges.issubset(topology.protected_edges)
-            ):
+            protected_corner = fixed_corner_edges.issubset(topology.protected_edges)
+            local_metric = tensors[triangle]
+
+            def evaluate_priority():
+                center_tensor = np.mean(local_metric, axis=0)
+                metric_lengths = []
+                for index in range(3):
+                    delta = coordinates[(index + 1) % 3] - coordinates[index]
+                    metric_lengths.append(sqrt(max(float(delta @ center_tensor @ delta), 0.0)))
+                maximum_metric_length = max(metric_lengths)
+                limited = (
+                    minimum_angle < 30.0
+                    and maximum_metric_length
+                    <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12)
+                    and protected_corner
+                )
+                severity = max(
+                    maximum_metric_length / _MAXIMUM_METRIC_EDGE_LENGTH,
+                    30.0 / max(minimum_angle, 1.0e-12),
+                )
+                return severity, limited
+
+            _, limited = queue.refresh(
+                identity, record, local_metric, protected_corner, evaluate_priority
+            )
+            if limited:
                 if identity not in geometry_limited_triangles:
                     geometry_limited_triangles.add(identity)
                     geometry_limited += 1
                 continue
-            severity = max(
-                maximum_metric_length / _MAXIMUM_METRIC_EDGE_LENGTH,
-                30.0 / max(minimum_angle, 1.0e-12),
-            )
-            if severity > 1.0 + 1.0e-12:
-                heapq.heappush(queue, (-severity, 1, identity, topology.epoch))
+        queue.finish_round()
         if not queue:
             if geometry_limited:
                 route = "frontal_delaunay_geometry_limited"
             break
         accepted = False
-        triangle_lookup: dict[tuple[int, int, int], np.ndarray] = {}
-        for lookup_number, row in enumerate(topology.triangles):
-            if cancellation_check is not None and lookup_number % options.cancellation_interval == 0:
-                cancellation_check("native-v2 triangle lookup scan")
-            triangle_lookup[tuple(map(int, row))] = row
-        while queue:
+        if cancellation_check is not None:
+            cancellation_check("native-v2 triangle lookup scan")
+        while queue and operations < options.max_topology_operations:
             if cancellation_check is not None and operations % options.cancellation_interval == 0:
                 cancellation_check("native-v2 triangle queue processing")
-            negative_severity, _, identity, generation = heapq.heappop(queue)
+            negative_severity, _, identity, generation = queue.pop()
             operations += 1
-            if generation != topology.epoch:
-                stale_entries += 1
-                continue
-            triangle = triangle_lookup.get(identity)
-            if triangle is None:
-                stale_entries += 1
-                continue
-            coordinates = topology.points[triangle]
+            # Experimental providers historically receive a disposable writable array.
+            coordinates = topology._topology_index.geometry(points, identity).coordinates.copy()
             local_tensors = evaluate_metric(coordinates)
             proposals = [_offcentre(coordinates, local_tensors, target_size)]
             circumcentre = _circumcentre(coordinates)
@@ -1007,7 +1087,7 @@ def frontal_delaunay_refine(
                 key = tuple(np.rint(candidate / max(target_size * 1.0e-8, 1.0e-14)).astype(np.int64))
                 if key in rejected:
                     continue
-                all_points = topology.points
+                all_points = points
                 if not _inside_ring(candidate, all_points, triangulation.outer_loop) or any(
                     _inside_ring(candidate, all_points, ring) for ring in triangulation.hole_loops
                 ):

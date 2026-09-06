@@ -25,6 +25,8 @@ it, finalizes it in a ``finally``, and never leaves it initialized on the way ou
 from __future__ import annotations
 
 import contextlib
+import signal
+import threading
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -53,12 +55,21 @@ _PLANARITY_RTOL = 1.0e-6
 def _gmsh_session(verbose: bool = False) -> Iterator[None]:
     """Initialize gmsh for the duration of a block, and always finalize."""
 
-    gmsh.initialize()
+    previous_sigint = (
+        signal.getsignal(signal.SIGINT)
+        if threading.current_thread() is threading.main_thread()
+        else None
+    )
     try:
-        gmsh.option.setNumber("General.Terminal", 1 if verbose else 0)
-        yield
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Terminal", 1 if verbose else 0)
+            yield
+        finally:
+            gmsh.finalize()
     finally:
-        gmsh.finalize()
+        if previous_sigint is not None:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 def _face_planarity_error(geometry: GeometryModel, face_id: int) -> Optional[str]:

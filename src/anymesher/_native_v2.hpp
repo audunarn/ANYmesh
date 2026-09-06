@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
 #include <queue>
 #include <set>
 #include <string>
@@ -396,6 +397,8 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
     return Py_BuildValue("Ni", rows, std::min(iterations, max_iterations));
 }
 
+#include "_native_t3_storage.hpp"
+
 inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
     PyObject* points_object = nullptr;
     PyObject* triangles_object = nullptr;
@@ -403,8 +406,14 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
     PyObject* orientation_oracle = nullptr;
     double candidate_x = 0.0;
     double candidate_y = 0.0;
-    if (!PyArg_ParseTuple(args, "OOOOdd:native_v2_mutable_t3_insert", &points_object, &triangles_object, &protected_object, &orientation_oracle, &candidate_x, &candidate_y)) {
+    PyObject* snapshot_object = Py_None;
+    if (!PyArg_ParseTuple(args, "OOOOdd|O:native_v2_mutable_t3_insert", &points_object, &triangles_object, &protected_object, &orientation_oracle, &candidate_x, &candidate_y, &snapshot_object)) {
         return nullptr;
+    }
+    const T3IncidenceSnapshot* snapshot = nullptr;
+    if (snapshot_object != Py_None) {
+        snapshot = t3_snapshot(snapshot_object);
+        if (snapshot == nullptr) return nullptr;
     }
     if (!PyCallable_Check(orientation_oracle)) {
         PyErr_SetString(PyExc_TypeError, "native_v2_mutable_t3_insert requires its internal orientation oracle");
@@ -418,6 +427,8 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
         !acquire_matrix(protected_object, protected_buffer, 2, sizeof(Index), 'q', "protected_edges")) {
         return nullptr;
     }
+    // Complete binding before any canonicalization can request predicate fallback.
+    if (snapshot != nullptr && !require_t3_connectivity(*snapshot, triangles_buffer.value)) return nullptr;
     std::vector<Point> points;
     std::vector<Triangle> triangles;
     std::set<Edge> protected_edges;
@@ -433,7 +444,9 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
             if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
                 return nullptr;
             }
-            Triangle value{index_at(triangles_buffer.value, row, 0), index_at(triangles_buffer.value, row, 1), index_at(triangles_buffer.value, row, 2)};
+            Triangle value = snapshot != nullptr
+                ? snapshot->triangles[static_cast<std::size_t>(row)]
+                : Triangle{index_at(triangles_buffer.value, row, 0), index_at(triangles_buffer.value, row, 1), index_at(triangles_buffer.value, row, 2)};
             if (*std::min_element(value.begin(), value.end()) < 0 || *std::max_element(value.begin(), value.end()) >= static_cast<Index>(points.size())) {
                 throw std::runtime_error("mutable T3 connectivity is out of range");
             }
@@ -560,8 +573,10 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
                     throw SignalInterrupted{};
                 }
                 const Triangle& triangle = triangles[row];
-                for (int index = 0; index < 3; ++index) {
-                    edge_rows[edge(triangle[index], triangle[(index + 1) % 3])].push_back(row);
+                if (snapshot == nullptr) {
+                    for (int index = 0; index < 3; ++index) {
+                        edge_rows[edge(triangle[index], triangle[(index + 1) % 3])].push_back(row);
+                    }
                 }
             }
             std::set<std::size_t> selected{seed};
@@ -573,8 +588,18 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
                 const Triangle& triangle = triangles[frontier[cursor]];
                 std::set<std::size_t> adjacent;
                 for (int index = 0; index < 3; ++index) {
-                    const auto& rows = edge_rows[edge(triangle[index], triangle[(index + 1) % 3])];
-                    adjacent.insert(rows.begin(), rows.end());
+                    const Edge key = edge(triangle[index], triangle[(index + 1) % 3]);
+                    if (snapshot == nullptr) {
+                        const auto& rows = edge_rows[key];
+                        adjacent.insert(rows.begin(), rows.end());
+                    } else {
+                        const auto found = snapshot->edge_cells.find(key);
+                        if (found == snapshot->edge_cells.end()) throw std::runtime_error("mutable T3 incidence snapshot lost an edge");
+                        for (const Triangle& cell : *found->second) {
+                            const std::size_t row = snapshot->row_by_cell.at(cell);
+                            if (std::binary_search(bad_triangles.begin(), bad_triangles.end(), row)) adjacent.insert(row);
+                        }
+                    }
                 }
                 for (const std::size_t row : adjacent) {
                     if (selected.insert(row).second) frontier.push_back(row);
