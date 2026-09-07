@@ -2494,6 +2494,47 @@ def generate_hybrid_mesh_result(
                         "source_revision": int(source_geometry.revision),
                     }
                 )
+                _check_cancellation(
+                    cancellation_check,
+                    "selected fallback qualified S3 policy validation start",
+                )
+                repaired_fallback_quality = _structured_quality_report(
+                    fallback_mesh, structured_report.plan.options
+                )
+                if not repaired_fallback_quality["accepted"]:
+                    raise MeshError(
+                        "native fallback violates structured quality policy "
+                        "after qualified S3 preparation: "
+                        f"{repaired_fallback_quality}"
+                    )
+                repaired_fallback_metrics = regularity_metrics(
+                    fallback_mesh,
+                    target_size=target_size,
+                    minimum_size_ratio=(
+                        structured_report.plan.options.minimum_size_ratio
+                    ),
+                    maximum_size_ratio=(
+                        structured_report.plan.options.maximum_size_ratio
+                    ),
+                    mapped_element_ids=(),
+                )
+                _check_cancellation(
+                    cancellation_check,
+                    "selected fallback qualified S3 policy validation complete",
+                )
+                structured_report = replace(
+                    structured_report,
+                    metrics={
+                        **dict(structured_report.metrics),
+                        "pre_s3_fallback": fallback_metrics,
+                        "accepted_fallback": repaired_fallback_metrics,
+                    },
+                    quality={
+                        **dict(structured_report.quality),
+                        "pre_s3_fallback": fallback_quality,
+                        "accepted_fallback": repaired_fallback_quality,
+                    },
+                )
                 fallback = replace(fallback, mesh=fallback_mesh)
                 fallback.mesh.hybrid_diagnostics[
                     "qualified_s3_preparation"

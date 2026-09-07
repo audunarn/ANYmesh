@@ -720,18 +720,15 @@ def prepare_structural_closure(
     for position, pair in enumerate(source_face_candidates):
         if position % 16 == 0:
             _cancel(cancellation_check, "structural preparation overlap narrow phase")
-        from ._complementary_trims import complementary_trim_domains
-        from ._trim_certificates import certified_complementary_arc_domains
+        from ._owner_trim_domains import validated_complementary_trim_domains
 
-        if certified_complementary_arc_domains(
+        if validated_complementary_trim_domains(
             geometry, *pair, cancellation_check=cancellation_check,
         ):
             continue
 
         overlaps.extend(
-            overlap
-            for overlap in find_coplanar_overlaps(geometry, candidate_pairs=(pair,))
-            if not complementary_trim_domains(geometry, overlap.first, overlap.second)
+            find_coplanar_overlaps(geometry, candidate_pairs=(pair,))
         )
         if len(overlaps) >= 8:
             break
