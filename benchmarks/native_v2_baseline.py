@@ -377,6 +377,13 @@ def _measure(generate, args):
     return mesh, diagnostics, durations, digests, counts, work_samples
 
 
+def _target_size(case: str, domain_area: float, requested_elements: int) -> float:
+    # Mapped rectangles produce one quad per size-by-size cell. The native
+    # seed-density estimate is not applicable to this zero-use benchmark.
+    density_factor = 1.0 if case == "mapped_zero_use" else 3.5
+    return (density_factor * domain_area / requested_elements) ** 0.5
+
+
 def _run(args: argparse.Namespace) -> int:
     from anygeometry import GeometryModel, to_dict
     from anymesher import MetricFieldSpec, NativeMeshingOptions, __version__
@@ -407,7 +414,7 @@ def _run(args: argparse.Namespace) -> int:
     outer, holes, constraints, declared = _case("planar" if cylinder else args.case)
     domain_area = (cylinder.area if cylinder else
                    _ring_area(outer) - sum(_ring_area(hole) for hole in holes))
-    target = (3.5 * domain_area / requested_elements) ** 0.5
+    target = _target_size(args.case, domain_area, requested_elements)
     mesher_backend = "native" if args.backend == "compiled" else args.backend
     native = NativeMeshingOptions()
     if args.route == "frontal":

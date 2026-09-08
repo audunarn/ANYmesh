@@ -15,6 +15,25 @@ def benchmark(monkeypatch):
     return importlib.import_module("native_v2_baseline")
 
 
+@pytest.mark.parametrize("requested", (10_000, 100_000, 500_000))
+def test_mapped_target_size_matches_requested_quad_scale(benchmark, requested):
+    target = benchmark._target_size("mapped_zero_use", 16.0, requested)
+    assert target == (16.0 / requested) ** 0.5
+    divisions = round(4.0 / target)
+    assert benchmark.MIN_REQUESTED_SCALE_RATIO <= (
+        divisions * divisions / requested
+    ) <= benchmark.MAX_REQUESTED_SCALE_RATIO
+
+
+@pytest.mark.parametrize("requested", (10_000, 100_000, 500_000))
+def test_native_target_size_estimate_is_unchanged(benchmark, requested):
+    for case in benchmark.PERFORMANCE_CASES:
+        if case != "mapped_zero_use":
+            assert benchmark._target_size(case, 16.0, requested) == (
+                3.5 * 16.0 / requested
+            ) ** 0.5
+
+
 def work(insertions=3, operations=7):
     return {
         "faces": {"1": {"insertions": insertions, "topology_operations": operations,
