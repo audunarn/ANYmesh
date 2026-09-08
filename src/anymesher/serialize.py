@@ -25,6 +25,7 @@ __all__ = ["load_mesh", "mesh_from_dict", "mesh_to_dict", "save_mesh"]
 
 FORMAT = "anymesher.mesh"
 FORMAT_VERSION = 3
+_FLOAT64 = np.dtype(np.float64)
 
 
 def _json_value(value: Any, path: str) -> Any:
@@ -77,7 +78,12 @@ def mesh_to_dict(mesh: Mesh) -> Dict[str, Any]:
         "automatic_beam_connections": int(mesh.automatic_beam_connections),
         "automatic_shell_connections": int(mesh.automatic_shell_connections),
         "nodes": {
-            str(node_id): [float(value) for value in position]
+            str(node_id): (
+                position.tolist()
+                if type(position) is np.ndarray
+                and position.dtype == _FLOAT64 and position.ndim == 1
+                else [float(value) for value in position]
+            )
             for node_id, position in sorted(mesh.nodes.items())
         },
         "quads": {str(k): list(map(int, v)) for k, v in sorted(mesh.quads.items())},

@@ -435,6 +435,12 @@ class _Counter:
         self._value += 1
         return self._value
 
+    def take(self, count: int) -> range:
+        """Reserve consecutive IDs in exactly the scalar allocation order."""
+        first = self._value + 1
+        self._value += count
+        return range(first, self._value + 1)
+
 
 def _build_vertex_nodes(
     geometry: GeometryModel,
@@ -560,6 +566,32 @@ def _build_face(
         np.array([mesh.nodes[node] for node in side_c]),
         np.array([mesh.nodes[node] for node in side_d]),
     )
+    if step == 1:
+        # Keep the original i-then-j numbering and the unchanged Coons values.
+        # Row views avoid copying the full interior coordinate array.
+        interior_ids = next_node.take((u_stations - 1) * (v_stations - 1))
+        grid[1:-1, 1:-1] = np.arange(
+            interior_ids.start, interior_ids.stop, dtype=grid.dtype,
+        ).reshape(u_stations - 1, v_stations - 1)
+        first = interior_ids.start
+        for i in range(1, u_stations):
+            following = first + v_stations - 1
+            mesh.nodes.update(zip(range(first, following), blended[i, 1:-1]))
+            first = following
+        mesh.grid_of_face[face_id] = grid
+        element_ids = list(next_element.take(n_u * n_v))
+        # Bounded conversion batches, rather than a full-mesh connectivity
+        # temporary. Array indexing performs no coordinate arithmetic.
+        for start in range(0, len(element_ids), 2048):
+            stop = min(start + 2048, len(element_ids))
+            i, j = np.divmod(np.arange(start, stop, dtype=np.intp), n_v)
+            corners = np.column_stack((
+                grid[i, j], grid[i + 1, j],
+                grid[i + 1, j + 1], grid[i, j + 1],
+            ))
+            mesh.quads.update(zip(element_ids[start:stop], map(tuple, corners.tolist())))
+        mesh.elements_of_face[face_id] = element_ids
+        return
     for i in range(1, u_stations):
         for j in range(1, v_stations):
             if step == 2 and i % 2 == 1 and j % 2 == 1:

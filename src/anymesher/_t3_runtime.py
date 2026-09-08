@@ -52,6 +52,9 @@ class TriangleWorkQueue:
         self._heap: list[tuple[float, int, Cell, int]] = []
         self._seen: set[Cell] = set()
         self._token = 0
+        self._consumed: set[Cell] = set()
+        self._delta_round = False
+        self._refresh_index = None
         self._cancel = cancellation_check
         self._interval = cancellation_interval
         self.evaluations = 0
@@ -63,6 +66,36 @@ class TriangleWorkQueue:
 
     def begin_round(self) -> None:
         self._seen = set()
+        self._consumed.clear()
+        self._delta_round = False
+        self._refresh_index = None
+
+    def prepare_incremental_round(self, index, points, tensors, protected):
+        from ._t3_queue_refresh import QueueRefreshIndex
+
+        if self._refresh_index is None:
+            self._refresh_index = QueueRefreshIndex()
+        touched, removed = self._refresh_index.prepare(
+            index, points, tensors, protected, self._checkpoint,
+        )
+        self._seen = set()
+        self._delta_round = True
+        for number, identity in enumerate(removed):
+            self._checkpoint(number)
+            self._records.pop(identity, None)
+            self._active.pop(identity, None)
+            self._consumed.discard(identity)
+        changed = set(map(tuple, touched))
+        # Preserve the reference's logical cache-hit accounting without doing
+        # its per-cell metric extraction and angle/ownership work again.
+        self.cache_hits += len(self._records) - len(changed & self._records.keys())
+        for number, identity in enumerate(sorted(self._consumed)):
+            self._checkpoint(number)
+            record = self._records.get(identity)
+            if record is not None:
+                self._activate(identity, record)
+        self._consumed.clear()
+        return touched
 
     def refresh(
         self,
@@ -85,6 +118,10 @@ class TriangleWorkQueue:
             record = previous
             self.cache_hits += 1
         self._seen.add(identity)
+        self._activate(identity, record)
+        return record.severity, record.geometry_limited
+
+    def _activate(self, identity, record):
         if record.geometry_limited or not (record.severity > 1.0 + 1.0e-12):
             self._active.pop(identity, None)
         else:
@@ -94,18 +131,18 @@ class TriangleWorkQueue:
                 entry = (-record.severity, 1, identity, self._token)
                 heapq.heappush(self._heap, entry)
                 self._active[identity] = entry
-        return record.severity, record.geometry_limited
 
     def finish_round(self) -> None:
-        removed = []
-        for number, identity in enumerate(self._records):
-            self._checkpoint(number)
-            if identity not in self._seen:
-                removed.append(identity)
-        for number, identity in enumerate(removed):
-            self._checkpoint(number)
-            del self._records[identity]
-            self._active.pop(identity, None)
+        if not self._delta_round:
+            removed = []
+            for number, identity in enumerate(self._records):
+                self._checkpoint(number)
+                if identity not in self._seen:
+                    removed.append(identity)
+            for number, identity in enumerate(removed):
+                self._checkpoint(number)
+                del self._records[identity]
+                self._active.pop(identity, None)
         if len(self._heap) > max(64, 2 * len(self._active)):
             retained = []
             for number, entry in enumerate(self._active.values()):
@@ -133,4 +170,5 @@ class TriangleWorkQueue:
         self._prune()
         entry = heapq.heappop(self._heap)
         del self._active[entry[2]]
+        self._consumed.add(entry[2])
         return entry

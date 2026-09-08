@@ -4,6 +4,9 @@
 
 ## 0.5.0 - 2026-09-04
 
+Alpha preparation: final source, platform, installed-wheel, performance and
+hosted-CI qualification remains pending. This entry is not release approval.
+
 - Add immutable native-v2 options and serializable spatial metric controls while
   retaining the byte-compatible legacy lattice and metric defaults.
 - Add deterministic SPD metric evaluation, physical/chart pullback, gradation
@@ -12,7 +15,17 @@
   shared seed identities, and deterministic canonical export.
 - Add opt-in planar Frontal-Delaunay insertion with bounded queues, metric-aware
   off-centres, cancellation, geometry-limited diagnostics, and quality guarding.
+- Extend the opt-in route to owner-certified cylindrical patches and connected
+  sector assemblies using physical chart lengths and topology-owned shared
+  boundaries. Full-cylinder support uses connected sectors, not new single-face
+  periodic topology. Other curved surface types remain outside this extension.
+- Retain Python reference behavior while introducing persistent native topology
+  storage and immutable local incidence, geometry, row and export caches.
+  Keep protected identities, failed-candidate isolation and existing defaults.
 - Add the frozen native-v2 baseline corpus and performance acceptance envelope.
+- Defer field-guided quad-first meshing to a later release. Existing boundary
+  collars and triangle recombination do not implement orientation-field solving
+  or advancing quad fronts; no `field_guided_front` option is included.
 
 ## 0.4.0 - 2026-09-03
 

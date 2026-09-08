@@ -82,9 +82,23 @@ inline bool call_orientation_oracle(
     return true;
 }
 
+inline bool insertion_checkpoint(PyObject* callback, const char* phase) {
+    // Called with the GIL held. Never replace an exception from the host.
+    if (PyErr_CheckSignals() != 0) return false;
+    if (callback != nullptr && callback != Py_None) {
+        PyObject* result = PyObject_CallFunction(callback, "s", phase);
+        if (result == nullptr) return false;
+        Py_DECREF(result);
+    }
+    return true;
+}
+
 class SignalAwareGilRelease {
 public:
-    SignalAwareGilRelease() : state_(PyEval_SaveThread()) {}
+    explicit SignalAwareGilRelease(
+        PyObject* callback = nullptr,
+        const char* phase = "native-v2 compiled insertion work")
+        : callback_(callback), phase_(phase), state_(PyEval_SaveThread()) {}
     ~SignalAwareGilRelease() {
         if (state_ != nullptr) {
             PyEval_RestoreThread(state_);
@@ -93,7 +107,7 @@ public:
     bool interrupted() {
         PyEval_RestoreThread(state_);
         state_ = nullptr;
-        if (PyErr_CheckSignals() != 0) {
+        if (!insertion_checkpoint(callback_, phase_)) {
             return true;
         }
         state_ = PyEval_SaveThread();
@@ -113,6 +127,8 @@ public:
     }
 
 private:
+    PyObject* callback_;
+    const char* phase_;
     PyThreadState* state_;
 };
 
@@ -307,9 +323,15 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
     PyObject* values_object = nullptr;
     double growth = 0.0;
     int max_iterations = 0;
-    if (!PyArg_ParseTuple(args, "OOOdi:native_v2_gradation_limit", &points_object, &edges_object, &values_object, &growth, &max_iterations)) {
+    PyObject* cancellation = Py_None;
+    if (!PyArg_ParseTuple(args, "OOOdi|O:native_v2_gradation_limit", &points_object, &edges_object, &values_object, &growth, &max_iterations, &cancellation)) {
         return nullptr;
     }
+    if (cancellation != Py_None && !PyCallable_Check(cancellation)) {
+        PyErr_SetString(PyExc_TypeError, "gradation cancellation must be callable");
+        return nullptr;
+    }
+    if (!insertion_checkpoint(cancellation, "native-v2 compiled gradation prepare")) return nullptr;
     HeldBuffer points_buffer;
     HeldBuffer edges_buffer;
     HeldBuffer values_buffer;
@@ -330,7 +352,7 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
     }
     std::vector<double> values(static_cast<std::size_t>(values_buffer.value.shape[0]));
     for (Py_ssize_t row = 0; row < values_buffer.value.shape[0]; ++row) {
-        if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
+        if (static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && !insertion_checkpoint(cancellation, "native-v2 compiled gradation input")) {
             return nullptr;
         }
         values[static_cast<std::size_t>(row)] = double_vector_at(values_buffer.value, row);
@@ -339,12 +361,12 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
     bool invalid = false;
     bool interrupted = false;
     {
-      SignalAwareGilRelease gil;
+      SignalAwareGilRelease gil(cancellation, "native-v2 compiled gradation work");
       std::size_t work = 0;
       for (iterations = 1; iterations <= max_iterations; ++iterations) {
         bool changed = false;
         for (Py_ssize_t row = 0; row < edges_buffer.value.shape[0]; ++row, ++work) {
-            if (work > 0 && work % kSignalCheckInterval == 0 && gil.interrupted()) {
+            if (work % kSignalCheckInterval == 0 && gil.interrupted()) {
                 interrupted = true;
                 break;
             }
@@ -383,7 +405,7 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
         return nullptr;
     }
     for (Py_ssize_t row = 0; row < static_cast<Py_ssize_t>(values.size()); ++row) {
-        if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
+        if (static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && !insertion_checkpoint(cancellation, "native-v2 compiled gradation output")) {
             Py_DECREF(rows);
             return nullptr;
         }
@@ -407,9 +429,15 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
     double candidate_x = 0.0;
     double candidate_y = 0.0;
     PyObject* snapshot_object = Py_None;
-    if (!PyArg_ParseTuple(args, "OOOOdd|O:native_v2_mutable_t3_insert", &points_object, &triangles_object, &protected_object, &orientation_oracle, &candidate_x, &candidate_y, &snapshot_object)) {
+    PyObject* cancellation = Py_None;
+    if (!PyArg_ParseTuple(args, "OOOOdd|OO:native_v2_mutable_t3_insert", &points_object, &triangles_object, &protected_object, &orientation_oracle, &candidate_x, &candidate_y, &snapshot_object, &cancellation)) {
         return nullptr;
     }
+    if (cancellation != Py_None && !PyCallable_Check(cancellation)) {
+        PyErr_SetString(PyExc_TypeError, "insertion cancellation must be callable");
+        return nullptr;
+    }
+    if (!insertion_checkpoint(cancellation, "native-v2 compiled insertion prepare")) return nullptr;
     const T3IncidenceSnapshot* snapshot = nullptr;
     if (snapshot_object != Py_None) {
         snapshot = t3_snapshot(snapshot_object);
@@ -428,20 +456,20 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
         return nullptr;
     }
     // Complete binding before any canonicalization can request predicate fallback.
-    if (snapshot != nullptr && !require_t3_connectivity(*snapshot, triangles_buffer.value)) return nullptr;
+    if (snapshot != nullptr && !require_t3_connectivity(*snapshot, triangles_buffer.value, cancellation)) return nullptr;
     std::vector<Point> points;
     std::vector<Triangle> triangles;
     std::set<Edge> protected_edges;
     try {
         points.reserve(static_cast<std::size_t>(points_buffer.value.shape[0] + 1));
         for (Py_ssize_t row = 0; row < points_buffer.value.shape[0]; ++row) {
-            if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
+            if (static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && !insertion_checkpoint(cancellation, "native-v2 compiled insertion points")) {
                 return nullptr;
             }
             points.push_back({double_at(points_buffer.value, row, 0), double_at(points_buffer.value, row, 1)});
         }
         for (Py_ssize_t row = 0; row < triangles_buffer.value.shape[0]; ++row) {
-            if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
+            if (static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && !insertion_checkpoint(cancellation, "native-v2 compiled insertion cells")) {
                 return nullptr;
             }
             Triangle value = snapshot != nullptr
@@ -453,7 +481,7 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
             triangles.push_back(canonical(value, points));
         }
         for (Py_ssize_t row = 0; row < protected_buffer.value.shape[0]; ++row) {
-            if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
+            if (static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && !insertion_checkpoint(cancellation, "native-v2 compiled insertion protected")) {
                 return nullptr;
             }
             const Index first = index_at(protected_buffer.value, row, 0);
@@ -477,7 +505,8 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
     std::string error;
     bool interrupted = false;
     try {
-      SignalAwareGilRelease gil;
+      SignalAwareGilRelease gil(cancellation);
+        if (gil.interrupted()) throw SignalInterrupted{};
         double scale = 1.0;
         double minimum_x = points.empty() ? 0.0 : points.front()[0];
         double maximum_x = minimum_x;
@@ -652,8 +681,14 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
                 ++added_count;
             }
         }
-        std::sort(result.begin(), result.end());
-        result.erase(std::unique(result.begin(), result.end()), result.end());
+        std::sort(result.begin(), result.end(), [&](const Triangle& a, const Triangle& b) {
+            if (++work % kSignalCheckInterval == 0 && gil.interrupted()) throw SignalInterrupted{};
+            return a < b;
+        });
+        result.erase(std::unique(result.begin(), result.end(), [&](const Triangle& a, const Triangle& b) {
+            if (++work % kSignalCheckInterval == 0 && gil.interrupted()) throw SignalInterrupted{};
+            return a == b;
+        }), result.end());
         removed_count = cavity.size();
     } catch (const SignalInterrupted&) {
         interrupted = true;
@@ -678,7 +713,7 @@ inline PyObject* py_mutable_t3_insert(PyObject*, PyObject* args) {
         return nullptr;
     }
     for (Py_ssize_t row = 0; row < static_cast<Py_ssize_t>(result.size()); ++row) {
-        if (row > 0 && static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && PyErr_CheckSignals() != 0) {
+        if (static_cast<std::size_t>(row) % kSignalCheckInterval == 0 && !insertion_checkpoint(cancellation, "native-v2 compiled insertion output")) {
             Py_DECREF(rows);
             return nullptr;
         }

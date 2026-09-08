@@ -22,6 +22,8 @@ from typing import Any
 
 import numpy as np
 
+from native_v2_cylinder_cases import CYLINDER_CASES, cylinder_case
+
 
 WARMUPS = 1
 MEASUREMENTS = 7
@@ -34,6 +36,7 @@ PERFORMANCE_CASES = (
     "intersection",
     "declared_junction",
     "rotated",
+    *CYLINDER_CASES,
 )
 FROZEN_EVIDENCE_TESTS = (
     "tests/test_native_backend_defaults.py::test_present_partial_native_v2_abi_fails_hard",
@@ -276,8 +279,106 @@ def _validate_hex(value: str, length: int, label: str) -> str:
     return lowered
 
 
+
+def _native_work(diagnostics: dict[str, Any], route: str, case: str) -> dict[str, Any]:
+    rows = diagnostics.get("faces") if case in CYLINDER_CASES else {"surface": diagnostics}
+    if not isinstance(rows, dict) or not rows:
+        raise ValueError("missing benchmark face diagnostics")
+    work = {}
+    for face, values in sorted(rows.items(), key=lambda item: str(item[0])):
+        report = values.get("native_v2")
+        if report is None:
+            if route == "frontal" and case != "mapped_zero_use":
+                raise ValueError("Frontal-Delaunay work receipt missing")
+            continue
+        counters = {}
+        for key in ("insertions", "published_insertions", "topology_operations"):
+            value = report.get(key)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"invalid native work counter: {key}")
+            counters[key] = value
+        selected = report.get("selected_route")
+        if not isinstance(selected, str) or not selected.startswith("frontal_delaunay"):
+            raise ValueError("native work receipt has wrong route")
+        if report.get("cancelled") is not False:
+            raise ValueError("refinement completion is not proven")
+        work[str(face)] = dict(counters, selected_route=selected, cancelled=False)
+    result = {"faces": work,
+              "insertions": sum(row["insertions"] for row in work.values()),
+              "published_insertions": sum(row["published_insertions"] for row in work.values()),
+              "topology_operations": sum(row["topology_operations"] for row in work.values())}
+    _require_refinement_work(result, route, case)
+    return result
+
+
+def _require_refinement_work(work: dict[str, Any], route: str, case: str) -> None:
+    rows = work.get("faces")
+    if not isinstance(rows, dict):
+        raise ValueError("missing per-face refinement work")
+    for key in ("insertions", "published_insertions", "topology_operations"):
+        total = work.get(key)
+        if type(total) is not int or total < 0:
+            raise ValueError("invalid refinement work total")
+        values = [row.get(key) for row in rows.values()]
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("invalid per-face refinement work")
+        if total != sum(values):
+            raise ValueError("inconsistent refinement work total")
+    if any(row["published_insertions"] > row["insertions"]
+           or row.get("cancelled") is not False for row in rows.values()):
+        raise ValueError("invalid publication or cancellation evidence")
+    if route == "frontal" and case != "mapped_zero_use":
+        if not rows or work["published_insertions"] <= 0 or work["topology_operations"] <= 0:
+            raise ValueError("seed-only run is not refinement qualification")
+        if any(not isinstance(row.get("selected_route"), str)
+               or not row["selected_route"].startswith("frontal_delaunay")
+               for row in rows.values()):
+            raise ValueError("refinement route is not proven")
+    elif work["insertions"] or work["published_insertions"] or work["topology_operations"]:
+        raise ValueError("legacy/mapped benchmark unexpectedly used refinement")
+
+
+def _measure(generate, args):
+    """Preserve completed samples and first failure, even without a final record."""
+    partial = args.output.with_name(args.output.name + ".partial.jsonl")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.output.exists():
+        raise FileExistsError(f"refusing to overwrite evidence: {args.output}")
+    durations, digests, counts, work_samples = [], [], [], []
+    with partial.open("x", encoding="utf-8", newline="\n") as stream:
+        def emit(row):
+            stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        emit({"event": "start", "case": args.case, "route": args.route,
+              "source_commit": args.source_commit})
+        try:
+            for index in range(WARMUPS + MEASUREMENTS):
+                started = perf_counter()
+                mesh, diagnostics = generate()
+                elapsed = perf_counter() - started
+                work = _native_work(diagnostics, args.route, args.case)
+                digest = _mesh_digest(mesh)
+                count = mesh.num_triangles + mesh.num_quads
+                emit({"event": "warmup" if index < WARMUPS else "measurement",
+                      "index": index, "seconds": elapsed, "elements": count,
+                      "mesh_digest": digest, "native_work": work})
+                if index >= WARMUPS:
+                    durations.append(elapsed)
+                    digests.append(digest)
+                    counts.append(count)
+                    work_samples.append(work)
+            if (len(set(digests)) != 1 or len(set(counts)) != 1
+                    or any(row != work_samples[0] for row in work_samples[1:])):
+                raise RuntimeError("benchmark repetitions are not deterministic")
+        except BaseException as error:
+            emit({"event": "failure", "type": type(error).__name__, "message": str(error)})
+            raise
+    return mesh, diagnostics, durations, digests, counts, work_samples
+
+
 def _run(args: argparse.Namespace) -> int:
-    from anygeometry import GeometryModel
+    from anygeometry import GeometryModel, to_dict
     from anymesher import MetricFieldSpec, NativeMeshingOptions, __version__
     from anymesher.hybrid import _neutral_shell_core, generate_hybrid_mesh_result
     from anymesher.quality_v2 import evaluate_quality
@@ -302,8 +403,10 @@ def _run(args: argparse.Namespace) -> int:
     elif args.wheel_sha256:
         raise ValueError("source runs must not carry a wheel SHA-256")
 
-    outer, holes, constraints, declared = _case(args.case)
-    domain_area = _ring_area(outer) - sum(_ring_area(hole) for hole in holes)
+    cylinder = cylinder_case(args.case) if args.case in CYLINDER_CASES else None
+    outer, holes, constraints, declared = _case("planar" if cylinder else args.case)
+    domain_area = (cylinder.area if cylinder else
+                   _ring_area(outer) - sum(_ring_area(hole) for hole in holes))
     target = (3.5 * domain_area / requested_elements) ** 0.5
     mesher_backend = "native" if args.backend == "compiled" else args.backend
     native = NativeMeshingOptions()
@@ -314,6 +417,8 @@ def _run(args: argparse.Namespace) -> int:
             metric_field=MetricFieldSpec.uniform(target),
             max_insertions=max(100, requested_elements // 2),
         )
+    if cylinder is not None:
+        native = cylinder.options(target, args.route, requested_elements)
     options = SurfaceMeshOptions(
         target_size=target,
         backend=mesher_backend,
@@ -338,9 +443,37 @@ def _run(args: argparse.Namespace) -> int:
         mapped_geometry.add_sheet((mapped_face,))
 
     semantic_mesh = None
+    cylinder_contract = None
+    geometry_digest = _digest_contract(to_dict(cylinder.model)) if cylinder else None
 
-    def generate() -> tuple[Any, dict[str, Any]]:
-        nonlocal semantic_mesh
+    def generate(cancellation_check=None) -> tuple[Any, dict[str, Any]]:
+        nonlocal semantic_mesh, cylinder_contract
+        if cylinder is not None:
+            result = generate_hybrid_mesh_result(
+                cylinder.model, face_ids=cylinder.face_ids, target_size=target,
+                strategy="native", overrides=cylinder.overrides(target),
+                refinements=cylinder.refinements(target),
+                order="linear", recombine=True, native_backend=mesher_backend,
+                native_options=native, cancellation_check=cancellation_check,
+            )
+            if set(result.strategy_by_face.values()) != {"native"}:
+                raise RuntimeError("cylinder benchmark did not exercise native meshing")
+            if _digest_contract(to_dict(cylinder.model)) != geometry_digest:
+                raise RuntimeError("benchmark geometry was mutated")
+            contract = cylinder.mesh_contract(result.mesh, target)
+            digest = _digest_contract(contract)
+            if cylinder_contract is not None and cylinder_contract != digest:
+                raise RuntimeError("benchmark protected topology changed between repetitions")
+            cylinder_contract = digest
+            semantic_mesh = result.mesh
+            faces = {str(face): dict(row) for face, row in
+                     result.triangulation_backend_by_face.items()}
+            backend_rows = [{key: row.get(key) for key in
+                             ("requested_backend", "selected_backend", "actual_backend")}
+                            for row in faces.values()]
+            if not backend_rows or any(row != backend_rows[0] for row in backend_rows):
+                raise RuntimeError("inconsistent cylinder triangulation backends")
+            return _neutral_shell_core(result.mesh), dict(backend_rows[0], faces=faces)
         if mapped_geometry is not None and mapped_face is not None:
             result = generate_hybrid_mesh_result(
                 mapped_geometry,
@@ -366,28 +499,14 @@ def _run(args: argparse.Namespace) -> int:
             constraints,
             options=options,
             diagnostics=diagnostics,
+            cancellation_check=cancellation_check,
         )
         semantic_mesh = mesh
         return mesh, diagnostics
 
-    for _ in range(WARMUPS):
-        generate()
-    durations: list[float] = []
-    digests: list[str] = []
-    counts: list[int] = []
-    mesh = None
-    diagnostics: dict[str, Any] = {}
     rss_before = _peak_rss()
-    for _ in range(MEASUREMENTS):
-        started = perf_counter()
-        mesh, diagnostics = generate()
-        durations.append(perf_counter() - started)
-        digests.append(_mesh_digest(mesh))
-        counts.append(mesh.num_triangles + mesh.num_quads)
+    mesh, diagnostics, durations, digests, counts, work_samples = _measure(generate, args)
     rss_after = _peak_rss()
-    if len(set(digests)) != 1 or len(set(counts)) != 1:
-        raise RuntimeError("benchmark repetitions are not canonically deterministic")
-    assert mesh is not None
     quality = evaluate_quality(mesh)
     cancellation_phases: list[str] = []
     cancellation_started = perf_counter()
@@ -399,13 +518,11 @@ def _run(args: argparse.Namespace) -> int:
 
     cancellation_observed = False
     try:
-        mesh_planar_surface(
-            outer,
-            holes,
-            constraints,
-            options=options,
-            cancellation_check=cancel,
-        )
+        if cylinder is not None:
+            generate(cancellation_check=cancel)
+        else:
+            mesh_planar_surface(
+                outer, holes, constraints, options=options, cancellation_check=cancel)
     except _CancellationProbe:
         cancellation_observed = True
     if not cancellation_observed:
@@ -413,7 +530,9 @@ def _run(args: argparse.Namespace) -> int:
 
     total_elements = counts[-1]
     record = {
-        "schema": "anymesher.native-v2-baseline/2",
+        "schema": "anymesher.native-v2-baseline/3",
+        "native_work_samples": work_samples,
+        "partial_sample_journal": str(args.output.with_name(args.output.name + ".partial.jsonl")),
         "source_commit": source_commit,
         "package_version": __version__,
         "case": args.case,
@@ -429,13 +548,14 @@ def _run(args: argparse.Namespace) -> int:
         "peak_rss_before_bytes": rss_before,
         "peak_rss_bytes": rss_after,
         "mesh_digest": digests[0],
-        "semantic_contract": _semantic_contract(
+        "semantic_contract": ({"cylindrical_protected_topology": cylinder_contract}
+                              if cylinder is not None else _semantic_contract(
             semantic_mesh if semantic_mesh is not None else mesh,
             outer,
             holes,
             constraints,
             declared,
-        ),
+        )),
         "repetition_digests": digests,
         "nodes": mesh.num_nodes,
         "triangles": mesh.num_triangles,
@@ -487,6 +607,10 @@ def _run(args: argparse.Namespace) -> int:
             "wheel_sha256": wheel_sha256,
             "compiler_id": args.compiler_id,
             "dependencies": _dependency_versions(),
+            "harness_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+            "cylinder_fixture_sha256": sha256(
+                Path(__file__).with_name("native_v2_cylinder_cases.py").read_bytes()).hexdigest(),
+            "commit_binding": "caller_supplied; clean-tree delivery requires separate attestation",
             "python": sys.version,
             "numpy": np.__version__,
             "platform": platform.platform(),
@@ -498,20 +622,22 @@ def _run(args: argparse.Namespace) -> int:
             "allow_large": bool(args.allow_large),
             "fixed_warmups": WARMUPS,
             "fixed_measurements": MEASUREMENTS,
+            "cylinder_metric": cylinder.metric_spec(target).to_dict() if cylinder else None,
+            "pinned_edge_divisions": cylinder.overrides(target) if cylinder else None,
         },
     }
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite evidence: {args.output}")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(record, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
+    with args.output.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
     return 0
 
 
 def _load_record(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("schema") != "anymesher.native-v2-baseline/2":
+    if value.get("schema") != "anymesher.native-v2-baseline/3":
         raise ValueError(f"unsupported benchmark evidence: {path}")
     if value.get("warmups") != WARMUPS or value.get("repetitions") != MEASUREMENTS:
         raise ValueError(f"non-canonical repetition contract: {path}")
@@ -519,6 +645,30 @@ def _load_record(path: Path) -> dict[str, Any]:
         set(value["repetition_digests"])
     ) != 1:
         raise ValueError(f"non-deterministic benchmark evidence: {path}")
+    route, case = value.get("route"), value.get("case")
+    if route not in {"legacy", "frontal"} or case not in PERFORMANCE_CASES:
+        raise ValueError("invalid benchmark case/route")
+    samples = value.get("native_work_samples")
+    if not isinstance(samples, list) or len(samples) != MEASUREMENTS:
+        raise ValueError("missing measured refinement work")
+    for work in samples:
+        _require_refinement_work(work, route, case)
+    if any(work != samples[0] for work in samples[1:]):
+        raise ValueError("non-deterministic measured refinement work")
+    durations = value.get("durations_seconds")
+    if (not isinstance(durations, list) or len(durations) != MEASUREMENTS
+            or any(type(item) not in (int, float) or not math.isfinite(item)
+                   or item <= 0 for item in durations)):
+        raise ValueError("invalid benchmark durations")
+    median = value.get("median_seconds")
+    if (type(median) not in (int, float) or not math.isfinite(median)
+            or not math.isclose(median, statistics.median(durations), rel_tol=1.e-12)):
+        raise ValueError("inconsistent benchmark median")
+    if type(value.get("peak_rss_bytes")) is not int or value["peak_rss_bytes"] <= 0:
+        raise ValueError("peak memory evidence is unavailable")
+    if any(type(item) not in (int, float) or not math.isfinite(item)
+           for item in value.get("quality", {}).values()):
+        raise ValueError("non-finite quality evidence")
     scale_ratio = float(value.get("element_count_ratio", float("nan")))
     scale = str(value.get("scale", ""))
     requested_elements = int(value.get("requested_elements", 0))
@@ -547,6 +697,8 @@ def _rss_ratio_exceeds(candidate: Any, baseline: Any, limit: float) -> bool:
 def _compare(args: argparse.Namespace) -> int:
     legacy = _load_record(args.legacy)
     frontal = _load_record(args.frontal)
+    if legacy["route"] != "legacy" or frontal["route"] != "frontal":
+        raise ValueError("comparison requires legacy followed by frontal evidence")
     for field in (
         "case",
         "scale",

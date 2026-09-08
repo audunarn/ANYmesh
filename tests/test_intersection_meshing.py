@@ -417,7 +417,12 @@ def test_positive_area_coplanar_overlap_is_blocked_before_double_stiffness():
     with pytest.raises(MeshError, match=r"positive-area.*overlap.*1 m\^2"):
         generate_mesh_with_intersections(geometry, target_size=0.25)
 
-    result = fragment_coplanar_overlaps(geometry, tuple(geometry.faces))
+    from anygeometry import OverlapOwnershipPolicy
+
+    result = fragment_coplanar_overlaps(
+        geometry, tuple(geometry.faces),
+        ownership_policy=OverlapOwnershipPolicy.FIRST_SELECTED,
+    )
     mesh = generate_mesh_with_intersections(geometry, target_size=0.25)
     assert len(result.outputs) == 3
     assert set(mesh.elements_of_face) == set(geometry.faces)

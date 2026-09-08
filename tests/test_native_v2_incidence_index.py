@@ -166,7 +166,8 @@ def test_shared_split_preserves_owners_intervals_and_index():
     }
     assert topology.splittable_edges == ((0, 4), (2, 4))
     assert topology._splittable_intervals[(0, 4)] == (7, 0, report["station"][0] / report["station"][1])
-    assert topology._splittable_intervals[(2, 4)] == (7, report["station"][0] / report["station"][1], 1)
+    # Parameter endpoints follow the canonical node pair, not sorted parameter order.
+    assert topology._splittable_intervals[(2, 4)] == (7, 1, report["station"][0] / report["station"][1])
     assert all(edge in topology._topology_index for edge in topology.protected_edges)
 
 

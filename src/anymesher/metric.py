@@ -615,6 +615,20 @@ def limit_metric_gradation(
     if (
         coordinates.shape[1] == 2
         and len(connections) >= _NATIVE_BATCH_THRESHOLD
+        and cancellation_check is not None
+        and _native_v2_available()
+    ):
+        from ._cancellable_gradation import native_cancellable_gradation
+
+        native = native_cancellable_gradation(
+            coordinates, connections, values, growth, int(max_iterations),
+            cancellation_check,
+        )
+        if native is not None:
+            return native
+    if (
+        coordinates.shape[1] == 2
+        and len(connections) >= _NATIVE_BATCH_THRESHOLD
         and cancellation_check is None
         and _native_v2_available()
     ):
@@ -634,6 +648,9 @@ def limit_metric_gradation(
             or not 1 <= int(iterations) <= int(max_iterations)
         ):
             raise MeshError("native-v2 metric gradation returned an invalid result")
+        from ._cancellable_gradation import require_gradation_convergence
+
+        require_gradation_convergence(coordinates, connections, limited, growth)
         return limited, int(iterations)
     iterations = 0
     for iterations in range(1, max_iterations + 1):

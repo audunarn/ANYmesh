@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import acos, degrees
+from math import acos, atan2, degrees, pi
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -187,8 +187,13 @@ def _quad_values(corners: np.ndarray) -> tuple[float, float, float, float, float
     first_norm = float(np.linalg.norm(first_cross))
     second_norm = float(np.linalg.norm(second_cross))
     if first_norm > 0.0 and second_norm > 0.0:
-        cosine = float(np.clip(np.dot(first_cross, second_cross) / (first_norm * second_norm), -1.0, 1.0))
-        warpage = degrees(acos(cosine)) / 180.0
+        first_unit = first_cross / first_norm
+        second_unit = second_cross / second_norm
+        # acos amplifies rounding near parallel normals. Keep the same
+        # diagonal and normals, but resolve their angle without that loss.
+        sine = float(np.linalg.norm(np.cross(first_unit, second_unit)))
+        cosine = float(np.dot(first_unit, second_unit))
+        warpage = atan2(sine, cosine) / pi
     else:
         warpage = 1.0
     return (

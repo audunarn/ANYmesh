@@ -1668,6 +1668,7 @@ def _run_frontal_quality_path(
     ] | None,
     component_seed_registry: Any | None,
     supplemental_metric_field: MetricFieldSpec | None,
+    preserve_spatial_refinement: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply native-v2 local insertion to the qualified legacy CDT seed."""
 
@@ -1703,7 +1704,20 @@ def _run_frontal_quality_path(
             candidate, prefer_growth=False
         ),
     )
-    if report["shared_segment_splits"] == 0 and _candidate_selection_key(
+    if (preserve_spatial_refinement
+            and settings.native_options.metric_mode == "isotropic_spatial"
+            and best.report["poor_element_ids"]):
+        from ._frontal_transition_quality import repair_frontal_transition
+        best, report = repair_frontal_transition(
+            best, triangulation.segments, settings, report, cancellation_check,
+        )
+    accepted_spatial_refinement = (
+        preserve_spatial_refinement
+        and settings.native_options.metric_mode == "isotropic_spatial"
+        and best.report["invalid_element_count"] == 0
+        and not best.report["poor_element_ids"]
+    )
+    if not accepted_spatial_refinement and report["shared_segment_splits"] == 0 and _candidate_selection_key(
         best, prefer_growth=False
     ) > _candidate_selection_key(baseline["best"], prefer_growth=False):
         guarded = dict(baseline)
@@ -1877,6 +1891,24 @@ def _active_connectivity_key(mesh: MeshCore) -> tuple[Any, ...]:
     return triangles, quads
 
 
+def _qualified_recombination(core, protected_edges, settings, cancellation_check):
+    """The existing recombination and qualification operation, without publication."""
+    report = recombine_triangles_with_report(
+        core,
+        protected_edges=protected_edges,
+        min_scaled_jacobian=settings.min_scaled_jacobian,
+        max_aspect_ratio=settings.max_aspect_ratio,
+        min_angle=settings.min_angle,
+        max_angle=settings.max_angle,
+        max_warpage=settings.max_warpage,
+        cancellation_check=cancellation_check,
+        max_exchange_work=settings.max_recombination_work,
+    )
+    assert_valid_mesh(report.mesh)
+    quality = _quality_threshold_report(evaluate_quality(report.mesh), settings)
+    return report, quality
+
+
 def _prepare_recombined_path(
     path: dict[str, Any],
     plane: _Plane,
@@ -1889,19 +1921,9 @@ def _prepare_recombined_path(
     triangulation: PlanarTriangulation = path["triangulation"]
     core = MeshCore(plane.lift(best.points), best.triangles)
     started = perf_counter()
-    report = recombine_triangles_with_report(
-        core,
-        protected_edges=triangulation.segments,
-        min_scaled_jacobian=settings.min_scaled_jacobian,
-        max_aspect_ratio=settings.max_aspect_ratio,
-        min_angle=settings.min_angle,
-        max_angle=settings.max_angle,
-        max_warpage=settings.max_warpage,
-        cancellation_check=cancellation_check,
-        max_exchange_work=settings.max_recombination_work,
+    report, quality = _qualified_recombination(
+        core, triangulation.segments, settings, cancellation_check
     )
-    assert_valid_mesh(report.mesh)
-    quality = _quality_threshold_report(evaluate_quality(report.mesh), settings)
     outer_edges, hole_edges = _boundary_edge_groups(outer, holes)
     return {
         "path": path,
@@ -2098,6 +2120,7 @@ def mesh_planar_surface(
     ] | None = None,
     _component_seed_registry: Any | None = None,
     _supplemental_metric_field: MetricFieldSpec | None = None,
+    _preserve_spatial_refinement: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -2234,6 +2257,7 @@ def mesh_planar_surface(
             automatically_seeded_shared_segments=_automatically_seeded_shared_segments,
             component_seed_registry=_component_seed_registry,
             supplemental_metric_field=_supplemental_metric_field,
+            preserve_spatial_refinement=_preserve_spatial_refinement,
         )
         candidate_paths = [frontal_path]
     guide_diagnostics: dict[str, Any] = {
@@ -2351,7 +2375,11 @@ def mesh_planar_surface(
                     collar_diagnostics.append(complete_report)
     elif settings.target_size is not None and settings.recombine:
         collar_skipped_reason = "whole_mesh_quality_fallback"
-    elif settings.target_size is not None and not candidate_paths[0]["target_met"]:
+    elif (
+        settings.target_size is not None
+        and settings.native_options.point_placement == "legacy_lattice"
+        and not candidate_paths[0]["target_met"]
+    ):
         dominant_statistics: dict[str, Any] = {}
         dominant = _target_points(
             planar_outer,

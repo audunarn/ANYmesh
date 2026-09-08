@@ -24,7 +24,7 @@ from anygeometry.curves import Straight
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
-from anygeometry.surfaces import Plane
+from anygeometry.surfaces import Cylinder, Plane
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
@@ -1158,6 +1158,25 @@ def _check_cancellation(
         cancellation_check(stage)
 
 
+def _publish_native_face_elements(mesh, face_id, core, core_to_global):
+    """Publish qualified local connectivity through the existing source-ID map."""
+    next_element = _next_identifier((*mesh.quads, *mesh.tris, *mesh.beams))
+    elements: list[int] = []
+    for row in _active_rows(core.triangle_connectivity, core.triangle_active):
+        connectivity = tuple(core_to_global[int(item)] for item in row)
+        mesh.tris[next_element] = connectivity
+        elements.append(next_element)
+        next_element += 1
+    for row in _active_rows(core.quad_connectivity, core.quad_active):
+        connectivity = tuple(core_to_global[int(item)] for item in row)
+        mesh.quads[next_element] = connectivity
+        elements.append(next_element)
+        next_element += 1
+    if not elements:
+        raise MeshError(f"native meshing produced no active elements for face {face_id}")
+    mesh.elements_of_face[face_id] = elements
+
+
 def _mesh_native_face(
     geometry: GeometryModel,
     mesh: Mesh,
@@ -1178,7 +1197,12 @@ def _mesh_native_face(
     evaluate_declared_junction_alignment: bool,
     refine_declared_junction_transition: bool,
     cancellation_check: Callable[[str], None] | None,
+    _cylindrical_binding: Any = None,
 ) -> dict[str, Any]:
+    if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
+        from ._cylindrical_recombine import assert_face_open
+
+        assert_face_open(component_seed_registry, face_id)
     boundary_started = perf_counter()
     _check_cancellation(cancellation_check, f"native face {face_id} boundary start")
     face = geometry.faces[face_id]
@@ -1207,7 +1231,34 @@ def _mesh_native_face(
         for loop in face.holes
     )
     loops = (outer, *holes)
+    cylindrical_chart = None
+    if native_options.point_placement == "frontal_delaunay" and isinstance(face.surface, Cylinder):
+        # The public orchestrator supplies revision-bound geometry-owner evidence.
+        from ._cylindrical_atlas import CylindricalAtlasBinding
+        from ._cylindrical_patch import CylindricalPatchBinding
+
+        if not isinstance(_cylindrical_binding, (CylindricalAtlasBinding, CylindricalPatchBinding)):
+            raise MeshError("cylindrical frontal_delaunay requires an accepted owner binding")
+        if (
+            _cylindrical_binding.model_id != geometry.model_id
+            or _cylindrical_binding.revision != geometry.revision
+        ):
+            raise MeshError("cylindrical atlas does not bind the working geometry")
+        uses = tuple(
+            sector.face_use for sector in _cylindrical_binding.face_records
+            if sector.face.id == face_id
+        )
+        if len(uses) != 1:
+            raise MeshError("cylindrical native face requires one qualified FaceUse")
+        cylindrical_chart = _cylindrical_binding.chart_for(
+            uses[0], cancellation_check=cancellation_check
+        )
     chart_transform = np.eye(2, dtype=float)
+    if cylindrical_chart is not None:
+        chart_transform = np.diag((
+            cylindrical_chart.circumferential_length,
+            cylindrical_chart.axial_length,
+        ))
     if isinstance(face.surface, Plane) and len(geometry.faces) > 1:
         u_vector = np.asarray(face.surface.u_vector, dtype=float)
         v_vector = np.asarray(face.surface.v_vector, dtype=float)
@@ -1225,6 +1276,9 @@ def _mesh_native_face(
         np.asarray(face.surface.v_vector, dtype=np.float64),
     )) @ chart_inverse.T if isinstance(face.surface, Plane) else None
     metric_to_physical = None
+    if cylindrical_chart is not None:
+        physical_jacobian = cylindrical_chart.jacobians
+        metric_to_physical = cylindrical_chart.evaluate
     if isinstance(face.surface, Plane):
         metric_origin = np.asarray(face.surface.origin, dtype=np.float64)
         metric_u = np.asarray(face.surface.u_vector, dtype=np.float64)
@@ -1250,6 +1304,20 @@ def _mesh_native_face(
         count = len(loop.node_ids)
         for local, specification in enumerate(loop.segment_specs):
             if specification is not None:
+                if cylindrical_chart is not None:
+                    edge_id = specification[0]
+                    parameters = {
+                        int(entry.node_id): float(entry.key.parameter)
+                        for entry in boundary_registry.entries(edge_id)
+                        if entry.node_id is not None
+                    }
+                    following = (local + 1) % count
+                    ends = (local, following) if local < following else (following, local)
+                    specification = (
+                        edge_id,
+                        parameters[loop.node_ids[ends[0]]],
+                        parameters[loop.node_ids[ends[1]]],
+                    )
                 automatically_seeded_shared_segments[
                     tuple(sorted((boundary_offset + local, boundary_offset + (local + 1) % count)))
                 ] = specification
@@ -1267,7 +1335,7 @@ def _mesh_native_face(
     face_native_options = native_options
     if native_options.point_placement == "frontal_delaunay" and not isinstance(
         face.surface, Plane
-    ):
+    ) and cylindrical_chart is None:
         raise MeshError(
             "frontal_delaunay activation is currently limited to planar faces"
         )
@@ -1275,7 +1343,7 @@ def _mesh_native_face(
     supplemental_metric_field = None
     if (
         native_options.metric_mode == "isotropic_spatial"
-        and isinstance(face.surface, Plane)
+        and (isinstance(face.surface, Plane) or cylindrical_chart is not None)
     ):
         if native_options.metric_field is not None:
             explicit = native_options.metric_field
@@ -1310,6 +1378,34 @@ def _mesh_native_face(
             )
         else:
             supplemental_metric_field = size_metric_spec
+    deferred_recombine = cylindrical_chart is not None and not quadratic and bool(recombine)
+    if deferred_recombine:
+        from ._cylindrical_recombine import register_face
+
+        deferred_settings = SurfaceMeshOptions(
+            target_size=chart_size, recombine=True, order="linear",
+            backend=native_backend, native_options=face_native_options,
+            prefer_quality_policy=True,
+            **({} if quality_options is None else {
+                "min_scaled_jacobian": quality_options.quality_policy.minimum_scaled_jacobian,
+                "max_aspect_ratio": quality_options.quality_policy.maximum_aspect_ratio,
+                "min_angle": quality_options.quality_policy.minimum_angle,
+                "max_angle": quality_options.quality_policy.maximum_angle,
+                "max_warpage": quality_options.quality_policy.maximum_warpage,
+                "max_element_growth": quality_options.max_element_growth,
+            }),
+        )
+        register_face(
+            geometry, mesh, face_id, _cylindrical_binding,
+            component_seed_registry, deferred_settings,
+            effective_metric_field=(
+                MetricFieldSpec.uniform(chart_size)
+                if face_native_options.metric_mode == "legacy"
+                else face_native_options.metric_field
+            ),
+            supplemental_metric_field=supplemental_metric_field,
+        )
+        recombine = False
     surface_diagnostics: dict[str, Any] = {}
     if quality_options is None:
         core = mesh_planar_surface(
@@ -1322,7 +1418,12 @@ def _mesh_native_face(
             owner=geometry.handle("face", face_id),
             cancellation_check=cancellation_check,
             diagnostics=surface_diagnostics,
-            native_options=face_native_options,
+            native_options=(
+                None
+                if cylindrical_chart is not None
+                and native_options.metric_mode == "isotropic_spatial"
+                else face_native_options
+            ),
             _metric_model_uuid=metric_model_uuid,
             _metric_geometry_revision=metric_geometry_revision,
             _metric_to_physical=metric_to_physical,
@@ -1330,6 +1431,17 @@ def _mesh_native_face(
             _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
+            _preserve_spatial_refinement=cylindrical_chart is not None,
+            options=(
+                SurfaceMeshOptions(
+                    target_size=chart_size, recombine=recombine, order=order,
+                    backend=native_backend, native_options=face_native_options,
+                    prefer_quality_policy=True,
+                )
+                if cylindrical_chart is not None
+                and native_options.metric_mode == "isotropic_spatial"
+                else None
+            ),
         )
     else:
         quality_policy = quality_options.quality_policy
@@ -1386,6 +1498,7 @@ def _mesh_native_face(
             _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
+            _preserve_spatial_refinement=cylindrical_chart is not None,
         )
         if (
             isinstance(face.surface, Plane)
@@ -1457,7 +1570,22 @@ def _mesh_native_face(
     surface_diagnostics.setdefault("phase_seconds", {})[
         "boundary_registration"
     ] = boundary_seconds
+    if cylindrical_chart is not None:
+        surface_diagnostics["cylindrical_frontal_delaunay"] = {
+            "chart": ("owner_certified_sector_physical_lengths"
+                      if _cylindrical_binding.certification_kind == "full_period_sector_atlas"
+                      else "owner_certified_patch_physical_lengths"),
+            "circumferential_length": cylindrical_chart.circumferential_length,
+            "axial_length": cylindrical_chart.axial_length,
+            "protected_seeds": "existing_global_edge_registry",
+            "periodic_topology": ("connected_owner_sector_faces"
+                                  if _cylindrical_binding.certification_kind == "full_period_sector_atlas"
+                                  else "nonperiodic_owner_patch"),
+            "owner_contract": _cylindrical_binding.certification_kind,
+        }
     _check_cancellation(cancellation_check, f"native face {face_id} lifting start")
+    if cylindrical_chart is not None:
+        _cylindrical_binding.validate()
     lifting_started = perf_counter()
     assert_valid_mesh(core)
 
@@ -1502,14 +1630,31 @@ def _mesh_native_face(
         node_id = int(record["node_id"])
         edge_id = int(record["edge_id"])
         if core_node in core_to_global or not 0 <= core_node < len(coordinates):
-            raise MeshError("native-v2 shared-node receipt conflicts with boundary topology")
+            raise MeshError(
+                "native-v2 shared-node receipt conflicts with boundary topology: "
+                f"face={face_id}, local_node={core_node}, node_count={len(coordinates)}, "
+                f"protected_row={core_node in core_to_global}, edge={edge_id}, "
+                f"route={surface_diagnostics.get('native_v2', {}).get('selected_route')}"
+            )
         u, v = (
             float(value)
             for value in (coordinates[core_node, :2] @ chart_inverse)
         )
         candidate = np.asarray(geometry.face_point(face_id, u, v), dtype=float)
-        edge_point, parameter, distance = geometry.closest_edge_point(edge_id, candidate)
         tolerance = geometry.tolerance.effective_length(geometry.edge_length(edge_id))
+        if cylindrical_chart is not None:
+            from fractions import Fraction
+
+            numerator, denominator = record["station"]
+            if not isinstance(numerator, int) or not isinstance(denominator, int) or denominator <= 0:
+                raise MeshError("cylindrical split requires an exact native edge station")
+            parameter = float(Fraction(numerator, denominator))
+            if not 0. < parameter < 1.:
+                raise MeshError("cylindrical split station must be strictly inside its source edge")
+            edge_point = geometry.sample_edge(edge_id, np.asarray([parameter]))[0]
+            distance = float(np.linalg.norm(candidate - edge_point))
+        else:
+            edge_point, parameter, distance = geometry.closest_edge_point(edge_id, candidate)
         if distance > tolerance:
             raise MeshError("native-v2 shared split left its topology-owned edge")
         exact_point = np.asarray(edge_point, dtype=float)
@@ -1521,12 +1666,40 @@ def _mesh_native_face(
         mesh.nodes[node_id] = exact_point
         sequence = mesh.nodes_of_edge[edge_id]
         if node_id not in sequence:
-            sequence.append(node_id)
-            sequence.sort(
-                key=lambda value: geometry.closest_edge_point(
-                    edge_id, mesh.nodes[value]
-                )[1]
-            )
+            if cylindrical_chart is not None:
+                from ._shared_triangle_split import propagate_triangle_split
+
+                stations = {
+                    int(entry.node_id): float(entry.key.parameter)
+                    for entry in boundary_registry.entries(edge_id)
+                    if entry.node_id is not None
+                }
+                ordered = sorted(sequence, key=stations.__getitem__)
+                brackets = tuple(
+                    (a, b) for a, b in zip(ordered, ordered[1:])
+                    if stations[a] < parameter < stations[b]
+                )
+                if len(brackets) != 1:
+                    raise MeshError("shared station has no unique registered source-edge interval")
+                cache = getattr(component_seed_registry, "_published_triangle_incidence", None)
+                if cache is None:
+                    cache = {}
+                    component_seed_registry._published_triangle_incidence = cache
+                propagate_triangle_split(
+                    mesh,
+                    (other for other in geometry.faces_using_edge(edge_id) if other != face_id),
+                    brackets[0], node_id, cache=cache,
+                )
+                stations[node_id] = parameter
+                sequence.append(node_id)
+                sequence.sort(key=stations.__getitem__)
+            else:
+                sequence.append(node_id)
+                sequence.sort(
+                    key=lambda value: geometry.closest_edge_point(
+                        edge_id, mesh.nodes[value]
+                    )[1]
+                )
         boundary_registry.register(
             edge_id,
             float(parameter),
@@ -1554,21 +1727,23 @@ def _mesh_native_face(
         mesh.nodes[next_node] = point
         next_node += 1
 
-    next_element = _next_identifier((*mesh.quads, *mesh.tris, *mesh.beams))
-    elements: list[int] = []
-    for row in _active_rows(core.triangle_connectivity, core.triangle_active):
-        connectivity = tuple(core_to_global[int(item)] for item in row)
-        mesh.tris[next_element] = connectivity
-        elements.append(next_element)
-        next_element += 1
-    for row in _active_rows(core.quad_connectivity, core.quad_active):
-        connectivity = tuple(core_to_global[int(item)] for item in row)
-        mesh.quads[next_element] = connectivity
-        elements.append(next_element)
-        next_element += 1
-    if not elements:
-        raise MeshError(f"native meshing produced no active elements for face {face_id}")
-    mesh.elements_of_face[face_id] = elements
+    _publish_native_face_elements(mesh, face_id, core, core_to_global)
+    if deferred_recombine:
+        from ._cylindrical_recombine import mark_staged
+
+        mark_staged(component_seed_registry, face_id, mesh, surface_diagnostics)
+    if cylindrical_chart is not None and not deferred_recombine:
+        from ._shared_triangle_split import repair_completed_cylindrical_neighbours
+
+        repair_reports = repair_completed_cylindrical_neighbours(
+            mesh,
+            geometry,
+            _cylindrical_binding,
+            component_seed_registry,
+            cancellation_check=cancellation_check,
+        )
+        if repair_reports:
+            surface_diagnostics["cylindrical_shared_boundary_repair"] = repair_reports
     surface_diagnostics.setdefault("phase_seconds", {})[
         "surface_lifting_and_publication"
     ] = perf_counter() - lifting_started
@@ -1916,6 +2091,23 @@ def generate_hybrid_mesh_result(
     )
 
     view = GeometryMeshingView(geometry)
+    def finish_publication(stage: str) -> None:
+        # Internal working-copy preparation may advance the source revision.
+        # A user callback may not change either publication authority afterward.
+        owners = (source_geometry,) if geometry is source_geometry else (source_geometry, geometry)
+        bindings = tuple(
+            (owner, owner.model_id, owner.revision, owner.tolerance)
+            for owner in owners
+        )
+        _check_cancellation(cancellation_check, stage)
+        if not reuse_prepared_working_copy:
+            source_view.assert_current()
+        view.assert_current()
+        for owner, model_id, revision, tolerance in bindings:
+            if getattr(owner, "_transaction_journal", None) is not None:
+                raise MeshError("cannot publish a mesh during an open geometry transaction")
+            if (owner.model_id, owner.revision, owner.tolerance) != (model_id, revision, tolerance):
+                raise MeshError("cannot publish a stale geometry-bound mesh after the final callback")
     active_sheets, active_members = _active_structural_owners(view, faces, beams)
     pipeline = StructuralMeshingPipeline(
         view,
@@ -2051,15 +2243,24 @@ def generate_hybrid_mesh_result(
             int(prepared_edge), (int(prepared_edge),)
         )
     )
+    from ._cylindrical_public import component_local_split_edges, prepare_bindings
+
+    cylindrical_bindings = prepare_bindings(
+        geometry, native_faces, native_options, cancellation_check
+    )
+    automatically_seeded_shared_edges = component_local_split_edges(
+        geometry, automatically_seeded_shared_edges, cylindrical_bindings
+    )
     for face_id in native_faces:
+        quadratic_cylinder = order == "quadratic" and face_id in cylindrical_bindings
         face_diagnostics = _mesh_native_face(
             geometry,
             mesh,
             face_id,
             order=order,
-            recombine=bool(recombine),
+            recombine=False if quadratic_cylinder else bool(recombine),
             native_backend=native_backend,
-            native_options=native_options,
+            native_options=NativeMeshingOptions() if quadratic_cylinder else native_options,
             size_field=size_field,
             metric_model_uuid=str(source_geometry.model_id),
             metric_geometry_revision=int(source_geometry.revision),
@@ -2083,9 +2284,33 @@ def generate_hybrid_mesh_result(
                 _refine_declared_junction_transition
             ),
             cancellation_check=cancellation_check,
+            _cylindrical_binding=None if quadratic_cylinder else cylindrical_bindings.get(face_id),
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
         _check_cancellation(cancellation_check, f"native face {face_id} complete")
+
+    if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
+        from ._cylindrical_recombine import finalize_components
+
+        finalize_components(geometry, mesh, component_seed_registry, cancellation_check)
+
+    if order == "quadratic" and native_faces and cylindrical_bindings:
+        from ._cylindrical_public import finish_quadratic_components
+
+        mesh = finish_quadratic_components(
+            geometry, mesh, cylindrical_bindings, boundary_registry,
+            native_options=native_options, size_field=size_field,
+            quality_options=(_native_surface_options if _native_surface_options is not None
+                             else None if structured_report is None else structured_report.plan.options),
+            recombine=recombine, backend=native_backend,
+            pinned_edges=final_overrides or (), beam_edges=beams,
+            declared_junction_edges=final_declared_junction_edges,
+            supplied_seeding=supplied_seeding,
+            metric_model_uuid=str(source_geometry.model_id),
+            metric_geometry_revision=int(source_geometry.revision),
+            face_diagnostics=triangulation_backend_by_face,
+            cancellation_check=cancellation_check,
+        )
 
     for sheet_id, sheet in geometry.sheets.items():
         element_ids = {
@@ -2565,10 +2790,7 @@ def generate_hybrid_mesh_result(
                     "structured_quality": structured_report.to_dict()["quality"],
                 }
             )
-            _check_cancellation(
-                cancellation_check,
-                "structured quality fallback accepted",
-            )
+            finish_publication("structured quality fallback accepted")
             return replace(fallback, structured_layout=structured_report)
     if defer_qualified_s3:
         # Reaching this point means the later authoritative quality check did
@@ -2676,7 +2898,7 @@ def generate_hybrid_mesh_result(
         "completed_phases": sorted(phase_seconds),
     }
     mesh.boundary_registry = boundary_registry
-    _check_cancellation(cancellation_check, "hybrid generation complete")
+    finish_publication("hybrid generation complete")
     return result
 
 

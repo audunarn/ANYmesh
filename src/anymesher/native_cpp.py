@@ -560,10 +560,30 @@ def native_t3_incidence(triangles: Any, previous: Any = None) -> Any:
 
 def native_mutable_t3_insert(
     points: Any, triangles: Any, protected_edges: Any, candidate: Any,
-    topology_state: Any = None,
+    topology_state: Any = None, *, cancellation_check: Any = None,
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
+    if cancellation_check is not None and not callable(cancellation_check):
+        raise TypeError("insertion cancellation must be callable")
     if not _complete_native_v2_available():
         return None
+    kernel = _compiled.native_v2_mutable_t3_insert
+    callback_error = None
+
+    def checkpoint(phase):
+        nonlocal callback_error
+        if cancellation_check is not None:
+            try:
+                cancellation_check(phase)
+            except BaseException as error:
+                callback_error = error
+                raise
+
+    if cancellation_check is not None:
+        kernel = getattr(_compiled, "native_v2_mutable_t3_insert_cancellable", None)
+        if kernel is None:
+            return None  # Supported older extension; keep the cancellable oracle.
+        if not callable(kernel):
+            raise MeshError("compiled cancellable insertion capability is malformed")
     made_points = _strict_float64_matrix(points, 2, "points")
     made_triangles = _strict_int64_matrix(triangles, 3, "triangles")
     made_protected = _strict_int64_matrix(protected_edges, 2, "protected_edges")
@@ -575,8 +595,10 @@ def native_mutable_t3_insert(
     if topology_state is not None and not _native_t3_incidence_available():
         raise MeshError("native T3 incidence state requires its compiled capability")
     state_arguments = () if topology_state is None else (topology_state,)
+    if cancellation_check is not None:
+        state_arguments = (topology_state, checkpoint)
     try:
-        raw_rows, diagnostics = _compiled.native_v2_mutable_t3_insert(
+        raw_rows, diagnostics = kernel(
             made_points,
             made_triangles,
             made_protected,
@@ -586,58 +608,20 @@ def native_mutable_t3_insert(
             *state_arguments,
         )
     except RuntimeError as error:
+        if error is callback_error:
+            raise
         message = str(error)
         if message.startswith(_NATIVE_V2_PREDICATE_UNCERTAIN_PREFIX):
             return None
         if message.startswith(_NATIVE_V2_GEOMETRY_LIMITED_PREFIX):
             return None
         raise
-    rows = np.asarray(raw_rows)
-    if rows.ndim != 2 or rows.shape[1:] != (3,) or rows.dtype.kind not in "iu":
-        raise MeshError("native mutable T3 insertion connectivity is malformed")
-    rows = np.ascontiguousarray(rows, dtype=np.int64)
-    required = {"removed_triangles", "added_triangles", "native"}
-    if not isinstance(diagnostics, dict) or set(diagnostics) != required:
-        raise MeshError("native mutable T3 insertion diagnostics are malformed")
-    made_diagnostics = dict(diagnostics)
-    removed = made_diagnostics["removed_triangles"]
-    added = made_diagnostics["added_triangles"]
-    if (
-        type(removed) is not int
-        or type(added) is not int
-        or made_diagnostics["native"] is not True
-        or not 1 <= removed <= len(made_triangles)
-        or added < 3
-        or len(rows) != len(made_triangles) - removed + added
-        or np.any(rows < 0)
-        or np.any(rows > len(made_points))
-        or np.any(np.diff(np.sort(rows, axis=1), axis=1) == 0)
-    ):
-        raise MeshError("native mutable T3 insertion result is inconsistent")
-    identities = [tuple(map(int, row)) for row in rows]
-    if identities != sorted(set(identities)):
-        raise MeshError("native mutable T3 insertion is not canonical")
-    inserted = len(made_points)
-    old_identities = {tuple(map(int, row)) for row in made_triangles}
-    retained = sum(identity in old_identities for identity in identities)
-    if retained != len(made_triangles) - removed or sum(inserted in row for row in identities) != added:
-        raise MeshError("native mutable T3 insertion cavity accounting is inconsistent")
-    extended = np.vstack((made_points, value))
-    if any(
-        orientation_oracle(extended[a], extended[b], extended[c]) <= 0.0
-        for a, b, c in identities
-    ):
-        raise MeshError("native mutable T3 insertion returned a non-positive cell")
-    incidence: dict[tuple[int, int], int] = {}
-    for triangle in identities:
-        for index in range(3):
-            edge = tuple(sorted((triangle[index], triangle[(index + 1) % 3])))
-            incidence[edge] = incidence.get(edge, 0) + 1
-    if any(count > 2 for count in incidence.values()):
-        raise MeshError("native mutable T3 insertion returned non-manifold topology")
-    if any(tuple(sorted(map(int, edge))) not in incidence for edge in made_protected):
-        raise MeshError("native mutable T3 insertion removed a protected edge")
-    return rows, made_diagnostics
+    from ._t3_insertion_result import validate_insertion
+
+    return validate_insertion(
+        made_points, made_triangles, made_protected, value, raw_rows,
+        diagnostics, orientation_oracle, checkpoint,
+    )
 
 
 def native_local_edge_flip(

@@ -43,6 +43,9 @@ def _edge(first: int, second: int) -> tuple[int, int]:
     return (first, second) if first < second else (second, first)
 
 
+from ._t3_correspondence import insertion_correspondence_scope
+
+
 def _canonical_triangle(values: Sequence[int], points: np.ndarray) -> tuple[int, int, int]:
     triangle = [int(value) for value in values]
     if orient2d(points[triangle[0]], points[triangle[1]], points[triangle[2]]) < 0.0:
@@ -53,6 +56,43 @@ def _canonical_triangle(values: Sequence[int], points: np.ndarray) -> tuple[int,
 
 class _GeometryLimited(MeshError):
     """A deterministic candidate rejection, distinct from an operational failure."""
+
+
+def _pullback_spatial_metrics(
+    physical_tensors, points, jacobian, *, cancellation_check=None,
+    cancellation_interval=256,
+):
+    """Pull back fixed or position-dependent derivatives without a full J cache.
+
+    Constant planar bindings retain their row order and scalar oracle. Internal
+    callable bindings receive at most 4096 chart rows at once; they are not a
+    serialized/public metric provider interface.
+    """
+    tensors = np.asarray(physical_tensors, dtype=np.float64)
+    if tensors.shape != (len(points), 3, 3):
+        raise MeshError("physical spatial metrics must have shape (n, 3, 3)")
+    varying = callable(jacobian)
+    derivatives = None if varying else np.asarray(jacobian, dtype=np.float64)
+    if not varying and derivatives.shape not in ((3, 2), (len(points), 3, 2)):
+        raise MeshError("chart derivatives must have shape (3, 2) or (n, 3, 2)")
+    result = np.empty((len(tensors), 2, 2), dtype=np.float64)
+    batch = None
+    batch_start = 0
+    for row, tensor in enumerate(tensors):
+        if cancellation_check is not None and row % cancellation_interval == 0:
+            cancellation_check("native-v2 metric pullback scan")
+        if varying:
+            if row % 4096 == 0:
+                batch_start = row
+                stop = min(row + 4096, len(points))
+                batch = np.asarray(jacobian(points[row:stop]), dtype=np.float64)
+                if batch.shape != (stop - row, 3, 2):
+                    raise MeshError("position-dependent chart derivatives must have shape (n, 3, 2)")
+            derivative = batch[row - batch_start]
+        else:
+            derivative = derivatives if derivatives.ndim == 2 else derivatives[row]
+        result[row] = pullback_metric(tensor, derivative)
+    return result
 
 
 @dataclass(frozen=True)
@@ -171,6 +211,8 @@ class ComponentSeedRegistry:
         numerator: int,
         denominator: int,
         publish: Callable[[int], Any],
+        *,
+        existing_node_id: int | None = None,
     ) -> Any:
         """Publish a prepared split while owning its provisional registration.
 
@@ -178,10 +220,22 @@ class ComponentSeedRegistry:
         effects cannot be undone, so callers must finish validation and all
         cancellation checks before entering this synchronous commit section.
         """
+        from math import gcd
+
         if denominator <= 0 or numerator <= 0 or numerator >= denominator:
             raise MeshError("shared-edge split position must be strictly interior")
-        common = np.gcd(numerator, denominator)
+        # Native binary64 stations can have denominators beyond int64. Reduce
+        # their exact rational identities without NumPy integer coercion.
+        common = gcd(numerator, denominator)
         key = (int(edge_id), int(numerator // common), int(denominator // common))
+        if existing_node_id is not None:
+            if (
+                isinstance(existing_node_id, (bool, np.bool_))
+                or not isinstance(existing_node_id, (int, np.integer))
+                or existing_node_id < 1
+            ):
+                raise MeshError("reserved shared-edge node identity must be a positive integer")
+            existing_node_id = int(existing_node_id)
         with self._resolution_lock:
             if self._resolving:
                 raise MeshError("component seed resolution is already active")
@@ -189,11 +243,17 @@ class ComponentSeedRegistry:
             previous_next = self._next
             self._resolving = True
             try:
+                if existed and existing_node_id is not None and self._values[key] != existing_node_id:
+                    raise MeshError("shared-edge station conflicts with its reserved node identity")
                 if not existed:
                     node_id = (
-                        self._next
-                        if self._node_id_allocator is None
-                        else int(self._node_id_allocator())
+                        existing_node_id
+                        if existing_node_id is not None
+                        else (
+                            self._next
+                            if self._node_id_allocator is None
+                            else int(self._node_id_allocator())
+                        )
                     )
                     if node_id < 1 or node_id in self._values.values():
                         raise MeshError("component seed allocator returned an invalid node identity")
@@ -249,8 +309,14 @@ class MutableT3Topology:
                     raise MeshError("splittable edge metadata is invalid") from error
                 edge_id = int(edge_id)
                 lower, upper = Fraction(raw_lower), Fraction(raw_upper)
-            if edge_id < 1 or not Fraction(0) <= lower < upper <= Fraction(1):
+            if (
+                edge_id < 1 or lower == upper
+                or not Fraction(0) <= lower <= Fraction(1)
+                or not Fraction(0) <= upper <= Fraction(1)
+            ):
                 raise MeshError("splittable edge interval is invalid")
+            if edge[0] > edge[1]:
+                lower, upper = upper, lower
             self._splittable_intervals[_edge(*edge)] = (edge_id, lower, upper)
         if self._protected_edges.intersection(self._splittable_intervals):
             raise MeshError("a mutable T3 edge cannot be both protected and splittable")
@@ -501,6 +567,7 @@ class MutableT3Topology:
             values.append(int(owner) if int(owner) != -1 else sources[0])
         return np.asarray(values, dtype=np.int64)
 
+    @insertion_correspondence_scope
     def insert_point(
         self,
         point: Sequence[float],
@@ -515,27 +582,27 @@ class MutableT3Topology:
             cancellation_check("native-v2 mutable insertion start")
         bounded_oracle = len(self._triangles) <= 4096
         reference: tuple[np.ndarray, np.ndarray, dict[str, Any]] | None = None
-        if bounded_oracle or cancellation_check is not None:
+        if bounded_oracle:
             reference = self._python_insert_with_owners(
                 candidate,
                 owner=owner,
                 cancellation_check=cancellation_check,
             )
-        native = (
-            None
-            if cancellation_check is not None and not bounded_oracle
-            else native_mutable_t3_insert(
+        native = native_mutable_t3_insert(
                 self._points,
                 self._triangles,
                 np.asarray(sorted(self.protected_edges), dtype=np.int64).reshape((-1, 2)),
                 candidate,
                 *((self._topology_index._native_state,)
                   if self._topology_index._native_state is not None else ()),
+                **({"cancellation_check": cancellation_check}
+                   if cancellation_check is not None and not bounded_oracle else {}),
             )
-        )
         if native is None:
             if reference is None:
-                reference = self._python_insert_with_owners(candidate, owner=owner)
+                reference = self._python_insert_with_owners(
+                    candidate, owner=owner, cancellation_check=cancellation_check,
+                )
             new_triangles, reference_owners, report = reference
         else:
             new_triangles, report = native
@@ -546,10 +613,14 @@ class MutableT3Topology:
                         "compiled mutable T3 insertion disagrees with the Python oracle"
                     )
             else:
-                reference_owners = self._native_insert_owners(
-                    new_triangles,
+                from ._t3_insertion_result import insertion_owners
+
+                reference_owners = insertion_owners(
+                    self._triangles, new_triangles, self.triangle_owners,
+                    self._topology_index,
                     inserted_node=len(self._points),
                     owner=owner,
+                    cancellation_check=cancellation_check,
                 )
         if cancellation_check is not None:
             cancellation_check("native-v2 mutable insertion commit")
@@ -563,10 +634,22 @@ class MutableT3Topology:
             self._triangles = np.ascontiguousarray(new_triangles, dtype=np.int64)
             self.node_owners = np.append(self.node_owners, int(owner))
             self.triangle_owners = reference_owners
-            self.validate()
+            from ._t3_insertion_transaction import validate_insertion_transaction
+
+            validate_insertion_transaction(
+                self._points, self._triangles, self.node_owners,
+                self.triangle_owners, old_points, old_triangles,
+                old_node_owners, old_triangle_owners, old_index,
+                self._protected_edges, self._splittable_intervals, report,
+                owner=owner, orientation_oracle=orient2d,
+                cancellation_check=cancellation_check,
+            )
             self._topology_index = old_index.updated(
                 self._triangles, cancellation_check=cancellation_check
             )
+            from ._t3_local_validation import bind_qualified_commit
+
+            bind_qualified_commit(self)
         except BaseException:
             self._points, self._triangles = old_points, old_triangles
             self.node_owners, self.triangle_owners = old_node_owners, old_triangle_owners
@@ -582,6 +665,9 @@ class MutableT3Topology:
         *,
         owner: int = -1,
         cancellation_check: Callable[[str], None] | None = None,
+        _split_proposal: Callable[
+            [int, Fraction, Fraction], tuple[Fraction, Any, int | None] | None
+        ] | None = None,
     ) -> dict[str, Any]:
         """Split one registry-authorized automatically seeded shared edge."""
 
@@ -599,8 +685,39 @@ class MutableT3Topology:
         if cancellation_check is not None:
             cancellation_check("native-v2 shared segment split start")
         edge_id, lower, upper = interval
-        station = (lower + upper) / 2
-        candidate = 0.5 * (self._points[target[0]] + self._points[target[1]])
+        existing_node_id = None
+        if _split_proposal is None:
+            station = (lower + upper) / 2
+            candidate = 0.5 * (self._points[target[0]] + self._points[target[1]])
+        else:
+            # The component owns native-t orientation and reserved identities.
+            # A refusal must not silently allocate an ordinary midpoint.
+            proposal = _split_proposal(edge_id, lower, upper)
+            if proposal is None:
+                raise _GeometryLimited("reserved shared-edge split is unavailable")
+            if not isinstance(proposal, tuple) or len(proposal) != 3:
+                raise MeshError("reserved shared-edge split proposal is malformed")
+            station, raw_point, existing_node_id = proposal
+            if not isinstance(station, Fraction) or not min(lower, upper) < station < max(lower, upper):
+                raise MeshError("reserved shared-edge station must be an exact interior fraction")
+            if existing_node_id is not None and (
+                isinstance(existing_node_id, (bool, np.bool_))
+                or not isinstance(existing_node_id, (int, np.integer))
+                or existing_node_id < 1
+            ):
+                raise MeshError("reserved shared-edge node identity must be a positive integer")
+            candidate = np.array(raw_point, dtype=np.float64, copy=True)
+            if candidate.shape != (2,) or not np.all(np.isfinite(candidate)):
+                raise MeshError("reserved shared-edge point must be a finite chart pair")
+            first, last = self._points[list(target)]
+            if (
+                orient2d(first, last, candidate) != 0.0
+                or not np.all(candidate >= np.minimum(first, last))
+                or not np.all(candidate <= np.maximum(first, last))
+                or np.array_equal(candidate, first)
+                or np.array_equal(candidate, last)
+            ):
+                raise MeshError("reserved shared-edge point must lie strictly on the segment")
         new_id = len(self._points)
         extended = np.vstack((self._points, candidate))
         retained_rows: list[tuple[int, int, int]] = []
@@ -627,7 +744,9 @@ class MutableT3Topology:
         new_intervals = dict(self._splittable_intervals)
         del new_intervals[target]
         new_intervals[_edge(target[0], new_id)] = (edge_id, lower, station)
-        new_intervals[_edge(new_id, target[1])] = (edge_id, station, upper)
+        # new_id is appended, so the canonical second child is (target[1],
+        # new_id). Parameters must follow those endpoints, not numeric t order.
+        new_intervals[_edge(new_id, target[1])] = (edge_id, upper, station)
 
         # Reuse the exact validator on detached state, without constructing a
         # second full incidence index or exposing a trial to cancellation hooks.
@@ -652,6 +771,8 @@ class MutableT3Topology:
             "edge_id": edge_id,
             "station": (station.numerator, station.denominator),
         }
+        if _split_proposal is not None:
+            report["reused_node_identity"] = existing_node_id is not None
         if cancellation_check is not None:
             cancellation_check("native-v2 shared segment split commit")
         old_state = (
@@ -681,8 +802,13 @@ class MutableT3Topology:
             return report
 
         try:
+            if existing_node_id is None:
+                return self._seed_registry._resolve_and_publish(
+                    edge_id, station.numerator, station.denominator, publish
+                )
             return self._seed_registry._resolve_and_publish(
-                edge_id, station.numerator, station.denominator, publish
+                edge_id, station.numerator, station.denominator, publish,
+                existing_node_id=existing_node_id,
             )
         except BaseException:
             (
@@ -826,13 +952,16 @@ def frontal_delaunay_refine(
     model_uuid: str | None = None,
     geometry_revision: int | None = None,
     metric_to_physical: Callable[[np.ndarray], np.ndarray] | None = None,
-    metric_jacobian: np.ndarray | None = None,
+    metric_jacobian: np.ndarray | Callable[[np.ndarray], np.ndarray] | None = None,
     automatically_seeded_shared_segments: Mapping[
         tuple[int, int], int | tuple[int, Any, Any]
     ] | None = None,
     component_seed_registry: ComponentSeedRegistry | None = None,
     supplemental_metric_field: MetricFieldSpec | None = None,
     qualified_seed: bool = False,
+    _split_proposal: Callable[
+        [int, Fraction, Fraction], tuple[Fraction, Any, int | None] | None
+    ] | None = None,
 ) -> tuple[PlanarTriangulation, dict[str, Any]]:
     """Refine one qualified planar CDT through a deterministic bounded queue."""
 
@@ -872,12 +1001,11 @@ def frontal_delaunay_refine(
                 cancellation_check=cancellation_check,
                 cancellation_interval=options.cancellation_interval,
             )
-            result = np.empty((len(physical_tensors), 2, 2), dtype=np.float64)
-            for row, tensor in enumerate(physical_tensors):
-                if cancellation_check is not None and row % options.cancellation_interval == 0:
-                    cancellation_check("native-v2 metric pullback scan")
-                result[row] = pullback_metric(tensor, metric_jacobian)
-            return result
+            return _pullback_spatial_metrics(
+                physical_tensors, points, metric_jacobian,
+                cancellation_check=cancellation_check,
+                cancellation_interval=options.cancellation_interval,
+            )
         return field.evaluate(
             points,
             cancellation_check=cancellation_check,
@@ -894,9 +1022,23 @@ def frontal_delaunay_refine(
         )
     )
 
+    metric_cache = None
+    if (isinstance(provider, SpatialMetricField)
+            and metric_spec is not None and metric_spec.spatial_dimension == 3
+            and (callable(metric_jacobian) or np.shape(metric_jacobian) == (3, 2))):
+        from ._point_metric_cache import PointMetricCache
+        metric_cache = PointMetricCache(
+            lambda rows: evaluate_spec(metric_spec, provider, rows),
+            max_rows=len(triangulation.points) + options.max_insertions,
+            batch_rows=min(4096, options.cancellation_interval),
+            cancellation_check=cancellation_check,
+        )
+
     def evaluate_metric(points: np.ndarray) -> np.ndarray:
         if isinstance(provider, SpatialMetricField):
             assert metric_spec is not None
+            if metric_cache is not None:
+                return metric_cache.evaluate(points)
             return evaluate_spec(metric_spec, provider, points)
         if cancellation_check is not None:
             cancellation_check("native-v2 experimental metric evaluation start")
@@ -915,14 +1057,15 @@ def frontal_delaunay_refine(
             cancellation_check("native-v2 experimental metric evaluation complete")
         return result
 
-    splittable = {
-        _edge(*edge): interval
-        for edge, interval in dict(automatically_seeded_shared_segments or {}).items()
-    }
+    # Endpoint order and native-t order are one binding. The topology
+    # constructor canonicalizes both together; normalizing only this key
+    # reverses the station interval and corrupts subsequent child splits.
+    splittable = dict(automatically_seeded_shared_segments or {})
+    splittable_keys = {_edge(*edge) for edge in splittable}
     protected = [
         tuple(map(int, edge))
         for edge in np.asarray(triangulation.segments, dtype=np.int64)
-        if _edge(*map(int, edge)) not in splittable
+        if _edge(*map(int, edge)) not in splittable_keys
     ]
     topology = MutableT3Topology(
         triangulation.points,
@@ -938,25 +1081,52 @@ def frontal_delaunay_refine(
     geometry_limited_triangles: set[tuple[int, int, int]] = set()
     stale_entries = 0
     shared_segment_splits = 0
+    reserved_node_reuses = 0
+    refused_shared_edges: set[tuple[int, int]] = set()
     gradation_iterations = 0
     metric_minimum = float("inf")
     metric_maximum = 0.0
     route = "frontal_delaunay"
     queue = TriangleWorkQueue(cancellation_check, options.cancellation_interval)
-    while insertions < options.max_insertions and operations < options.max_topology_operations:
+
+    def split_shared_edge(edge: tuple[int, int]) -> bool:
+        nonlocal insertions, shared_segment_splits, reserved_node_reuses, geometry_limited
+        try:
+            if _split_proposal is None:
+                split = topology.split_segment(edge, cancellation_check=cancellation_check)
+            else:
+                split = topology.split_segment(
+                    edge, cancellation_check=cancellation_check,
+                    _split_proposal=_split_proposal,
+                )
+        except _GeometryLimited:
+            if edge not in refused_shared_edges:
+                refused_shared_edges.add(edge)
+                geometry_limited += 1
+            return False
+        shared_segment_splits += 1
+        if split.get("reused_node_identity", False):
+            # A new chart occurrence of an existing physical midside is not
+            # a newly allocated mesh node or evidence of new-point refinement.
+            reserved_node_reuses += 1
+        else:
+            insertions += 1
+        return True
+
+    from ._t3_canonical_export import canonical_frontal_export
+    from ._t3_local_validation import enable_local_validation
+    enable_local_validation(topology, cancellation_check=cancellation_check)
+
+    while insertions + reserved_node_reuses < options.max_insertions and operations < options.max_topology_operations:
         if cancellation_check is not None and operations % options.cancellation_interval == 0:
             cancellation_check("native-v2 frontal queue")
-        points, triangles = topology.canonical_export()
+        points, triangles = canonical_frontal_export(
+            topology, cancellation_check=cancellation_check,
+        )
         tensors = evaluate_metric(points)
-        topology_edge_set: set[tuple[int, int]] = set()
-        for triangle_number, triangle in enumerate(triangles):
-            if cancellation_check is not None and triangle_number % options.cancellation_interval == 0:
-                cancellation_check("native-v2 topology-edge scan")
-            for index in range(3):
-                topology_edge_set.add(
-                    _edge(int(triangle[index]), int(triangle[(index + 1) % 3]))
-                )
-        topology_edges = np.asarray(sorted(topology_edge_set), dtype=np.int64).reshape((-1, 2))
+        topology_edges = topology._topology_index.canonical_edges(
+            cancellation_check=cancellation_check,
+        )
         target_lengths = 1.0 / np.sqrt(
             np.maximum(np.linalg.eigvalsh(tensors)[:, -1], 1.0e-30)
         )
@@ -976,7 +1146,8 @@ def frontal_delaunay_refine(
         metric_maximum = max(metric_maximum, float(np.max(limited_lengths)))
         segment_queue: list[tuple[float, tuple[int, int]]] = []
         splittable_edges = np.asarray(
-            topology.splittable_edges, dtype=np.int64
+            [edge for edge in topology.splittable_edges if edge not in refused_shared_edges],
+            dtype=np.int64,
         ).reshape((-1, 2))
         splittable_lengths = _metric_lengths(
             points,
@@ -997,12 +1168,7 @@ def frontal_delaunay_refine(
         if segment_queue:
             _, edge = heapq.heappop(segment_queue)
             operations += 1
-            topology.split_segment(
-                edge,
-                cancellation_check=cancellation_check,
-            )
-            insertions += 1
-            shared_segment_splits += 1
+            split_shared_edge(edge)
             continue
         if qualified_seed and operations == 0:
             qualified_lengths = _metric_lengths(
@@ -1017,8 +1183,12 @@ def frontal_delaunay_refine(
             ) <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12):
                 route = "frontal_delaunay_baseline_satisfied"
                 break
-        queue.begin_round()
-        for triangle_number, triangle in enumerate(triangles):
+        if cancellation_check is not None:
+            cancellation_check("native-v2 triangle queue scan")
+        refresh_triangles = queue.prepare_incremental_round(
+            topology._topology_index, points, tensors, topology.protected_edges,
+        )
+        for triangle_number, triangle in enumerate(refresh_triangles):
             if cancellation_check is not None and triangle_number % options.cancellation_interval == 0:
                 cancellation_check("native-v2 triangle queue scan")
             identity = tuple(map(int, triangle))
@@ -1078,9 +1248,36 @@ def frontal_delaunay_refine(
             operations += 1
             # Experimental providers historically receive a disposable writable array.
             coordinates = topology._topology_index.geometry(points, identity).coordinates.copy()
-            local_tensors = evaluate_metric(coordinates)
+            # Spatial queue severity and point placement must use the same
+            # gradation-limited metric. Re-evaluating the raw field here can
+            # propose coarse points in a region the queue correctly refined.
+            local_tensors = (
+                tensors[np.asarray(identity, dtype=np.int64)]
+                if options.metric_mode == "isotropic_spatial"
+                and isinstance(provider, SpatialMetricField)
+                else evaluate_metric(coordinates)
+            )
             proposals = [_offcentre(coordinates, local_tensors, target_size)]
             circumcentre = _circumcentre(coordinates)
+            if (
+                circumcentre is not None
+                and options.metric_mode == "isotropic_spatial"
+                and isinstance(provider, SpatialMetricField)
+            ):
+                # An off-centre is the nearer alternative to the circumcentre,
+                # not a license to jump past it and seed another thin cavity.
+                edge_index = min(
+                    range(3),
+                    key=lambda row: (
+                        float(np.linalg.norm(coordinates[(row + 1) % 3] - coordinates[row])),
+                        row,
+                    ),
+                )
+                midpoint = .5 * (coordinates[edge_index] + coordinates[(edge_index + 1) % 3])
+                if float(np.linalg.norm(proposals[0] - midpoint)) >= float(
+                    np.linalg.norm(circumcentre - midpoint)
+                ):
+                    proposals = []
             if circumcentre is not None:
                 proposals.append(circumcentre)
             for candidate in proposals:
@@ -1094,6 +1291,35 @@ def frontal_delaunay_refine(
                     rejected.add(key)
                     geometry_limited += 1
                     continue
+                if options.metric_mode == "isotropic_spatial" and isinstance(provider, SpatialMetricField):
+                    # A circumcentre/off-centre may encroach a segment even
+                    # when that segment already satisfies its metric length.
+                    # Resolve splittable constraints before inserting the
+                    # point; never split a pinned or mandatory constraint.
+                    encroached = []
+                    blocked = False
+                    for segment_number, segment in enumerate(topology.constraint_edges):
+                        if cancellation_check is not None and segment_number % options.cancellation_interval == 0:
+                            cancellation_check("native-v2 proposed-point encroachment scan")
+                        edge = _edge(*map(int, segment))
+                        first, second = points[list(edge)]
+                        penetration = float((candidate - first) @ (candidate - second))
+                        if penetration < 0.0:
+                            if edge in topology.protected_edges or edge in refused_shared_edges:
+                                blocked = True
+                            else:
+                                encroached.append((penetration, edge))
+                    if blocked:
+                        rejected.add(key)
+                        geometry_limited += 1
+                        continue
+                    if encroached:
+                        _, edge = min(encroached)
+                        if not split_shared_edge(edge):
+                            rejected.add(key)
+                            continue
+                        accepted = True
+                        break
                 try:
                     topology.insert_point(
                         candidate,
@@ -1111,8 +1337,10 @@ def frontal_delaunay_refine(
         if not accepted:
             route = "frontal_delaunay_geometry_limited"
             break
-    if operations >= options.max_topology_operations or insertions >= options.max_insertions:
+    if operations >= options.max_topology_operations or insertions + reserved_node_reuses >= options.max_insertions:
         route = "frontal_delaunay_budget_limited"
+    elif refused_shared_edges:
+        route = "frontal_delaunay_geometry_limited"
     elif insertions == 0 and route == "frontal_delaunay":
         route = "frontal_delaunay_baseline_satisfied"
     points, triangles = topology.canonical_export()
@@ -1144,6 +1372,10 @@ def frontal_delaunay_refine(
             for local_node_id, values in sorted(topology.shared_node_ids.items())
         ],
     }
+    if _split_proposal is not None:
+        report["reserved_node_reuses"] = reserved_node_reuses
+        report["staged_point_insertions"] = insertions + reserved_node_reuses
+        report["refused_shared_edges"] = sorted(refused_shared_edges)
     native_diagnostics["native_v2"] = report
     return PlanarTriangulation(
         points=points, triangles=triangles, segments=topology.constraint_edges,

@@ -858,9 +858,14 @@ inline QuadMetrics quad_metrics(
     const double second_norm = norm(second_cross);
     double warpage = 1.0;
     if (first_norm > 0.0 && second_norm > 0.0) {
-        const double cosine = std::max(-1.0, std::min(
-            1.0, dot(first_cross, second_cross) / (first_norm * second_norm)));
-        warpage = std::acos(cosine) / std::acos(-1.0);
+        const Point3 first_unit = {
+            first_cross.x / first_norm, first_cross.y / first_norm,
+            first_cross.z / first_norm};
+        const Point3 second_unit = {
+            second_cross.x / second_norm, second_cross.y / second_norm,
+            second_cross.z / second_norm};
+        warpage = std::atan2(norm(cross(first_unit, second_unit)),
+                            dot(first_unit, second_unit)) / std::acos(-1.0);
     }
     return {
         0.5 * (first_norm + second_norm),
