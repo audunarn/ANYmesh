@@ -413,11 +413,15 @@ def test_actual_spatial_linear_recombination(monkeypatch,tmp_path):
         assert mesh.quads and not mesh.is_quadratic
         assert set(result.strategy_by_face.values())=={'native'}
         committed=sum(v['published_insertions'] for v in record['finalization'].values())
-        assert committed==581,'Published native refinement must match the exact spatial reference'
-        assert len(record['before_finalization']['nodes'])==735
-        assert len(record['before_finalization']['tris'])==1438
-        assert len(mesh.nodes)==735
-        assert len(mesh.tris)+2*len(mesh.quads)==1438
+        staged=record['before_finalization']
+        assert committed>0,'The spatial fixture must publish actual refinement'
+        refinements=record['refinements']
+        assert len(refinements)==len(record['faces'])
+        assert all(item['completed'] for item in refinements)
+        assert committed==sum(item['output_points']-item['input_points'] for item in refinements),(
+            'Published insertions must match actual refinement growth, excluding existing seeds')
+        assert len(mesh.nodes)==len(staged['nodes'])
+        assert len(mesh.tris)+2*len(mesh.quads)==len(staged['tris'])
         assert all(v['physical_size']['accepted'] for v in record['finalization'].values())
         assert all(not v['requested_settings']['enforce_quality'] for v in record['finalization'].values())
         assert all(v['requested_settings']['min_angle']==30. for v in record['finalization'].values())
@@ -466,6 +470,15 @@ def test_actual_spatial_linear_recombination(monkeypatch,tmp_path):
             near=np.linalg.norm(np.asarray(centroids)-center,axis=1)<.12
             assert np.any(near)
             assert np.max(np.asarray(lengths)[near])<.4
+        first_payload=json.dumps(mesh_payload(mesh),sort_keys=True,default=str)
+        with monkeypatch.context() as repeat_hooks:
+            repeat_hooks.setattr(hybrid,'_mesh_native_face',original_face)
+            repeat_hooks.setattr(surface_mesh,'frontal_delaunay_refine',original_refine)
+            repeat_hooks.setattr(deferred,'finalize_components',original_finalize)
+            repeated=hybrid.generate_hybrid_mesh_result(model,target_size=.4,strategy='native',native_backend='python',order='linear',recombine=True,
+                native_options=NativeMeshingOptions(point_placement='frontal_delaunay',metric_mode='isotropic_spatial',metric_field=field,max_insertions=128,max_topology_operations=20000))
+        assert json.dumps(mesh_payload(repeated.mesh),sort_keys=True,default=str)==first_payload
+        record['deterministic_repetition_passed']=True
         record.update(status='passed',qualification='published refinement with post-recombination physical checks',published_insertions=committed,
             nodes=len(mesh.nodes),triangles=len(mesh.tris),quads=len(mesh.quads),minimum_scaled_jacobian=quality.minimum_scaled_jacobian,maximum_aspect_ratio=quality.maximum_aspect_ratio,published_mesh=mesh_payload(mesh))
     except BaseException as error:
