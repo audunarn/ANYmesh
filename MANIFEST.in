@@ -7,6 +7,7 @@ include MIGRATION.md
 recursive-include docs *.md
 recursive-include tests *.py
 include tools/release_wheel_smoke.py
+include benchmarks/native_v2_cylinder_cases.py
 include src/anymesher/_native.cpp
 global-exclude __pycache__
 global-exclude *.py[cod]

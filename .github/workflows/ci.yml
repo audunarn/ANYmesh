@@ -103,7 +103,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libglu1-mesa
       - run: python -c "import gmsh"
-      - run: python -m pytest
+      - name: Qualify the optional Gmsh backend contracts
+        run: >-
+          python -m pytest
+          tests/test_backends.py
+          tests/test_geometry_owner_integration.py
+          tests/test_release_correctness_guards.py::test_gmsh_session_restores_callers_sigint
+          -q
 
   wheel:
     runs-on: ${{ matrix.os }}

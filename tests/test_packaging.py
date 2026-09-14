@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -170,6 +173,15 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert ci.count(
         "sudo apt-get install --yes --no-install-recommends libglu1-mesa"
     ) == 1
+    gmsh_job = ci.split("\n  gmsh:\n", 1)[1].split("\n  wheel:\n", 1)[0]
+    assert "- run: python -m pytest\n" not in gmsh_job
+    assert "name: Qualify the optional Gmsh backend contracts" in gmsh_job
+    assert "tests/test_backends.py" in gmsh_job
+    assert "tests/test_geometry_owner_integration.py" in gmsh_job
+    assert (
+        "tests/test_release_correctness_guards.py::"
+        "test_gmsh_session_restores_callers_sigint"
+    ) in gmsh_job
     assert ci.startswith("name: Tests\n\non:\n  push:\n  pull_request:\n")
 
     assert publish.startswith(
@@ -215,6 +227,32 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "RECORD integrity mismatch" in publish
     assert publish.count("tools/release_wheel_smoke.py") == 1
     assert publish.count("--expect-version 0.5.0 --require-native") == 1
+
+
+def test_sdist_contains_the_installed_wheel_smoke_and_cylinder_fixture(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "dist"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--sdist",
+            "--outdir",
+            str(output),
+            str(REPOSITORY_ROOT),
+        ],
+        check=True,
+        cwd=REPOSITORY_ROOT,
+    )
+    archives = list(output.glob("anymesher-0.5.0.tar.gz"))
+    assert len(archives) == 1
+    with tarfile.open(archives[0], mode="r:gz") as archive:
+        members = set(archive.getnames())
+    root = "anymesher-0.5.0"
+    assert f"{root}/tools/release_wheel_smoke.py" in members
+    assert f"{root}/benchmarks/native_v2_cylinder_cases.py" in members
 
 
 @pytest.mark.skipif(
