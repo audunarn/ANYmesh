@@ -62,7 +62,7 @@ def _harness_digest(root: Path) -> str:
         "performance_dev.py", "performance_dev_cases.py",
         "performance_dev_measure.py",
     ):
-        raw = (root / "benchmarks" / name).read_bytes()
+        raw = (root / "benchmarks" / name).read_bytes().replace(b"\r\n", b"\n")
         digest.update(name.encode("ascii"))
         digest.update(len(raw).to_bytes(8, "little"))
         digest.update(raw)
