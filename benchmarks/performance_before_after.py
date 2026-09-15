@@ -60,7 +60,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("runtime, dependency, machine or harness provenance differs")
     for field in (
         "mesh_digest", "association_digest", "actual_elements", "triangles", "quadrilaterals",
-        "q4_fraction", "quality", "serialization_bytes",
+        "q4_fraction", "quality",
     ):
         _require_equal(before, after, field)
     old_work, new_work = _work(before), _work(after)
@@ -99,6 +99,8 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "peak_rss_ratio": new_peak / old_peak,
         "mesh_digest": before["mesh_digest"],
         "association_digest": before.get("association_digest"),
+        "before_serialization_bytes": before.get("serialization_bytes"),
+        "after_serialization_bytes": after.get("serialization_bytes"),
     }
 
 

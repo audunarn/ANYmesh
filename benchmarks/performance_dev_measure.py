@@ -47,6 +47,28 @@ def _git_head(root: Path) -> str:
     return result.stdout.strip()
 
 
+def _git_dirty(root: Path) -> bool:
+    result = subprocess.run(
+        ("git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"),
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    return bool(result.stdout.strip())
+
+
+def _harness_digest(root: Path) -> str:
+    digest = sha256()
+    for name in (
+        "native_hybrid_performance.py", "native_v2_cylinder_cases.py",
+        "performance_dev.py", "performance_dev_cases.py",
+        "performance_dev_measure.py",
+    ):
+        raw = (root / "benchmarks" / name).read_bytes()
+        digest.update(name.encode("ascii"))
+        digest.update(len(raw).to_bytes(8, "little"))
+        digest.update(raw)
+    return digest.hexdigest()
+
+
 def _source_version(root: Path) -> str:
     with (root / "pyproject.toml").open("rb") as stream:
         value = tomllib.load(stream)["project"]["version"]
@@ -219,6 +241,14 @@ def main(argv: list[str] | None = None) -> int:
         if actual_commit != args.source_commit:
             raise RuntimeError("declared source commit does not match worktree HEAD")
         origins = _bind_imports(root, args.install_kind)
+        geometry_root = Path(origins["anygeometry_origin"]).parents[2]
+        geometry_git = geometry_root / ".git"
+        dependency_state = (
+            {"anygeometry_commit": _git_head(geometry_root),
+             "anygeometry_dirty": _git_dirty(geometry_root)}
+            if geometry_git.exists() else
+            {"anygeometry_commit": None, "anygeometry_dirty": None}
+        )
         from performance_dev_cases import prepare_case, generate_once
         from anymesher.serialize import mesh_to_dict
 
@@ -261,6 +291,9 @@ def main(argv: list[str] | None = None) -> int:
         representative = samples[0]
         provenance = {
             **origins,
+            **dependency_state,
+            "source_worktree_dirty": _git_dirty(root),
+            "benchmark_harness_sha256": _harness_digest(root),
             "platform": platform.platform(), "machine": platform.node(),
             "python_executable": sys.executable,
             "python_version": sys.version.split()[0],
