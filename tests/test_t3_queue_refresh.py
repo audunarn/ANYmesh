@@ -210,7 +210,11 @@ def test_preparation_owns_bit_exact_metric_snapshot():
 def test_public_cylinder_full_refresh_matches_incremental(monkeypatch, backend, target):
     from anygeometry import to_dict
     from anymesher.hybrid import generate_hybrid_mesh_result, _neutral_shell_core
+    from anymesher.native_cpp import COMPILED_TRIANGULATION_AVAILABLE
     from anymesher.quality_v2 import assert_valid_mesh
+
+    if backend == "native" and not COMPILED_TRIANGULATION_AVAILABLE:
+        pytest.skip("optional C++17 triangulation boundary is absent")
 
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
     bench = importlib.import_module("native_v2_baseline")
