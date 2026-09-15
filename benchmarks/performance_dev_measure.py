@@ -88,8 +88,13 @@ def _bind_imports(root: Path, install_kind: str) -> dict[str, str]:
     source = (root / "src" / "anymesher").resolve()
     if install_kind == "source" and not origin.is_relative_to(source):
         raise RuntimeError("source benchmark imported ANYmesher outside the isolated worktree")
-    if install_kind == "wheel" and ("Github" in origin.parts or "github" in origin.parts):
-        raise RuntimeError("wheel benchmark imported an editable source checkout")
+    if install_kind == "wheel":
+        distribution = importlib.metadata.distribution("ANYmesher")
+        installed_init = Path(
+            distribution.locate_file("anymesher/__init__.py")
+        ).resolve()
+        if origin != installed_init:
+            raise RuntimeError("wheel benchmark imported an editable source checkout")
     return {
         "anymesher_origin": str(origin),
         "anygeometry_origin": str(Path(anygeometry.__file__).resolve()),
