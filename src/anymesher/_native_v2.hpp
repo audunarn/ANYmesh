@@ -360,6 +360,12 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
     int iterations = 0;
     bool invalid = false;
     bool interrupted = false;
+    // Coordinates and edge order are immutable for this invocation. Preserve
+    // the first sweep's hypot values and reuse them only on later sweeps.
+    std::vector<double> maximum_deltas;
+    if (max_iterations > 1) {
+        maximum_deltas.resize(static_cast<std::size_t>(edges_buffer.value.shape[0]));
+    }
     {
       SignalAwareGilRelease gil(cancellation, "native-v2 compiled gradation work");
       std::size_t work = 0;
@@ -376,9 +382,17 @@ inline PyObject* py_gradation_limit(PyObject*, PyObject* args) {
                 invalid = true;
                 break;
             }
-            const double dx = double_at(points_buffer.value, second, 0) - double_at(points_buffer.value, first, 0);
-            const double dy = double_at(points_buffer.value, second, 1) - double_at(points_buffer.value, first, 1);
-            const double maximum_delta = (growth - 1.0) * std::hypot(dx, dy);
+            double maximum_delta;
+            if (iterations == 1 || maximum_deltas.empty()) {
+                const double dx = double_at(points_buffer.value, second, 0) - double_at(points_buffer.value, first, 0);
+                const double dy = double_at(points_buffer.value, second, 1) - double_at(points_buffer.value, first, 1);
+                maximum_delta = (growth - 1.0) * std::hypot(dx, dy);
+                if (!maximum_deltas.empty()) {
+                    maximum_deltas[static_cast<std::size_t>(row)] = maximum_delta;
+                }
+            } else {
+                maximum_delta = maximum_deltas[static_cast<std::size_t>(row)];
+            }
             if (values[second] > values[first] + maximum_delta) {
                 values[second] = values[first] + maximum_delta;
                 changed = true;
