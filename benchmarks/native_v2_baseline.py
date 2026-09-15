@@ -359,7 +359,7 @@ def _measure(generate, args):
                 elapsed = perf_counter() - started
                 work = _native_work(diagnostics, args.route, args.case)
                 digest = _mesh_digest(mesh)
-                count = mesh.num_triangles + mesh.num_quads
+                count = sum(_active_element_counts(mesh))
                 emit({"event": "warmup" if index < WARMUPS else "measurement",
                       "index": index, "seconds": elapsed, "elements": count,
                       "mesh_digest": digest, "native_work": work})
@@ -389,6 +389,21 @@ def _target_size(case: str, domain_area: float, requested_elements: int) -> floa
     else:
         density_factor = 3.5
     return (density_factor * domain_area / requested_elements) ** 0.5
+
+
+def _active_element_counts(mesh: Any) -> tuple[int, int]:
+    """Count published elements without changing MeshCore's stored-row API."""
+    triangle_active = getattr(mesh, "triangle_active", None)
+    quad_active = getattr(mesh, "quad_active", None)
+    triangles = (
+        int(np.count_nonzero(triangle_active))
+        if triangle_active is not None else int(mesh.num_triangles)
+    )
+    quads = (
+        int(np.count_nonzero(quad_active))
+        if quad_active is not None else int(mesh.num_quads)
+    )
+    return triangles, quads
 
 
 def _run(args: argparse.Namespace) -> int:

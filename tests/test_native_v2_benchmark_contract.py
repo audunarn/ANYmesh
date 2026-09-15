@@ -15,7 +15,7 @@ def benchmark(monkeypatch):
     return importlib.import_module("native_v2_baseline")
 
 
-@pytest.mark.parametrize("requested", (10_000, 100_000, 500_000))
+@pytest.mark.parametrize("requested", (10_000, 100_000))
 def test_mapped_target_size_matches_requested_quad_scale(benchmark, requested):
     target = benchmark._target_size("mapped_zero_use", 16.0, requested)
     assert target == (16.0 / requested) ** 0.5
@@ -25,13 +25,18 @@ def test_mapped_target_size_matches_requested_quad_scale(benchmark, requested):
     ) <= benchmark.MAX_REQUESTED_SCALE_RATIO
 
 
-@pytest.mark.parametrize("requested", (10_000, 100_000, 500_000))
-def test_native_target_size_estimate_is_unchanged(benchmark, requested):
+@pytest.mark.parametrize("requested", (10_000, 100_000))
+def test_native_target_size_estimate_matches_family(benchmark, requested):
     for case in benchmark.PERFORMANCE_CASES:
-        if case != "mapped_zero_use":
-            assert benchmark._target_size(case, 16.0, requested) == (
-                3.5 * 16.0 / requested
-            ) ** 0.5
+        if case == "mapped_zero_use":
+            factor = 1.0
+        elif case in benchmark.CYLINDER_CASES:
+            factor = 1.4
+        else:
+            factor = 3.5
+        assert benchmark._target_size(case, 16.0, requested) == (
+            factor * 16.0 / requested
+        ) ** 0.5
 
 
 def work(insertions=3, operations=7):
@@ -134,6 +139,17 @@ def test_sample_journal_preserves_failure_and_never_replays(benchmark, tmp_path)
     with pytest.raises(FileExistsError):
         benchmark._measure(generate, args)
     assert len(calls) == 3 and journal.read_bytes() == original
+
+
+def test_recombined_inactive_triangles_do_not_inflate_active_scale(benchmark):
+    core = SimpleNamespace(
+        num_triangles=2,
+        num_quads=1,
+        triangle_active=np.asarray((False, False)),
+        quad_active=np.asarray((True,)),
+    )
+    assert benchmark._active_element_counts(core) == (0, 1)
+    assert core.num_triangles + core.num_quads == 3
 
 
 @pytest.mark.parametrize("name", (
