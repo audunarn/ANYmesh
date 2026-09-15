@@ -116,17 +116,13 @@ def _point_on_segment(point: np.ndarray, first: np.ndarray, second: np.ndarray, 
     first_x, first_y = float(first[0]), float(first[1])
     second_x, second_y = float(second[0]), float(second[1])
     point_x, point_y = float(point[0]), float(point[1])
-    length = hypot(second_x - first_x, second_y - first_y)
-    if abs(orient2d(first, second, point)) > tolerance * max(1.0, length):
+    if not (
+        min(first_x, second_x) - tolerance <= point_x <= max(first_x, second_x) + tolerance
+        and min(first_y, second_y) - tolerance <= point_y <= max(first_y, second_y) + tolerance
+    ):
         return False
-    return (
-        min(first_x, second_x) - tolerance
-        <= point_x
-        <= max(first_x, second_x) + tolerance
-        and min(first_y, second_y) - tolerance
-        <= point_y
-        <= max(first_y, second_y) + tolerance
-    )
+    length = hypot(second_x - first_x, second_y - first_y)
+    return abs(orient2d(first, second, point)) <= tolerance * max(1.0, length)
 
 
 def _point_in_ring(point: np.ndarray, points: np.ndarray, ring: Sequence[int], tolerance: float) -> bool:
