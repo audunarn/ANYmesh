@@ -380,7 +380,14 @@ def _measure(generate, args):
 def _target_size(case: str, domain_area: float, requested_elements: int) -> float:
     # Mapped rectangles produce one quad per size-by-size cell. The native
     # seed-density estimate is not applicable to this zero-use benchmark.
-    density_factor = 1.0 if case == "mapped_zero_use" else 3.5
+    # Recombined cylindrical sectors have a separately measured physical-area
+    # density; keeping it explicit makes the named scales representative.
+    if case == "mapped_zero_use":
+        density_factor = 1.0
+    elif case in CYLINDER_CASES:
+        density_factor = 1.4
+    else:
+        density_factor = 3.5
     return (density_factor * domain_area / requested_elements) ** 0.5
 
 
