@@ -397,6 +397,8 @@ def test_present_compiled_triangle_quality_rejects_malformed_batches(
 def test_compiled_triangle_incidence_rejects_repeated_cell_attachment(
     monkeypatch,
 ) -> None:
+    if not surface_mesh_module._native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        pytest.skip("compiled quality pipeline is unavailable")
     points = np.asarray(
         ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
     )
