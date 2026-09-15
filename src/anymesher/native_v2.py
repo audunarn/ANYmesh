@@ -185,6 +185,18 @@ class NativeMeshingOptions:
         return sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _metric_edge_pairs(edges: Any, lengths: Any) -> tuple[tuple[tuple[int, int], float], ...]:
+    """Bind evaluated metric lengths to the exact filtered edge rows."""
+    edge_rows = np.asarray(edges, dtype=np.int64).reshape((-1, 2))
+    length_rows = np.asarray(lengths, dtype=np.float64).reshape((-1,))
+    if len(edge_rows) != len(length_rows):
+        raise MeshError("splittable edge metric rows are misaligned")
+    return tuple(
+        ((int(edge[0]), int(edge[1])), float(length))
+        for edge, length in zip(edge_rows, length_rows)
+    )
+
+
 class ComponentSeedRegistry:
     """Component-owned deterministic identities for splittable shared seeds."""
 
@@ -1157,7 +1169,7 @@ def frontal_delaunay_refine(
             cancellation_interval=options.cancellation_interval,
         )
         for edge_number, (edge, length) in enumerate(
-            zip(topology.splittable_edges, splittable_lengths)
+            _metric_edge_pairs(splittable_edges, splittable_lengths)
         ):
             if cancellation_check is not None and edge_number % options.cancellation_interval == 0:
                 cancellation_check("native-v2 segment queue scan")
