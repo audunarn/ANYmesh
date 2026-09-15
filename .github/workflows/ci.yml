@@ -141,3 +141,37 @@ jobs:
         with:
           name: anymesher-wheels-${{ runner.os }}
           path: dist/*.whl
+
+  wheel-full-linux:
+    name: Installed Linux native wheel full suite
+    needs: wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: anymesher-wheels-Linux
+          path: dist
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]"
+      - run: python -m pip uninstall --yes anymesher
+      - run: python -m pip install --no-deps dist/anymesher-0.5.0-cp313-cp313-manylinux*.whl
+      - name: Prove installed origin and compiled availability
+        run: >-
+          python -I -B -c "import anymesher, importlib.util, pathlib, sys;
+          assert pathlib.Path(anymesher.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve());
+          assert importlib.util.find_spec('anymesher._native') is not None"
+      - name: Qualify the installed wheel against the full suite
+        run: >-
+          python -I -B -m pytest -p no:cacheprovider -o pythonpath=
+          --confcutdir=tests --import-mode=importlib tests
