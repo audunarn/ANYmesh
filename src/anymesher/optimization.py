@@ -193,21 +193,10 @@ def constrained_smoothing(
     if not np.isfinite(made_relaxation) or not 0.0 < made_relaxation <= 1.0:
         raise MeshError("relaxation must be finite and in (0, 1]")
 
-    neighbors = [set() for _ in range(len(coordinates))]
-    incident_cells = [set() for _ in range(len(coordinates))]
-    incidence: dict[tuple[int, int], int] = {}
     signs = tuple(
         _cell_sign(coordinates, cell, number)
         for number, cell in enumerate(topology)
     )
-    for cell_number, cell in enumerate(topology):
-        for node in cell:
-            incident_cells[node].add(cell_number)
-        for edge in _cell_edges(cell):
-            incidence[edge] = incidence.get(edge, 0) + 1
-            neighbors[edge[0]].add(edge[1])
-            neighbors[edge[1]].add(edge[0])
-
     fixed = {
         _node(value, len(coordinates), "fixed_nodes") for value in fixed_nodes
     }
@@ -240,6 +229,18 @@ def constrained_smoothing(
                 diagnostics["rejected_moves"],
                 diagnostics["converged"],
             )
+    # The compiled boundary builds its own adjacency. Keep the identical
+    # Python preparation only for the reference path after native absence.
+    neighbors = [set() for _ in range(len(coordinates))]
+    incident_cells = [set() for _ in range(len(coordinates))]
+    incidence: dict[tuple[int, int], int] = {}
+    for cell_number, cell in enumerate(topology):
+        for node in cell:
+            incident_cells[node].add(cell_number)
+        for edge in _cell_edges(cell):
+            incidence[edge] = incidence.get(edge, 0) + 1
+            neighbors[edge[0]].add(edge[1])
+            neighbors[edge[1]].add(edge[0])
     if preserve_boundary:
         fixed.update(
             node for edge, attached in incidence.items() if attached == 1 for node in edge
