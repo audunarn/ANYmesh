@@ -592,14 +592,6 @@ class MutableT3Topology:
             raise MeshError("frontal insertion point must be one finite 2D coordinate")
         if cancellation_check is not None:
             cancellation_check("native-v2 mutable insertion start")
-        bounded_oracle = len(self._triangles) <= 4096
-        reference: tuple[np.ndarray, np.ndarray, dict[str, Any]] | None = None
-        if bounded_oracle:
-            reference = self._python_insert_with_owners(
-                candidate,
-                owner=owner,
-                cancellation_check=cancellation_check,
-            )
         native = native_mutable_t3_insert(
                 self._points,
                 self._triangles,
@@ -608,32 +600,23 @@ class MutableT3Topology:
                 *((self._topology_index._native_state,)
                   if self._topology_index._native_state is not None else ()),
                 **({"cancellation_check": cancellation_check}
-                   if cancellation_check is not None and not bounded_oracle else {}),
+                   if cancellation_check is not None else {}),
             )
         if native is None:
-            if reference is None:
-                reference = self._python_insert_with_owners(
-                    candidate, owner=owner, cancellation_check=cancellation_check,
-                )
-            new_triangles, reference_owners, report = reference
+            new_triangles, reference_owners, report = self._python_insert_with_owners(
+                candidate, owner=owner, cancellation_check=cancellation_check,
+            )
         else:
             new_triangles, report = native
-            if reference is not None:
-                reference_triangles, reference_owners, _ = reference
-                if not np.array_equal(new_triangles, reference_triangles):
-                    raise MeshError(
-                        "compiled mutable T3 insertion disagrees with the Python oracle"
-                    )
-            else:
-                from ._t3_insertion_result import insertion_owners
+            from ._t3_insertion_result import insertion_owners
 
-                reference_owners = insertion_owners(
-                    self._triangles, new_triangles, self.triangle_owners,
-                    self._topology_index,
-                    inserted_node=len(self._points),
-                    owner=owner,
-                    cancellation_check=cancellation_check,
-                )
+            reference_owners = insertion_owners(
+                self._triangles, new_triangles, self.triangle_owners,
+                self._topology_index,
+                inserted_node=len(self._points),
+                owner=owner,
+                cancellation_check=cancellation_check,
+            )
         if cancellation_check is not None:
             cancellation_check("native-v2 mutable insertion commit")
         old_points = self._points

@@ -1315,7 +1315,12 @@ def _make_candidate(
     added_points: int = 0,
     rounds: int = 0,
     settings: SurfaceMeshOptions | None = None,
+    statistics: dict[str, int] | None = None,
 ) -> _QualityCandidate:
+    if statistics is not None:
+        statistics["quality_evaluations"] = (
+            statistics.get("quality_evaluations", 0) + 1
+        )
     report, score, aspects = _triangle_quality(points, triangles, settings)
     return _QualityCandidate(
         np.ascontiguousarray(points, dtype=np.float64),
@@ -1364,6 +1369,7 @@ def _optimize_candidate(
     settings: SurfaceMeshOptions | None = None,
     *,
     prefer_growth: bool = False,
+    statistics: dict[str, int] | None = None,
 ) -> _QualityCandidate:
     """Run the fixed flip/smooth/flip sequence and publish only improvements."""
 
@@ -1373,13 +1379,18 @@ def _optimize_candidate(
         candidate.triangles,
         protected_edges=protected_edges,
     )
-    flipped = _make_candidate(
-        candidate.points,
-        first_flip.triangles,
-        flips=first_flip.flip_count,
-        added_points=candidate.added_points,
-        rounds=candidate.rounds,
-        settings=settings,
+    flipped = (
+        _make_candidate(
+            candidate.points,
+            first_flip.triangles,
+            flips=first_flip.flip_count,
+            added_points=candidate.added_points,
+            rounds=candidate.rounds,
+            settings=settings,
+            statistics=statistics,
+        )
+        if first_flip.flip_count
+        else candidate
     )
     if (
         _candidate_selection_key(flipped, prefer_growth=prefer_growth)
@@ -1396,14 +1407,19 @@ def _optimize_candidate(
         relaxation=0.6,
     )
     moved_nodes = tuple(int(row) for row in smoothing.moved_nodes)
-    smoothed = _make_candidate(
-        smoothing.points,
-        first_flip.triangles,
-        flips=first_flip.flip_count,
-        moved_nodes=moved_nodes,
-        added_points=candidate.added_points,
-        rounds=candidate.rounds,
-        settings=settings,
+    smoothed = (
+        _make_candidate(
+            smoothing.points,
+            first_flip.triangles,
+            flips=first_flip.flip_count,
+            moved_nodes=moved_nodes,
+            added_points=candidate.added_points,
+            rounds=candidate.rounds,
+            settings=settings,
+            statistics=statistics,
+        )
+        if moved_nodes
+        else flipped
     )
     if (
         _candidate_selection_key(smoothed, prefer_growth=prefer_growth)
@@ -1411,19 +1427,30 @@ def _optimize_candidate(
         and smoothed.score[0] == 0
     ):
         best = smoothed
+    if not moved_nodes and first_flip.converged:
+        if statistics is not None:
+            statistics["optimization_noop_short_circuits"] = (
+                statistics.get("optimization_noop_short_circuits", 0) + 1
+            )
+        return best
     final_flip = local_edge_flip(
         smoothing.points,
         first_flip.triangles,
         protected_edges=protected_edges,
     )
-    finished = _make_candidate(
-        smoothing.points,
-        final_flip.triangles,
-        flips=first_flip.flip_count + final_flip.flip_count,
-        moved_nodes=moved_nodes,
-        added_points=candidate.added_points,
-        rounds=candidate.rounds,
-        settings=settings,
+    finished = (
+        _make_candidate(
+            smoothing.points,
+            final_flip.triangles,
+            flips=first_flip.flip_count + final_flip.flip_count,
+            moved_nodes=moved_nodes,
+            added_points=candidate.added_points,
+            rounds=candidate.rounds,
+            settings=settings,
+            statistics=statistics,
+        )
+        if final_flip.flip_count
+        else smoothed
     )
     if (
         _candidate_selection_key(finished, prefer_growth=prefer_growth)
@@ -1515,6 +1542,11 @@ def _run_quality_path(
 ) -> dict[str, Any]:
     """Triangulate and optimize one detached deterministic point candidate."""
 
+    work_statistics = {
+        "full_triangulations": 1,
+        "quality_evaluations": 0,
+        "optimization_noop_short_circuits": 0,
+    }
     triangulation_started = perf_counter()
     interior = np.vstack((explicit_interior, generated))
     triangulation = triangulate_polygon(
@@ -1535,6 +1567,7 @@ def _run_quality_path(
         triangulation.points,
         triangulation.triangles,
         settings=settings,
+        statistics=work_statistics,
     )
     current = _optimize_candidate(
         initial,
@@ -1542,6 +1575,7 @@ def _run_quality_path(
         explicit_interior,
         settings,
         prefer_growth=preserve_protected_cells,
+        statistics=work_statistics,
     )
     best = min(
         (initial, current),
@@ -1591,6 +1625,7 @@ def _run_quality_path(
             backend=settings.backend,
             cancellation_check=cancellation_check,
         )
+        work_statistics["full_triangulations"] += 1
         triangulation_seconds += perf_counter() - retry_started
         attempted_added_points += len(additions)
         attempted_rounds += 1
@@ -1600,6 +1635,7 @@ def _run_quality_path(
             added_points=attempted_added_points,
             rounds=attempted_rounds,
             settings=settings,
+            statistics=work_statistics,
         )
         retry = _optimize_candidate(
             retry,
@@ -1607,6 +1643,7 @@ def _run_quality_path(
             explicit_interior,
             settings,
             prefer_growth=preserve_protected_cells,
+            statistics=work_statistics,
         )
         current = retry
         triangulation = retry_triangulation
@@ -1645,6 +1682,7 @@ def _run_quality_path(
         ),
         "triangulation_seconds": triangulation_seconds,
         "optimization_seconds": perf_counter() - optimization_started,
+        "work_statistics": work_statistics,
     }
 
 
@@ -1689,14 +1727,23 @@ def _run_frontal_quality_path(
         supplemental_metric_field=supplemental_metric_field,
         qualified_seed=bool(baseline["target_met"]),
     )
+    work_statistics = {
+        "full_triangulations": 0,
+        "quality_evaluations": 0,
+        "optimization_noop_short_circuits": 0,
+    }
     initial = _make_candidate(
-        triangulation.points, triangulation.triangles, settings=settings
+        triangulation.points,
+        triangulation.triangles,
+        settings=settings,
+        statistics=work_statistics,
     )
     optimized = _optimize_candidate(
         initial,
         triangulation.segments,
         np.empty((0, 2), dtype=np.float64),
         settings,
+        statistics=work_statistics,
     )
     best = min(
         (initial, optimized),
@@ -1729,6 +1776,11 @@ def _run_frontal_quality_path(
             "shared_nodes": [],
         }
         guarded["native_v2"] = report
+        guarded["work_statistics"] = {
+            key: int(baseline["work_statistics"].get(key, 0))
+            + int(work_statistics.get(key, 0))
+            for key in set(baseline["work_statistics"]) | set(work_statistics)
+        }
         return guarded, report
     target_met = (
         best.report["invalid_element_count"] == 0
@@ -1752,6 +1804,7 @@ def _run_frontal_quality_path(
         "triangulation_seconds": baseline["triangulation_seconds"],
         "optimization_seconds": perf_counter() - started,
         "native_v2": report,
+        "work_statistics": work_statistics,
     }, report
 
 
@@ -2495,6 +2548,17 @@ def mesh_planar_surface(
         "budget_exhausted": not target_met and attempted_added_points >= point_budget,
         "selected_strategy": str(selected["name"]),
         "candidate_count": len(candidate_paths),
+        "work_totals": {
+            key: sum(
+                int(path.get("work_statistics", {}).get(key, 0))
+                for path in candidate_paths
+            )
+            for key in (
+                "full_triangulations",
+                "quality_evaluations",
+                "optimization_noop_short_circuits",
+            )
+        },
         "candidates": [
             {
                 "strategy": str(path["name"]),
@@ -2502,6 +2566,7 @@ def mesh_planar_surface(
                 "target_met": bool(path["target_met"]),
                 "score": list(path["best"].score),
                 "final_quality": dict(path["best"].report),
+                "work_statistics": dict(path.get("work_statistics", {})),
             }
             for path in candidate_paths
         ],
