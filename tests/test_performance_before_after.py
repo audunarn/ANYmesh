@@ -20,7 +20,11 @@ def report(commit):
         "semantic_contract": {"protected": "abc"},
         "quality_policy": {"minimum_angle": "no_decrease"},
         "warmups": 1, "repetitions": 7, "source_commit": commit,
-        "provenance": {"machine": "AMD64", "numpy": "2.4.6", "wheel_sha256": None},
+        "provenance": {
+            "machine": "AMD64", "numpy": "2.4.6", "wheel_sha256": None,
+            "commit_binding": commit, "source_worktree_dirty": False,
+            "anymesher_origin": f"C:/fixture/{commit}/src/anymesher/__init__.py",
+        },
         "mesh_digest": "d" * 64, "association_digest": "e" * 64,
         "actual_elements": 9_500,
         "triangles": 100, "quadrilaterals": 9_400, "q4_fraction": 9_400 / 9_500,

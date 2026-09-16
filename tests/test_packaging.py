@@ -145,8 +145,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         encoding="utf-8"
     )
 
-    assert ci.count("repository: audunarn/ANYgeometry") == 5
-    assert ci.count(f"ref: {geometry_ref}") == 5
+    assert ci.count("repository: audunarn/ANYgeometry") == 6
+    assert ci.count(f"ref: {geometry_ref}") == 6
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {geometry_ref}") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
@@ -157,7 +157,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
 
     assert ci.count(
         'python -m pip install -e ".[dev,planar]"'
-    ) == 2
+    ) == 3
     assert ci.count(
         'python -m pip install -e ".[dev,gmsh,planar]"'
     ) == 1

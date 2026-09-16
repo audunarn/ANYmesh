@@ -53,7 +53,19 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("unknown meshing route")
     old_provenance = dict(before.get("provenance") or {})
     new_provenance = dict(after.get("provenance") or {})
-    for key in ("wheel_sha256", "commit_binding"):
+    for row, provenance in ((before, old_provenance), (after, new_provenance)):
+        if provenance.get("commit_binding") != row.get("source_commit"):
+            raise ValueError("source record is not bound to its own commit")
+        if provenance.get("source_worktree_dirty") is not False:
+            raise ValueError("formal source worktree must be clean")
+        origin = provenance.get("anymesher_origin")
+        if not isinstance(origin, str) or not origin:
+            raise ValueError("ANYmesher import origin is required")
+        if row.get("install_kind") == "source" and not origin.replace("\\", "/").endswith(
+            "/src/anymesher/__init__.py"
+        ):
+            raise ValueError("source record must import from its source worktree")
+    for key in ("wheel_sha256", "commit_binding", "anymesher_origin"):
         old_provenance.pop(key, None)
         new_provenance.pop(key, None)
     if old_provenance != new_provenance:
