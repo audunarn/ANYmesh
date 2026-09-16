@@ -612,6 +612,10 @@ def limit_metric_gradation(
         raise MeshError("cancellation_interval must be a positive integer")
     if np.any(connections < 0) or np.any(connections >= len(coordinates)):
         raise MeshError("gradation edge index is out of range")
+    if len(values) and np.all(values == values[0]):
+        if cancellation_check is not None:
+            cancellation_check("native-v2 uniform metric gradation")
+        return values, 1
     if (
         coordinates.shape[1] == 2
         and len(connections) >= _NATIVE_BATCH_THRESHOLD
