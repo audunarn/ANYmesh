@@ -592,6 +592,9 @@ class MutableT3Topology:
             raise MeshError("frontal insertion point must be one finite 2D coordinate")
         if cancellation_check is not None:
             cancellation_check("native-v2 mutable insertion start")
+            # Preserve the established cavity-scan cancellation boundary even
+            # when the compiled insertion kernel replaces the Python oracle.
+            cancellation_check("native-v2 cavity adjacency scan")
         native = native_mutable_t3_insert(
                 self._points,
                 self._triangles,
