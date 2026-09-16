@@ -132,7 +132,7 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry[planar]>=0.4,<0.5"]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.3,<0.5"]
     assert project["optional-dependencies"]["planar"] == []
 
 

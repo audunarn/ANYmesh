@@ -23,6 +23,8 @@ hosted-CI qualification remains pending. This entry is not release approval.
   storage and immutable local incidence, geometry, row and export caches.
   Keep protected identities, failed-candidate isolation and existing defaults.
 - Add the frozen native-v2 baseline corpus and performance acceptance envelope.
+- Require ANYgeometry 0.4.3 or newer within the qualified 0.4 line so clean
+  production installs cannot resolve an older, unqualified geometry runtime.
 - Defer field-guided quad-first meshing to a later release. Existing boundary
   collars and triangle recombination do not implement orientation-field solving
   or advancing quad fronts; no `field_guided_front` option is included.
