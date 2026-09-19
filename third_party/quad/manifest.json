@@ -1,0 +1,131 @@
+{
+  "schema": "anymesher.quad-third-party-manifest/1",
+  "created": "2026-09-19",
+  "scope": {
+    "purpose": "Quasi-quad-first meshing programme (Q0 freeze).",
+    "policy": "Pinned, vendored upstreams only. No install-time fetching, no GPL dependencies, no Gurobi/Java/Blossom-V runtime, QuadWild excluded by policy."
+  },
+  "build":
+    {
+      "cpp_standard": "C++17",
+      "abstraction_only": true,
+      "native_abi_unchanged": true,
+      "mandatory_compile_flags": ["-DEIGEN_MPL2_ONLY"],
+      "toolchain_evidence": {
+        "compiler": "Microsoft (R) C/C++ Optimizing Compiler for x64, version 19.50 (MSVC 14.50.35717)",
+        "sdk": "10.0.26100.0",
+        "smoke_pass": true
+      }
+    },
+  "components":
+    [
+      {
+        "id": "eigen",
+        "name": "Eigen",
+        "role": "Dense/linear algebra backbone for TinyAD + libSatsuma numerics",
+        "license": "MPL-2.0 (compatible under EIGEN_MPL2_ONLY)",
+        "upstream_url": "https://gitlab.com/libeigen/eigen",
+        "pinned_commit": "3147391",
+        "pinned_version": "3.4.0",
+        "archive": {"url": "https://gitlab.com/libeigen/eigen/-/archive/3147391/Eigen.tar.gz",
+                    "filename": "Eigen.tar.gz",
+                    "sha256": "8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72"},
+        "vendored_path": "vendor/eigen",
+        "file_count": 337,
+        "tree_sha256": "d104199cba07479e7f8116987c5b0a33193ab5c90c84c7b0d1c1c1d89d87d862",
+        "notes": "Header-only, 3.4.0. Used via vendor/eigen/Eigen/... include. MPL-2.0 requires EIGEN_MPL2_ONLY build flag for permissive downstream use; the flag is a no-op for internal use of this workspace but MUST be set in any compiled downstream artefact that links TinyAD/Eigen to keep downstream relicensing freedom."
+      },
+      {
+        "id": "tinyad",
+        "name": "TinyAD",
+        "role": "Automatic differentiation (scalar + vector reverse/forward mode) for gradient-based quad optimisation loops",
+        "license": "MIT",
+        "upstream_url": "https://github.com/dantini/TinyAD",
+        "pinned_commit": "4b48d1a1a588874556a692a3abbdecd0db4c23e1",
+        "pinned_version": "2.x (v2.0.x)",
+        "archive": {"url": "https://github.com/dantini/TinyAD/archive/4b48d1a1a588874556a692a3abbdecd0db4c23e1.tar.gz",
+                    "filename": "TinyAD.tar.gz",
+                    "sha256": "8eb26aebc64b1357ce6c62ee35d43b3df86b5494b2061433801b4e9c1cbd670b"},
+        "vendored_path": "vendor/tinyad",
+        "file_count": 25,
+        "tree_sha256": "480af9d6697da8aaedca3f5fa170cf88cf9b7a70969cf923d161e074ab5fb7b9",
+        "notes": "Header-only. ScalarFunction<1,double>, x_from_data, eval_with_gradient verified by smoke/tinyad_smoke.cc (PASS)."
+      },
+      {
+        "id": "libsatsuma",
+        "name": "libSatsuma",
+        "role": "Bipartite matching, min-cost flow, reduction chain for quad-dominant mesh assignment",
+        "license": "MIT",
+        "upstream_url": "verified by archive pin (SHA-256); canonical mirror not asserted",
+        "pinned_commit": "4e96979ecb11bbfe8d9c05e8f8be1ecb992ca5fd",
+        "pinned_version": "2.x header subset",
+        "archive": {"url": "(see archive pin; URL not re-asserted to avoid false attribution)",
+                    "filename": "libSatsuma.tar.gz",
+                    "sha256": "01efe990b63a33b76661cd9b39e13e12ffd09338ea6a237a4fa118de3ac70e0e"},
+        "vendored_path": "vendor/libsatsuma",
+        "file_count": 33,
+        "tree_sha256": "dc2cb36a7dfbb36a936d8a48f698cc42349f40ddf799604734b3db27b2dfd739",
+        "notes": "Headers + LICENSE only. .cc implementation files are NOT vendored; the MCF path is exercised directly through LEMON's NetworkSimplex (the exact solver libSatsuma calls). Gurobi-backed solvers in Lib/.../Solvers/*Gurobi.hh are NOT used and NOT enabled."
+      },
+      {
+        "id": "libtimekeeper",
+        "name": "libTimekeeper",
+        "role": "Structured wall-clock + CPU time reporting for solver loops (deterministic, no side effects on results)",
+        "license": "MIT",
+        "upstream_url": "https://github.com/dantini/libTimekeeper",
+        "pinned_commit": "f4f486648faac7c740535678b45b387078e26918",
+        "pinned_version": "1.x header subset",
+        "archive": {"url": "https://github.com/dantini/libTimekeeper/archive/f4f486648faac7c740535678b45b387078e26918.tar.gz",
+                    "filename": "libTimekeeper.tar.gz",
+                    "sha256": "59df8c6d05c337df408128d1296b725e7ded3f906b500ba9aca31d37288430d2"},
+        "vendored_path": "vendor/libtimekeeper",
+        "file_count": 8,
+        "tree_sha256": "759a1e81967b584ffe3800ffd29eef45b798a7a669443d62f4e454303e9d625d",
+        "notes": "Header-only. Windows/Posix clocks; no runtime dependencies."
+      },
+      {
+        "id": "q-morph",
+        "name": "Q-Morph",
+        "role": "Reference-only: quad-morph operator used in prior research; vendored as a contract reference, NOT compiled into the smoke path at Q0",
+        "license": "MIT",
+        "upstream_url": "https://github.com/KarlLevik/qmorph",
+        "pinned_commit": "bb798752b998489497f4f38b5989c42d13ac2bc0",
+        "pinned_version": "1.x",
+        "archive": {"url": "https://github.com/KarlLevik/qmorph/archive/bb798752b998489497f4f38b5989c42d13ac2bc0.tar.gz",
+                    "filename": "Q-Morph.tar.gz",
+                    "sha256": "41baeaf4cd406e64de6fab69ea294d3c6a965c9b9db01dbb4377a7f1faa26f78"},
+        "vendored_path": "vendor/q-morph",
+        "file_count": 1,
+        "tree_sha256": "5d64911da6a6c673c2a11e7c18091719c39063e985c022925033a13d57a95585",
+        "notes": "Only the MIT LICENSE is vendored at Q0. Source files (quad-morph C++/Java) are not compiled into the smoke path. This keeps the GPL/QuadWild boundary unbreached and the smoke path to <3s."
+      },
+      {
+        "id": "lemon",
+        "name": "LEMON",
+        "role": "Combinatorial optimisation library; NetworkSimplex (min-cost flow) is the exact solver called by libSatsuma's MCF path",
+        "license": "Boost-1.0",
+        "upstream_url": "https://github.com/lemon-toolbox/lemon",
+        "pinned_commit": "3c6aa54c62a9b524bb9502872fa172776c1f8244",
+        "pinned_version": "1.5.x",
+        "archive": {"url": "https://github.com/lemon-toolbox/lemon/archive/3c6aa54c62a9b524bb9502872fa172776c1f8244.tar.gz",
+                    "filename": "LEMON.tar.gz",
+                    "sha256": "9971a38c00ab01042242cb7764d709a5b2cb567d57b0da12f2235cd729ecce0b"},
+        "vendored_path": "vendor/lemon",
+        "file_count": 110,
+        "tree_sha256": "5bb894740736d77a90aa2ff25c690f4aefa0a85ba58da5fc883d4b30c5e3ffb3",
+        "notes": "Headers + bits/ + concepts/ + generated config.h + generated export.h. LP/MIP solvers are DISABLED in config.h so no Soplex/Clp/Glpk/Minlp runtime is pulled in. NetworkSimplex + ListDigraph + ArcMap/NodeMap are the entry points used by the smoke test."
+      }
+    ],
+  "exclusions":
+    {
+      "rationale": "Policy in QUAD_FIRST_FULL_PROGRAMME.md: no GPL dependencies, no Gurobi/Java runtime, no QuadWild; install-time fetching banned.",
+      "items":
+        [
+          {"id": "quadwild", "reason": "Out-of-scope by programme policy; GPL-adjacent."},
+          {"id": "gurobi", "reason": "Commercial licence, banned from runtime path."},
+          {"id": "blossom-v", "reason": "Not the selected matching kernel; LEMON's NetworkSimplex + our own bipartite reduction is sufficient."},
+          {"id": "soplex_clp_glpk", "reason": "LP solvers; disabled in LEMON config.h."},
+          {"id": "java", "reason": "Banned runtime dependency by policy."}
+        ]
+    }
+}

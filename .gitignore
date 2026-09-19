@@ -11,3 +11,9 @@ venv/
 reports/*
 !reports/native_hybrid/
 !reports/native_hybrid/**
+!reports/quad_first/
+!reports/quad_first/**
+# Quad-first smoke build outputs (not artefacts of the vendored set)
+third_party/quad/smoke/out/
+third_party/quad/smoke/*.obj
+third_party/quad/smoke/*.exe

@@ -106,6 +106,7 @@ from .metric import (
     pullback_metric,
 )
 from .native_v2 import ComponentSeedRegistry, MutableT3Topology, NativeMeshingOptions
+from .quad import QUAD_MESHING_OPTIONS_SCHEMA, QuadMeshingOptions
 from .primitives import (
     PANEL_EDGE_IDS,
     PANEL_FACE_ID,
@@ -221,6 +222,8 @@ __all__ = [
     "NativeMeshingOptions",
     "MutableT3Topology",
     "ComponentSeedRegistry",
+    "QuadMeshingOptions",
+    "QUAD_MESHING_OPTIONS_SCHEMA",
     "MeshingStrategy",
     "OrientedEdge",
     "EdgeFlipResult",
