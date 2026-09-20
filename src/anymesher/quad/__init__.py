@@ -1,10 +1,37 @@
 """Quad-first meshing subpackage.
 
-At Q0 this exposes only the frozen strict options contract.  The driver,
-contracts, layout, counts, transitions, validation and optimization modules
-land in later milestones (Q1-Q7) and are not importable at Q0.
+Q0 exposes the frozen strict options contract.  Q1 adds the resident
+mixed T3/Q4 state, the transactional journal, and the single-step
+advancing-front driver that converts one front T3 pair into a Q4.
 """
 
 from .options import QUAD_MESHING_OPTIONS_SCHEMA, QuadMeshingOptions
+from .front import (
+    FrontNoCandidate,
+    FrontRejected,
+    area2,
+    body_edges,
+    candidate_partners,
+    classify,
+    edge_key,
+    find_source_cell,
+    front_step,
+    local_swap,
+    make_quad,
+)
 
-__all__ = ["QUAD_MESHING_OPTIONS_SCHEMA", "QuadMeshingOptions"]
+__all__ = [
+    "QUAD_MESHING_OPTIONS_SCHEMA",
+    "QuadMeshingOptions",
+    "FrontNoCandidate",
+    "FrontRejected",
+    "area2",
+    "body_edges",
+    "candidate_partners",
+    "classify",
+    "edge_key",
+    "find_source_cell",
+    "front_step",
+    "local_swap",
+    "make_quad",
+]
