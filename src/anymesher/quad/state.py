@@ -620,7 +620,7 @@ class View:
     @property
     def node_ids(self) -> frozenset[int]:
         d = self._delta
-        return frozenset((set(self._base.node_ids) - d.remove_nodes) | d.add_nodes)
+        return frozenset((set(self._base.node_ids) - d.remove_nodes) | set(d.add_nodes))
 
     @property
     def nodes(self) -> Mapping[int, tuple[float, float]]:

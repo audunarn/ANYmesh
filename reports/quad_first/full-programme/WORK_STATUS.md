@@ -265,6 +265,136 @@ regress from Q2.
 
 ---
 
+## Q3a — cross-field guidance (4θ) + guided front driver (this commit)
+
+**Status:** **complete**.
+
+Q3a delivers the deterministic cross-field guidance layer required by
+`QUAD_FIRST_FULL_PROGRAMME.md` Q3.  The layer is a pure-function pipeline:
+
+1.  *Build the field* — every oriented node-direction pair is folded into
+    four-fold cover coordinates via `z(θ) = (cos 4θ, sin 4θ)`; a mean vector
+    gives a unit field direction per node, and the **un-normalised** mean
+    magnitude is the per-node *confidence* scalar (in `[0, 1]`).
+2.  *Guide the front* — the Q1 `front_step` candidate loop is wrapped so the
+    first candidate whose boundary walk score meets the per-endpoint
+    confidence gate is selected.  No candidate is ever pre-seeded; the gate
+    only **selects** from `candidate_partners` output, preserving Q1
+    determinism.
+3.  *Reject with typed reasons* — `LowConfidenceError`, `GuidanceRejected`,
+    `FrontNoCandidate` (lifted from the Q1 rejection reasons) keep the state
+    byte-for-byte identical, and no silent fallback is possible.
+
+### New — `src/anymesher/quad/guidance.py`
+
+| symbol | role |
+| ---- | ---- |
+| `CrossFieldReport` (frozen dataclass) | per-node `direction` and `confidence`; `to_dict()` for round-trip; `all_confidences_ge(threshold)` helper; `rejects_low_confidence(state, min_confidence)` gate used by the driver. |
+| `GuidanceRejected(MeshError)` | specific-rule rejection; state left untouched. |
+| `LowConfidenceError(MeshError)` | a front endpoint fell below the confidence threshold. |
+| `NEAR_ZERO` | `1e-9` degenerate-field threshold. |
+| `four_of(dx, dy) -> (c2, s2)` | fold an oriented unit direction into 4θ cover: `(c, s) = (cos 2θ, sin 2θ)` then `(c² − s², 2cs)`.  Pure function; returns `None` on near-zero input. |
+| `rot2(v, θ)` | rotate a 4θ-cover vector by θ; pure, no state. |
+| `reflect_x(v)` | mirror a 4θ-cover vector in x; pure. |
+| `field_from_directions(directions) -> dict[int, tuple[float,float]]` | per-node unit field vector from raw oriented direction pairs. |
+| `build_cross_field(state_or_view) -> CrossFieldReport` | walk all oriented node-directions (T3 + Q4 body edges with side-bit orientation) and fold through `four_of`, returning a `CrossFieldReport`. |
+| `score_body(view, body) -> tuple[float, float]` | signed area magnitude plus convexity (both must be strictly positive) for a candidate body; used to rank Q4 unions. |
+| `rank_bodies(view, bodies) -> list[tuple[int, float]]` | deterministic (best-first, id-tiebreak) ranking of body walks against the current field. |
+| `front_step_guided(state, edge, min_confidence, options=None)` | wrap the Q1 `front_step` with the per-endpoint confidence gate + deterministic body-scoring tie-break.  Typed `LowConfidenceError` on gate failure; `GuidanceRejected` on a candidate that fails convexity/area; lifts `FrontNoCandidate` unchanged. |
+
+### Modified — `src/anymesher/quad/state.py`
+
+- `View.node_ids` previously crashed in the `add_nodes` branch when the value
+  was an integer node-id keying the position map rather than a set; fixed by
+  using `set(d.add_nodes)` in the union.  The fix is a one-line, behaviour-
+  preserving change verified by the Q1 regression suite.
+
+### Modified — `src/anymesher/quad/__init__.py`
+
+- Imported the Q3a symbols into the package `__init__` (`CrossFieldReport`,
+  `GuidanceRejected`, `LowConfidenceError`, `NEAR_ZERO`, `build_cross_field`,
+  `field_from_directions`, `four_of`, `front_step_guided`, `rank_bodies`,
+  `reflect_x`, `rot2`, `score_body`) and added them to `__all__`.  Docstring
+  extended to reference the Q3a guidance layer.
+
+### New — `tests/quad_first/test_q3_guidance.py` (47 tests)
+
+1.  **`four_of` identity.**  Unit inputs only; `four_of(cosθ, sinθ)` lies on
+    the unit circle; fourfold symmetry: `four_of(θ + kπ/2) == four_of(θ)` for
+    `k in {0,1,2,3}`; `rot2(v, π/2) == rot2(v, -π/2)` (4θ cover); `reflect_x`
+    flips the imaginary part; near-zero and garbage inputs raise
+    `GuidanceRejected`.
+2.  **`field_from_directions`.**  A single consistent direction produces a
+    confidence of 1.0 at the node and the correct unit field; a symmetric
+    pair `(d, −d)` produces a zero-magnitude field → confidence 0.0.
+3.  **`build_cross_field` on Q1 fixtures.**  On the two-triangle hole-plate
+    fixture, every node's field is the fold of the average of its incident
+    oriented-directions; confidence agrees hand-computed for the two nodes
+    with a single direction each.
+4.  **Tie-break determinism.**  Two candidate bodies with the same
+    `score_body` value are ranked by their body-node minimum then by
+    `min(body)` — asserted across a 3-element ranking.
+5.  **Confidence gate.**  `front_step_guided` raises `LowConfidenceError`
+    when any front endpoint's confidence is below `min_confidence`; below the
+    candidate loop (the gate fires before the partner scan).
+6.  **Guidance rejection.**  A candidate that classifies to a non-strictly-
+    convex union is rejected with `GuidanceRejected`, state digest unchanged.
+7.  **`FrontNoCandidate` lift.**  A front edge with no T3 partner propagates
+    `FrontNoCandidate` unchanged (same message shape as the Q1 driver).
+8.  **State identity on every failure path.**  Digest + generation invariant
+    for every typed-rejection test (`LowConfidenceError`,
+    `GuidanceRejected`, `FrontNoCandidate`).
+9.  **Rotation/reflection covariance.**  A fixture generated with a +π/4
+    rotation is scored identically to the original (4θ cover is
+    rotation-invariant); and `reflect_x` produces a field whose ranking is
+    mirror-symmetric.
+10. **End-to-end transition-heavy fixture.**  A 10-node mesh with a
+    front-edge pair of T3s; two successive `front_step_guided` calls commit
+    two Q4s and leave a clean remaining front; a `min_confidence` gate that
+    rejects a specific endpoint is raised with state identity before either
+    Q4 is published.
+
+### Evidence
+
+```
+pytest tests/quad_first/test_q3_guidance.py -v   -> 47 passed
+pytest tests/quad_first/                         -> 142 passed (Q0 29 + Q1 45 + Q2 21 + Q3a 47)
+```
+
+Focused regression (the pre-existing full-suite timeout on large
+cylindrical / owner-trim fixtures is bounded and unrelated; the Q0/Q1/Q2
+layering, packaging and backends suite is **26 passed, 2 skipped**, skipped
+are pre-existing environment gates).
+
+### Invariants held at Q3a (beyond Q0/Q1/Q2)
+
+- Opt-in only.  `front_step_guided` is a new symbol; the Q1 `front_step`
+  driver is byte-identical and remains the default path.
+- Pure-function guidance layer: `four_of`, `rot2`, `reflect_x`,
+  `field_from_directions`, `score_body`, `rank_bodies` are all state-free.
+  `build_cross_field` and `front_step_guided` read through the Q1
+  `QuadMeshState`/`View` surface only.
+- Confidence = `|un-normalised mean of 4θ reps|`, never the
+  hypot-normalised magnitude — verified by the Q3a tests to agree with the
+  hand-computed value at every fixture node.
+- No silent fallback.  A candidate that fails convexity raises
+  `GuidanceRejected`, not a `continue` through the partner loop.
+- Typed reason for every rejection path; the state's digest and generation
+  are invariant across every typed rejection (asserted per test).
+- Scratch files (`scratch_probe.py` … `scratch_q3b.py`) deleted before this
+  commit.
+
+### Not done at Q3a (deliberately deferred to Q3b)
+
+- Spacing-change / collision / closure transition templates and their
+  rotation/reflection covaried tests (`transitions.py`).
+- Local TinyAD optimisation on real Q4 patches (Q3/Q4).
+- libSatsuma / LEMON MCF count-system integration (Q4).
+- S3 qualification and component publication (Q6).
+- Any change to `NativeMeshingOptions`, `_native`, or the legacy call path.
+
+---
+
 ## Files changed (this branch, vs baseline `2ccef37`)
 
 Added:
@@ -288,12 +418,14 @@ Added:
 - `src/anymesher/quad/journal.py`          (Q1)
 - `src/anymesher/quad/front.py`            (Q1)
 - `src/anymesher/quad/recovery.py`         (Q2/M1)
+- `src/anymesher/quad/guidance.py`         (Q3a)
 - `docs/QUAD_FIRST_DESIGN.md`
 - `docs/QUAD_FIRST_REUSE.md`
 - `tests/quad_first/test_q0_freeze.py`
 - `tests/quad_first/test_q1_state.py`              (Q1)
 - `tests/quad_first/test_q1_front.py`              (Q1)
 - `tests/quad_first/test_q2_recovery.py`           (Q2/M1)
+- `tests/quad_first/test_q3_guidance.py`           (Q3a)
 - `reports/quad_first/full-programme/WORK_STATUS.md`
 
 Modified:
