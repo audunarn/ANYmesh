@@ -48,6 +48,15 @@ from .guidance import (
     score_body,
 )
 
+from .transitions import (
+    ParentReplacement,
+    TransitionRejected,
+    TransitionReport,
+    closure,
+    collision,
+    spacing_change,
+)
+
 __all__ = [
     "QUAD_MESHING_OPTIONS_SCHEMA",
     "QuadMeshingOptions",
@@ -82,4 +91,10 @@ __all__ = [
     "reflect_x",
     "rot2",
     "score_body",
+    "TransitionRejected",
+    "ParentReplacement",
+    "TransitionReport",
+    "spacing_change",
+    "collision",
+    "closure",
 ]

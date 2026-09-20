@@ -2,8 +2,8 @@
 
 **Branch:** `opencode/quad-first-v1`
 **Baseline:** `2ccef37`
-**Task ID:** `full-programme` (Q0 → Q2/M1)
-**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete in this commit**.
+**Task ID:** `full-programme` (Q0 → Q4)
+**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete in this commit**.
 **Updated:** 2026-09-20
 
 ## Objective (Q0, from `Q0_EXECUTION.md` 1-11)
@@ -395,6 +395,119 @@ are pre-existing environment gates).
 
 ---
 
+## Q3b — quad transitions: spacing_change / collision / closure (this commit)
+
+**Status:** **complete**.
+
+Q3b delivers the three fixed quad-transition templates required by
+`QUAD_FIRST_FULL_PROGRAMME.md` Q3.  Each is a deterministic, sparse-local,
+transactional re-tile of the resident mixed Q4/T3 state, committed through the
+Q1 `Transaction` journal.  No cell is ever pre-seeded; the front is reconciled
+after staging — the same contract as `front_step`.
+
+### New — `src/anymesher/quad/transitions.py`
+
+| symbol | role |
+| ---- | ---- |
+| `TransitionRejected(MeshError)` | typed rejection; state digest + generation invariant. |
+| `ParentReplacement` (frozen) | maps a parent cell to its replacing cell(s). |
+| `TransitionReport` (frozen) | `kind`, `parent_cells`, `result_cell`, `body`, `added_front`/`removed_front`, `replacements`, `generation_before`/`generation_after`. |
+| `spacing_change(state, cell, options=None) -> TransitionReport` | Flip the diagonal of an **interior** strictly-convex Q4 into two T3 children. Interior guard: no boundary edge on the active front. Front edges added/removed via `_reconcile_front`. |
+| `collision(state, cell_a, cell_b, options=None) -> TransitionReport` | Merge two adjacent T3s into one Q4. **Exactly two** active front edges on the union boundary, **non-adjacent** (opposite). |
+| `closure(state, cell_a, cell_b, options=None) -> TransitionReport` | Same mechanical merge as `collision`; distinguished by requiring **at least three** active front edges on the union boundary. |
+| `_consolidate` (private) | Shared merge path; `kind` selects the front-edge count guard (2 exact non-adjacent vs ≥3). |
+| `_reconcile_front` (private) | Staged-edge front reconciliation: added/removed front edges computed via `tx.view.edge_cells`; front adds/removes staged into the same transaction. |
+| `_boundary_quad` (private) | Walks the 4-edge boundary cycle (each node degree 2), canonicalises CCW via `make_quad`. |
+| `_shared_interior_edge` (private) | Exactly one shared edge, not on the front. |
+
+### Modified — `src/anymesher/quad/__init__.py`
+
+- Imported `ParentReplacement`, `TransitionRejected`, `TransitionReport`,
+  `closure`, `collision`, `spacing_change` and added them to `__all__`.
+- **Top-level `anymesher/__init__.py` is NOT re-touched by Q3b** — legacy
+  surface remains byte-identical.
+
+### New — `tests/quad_first/test_q3b_transitions.py` (25 tests)
+
+1.  **`spacing_change` acceptance.** A strictly-convex interior Q4 is split into
+    two T3 children; `result_cell` is `max(cells)+1`; `body` is the canonical
+    CCW quad; front edges on the split diagonal are added (interior Q4 → the
+    diagonal becomes front); generation advances by exactly one.
+2.  **`spacing_change` rejection paths.**  Front-edge boundary (non-interior Q4),
+    protected node, protected edge, stale cell id, non-integer id, degenerate
+    quad, wrong kind (T3 source), bad options — all leave digest + generation
+    invariant.
+3.  **`collision` acceptance.** Two adjacent T3s with exactly two non-adjacent
+    front edges merge into one Q4 on the other diagonal.  Front edges on the
+    diagonal are removed; the two opposite front edges survive (union boundary
+    unchanged).  `result_cell` is `max(cells)+1`.
+4.  **`collision` rejection paths.**  Adjacent front edges (share a node),
+    wrong front count (0, 1, 3), non-adjacent T3s (no shared interior edge),
+    front shared edge, protected node/edge, stale handle, cancellation, wrong
+    kind — all leave digest + generation invariant.
+5.  **`closure` acceptance.** Two adjacent T3s with ≥3 front edges merge into
+    one Q4.  The diagonal front edge is removed; the ≥2 remaining front edges
+    survive.
+6.  **`closure` rejection paths.**  Fewer than 3 front edges, non-adjacent T3s,
+    protected node/edge, stale handle, wrong kind — all leave digest +
+    generation invariant.
+7.  **Rotation covariance.** A fixture generated with a +π/4 rotation
+    produces identical report semantics (same `parent_cells`, `result_cell`
+    relative to its own state, same `body` node-set, same `added_front` /
+    `removed_front`) for both `spacing_change` and `collision`.
+8.  **Reflection + relabel covariance.** A reflected + permuted copy
+    (`_FLIP1` bijection `{0:1,1:0,2:3,3:2}`) produces identical report
+    semantics with bodies/front-edges permuted through the relabel.  Cell
+    bodies compared as node-sets (reflection may reverse the canonical CCW
+    walk order).
+9.  **Report invariants.**  Every accepted transition: `generation_after ==
+    generation_before + 1`; `parent_cells` match the consumed cells;
+    `result_cell == max(parent_cells)+1` or the next free id; `replacements`
+    map each parent to the result; `body` is the 4-node quad (or the 3-node
+    T3 pair for `spacing_change`).
+10. **Front reconciliation correctness.**  The `added_front`/`removed_front`
+    diffs are exactly the edges whose front status changed; no edge appears in
+    both; front is recomputed from `edge_cells` on the post-staging view.
+
+### Evidence
+
+```
+pytest tests/quad_first/test_q3b_transitions.py -v   -> 25 passed
+pytest tests/quad_first/                             -> 167 passed
+  (Q0 29 + Q1 45 + Q2 21 + Q3a 47 + Q3b 25)
+```
+
+### Invariants held at Q3b (beyond Q0/Q1/Q2/Q3a)
+
+- Opt-in only.  `spacing_change`, `collision`, and `closure` are new symbols;
+  the Q1 `front_step` driver and the top-level `anymesher` package surface are
+  byte-identical.
+- Deterministic.  Result cell id is `max(cells)+1`; no renumbering; front
+  reconcile order is sorted by `EdgeKey` (tuple of ints).
+- Sparse-local.  Only the touched edges (quad boundary or T3 pair union)
+  change front membership; all other edges, cells, and nodes are untouched.
+- Transactional.  All commits go through `state.transaction()`; a rejection
+  before `tx.commit()` or a `TransitionRejected` guard never advances the
+  digest or generation.
+- No silent fallback.  Typed `TransitionRejected` for every rejection path;
+  no `try/except` swallowing.
+- Anygeometry owns geometry.  `transitions.py` calls `front.area2` /
+  `front.make_quad` / `front.body_edges` for all geometric predicates (strict
+  convexity, CCW canonicalisation, signed area); no inline geometry.
+- Reflection + relabel covariance verified for `spacing_change` and
+  `collision`; rotation covariance verified for both.  Cell bodies compared
+  as node-sets to account for the canonical CCW walk reversal under
+  reflection.
+
+### Not done at Q3b (deliberately deferred to Q4)
+
+- Local TinyAD optimisation on real Q4 patches (Q4).
+- libSatsuma MCF count-system integration (Q4).
+- S3 qualification and component publication (Q6/Q7).
+- Any change to `NativeMeshingOptions`, `_native`, or the legacy call path.
+
+---
+
 ## Files changed (this branch, vs baseline `2ccef37`)
 
 Added:
@@ -419,6 +532,7 @@ Added:
 - `src/anymesher/quad/front.py`            (Q1)
 - `src/anymesher/quad/recovery.py`         (Q2/M1)
 - `src/anymesher/quad/guidance.py`         (Q3a)
+- `src/anymesher/quad/transitions.py`      (Q3b)
 - `docs/QUAD_FIRST_DESIGN.md`
 - `docs/QUAD_FIRST_REUSE.md`
 - `tests/quad_first/test_q0_freeze.py`
@@ -426,6 +540,7 @@ Added:
 - `tests/quad_first/test_q1_front.py`              (Q1)
 - `tests/quad_first/test_q2_recovery.py`           (Q2/M1)
 - `tests/quad_first/test_q3_guidance.py`           (Q3a)
+- `tests/quad_first/test_q3b_transitions.py`       (Q3b)
 - `reports/quad_first/full-programme/WORK_STATUS.md`
 
 Modified:
