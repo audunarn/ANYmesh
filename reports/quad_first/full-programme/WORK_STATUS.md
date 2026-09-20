@@ -1,10 +1,10 @@
-# Quad-first Q0 work status
+# Quad-first work status
 
 **Branch:** `opencode/quad-first-v1`
 **Baseline:** `2ccef37`
-**Task ID:** `full-programme` (Q0 scope)
-**Status:** Q0 freeze **complete**. Q1+ not yet started.
-**Updated:** 2026-09-19
+**Task ID:** `full-programme` (Q0 → Q2/M1)
+**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete in this commit**.
+**Updated:** 2026-09-20
 
 ## Objective (Q0, from `Q0_EXECUTION.md` 1-11)
 
@@ -150,6 +150,121 @@ Per `Q0_EXECUTION.md` and the T1 brief:
   existing file outside the additions listed in "Work in this branch".
 - The `NativeMeshingOptions` class and `_native` extension are **unchanged**.
 
+## Q1 — resident mixed T3/Q4 state, transaction, `front_step` (commit `b410719`)
+
+**Status:** **complete**.
+
+### New — `src/anymesher/quad/`
+
+| path | role |
+| ---- | ---- |
+| `state.py` | `QuadMeshState`: resident mixed Q4/T3 topology keyed by exact shared node IDs; `EdgeKey` (cyclic-normalized, equal-node-rejecting) identity; protected-edge/node sets; `Delta` sparse staged patch, `View` read-model that resolves staged additions/removals before commit, generation counter, SHA-256 `digest()` for exact-identity assertions. |
+| `journal.py` | `Transaction`: atomic commit/rollback over `state.transaction()`; staged `add_node`/`remove_cell`/`add_cell`/`add_front_edge`/`remove_front_edge`; `view` read-model with late-staging freshness; use-after-conclude guard; cancellation gate at the staged checkpoint; failed-commit preserves digest + generation. |
+| `front.py` | Advancing-front driver: `edge_key`, `body_edges`, `area2`, `make_quad` (convex CCW, degenerate/repeated-node reject), `local_swap`, `find_source_cell` (unique-T3), `candidate_partners` (deterministic), `classify`, `front_step` — converts one front T3 pair into a Q4, updates the front, commits in a transaction, and **reverses on rejection** (digest identity guaranteed). |
+
+### New — `tests/quad_first/`
+
+| path | coverage |
+| ---- | -------- |
+| `test_q1_state.py` | 23 tests: exact node-edge adjacency, View-after-staging freshness, discard-only rollback with exact digest identity, generation/stale guards, cancellation, protect/release, duplicate-body reject, stale-cell-reject, local-patch-not-rebuild. |
+| `test_q1_front.py` | 22 tests: `edge_key`/`body_edges`/`area2`/`make_quad` convex+degenerate+repeat + `local_swap`; `find_source_cell`/`candidate_partners` determinism; `front_step` A (stage+commit+front-update), B (no partner), C (non-T3 source), D (non-convex union → reject), protected edge/node block, non-front reject, bad-options reject, **reverses-on-rejection digest identity**. |
+
+**Evidence:** `pytest tests/quad_first/` → **95 passed** (29 Q0 + 23 state + 22 front + 21 Q2 below).
+Top-level `anymesher` package untouched in Q1 (legacy path byte-identical).
+
+---
+
+## Q2/M1 — bounded deterministic front-edge Steiner-split recovery (this commit)
+
+**Status:** **complete (M1)**.
+
+Q1 pure pairing yields **0 Q4** on the dart (D) fixture: the two T3s share the
+interior diagonal `(0,2)` and their union is concave, so no convex quad exists.
+Q2 adds the production recovery: a bounded, deterministic **front-edge Steiner
+split** (1 T3 → 2 T3s at a single new node) that *enables* a Q4 which the real
+`front_step` then creates from a T3-only post-recovery state.
+
+### New — `src/anymesher/quad/recovery.py`
+
+| symbol | role |
+| ---- | ---- |
+| `RecoveryRejected(MeshError)` | specific-rule rejection (non-front/protected/degenerate/infeasible). State unchanged. |
+| `RecoveryExhausted(MeshError)` | all ratios tried, no admissible plan. State unchanged. |
+| `Attempt` (frozen) | per-ratio probe record: `ratio`, `midpoint_id`, `enabled_edge`, `ok`, `detail`. |
+| `SplitReport` (frozen) | `front_edge`, `ratio`, `midpoint_id`, `source_cell`, `child_cells`. |
+| `AdvanceReport` (frozen) | `front_edge`, `ratio`, `midpoint_id`, `child_cells`, `quad_cell_id`, `quad_body`, `enabling_edge`, `attempts`. |
+| `edge_split_recover(state, edge, ratio=0.5, options=None) -> SplitReport` | standalone: validate, stage 1 T3 → 2 T3s at a Steiner node, commit atomically. |
+| `recover_then_front_step(state, edge, ratios=(0.5,0.4,0.6,0.3,0.7), options=None) -> AdvanceReport` | orchestration: in a transaction, stage the split, probe (via `tx.view`) the enabling child edge where `classify` succeeds, commit inside the with-block, then run the **real** `front_step` on that enabling edge. Failed probe → context-manager exit discards; continue to next ratio. No Q4 is ever pre-seeded. |
+| `DEFAULT_RECOVERY_RATIOS` | `(0.5, 0.4, 0.6, 0.3, 0.7)`. |
+
+Geometry note (proven): dart edge `(0,1)`, `r=0.5` → m=(1,0), and
+`orient2d(m,2,3)=0` → **degenerate → rejected**. First canonical ratio that
+succeeds is **`0.4`** (m=(0.8,0), all four `orient2d > 0`); `0.6`/`0.7` are
+rejected (mixed-sign turns). So the default order lands on `0.4` after the
+single deterministic `0.5` probe.
+
+### Modified — `src/anymesher/quad/__init__.py`
+
+- Added recovery exports to imports and `__all__` (`RecoveryRejected`,
+  `RecoveryExhausted`, `Attempt`, `SplitReport`, `AdvanceReport`,
+  `DEFAULT_RECOVERY_RATIOS`, `edge_split_recover`, `recover_then_front_step`).
+- **Top-level `anymesher/__init__.py` is NOT re-touched by Q2** — legacy
+  top-level surface remains byte-identical to Q1 (recovery symbols are
+  subpackage-only; asserted in `test_legacy_isolation`).
+
+### New — `tests/quad_first/test_q2_recovery.py`
+
+21 tests covering the admin-mandated battery: two-T3 children + front
+re-wiring + generation/digest advance; ratio determinism; non-front /
+protected-edge / protected-node / bad-ratio / unknown-edge / bad-options
+rejection with **state digest identity**; dart `0.5`-reject → `0.4`-accept with
+recorded attempts; explicit `0.4`-only success; `0.5`-only exhaustion with
+digest identity; **no hidden Q4** (exactly one Q4, created by `front_step` from
+the T3-only post-split state); no-T3-partner exhaustion; deterministic ratio
+ordering; custom-order; empty-ratio exhaustion; cancellation; split-rejection and
+exhaustion state-unchanged (generation unchanged); legacy top-level isolation;
+hole-plate pure-pairing (Q4 without recovery).
+
+### Evidence
+
+```
+pytest tests/quad_first/test_q2_recovery.py -v   -> 21 passed
+pytest tests/quad_first/                         -> 95 passed (Q0 29 + Q1 45 + Q2 21)
+```
+
+Targeted regression set (layering / packaging / backends / serialization)
+**26 passed, 2 skipped** (skips are pre-existing environment gates). The full
+package suite exceeds the bounded local window and is treated as non-critical:
+Q2's only shared-surface change is an additive `quad/__init__.py` export, and
+`anymesher/__init__.py` is byte-identical to Q1, so the legacy path cannot
+regress from Q2.
+
+### Invariants held at Q2/M1 (beyond Q0/Q1)
+
+- Opt-in only: recovery is a named API; `front_step` and the legacy path are
+  untouched.
+- ANYgeometry owns geometry; recovery performs exact shared-node-ID topology
+  only (no coordinate welding, no solver).
+- Deterministic: ratios in list order; child edge `(a,m)` probed before `(m,b)`;
+  `candidate_partners` iterates sorted body-edges.
+- Typed failure + rollback: `RecoveryRejected`/`RecoveryExhausted` both leave
+  the state digest **and** generation unchanged; failed probe is discarded at
+  context-manager exit.
+- No hidden fallback: the Q4 is always created by the real `front_step` from the
+  committed T3-only post-split state; the probe only *selects* the enabling edge.
+- Scratch files (`_scratch_recovery.py`, `_scratch_search.py`, `_verify_dart.py`)
+  deleted before this commit.
+
+### Not done at Q2/M1 (deliberately deferred to Q3+)
+
+- Cross-field / anisotropy guidance and low-confidence diagnostics (Q3).
+- Local TinyAD optimisation on real Q4 patches (Q3/Q4).
+- libSatsuma/LEMON MCF count-system integration (Q4).
+- S3 qualification and component publication (Q6).
+- Any change to `NativeMeshingOptions`, `_native`, or the legacy call path.
+
+---
+
 ## Files changed (this branch, vs baseline `2ccef37`)
 
 Added:
@@ -169,14 +284,22 @@ Added:
 - `third_party/quad/smoke/build_lemon.bat`
 - `src/anymesher/quad/__init__.py`
 - `src/anymesher/quad/options.py`
+- `src/anymesher/quad/state.py`            (Q1)
+- `src/anymesher/quad/journal.py`          (Q1)
+- `src/anymesher/quad/front.py`            (Q1)
+- `src/anymesher/quad/recovery.py`         (Q2/M1)
 - `docs/QUAD_FIRST_DESIGN.md`
 - `docs/QUAD_FIRST_REUSE.md`
 - `tests/quad_first/test_q0_freeze.py`
+- `tests/quad_first/test_q1_state.py`              (Q1)
+- `tests/quad_first/test_q1_front.py`              (Q1)
+- `tests/quad_first/test_q2_recovery.py`           (Q2/M1)
 - `reports/quad_first/full-programme/WORK_STATUS.md`
 
 Modified:
 
-- `src/anymesher/__init__.py` (two additions: import + `__all__`)
+- `src/anymesher/__init__.py` (two additions: import + `__all__`; unchanged in Q1/Q2)
 - `.gitignore` (two additions: `!reports/quad_first/` + `/**`)
 
-Unchanged:  everything else.
+Unchanged:  everything else (notably `anymesher/__init__.py`, `native_v2.py`,
+`_native`, `errors.py`, and the legacy call path).
