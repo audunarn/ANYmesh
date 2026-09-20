@@ -17,3 +17,7 @@ reports/*
 third_party/quad/smoke/out/
 third_party/quad/smoke/*.obj
 third_party/quad/smoke/*.exe
+# Q4 min-cost-flow worker build outputs
+third_party/quad/worker/out/
+third_party/quad/worker/*.obj
+third_party/quad/worker/*.exe

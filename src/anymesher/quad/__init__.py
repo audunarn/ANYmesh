@@ -57,6 +57,35 @@ from .transitions import (
     spacing_change,
 )
 
+# Q4: representable count-system model + integer MCF reduction + worker adapter
+from .count_model import CountInstance, CountRejected
+from .count_mcf import (
+    INT64_MAX,
+    MCFRequest,
+    MCFResponse,
+    MCFEncoding,
+    CountInfeasible,
+    InvalidSolution,
+    MCF_REQUEST_SCHEMA,
+    MCF_RESPONSE_SCHEMA,
+    NotSolvedUnexpected,
+    SolveReport,
+    build_request,
+    decode_response,
+    tie_value,
+    validate_response,
+)
+from .quad_mcf_worker import (
+    WorkerCrash,
+    WorkerLifecycle,
+    WorkerMalformed,
+    WorkerNotFound,
+    WorkerTimeout,
+    find_worker,
+    run_worker,
+    solve_count_instance,
+)
+
 __all__ = [
     "QUAD_MESHING_OPTIONS_SCHEMA",
     "QuadMeshingOptions",
@@ -97,4 +126,29 @@ __all__ = [
     "spacing_change",
     "collision",
     "closure",
+    # Q4
+    "CountInstance",
+    "CountRejected",
+    "INT64_MAX",
+    "MCFRequest",
+    "MCFResponse",
+    "MCFEncoding",
+    "CountInfeasible",
+    "InvalidSolution",
+    "MCF_REQUEST_SCHEMA",
+    "MCF_RESPONSE_SCHEMA",
+    "NotSolvedUnexpected",
+    "SolveReport",
+    "build_request",
+    "decode_response",
+    "tie_value",
+    "validate_response",
+    "WorkerCrash",
+    "WorkerLifecycle",
+    "WorkerMalformed",
+    "WorkerNotFound",
+    "WorkerTimeout",
+    "find_worker",
+    "run_worker",
+    "solve_count_instance",
 ]

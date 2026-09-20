@@ -3,7 +3,7 @@
 **Branch:** `opencode/quad-first-v1`
 **Baseline:** `2ccef37`
 **Task ID:** `full-programme` (Q0 → Q4)
-**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete in this commit**.
+**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete**. Q4 (count-system + LEMON MCF worker adapter) **complete in this commit**.
 **Updated:** 2026-09-20
 
 ## Objective (Q0, from `Q0_EXECUTION.md` 1-11)
@@ -508,6 +508,129 @@ pytest tests/quad_first/                             -> 167 passed
 
 ---
 
+## Q4 — representable count-system + integer MCF worker adapter (this commit)
+
+**Status:** **complete**.
+
+Q4 delivers the count-system + minimum-cost-flow reduction and the
+worker-adapter boundary described in `QUAD_FIRST_FULL_PROGRAMME.md`.
+The solver is the vendored **LEMON `NetworkSimplex`** C++ worker
+(`third_party/quad/worker/quad_mcf_worker.cc`), invoked over stdin/stdout
+JSON.  No Gurobi, no Blossom, no LP, no Java, no new solver dependency.
+
+### New — `src/anymesher/quad/count_model.py`
+
+| symbol | role |
+| ---- | ---- |
+| `CountRejected(MeshError)` | typed domain rejection (strict input, representability, imbalance). |
+| `CountInstance` (frozen dataclass) | `supplies`, `demands`, `cost` (tuple-of-tuples), `blocked` (frozen set of `(i, j)`). `from_arrays` validates **every** value as `numbers.Integral` *before* any `int()` coercion — booleans, floats (even integral-valued), numeric strings, and any other convertible-but-not-`Integral` value raise `CountRejected` with the offending position in the message. `validate()` enforces the non-isolation representability predicate required by the worker. |
+
+### New — `src/anymesher/quad/count_mcf.py`
+
+| symbol | role |
+| ---- | ---- |
+| `INT64_MAX` | `(1 << 63) - 1`. Shared int64 bound with the C++ worker. |
+| `MCFEncoding` (frozen dataclass) | `S` (total supply), `B = S+1`, `m` (active arc count), `primary_scale = B**m`, `tie_weights` (descending `B**(m-1-k)`). Returned by `build_request` so `validate_response` can cross-check the worker's self-reported `total_cost` against its own returned flows. |
+| `tie_value(encoding, flows) -> int` | `Σ flows[k] * tie_weights[k]` — the base-`B` digit sum that makes the tie-break total a unique base-`B` number, so the lex-min flow is the unique perturbed-cost optimum. |
+| `build_request(instance) -> (MCFRequest, MCFEncoding)` | Builds the row-major active-arc request. Each arc cost is `primary * B**m + B**(m-1-k)`. Rejects with `CountRejected` if (a) any perturbed arc cost exceeds `INT64_MAX`, or (b) `S * max_perturbed` exceeds `INT64_MAX`. |
+| `validate_response(instance, response, *, encoding=None) -> SolveReport` | Conservation check, arc-bound check, blocked-arc-zeroflow check. When `encoding` is passed, cross-checks `response.total_cost == encoding.primary_scale * primary + tie_value(encoding, responses.flows)`. `SolveReport.total_cost` is always the **primary** cost, never the perturbed worker total. |
+| `MCFRequest` / `MCFResponse` / `decode_response` | Frozen JSON schema (schema-tag enforced) and strict `from_dict` (rejects booleans, floats, non-integer flows). |
+
+### New — `src/anymesher/quad/quad_mcf_worker.py`
+
+| symbol | role |
+| ---- | ---- |
+| `WorkerLifecycle(MeshError)` / `WorkerNotFound` / `WorkerCrash` / `WorkerTimeout` / `WorkerMalformed` | Typed process-level failures, distinct from domain errors. |
+| `find_worker()` / `default_worker_path()` | Locate `third_party/quad/worker/out/lemon/quad_mcf_worker.exe`. `WorkerNotFound` if absent. |
+| `run_worker(worker, request, *, timeout, self_test=None) -> MCFResponse` | Spawns the worker with the request as the sole stdin line (JSON). `self_test="crash"` / `"hang"` drive the self-test harness path in the C++ worker for lifecycle testing. |
+| `solve_count_instance(instance, worker=None) -> SolveReport` | Composition: `build_request` → `run_worker` → `validate_response`. |
+
+### New — `third_party/quad/worker/`
+
+| path | role |
+| ---- | ---- |
+| `quad_mcf_worker.cc` | LEMON `NetworkSimplex` worker. `long long` throughout. Self-test harness (`--self-test crash` / `hang`) for lifecycle verification. Build output: `out/lemon/quad_mcf_worker.exe` (75 776 bytes, MSVC C++17, `-DEIGEN_MPL2_ONLY`). |
+| `build_quad_mcf_worker.bat` | `cl` build script, no external dependencies beyond the vendored `../vendor/lemon` tree. |
+
+### Modified — `src/anymesher/quad/__init__.py`
+
+- Imported `INT64_MAX`, `MCFEncoding`, `tie_value` and added them to
+  `__all__` alongside the existing Q4 symbols.
+- **Top-level `anymesher/__init__.py` is NOT touched by Q4** — legacy
+  surface remains byte-identical.
+
+### Modified — `.gitignore`
+
+- Added `third_party/quad/worker/out/`, `third_party/quad/worker/*.obj`,
+  and `third_party/quad/worker/*.exe` so build artifacts are not committed.
+
+### New — `tests/quad_first/test_q4_mcf.py` (38 tests)
+
+8 evidence items, per `QUAD_FIRST_FULL_PROGRAMME.md`:
+
+1. **Brute-force oracle** — six small instances are solved through the real
+   C++ worker and compared against exhaustive enumeration of every feasible
+   integer flow (minimum primary cost *and* lexicographically smallest
+   optimum), proving the adapter is correct, not just self-consistent.
+2. **Strict tie case** — `supplies=[2,1], demands=[1,2], all costs=3`:
+   two equal-primary optima; the legacy `T(i,j)=i*n_out+j` tie encoding
+   left both at perturbed 94 (inert); the base-`B` encoding (B=4, m=4)
+   separates them at 36 vs. 81 → unique optimum `(0,2,1,0)`. Verified
+   through the worker across two runs (determinism).
+3. **Overflow guard** — `S=10**11` (S\*max_pert > INT64_MAX) and
+   `cost=10**19` (arc cost > INT64_MAX) both raise `CountRejected`;
+   the legitimate `S=10, cost<=100, m=4` case builds without rejection.
+4. **Strict input rejection** — floats (including integral-valued), numeric
+   strings, booleans, and negative ints are all rejected before coercion;
+   `np.int64`/`np.int32` are accepted per the project `Integral` convention.
+5. **Hall-type infeasibility** — `supplies=[1,1,1], demands=[1,2],
+   blocked={(1,1),(2,1)}`: passes representability, worker reports
+   INFEASIBLE, adapter raises `CountInfeasible`.
+6. **Corruption rejection** — conservation violation, negative flow,
+   non-integer flow, wrong arc count, desynced `total_cost`, and
+   wrong-status responses are all rejected; a consistent response yields
+   the **primary** cost (3), not the perturbed worker total (271).
+7. **Worker lifecycle** — `WorkerNotFound` (missing path),
+   `WorkerMalformed` (non-object JSON), `WorkerCrash` (self-test crash),
+   `WorkerTimeout` (self-test hang, `deadline_seconds==1.5`);
+   `WorkerLifecycle` is NOT a `CountRejected` (domain vs. process
+   separation).
+8. **Two E2E applications** — (a) N=4 equal-rail corridor: identity
+   matching, cost 0, each station maps to its mirror; (b) N=2, M=3
+   asymmetric blocked corridor: unique flow `(0,1),(1,0),(1,2)`,
+   cost 7, `flows_by_index` agrees.
+
+### Evidence
+
+```
+pytest tests/quad_first/test_q4_mcf.py -v   -> 38 passed
+pytest tests/quad_first/                    -> 205 passed
+  (Q0 29 + Q1 45 + Q2 21 + Q3a 47 + Q3b 25 + Q4 38)
+```
+
+### Invariants held at Q4 (beyond Q0-Q3b)
+
+- No new solver dependency. The backend is the exact vendored LEMON
+  `NetworkSimplex`; the worker `.cc` is compiled with `-DEIGEN_MPL2_ONLY`.
+- int64 boundary enforced in Python before the worker is ever spawned;
+  two independent checks (per-arc cost, worst-case total).
+- Reporting always uses the primary cost; the perturbed cost is an internal
+  encoding detail, never a public API value.
+- `SolveReport` is a frozen dataclass; `ValidateError` is a `MeshError`
+  subclass, consistent with the Q0-Q3b typed-error convention.
+- Worker lifecycle errors (`Worker*`) are a separate family from domain
+  errors (`CountRejected`, `CountInfeasible`, `InvalidSolution`).
+- `anymesher/__init__.py` unchanged; legacy path byte-identical.
+- `third_party/quad/worker/out/` and build artifacts are git-ignored.
+
+### Not done at Q4 (deliberately deferred)
+
+- Local TinyAD optimisation on real Q4 patches (Q5).
+- S3 qualification and component publication (Q6/Q7).
+- Any change to `NativeMeshingOptions`, `_native`, or the legacy call path.
+
+---
+
 ## Files changed (this branch, vs baseline `2ccef37`)
 
 Added:
@@ -533,6 +656,11 @@ Added:
 - `src/anymesher/quad/recovery.py`         (Q2/M1)
 - `src/anymesher/quad/guidance.py`         (Q3a)
 - `src/anymesher/quad/transitions.py`      (Q3b)
+- `src/anymesher/quad/count_model.py`      (Q4)
+- `src/anymesher/quad/count_mcf.py`        (Q4)
+- `src/anymesher/quad/quad_mcf_worker.py`  (Q4)
+- `third_party/quad/worker/quad_mcf_worker.cc`  (Q4)
+- `third_party/quad/worker/build_quad_mcf_worker.bat`  (Q4)
 - `docs/QUAD_FIRST_DESIGN.md`
 - `docs/QUAD_FIRST_REUSE.md`
 - `tests/quad_first/test_q0_freeze.py`
@@ -541,6 +669,7 @@ Added:
 - `tests/quad_first/test_q2_recovery.py`           (Q2/M1)
 - `tests/quad_first/test_q3_guidance.py`           (Q3a)
 - `tests/quad_first/test_q3b_transitions.py`       (Q3b)
+- `tests/quad_first/test_q4_mcf.py`                (Q4)
 - `reports/quad_first/full-programme/WORK_STATUS.md`
 
 Modified:
