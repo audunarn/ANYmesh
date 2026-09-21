@@ -176,6 +176,30 @@ def test_cancellation_preserves_digest_generation_and_allocator_ids():
     assert state.next_cell_id == cell0
 
 
+def test_move_only_commit_does_not_bulk_iterate_front_or_protected_sets():
+    class NoBulkSet(set):
+        def __iter__(self):
+            raise AssertionError("bulk set iteration is forbidden")
+        def __sub__(self, other):
+            raise AssertionError("bulk set-subtraction is forbidden")
+        def __or__(self, other):
+            raise AssertionError("bulk set-union is forbidden")
+        def copy(self):
+            raise AssertionError("bulk set copy is forbidden")
+
+    state = _square_pair()
+    state._front = NoBulkSet(state._front)
+    state._front_bits = NoBulkSet(state._front_bits)
+    state._prot_nodes = NoBulkSet(state._prot_nodes)
+    state._prot_edges = NoBulkSet(state._prot_edges)
+    generation = state.generation
+    tx = state.transaction()
+    tx.move_node(3, (1.05, 0.95))
+    tx.commit()
+    assert state.position(3) == (1.05, 0.95)
+    assert state.generation == generation + 1
+
+
 def test_coordinate_only_move_commit_does_not_iterate_whole_node_map():
     class NoIterDict(dict):
         def __iter__(self):

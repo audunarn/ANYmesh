@@ -362,15 +362,15 @@ def test_collision_accept_exactly_two_front():
     # canonical CCW quad of the (0,1)-(1,2)-(2,3)-(3,0) boundary cycle
     assert st.cell_kind(2) == "Q4"
     assert set(st.cells[2]) == {0, 1, 2, 3}
-    # front-edge reconciliation on the touched union-boundary edges:
-    # all four edges become single-incident after the merge, so all are front
-    assert st.front == frozenset({(0, 1), (0, 3), (1, 2), (2, 3)})
+    # no residual T3 remains after the merge; the Q4-only boundary is not
+    # active front, so the front is fully consumed
+    assert st.front == frozenset()
     assert rep.kind == "collision"
     assert rep.parent_cells == (0, 1)
     assert rep.result_cell == 2
     assert set(rep.body) == {0, 1, 2, 3}
-    assert sorted(rep.added_front) == [(0, 3), (1, 2)]
-    assert rep.removed_front == ()
+    assert rep.added_front == ()
+    assert sorted(rep.removed_front) == [(0, 1), (2, 3)]
     assert sorted(r.parent_cell for r in rep.replacements) == [0, 1]
     assert all(r.result_cell == 2 for r in rep.replacements)
 
@@ -410,15 +410,15 @@ def test_closure_accept_three_front():
     assert st.generation == g0 + 1
     assert st.cell_kind(2) == "Q4"
     assert set(st.cells[2]) == {0, 1, 2, 3}
-    # (0,3) becomes single-incident on the merged boundary and enters
-    # the front; the three base front edges remain single-incident too.
-    assert st.front == frozenset({(0, 1), (0, 3), (1, 2), (2, 3)})
+    # no residual T3 remains after the merge; the Q4-only boundary is not
+    # active front, so the front is fully consumed
+    assert st.front == frozenset()
     assert rep.kind == "closure"
     assert rep.parent_cells == (0, 1)
     assert rep.result_cell == 2
     assert set(rep.body) == {0, 1, 2, 3}
-    assert sorted(rep.added_front) == [(0, 3)]
-    assert rep.removed_front == ()
+    assert rep.added_front == ()
+    assert sorted(rep.removed_front) == [(0, 1), (1, 2), (2, 3)]
     assert sorted(r.parent_cell for r in rep.replacements) == [0, 1]
 
 

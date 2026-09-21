@@ -45,6 +45,47 @@ git diff --check
 
 No production code changed in PQ0. No push, merge, release, publication, or default-route promotion occurred.
 
+## PQ1 — residual front semantics + allocator/locality gates
+
+**Status: COMPLETE.**
+
+- Q4/T3 interface edges are active front; the source is the unique residual T3;
+  a Q4 on the accepted side is permitted and ignored.
+- Q3b transitions reconcile the front by residual-T3 incidence
+  (_is_residual_front) instead of total single-incident count: a Q4-only
+  boundary is not active front, so collision/closure consume the front fully
+  and stage no residual additions.
+- _apply_delta validates front/bits/protected only on locally changed/touched
+  keys and applies them as in-place set patches (difference_update / update),
+  with no full iteration or copy of resident front/protected sets.
+- Transaction-owned node/cell allocators: ids allocated in the delta are
+  reused (never consumed) on rollback and advance exactly once on commit;
+  stale transactions cannot publish after another commit; cancellation and
+  move-only commits preserve digest/generation without whole-map or
+  front/protected-set iteration (locality gate tests).
+
+### PQ1 evidence
+
+```text
+python -m pytest tests/quad_first_planar/test_pq1_front_semantics.py \
+             tests/quad_first/test_q3b_transitions.py -q
+  -> 35 passed in 0.27 s
+python -m pytest tests/quad_first/test_q1_state.py \
+             tests/quad_first/test_q1_front.py \
+             tests/quad_first/test_q2_recovery.py \
+             tests/quad_first/test_q3b_transitions.py \
+             tests/quad_first/test_q3_guidance.py -q
+  -> 138 passed in 0.27 s
+python -m pytest tests/quad_first -q
+  -> 272 passed in 6.07 s
+python -m pytest tests/quad_first_planar -q
+  -> 11 passed in 0.23 s
+git diff --check
+  -> clean
+```
+
+No push, merge, release, publication, or default-route promotion occurred.
+
 ## Next
 
-PQ1: correct residual-region front semantics, protected-node participation, deterministic allocation/local transactions, rollback/stale/cancellation/locality behavior, then commit a coherent PQ1 slice.
+PQ2: target-size-driven one-face planar meshing on the Q4/T3 advancing front.

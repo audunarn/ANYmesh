@@ -532,21 +532,23 @@ def front_step_guided(
     best_body = rank_bodies(state, report, [body for _, body in candidates])[0][1]
     best_partner = next(partner for partner, body in candidates if body == best_body)
 
-    new_id = max(state.cells, default=-1) + 1
-    s_body = tuple(int(x) for x in state.cell(source))
-    p_body = tuple(int(x) for x in state.cell(best_partner))
+    _s_body = tuple(int(x) for x in state.cell(source))
+    _p_body = tuple(int(x) for x in state.cell(best_partner))
     touched = (
-        set(body_edges(s_body)) | set(body_edges(p_body)) | set(body_edges(best_body))
+        set(body_edges(_s_body)) | set(body_edges(_p_body)) | set(body_edges(best_body))
     )
 
+    new_id = -1
     with state.transaction() as tx:
         tx.remove_cell(source)
         tx.remove_cell(best_partner)
-        tx.add_cell(new_id, best_body, "Q4")
+        new_id = tx.allocate_cell(best_body, "Q4")
 
         for k in sorted(touched):
-            now = tx.view.edge_cells(k)
-            is_front_now = len(now) == 1
+            is_front_now = sum(
+                1 for cid in tx.view.edge_cells(k)
+                if tx.view.cell_kind(cid) == "T3"
+            ) == 1
             was_front = state.is_front_edge(k)
             if is_front_now and not was_front:
                 tx.add_front_edge(k[0], k[1])

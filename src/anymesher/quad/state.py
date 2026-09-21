@@ -562,23 +562,49 @@ class QuadMeshState:
                 )
             added_norms[norm] = cid
 
-        # Front / bits / protected: final residency via touched incidence.
-        for k in sorted((self._front - delta.remove_front) | delta.add_front):
-            if not final_resident(k):
+        # Front / bits / protected: validate only locally changed/touched keys.
+        def final_front(k: EdgeKey) -> bool:
+            if k in delta.add_front:
+                return True
+            if k in delta.remove_front:
+                return False
+            return k in self._front
+
+        def final_bit(k: EdgeKey, n: int) -> bool:
+            pair = (k, n)
+            if pair in delta.add_bits:
+                return True
+            if pair in delta.remove_bits:
+                return False
+            return pair in self._front_bits
+
+        front_check_edges = set(touched) | delta.add_front | delta.remove_front
+        front_check_edges |= {k for k, _n in delta.add_bits}
+        front_check_edges |= {k for k, _n in delta.remove_bits}
+        for k in sorted(front_check_edges):
+            is_front = final_front(k)
+            if is_front and not final_resident(k):
                 raise MeshError(f"front edge {k} is not resident in the candidate")
-        final_bits = (self._front_bits - delta.remove_bits) | delta.add_bits
-        for k, n in sorted(final_bits):
-            if k not in ((self._front - delta.remove_front) | delta.add_front):
-                raise MeshError(f"bit edge {k} is not a front edge")
+            for n in k:
+                if final_bit(k, n) and not is_front:
+                    raise MeshError(f"bit edge {k} is not a front edge")
+        for k, n in sorted(delta.add_bits):
             if n not in k:
                 raise MeshError(f"bit endpoint {n} is not on edge {k}")
-        final_prot_nodes = (self._prot_nodes - delta.remove_prot_nodes) | delta.add_prot_nodes
-        for n in sorted(final_prot_nodes):
+            if not final_front(k):
+                raise MeshError(f"bit edge {k} is not a front edge")
+
+        for n in sorted(delta.add_prot_nodes):
             if not final_node_live(n):
                 raise MeshError(f"protected node {n} is not live")
-        final_prot_edges = (self._prot_edges - delta.remove_prot_edges) | delta.add_prot_edges
-        for k in sorted(final_prot_edges):
-            if not final_resident(k):
+        for n in sorted(delta.remove_nodes):
+            if n in self._prot_nodes and n not in delta.remove_prot_nodes:
+                raise MeshError(f"protected node {n} cannot be removed")
+        protected_check_edges = set(touched) | delta.add_prot_edges
+        for k in sorted(protected_check_edges):
+            if k in delta.remove_prot_edges:
+                continue
+            if (k in delta.add_prot_edges or k in self._prot_edges) and not final_resident(k):
                 raise MeshError(f"protected edge {k} is not resident")
 
         self.checkpoint()  # cancellation gate before any mutation
@@ -624,10 +650,14 @@ class QuadMeshState:
                 cid, "Q4" if len(body) == 4 else "T3"
             )
 
-        self._front = (self._front - delta.remove_front) | delta.add_front
-        self._front_bits = final_bits
-        self._prot_nodes = final_prot_nodes
-        self._prot_edges = final_prot_edges
+        self._front.difference_update(delta.remove_front)
+        self._front.update(delta.add_front)
+        self._front_bits.difference_update(delta.remove_bits)
+        self._front_bits.update(delta.add_bits)
+        self._prot_nodes.difference_update(delta.remove_prot_nodes)
+        self._prot_nodes.update(delta.add_prot_nodes)
+        self._prot_edges.difference_update(delta.remove_prot_edges)
+        self._prot_edges.update(delta.add_prot_edges)
         if delta.add_nodes:
             self._next_node_id = max(self._next_node_id, max(delta.add_nodes) + 1)
         if delta.add_cells:

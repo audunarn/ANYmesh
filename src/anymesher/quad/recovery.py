@@ -21,8 +21,11 @@ This module provides that recovery as a **bounded, deterministic** operation:
 
 Geometry is owned by ANYgeometry; this module only classifies via the existing
 :mod:`~anymesher.quad.front` primitives and node positions.  Node identity is an
-exact integer id (no coordinate welding); the Steiner node id is ``max(node_ids)+1``
-and the two child cell ids are ``max(cells)+1``, ``+2`` — fully deterministic.
+exact integer id (no coordinate welding); the Steiner node id and the two child
+cell ids are allocated by the transaction-local cursors
+(:meth:`Transaction.allocate_node` / :meth:`Transaction.allocate_cell`) and
+remain deterministic for a deterministic delta order — the base allocator is
+only advanced on successful commit, so cancelled dry-runs consume no ids.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from typing import Any, Mapping, Sequence
 from ..errors import MeshError
 from .front import (
     FrontRejected,
+    _is_residual_front,
     candidate_partners,
     classify,
     edge_key,
@@ -152,24 +156,22 @@ def _resolve_source(state: QuadMeshState, fe: EdgeKey) -> int:
         raise RecoveryRejected(str(exc)) from exc
 
 
-def _next_node_id(state: QuadMeshState) -> int:
-    return max(state.node_ids, default=-1) + 1
+def _stage_split(tx: Any, source: int, a: int, b: int, third: int,
+                 pm: tuple[float, float]) -> tuple[int, int, int]:
+    """Stage one Steiner split through the transaction; return ``(m, ca, cb)``.
 
-
-def _next_cell_ids(state: QuadMeshState) -> tuple[int, int]:
-    ca = max(state.cells, default=-1) + 1
-    return ca, ca + 1
-
-
-def _stage_split(tx: Any, source: int, a: int, b: int, third: int, m_id: int,
-                 ca_id: int, cb_id: int, pm: tuple[float, float]) -> None:
-    tx.add_node(m_id, pm)
+    The midpoint node id and the two child cell ids come from the transaction
+    cursors, so a deterministic delta order pins them exactly while cancelled
+    dry-runs consume nothing on the base.
+    """
+    m_id = tx.allocate_node(pm)
     tx.remove_cell(source)
-    tx.add_cell(ca_id, (a, m_id, third), "T3")
-    tx.add_cell(cb_id, (m_id, b, third), "T3")
+    ca_id = tx.allocate_cell((a, m_id, third), "T3")
+    cb_id = tx.allocate_cell((m_id, b, third), "T3")
     tx.remove_front_edge(a, b)
     tx.add_front_edge(a, m_id)
     tx.add_front_edge(m_id, b)
+    return m_id, ca_id, cb_id
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +199,11 @@ def edge_split_recover(
     r = _validate_ratio(ratio)
     third = _third_vertex(tuple(state.cell(source)), fe)
     a, b = fe
-
-    m_id = _next_node_id(state)
-    ca_id, cb_id = _next_cell_ids(state)
     pm = _midpoint(state, a, b, r)
 
+    m_id, ca_id, cb_id = (-1, -1, -1)
     with state.transaction() as tx:
-        _stage_split(tx, source, a, b, third, m_id, ca_id, cb_id, pm)
+        m_id, ca_id, cb_id = _stage_split(tx, source, a, b, third, pm)
         tx.commit()  # atomic: prevalidates (incidence, residency) then applies
 
     return SplitReport(
@@ -281,14 +281,19 @@ def recover_then_front_step(
     for r in ratios:
         rr = _validate_ratio(r)
         state.checkpoint()
-        m_id = _next_node_id(state)
-        ca_id, cb_id = _next_cell_ids(state)
+        # Transaction cursors start at ``state.next_*`` and the previous dry-run
+        # (if any) was rolled back, so each ratio's allocation ids are the
+        # deterministic ``base.next_*`` for this stage; commit is what advances
+        # the resident counters.
+        m_id = state.next_node_id
+        ca_id = state.next_cell_id
+        cb_id = state.next_cell_id + 1
         pm = _midpoint(state, a, b, rr)
 
         enabled: tuple[int, int] | None = None
         detail = ""
         with state.transaction() as tx:
-            _stage_split(tx, source, a, b, third, m_id, ca_id, cb_id, pm)
+            _stage_split(tx, source, a, b, third, pm)
             view = tx.view
             enabled, detail = _dry_run_enables(view, a, b, m_id)
             if enabled is not None:

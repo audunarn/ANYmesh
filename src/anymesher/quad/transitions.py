@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from ..errors import MeshError
-from .front import EPS, FrontRejected, area2, body_edges, local_swap, make_quad
+from .front import EPS, FrontRejected, _is_residual_front, area2, body_edges, local_swap, make_quad
 from .options import QuadMeshingOptions
 from .state import EdgeKey, QuadMeshState
 
@@ -186,7 +186,7 @@ def _reconcile_front(tx: Any, state: QuadMeshState, touched: set[EdgeKey]) -> tu
     """
     added, removed = [], []
     for k in sorted(touched):
-        is_front_now = len(tx.view.edge_cells(k)) == 1
+        is_front_now = _is_residual_front(tx.view, k)
         was_front = state.is_front_edge(k)
         if is_front_now and not was_front:
             tx.add_front_edge(k[0], k[1])
@@ -195,10 +195,6 @@ def _reconcile_front(tx: Any, state: QuadMeshState, touched: set[EdgeKey]) -> tu
             tx.remove_front_edge(k[0], k[1])
             removed.append(k)
     return tuple(added), tuple(removed)
-
-
-def _next_cell_id(state: QuadMeshState) -> int:
-    return max(state.cells, default=-1) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -239,15 +235,14 @@ def spacing_change(
         if abs(area2(state, t)) <= EPS:
             raise TransitionRejected(f"{label} split triangle {t!r} is degenerate")
 
-    new_id_a = _next_cell_id(state)
-    new_id_b = new_id_a + 1
     touched = set(body_edges(quad))
     generation_before = state.generation
 
+    new_id_a = new_id_b = -1
     with state.transaction() as tx:
         tx.remove_cell(cid)
-        tx.add_cell(new_id_a, t3a, "T3")
-        tx.add_cell(new_id_b, t3b, "T3")
+        new_id_a = tx.allocate_cell(t3a, "T3")
+        new_id_b = tx.allocate_cell(t3b, "T3")
         added, removed = _reconcile_front(tx, state, touched)
         tx.commit()  # atomic: prevalidates (incl. front residency) then applies
 
@@ -311,14 +306,14 @@ def _consolidate(
             f"(found {len(front_before)}: {sorted(front_before)!r})"
         )
 
-    new_id = _next_cell_id(state)
     touched = ea | eb
     generation_before = state.generation
 
+    new_id = -1
     with state.transaction() as tx:
         tx.remove_cell(ca)
         tx.remove_cell(cb)
-        tx.add_cell(new_id, quad, "Q4")
+        new_id = tx.allocate_cell(quad, "Q4")
         added, removed = _reconcile_front(tx, state, touched)
         tx.commit()  # atomic: prevalidates (incl. front residency) then applies
 

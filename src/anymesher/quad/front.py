@@ -334,7 +334,6 @@ def front_step(
         )
 
     partner, quad = chosen
-    new_id = max(state.cells, default=-1) + 1
 
     # Local (O(touched)) front update: capture the incident edge sets *before*
     # the removals are staged, since removals drop the triangles from the base
@@ -343,10 +342,11 @@ def front_step(
     p_body = tuple(int(x) for x in state.cell(partner))
     touched = set(body_edges(s_body)) | set(body_edges(p_body)) | set(body_edges(quad))
 
+    new_id = -1
     with state.transaction() as tx:
         tx.remove_cell(source)
         tx.remove_cell(partner)
-        tx.add_cell(new_id, quad, "Q4")
+        new_id = tx.allocate_cell(quad, "Q4")
 
         for k in sorted(touched):
             is_front_now = _is_residual_front(tx.view, k)
