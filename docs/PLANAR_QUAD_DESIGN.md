@@ -9,7 +9,7 @@
 
 The explicit quad-first path is a fixed demonstration, not a general production driver.
 
-- It currently accepts exactly one untrimmed planar four-corner face.
+- Each selected explicit quad-first face must currently be an untrimmed planar four-corner face, and each is independently reduced to one Q4; multi-face selection/publication exists, but resolution remains one Q4 per selected quad-first face.
 - It seeds only the four corner nodes and two T3 seeds.
 - It performs a single `front_step` and publishes one Q4.
 - `target_size` is validated but does not control production topology or resolution.
