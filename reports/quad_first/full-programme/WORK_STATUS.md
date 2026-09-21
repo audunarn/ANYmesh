@@ -856,8 +856,8 @@ qualification evidence (formal timing) and is not a runtime gate.
   shared code path, so semantic equality is the parity contract (asserted, not
   assumed). Canonical A evidence (identical on both legs): 8x Q4
   (cell_ids `(16, 17, 18, 19, 20, 21, 22, 23)`), double_area `16.0`, digest
-  `1251020901604dcbce8dc1e5290c02ca7cd23aa4d1354b6957c193e514229621`,
-  parity_token `0xadd55b0d`. The committed source tree intentionally carries no
+   `4918053865e0f0a0312c0d1aa270e8a1bea193f8e3f0b4e5f823ffccc0672a22`,
+   parity_token `0x1dc28f63`. The committed source tree intentionally carries no
   compiled `_native`; the wheel leg runs the compiled extension, so source and
   wheel legs differ only in provenance, never in topology.
 - **D2 — both legs execute the Q6 production worker chain (Q3 -> Q4 LEMON MCF

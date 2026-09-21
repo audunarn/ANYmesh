@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..errors import MeshError
-from .state import Delta, EdgeKey, QuadMeshState, View
+from .state import Delta, EdgeKey, QuadMeshState, StaleHandleError, _check_position, View
 
 __all__ = ["Transaction", "TransactionStateError"]
 
@@ -52,6 +52,8 @@ class Transaction:
         self._base = base
         self._base_generation = base.generation
         self._delta = Delta()
+        self._node_cursor = base.next_node_id
+        self._cell_cursor = base.next_cell_id
         self._committed = False
         self._rolled_back = False
         self._closed = False
@@ -109,6 +111,40 @@ class Transaction:
     def add_node(self, node: int, position: Any) -> None:
         self._ensure_open("stage")
         self._delta.add_nodes[int(node)] = position
+
+    def move_node(self, node: int, position: Any) -> None:
+        """Stage a coordinate-only move of an existing, unprotected node."""
+        self._ensure_open("stage")
+        nid = _int(node)
+        if nid in self._delta.add_nodes or nid in self._delta.remove_nodes:
+            raise MeshError(f"node {nid} cannot be both moved and added/removed")
+        if self._base.is_protected_node(nid):
+            raise MeshError(f"node {nid} is protected and cannot be moved")
+        try:
+            self._base.position(nid)
+        except StaleHandleError as exc:
+            raise MeshError(f"node {nid} is not a live node in this state") from exc
+        self._delta.move_nodes[nid] = _check_position(position)
+
+    def allocate_node(self, position: Any) -> int:
+        """Take the next node id for this transaction and stage it at ``position``."""
+        self._ensure_open("stage")
+        nid = self._node_cursor
+        self._node_cursor += 1
+        self._delta.add_nodes[nid] = _check_position(position)
+        return nid
+
+    def allocate_cell(self, body: Any, kind: str | None = None) -> int:
+        """Take the next cell id for this transaction and stage the body."""
+        self._ensure_open("stage")
+        cid = self._cell_cursor
+        self._cell_cursor += 1
+        body_ids = tuple(_int(x) for x in body)
+        if kind is None:
+            kind = "Q4" if len(body_ids) == 4 else "T3"
+        self._delta.add_cells[cid] = body_ids
+        self._delta.add_cell_kinds[cid] = kind
+        return cid
 
     def remove_node(self, node: int) -> None:
         self._ensure_open("stage")
@@ -233,3 +269,9 @@ def _key(a: int, b: int) -> EdgeKey:
     if a == b:
         raise MeshError("edge must have two distinct node ids")
     return (a, b) if a < b else (b, a)
+
+
+def _int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MeshError("node/cell handle must be an integer")
+    return value

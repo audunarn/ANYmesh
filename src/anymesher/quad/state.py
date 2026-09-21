@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -72,9 +73,13 @@ def _check_position(pos: Sequence[float]) -> tuple[float, float]:
     if len(pos) != 2:
         raise MeshError("each node needs exactly 2 coordinates")
     try:
-        return (float(pos[0]), float(pos[1]))
+        x = float(pos[0])
+        y = float(pos[1])
     except (TypeError, ValueError) as exc:
         raise MeshError("node positions must be numeric") from exc
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise MeshError("node positions must be finite")
+    return (x, y)
 
 
 def _cell_edges(body: tuple[int, int, ...]) -> list[EdgeKey]:
@@ -98,6 +103,7 @@ class Delta:
 
     add_nodes: dict[int, tuple[float, float]] = field(default_factory=dict)
     remove_nodes: set[int] = field(default_factory=set)
+    move_nodes: dict[int, tuple[float, float]] = field(default_factory=dict)
     add_cells: dict[int, tuple[int, int, ...]] = field(default_factory=dict)
     add_cell_kinds: dict[int, str] = field(default_factory=dict)
     remove_cells: set[int] = field(default_factory=set)
@@ -115,6 +121,7 @@ class Delta:
         return not (
             self.add_nodes
             or self.remove_nodes
+            or self.move_nodes
             or self.add_cells
             or self.remove_cells
             or self.add_front
@@ -154,6 +161,10 @@ class Delta:
             self.add_cells.pop(cid, None)
             self.add_cell_kinds.pop(cid, None)
             self.remove_cells.discard(cid)
+        # Reject moved-node conflicts with add_nodes or remove_nodes
+        move_conflict = set(self.move_nodes) & (set(self.add_nodes) | self.remove_nodes)
+        if move_conflict:
+            raise MeshError(f"nodes both moved and added/removed: {sorted(move_conflict)!r}")
 
     def touched_map(self, base: "QuadMeshState") -> dict[EdgeKey, dict[int, int]]:
         """Pure O(local) net cell-incidence map for the CURRENT sparse contents.
@@ -273,6 +284,8 @@ class QuadMeshState:
 
         self._is_cancelled = is_cancelled
         self._generation = 0
+        self._next_node_id = (max(pos) + 1) if pos else 0
+        self._next_cell_id = (max(cells_map) + 1) if cells_map else 0
 
     # ------------------------------------------------------------------
     # Read-only access (base)
@@ -281,6 +294,16 @@ class QuadMeshState:
     @property
     def generation(self) -> int:
         return self._generation
+
+    @property
+    def next_node_id(self) -> int:
+        """Next node id a *committed* addition will receive."""
+        return self._next_node_id
+
+    @property
+    def next_cell_id(self) -> int:
+        """Next cell id a *committed* addition will receive."""
+        return self._next_cell_id
 
     @property
     def node_ids(self) -> frozenset[int]:
@@ -474,14 +497,31 @@ class QuadMeshState:
             if cid not in self._cells:
                 raise StaleHandleError(f"cell {cid} does not exist (stale handle)")
 
-        live_nodes = (set(self._pos) - delta.remove_nodes) | set(delta.add_nodes)
         checked_add_nodes = {n: _check_position(p) for n, p in delta.add_nodes.items()}
+
+        def final_node_live(n: int) -> bool:
+            if n in delta.remove_nodes:
+                return False
+            if n in delta.add_nodes:
+                return True
+            return n in self._pos
 
         for n in delta.remove_nodes:
             _int_or_err(n, "node")
         conflict = set(delta.add_nodes) & set(delta.remove_nodes)
         if conflict:
             raise MeshError(f"nodes both added and removed: {sorted(conflict)!r}")
+
+        checked_move_nodes: dict[int, tuple[float, float]] = {}
+        for n, p in delta.move_nodes.items():
+            n = _int_or_err(n, "moved node")
+            if n in delta.add_nodes or n in delta.remove_nodes:
+                raise MeshError(f"node {n} cannot be both moved and added/removed")
+            if n not in self._pos:
+                raise StaleHandleError(f"node {n} is not a live node in this state")
+            if n in self._prot_nodes:
+                raise MeshError(f"node {n} is protected and cannot be moved")
+            checked_move_nodes[n] = _check_position(p)
 
         freed_bodies = {tuple(sorted(body)) for body in removed_bodies.values()}
 
@@ -504,7 +544,7 @@ class QuadMeshState:
             if len(set(body)) != len(body):
                 raise MeshError(f"cell {cid} repeats a node")
             for n in body:
-                if n not in live_nodes:
+                if not final_node_live(n):
                     raise MeshError(f"cell {cid} references unknown node {n}")
             kind = delta.add_cell_kinds.get(cid, "Q4" if len(body) == 4 else "T3")
             if kind not in ("T3", "Q4"):
@@ -534,7 +574,7 @@ class QuadMeshState:
                 raise MeshError(f"bit endpoint {n} is not on edge {k}")
         final_prot_nodes = (self._prot_nodes - delta.remove_prot_nodes) | delta.add_prot_nodes
         for n in sorted(final_prot_nodes):
-            if n not in live_nodes:
+            if not final_node_live(n):
                 raise MeshError(f"protected node {n} is not live")
         final_prot_edges = (self._prot_edges - delta.remove_prot_edges) | delta.add_prot_edges
         for k in sorted(final_prot_edges):
@@ -550,6 +590,8 @@ class QuadMeshState:
         for n, p in checked_add_nodes.items():
             self._pos[n] = p
             self._node_edges.setdefault(n, set())
+        for n, p in checked_move_nodes.items():
+            self._pos[n] = p
 
         for cid in sorted(delta.remove_cells):
             body = self._cells[cid]
@@ -586,6 +628,10 @@ class QuadMeshState:
         self._front_bits = final_bits
         self._prot_nodes = final_prot_nodes
         self._prot_edges = final_prot_edges
+        if delta.add_nodes:
+            self._next_node_id = max(self._next_node_id, max(delta.add_nodes) + 1)
+        if delta.add_cells:
+            self._next_cell_id = max(self._next_cell_id, max(delta.add_cells) + 1)
         self._generation += 1
 
 
@@ -626,6 +672,7 @@ class View:
     def nodes(self) -> Mapping[int, tuple[float, float]]:
         d = self._delta
         out = {n: p for n, p in self._base.nodes.items() if n not in d.remove_nodes}
+        out.update(d.move_nodes)
         out.update(d.add_nodes)
         return out
 
@@ -639,6 +686,8 @@ class View:
 
     def position(self, n: Any) -> tuple[float, float]:
         nid = _int_or_err(n, "node")
+        if nid in self._delta.move_nodes:
+            return self._delta.move_nodes[nid]
         if nid in self._delta.add_nodes:
             return self._delta.add_nodes[nid]
         if nid in self._delta.remove_nodes:

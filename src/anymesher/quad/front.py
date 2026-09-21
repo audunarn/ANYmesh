@@ -184,16 +184,26 @@ def local_swap(body: Sequence[int]) -> tuple[tuple[int, int, int], tuple[int, in
 # Candidate discovery and classification
 # ---------------------------------------------------------------------------
 
-def find_source_cell(view: View | QuadMeshState, edge: EdgeKey) -> int:
-    """The unique incident ``T3`` cell below the front edge ``edge``."""
+def _is_residual_front(view: View | QuadMeshState, edge: EdgeKey) -> bool:
+    """True when exactly one residual T3 is incident on ``edge``."""
     k = edge_key(*edge)
-    cells = view.edge_cells(k)
-    if len(cells) != 1:
-        raise FrontRejected(f"front edge {tuple(k)} has {len(cells)} incident cells (need exactly 1)")
-    cid = cells[0]
-    if view.cell_kind(cid) != "T3":
-        raise FrontRejected(f"source cell {cid} below front edge {tuple(k)} is not T3")
-    return cid
+    return sum(1 for cid in view.edge_cells(k) if view.cell_kind(cid) == "T3") == 1
+
+
+def find_source_cell(view: View | QuadMeshState, edge: EdgeKey) -> int:
+    """The unique incident residual ``T3`` cell below the front edge ``edge``.
+
+    The source is the exactly-one incident residual ``T3``; a ``Q4`` on the
+    accepted side of the edge is permitted and is ignored here.
+    """
+    k = edge_key(*edge)
+    cells = tuple(sorted(int(cid) for cid in view.edge_cells(k)))
+    residual = tuple(cid for cid in cells if view.cell_kind(cid) == "T3")
+    if not residual:
+        raise FrontRejected(f"front edge {tuple(k)} has no incident residual T3")
+    if len(residual) != 1:
+        raise FrontRejected(f"front edge {tuple(k)} has {len(residual)} incident residual T3 {residual!r} (need exactly 1)")
+    return residual[0]
 
 
 def candidate_partners(view: View | QuadMeshState, source: int) -> list[int]:
@@ -239,7 +249,8 @@ def classify(
     * the front edge is not an edge of the source
     * the pair does not share exactly one interior (diagonal) edge, or that
       edge is the front edge itself
-    * the shared diagonal or any candidate endpoint is protected
+    * the shared interior diagonal is protected
+    * protected/fixed endpoint nodes are allowed to participate as Q4 corners; movement/deletion protection is enforced elsewhere
     * the union boundary is not a strictly convex, non-degenerate quadrilateral
 
     (Duplicate-body rejection is handled atomically at commit by the state.)
@@ -268,9 +279,6 @@ def classify(
 
     if view.is_protected_edge(diag):
         raise FrontRejected(f"shared interior edge {tuple(diag)} is a protected edge")
-    for n in sorted(set(s) | set(p)):
-        if view.is_protected_node(n):
-            raise FrontRejected(f"candidate endpoint {n} is a protected node")
 
     boundary = _boundary_nodes(view, fe, s, p)
     return make_quad(view, boundary)
@@ -341,8 +349,7 @@ def front_step(
         tx.add_cell(new_id, quad, "Q4")
 
         for k in sorted(touched):
-            now = tx.view.edge_cells(k)
-            is_front_now = len(now) == 1
+            is_front_now = _is_residual_front(tx.view, k)
             was_front = state.is_front_edge(k)
             if is_front_now and not was_front:
                 tx.add_front_edge(k[0], k[1])

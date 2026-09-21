@@ -272,14 +272,14 @@ def test_f_quad_first_remains_explicit_opt_in_not_default() -> None:
 # ---------------------------------------------------------------------------
 
 # Canonical A-fixture evidence (observed identical on source and wheel legs).
-_A_DIGEST = "1251020901604dcbce8dc1e5290c02ca7cd23aa4d1354b6957c193e514229621"
+_A_DIGEST = "4918053865e0f0a0312c0d1aa270e8a1bea193f8e3f0b4e5f823ffccc0672a22"
 _A_CELL_IDS = (16, 17, 18, 19, 20, 21, 22, 23)
 _A_KINDS = ("Q4",) * 8
 _A_DOUBLE_AREA = "16.0"
 _A_Q4_COUNT = 8
 # CRC32 over the canonical (cell_ids, kinds, digest, double_area, q4) payload;
 # a portable parity token shared by source and wheel legs.
-_A_PARITY_TOKEN = "0xadd55b0d"
+_A_PARITY_TOKEN = "0x1dc28f63"
 
 
 def _a_parity_payload(state: QuadMeshState) -> dict[str, object]:

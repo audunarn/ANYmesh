@@ -183,9 +183,9 @@ def test_front_step_A_stages_quad_and_updates_front() -> None:
     # Source/partner cells consumed.
     assert 0 not in st.cells
     assert 1 not in st.cells
-    # The front-edge set of a clean pair is invariant: the four outer edges
-    # are re-backed by the new Q4.
-    assert st.front == frozenset({(0, 1), (0, 2), (1, 3), (2, 3)})
+    # PQ1 semantics: the active front is the boundary of the residual T3
+    # region; after both T3s become one Q4 there is no residual front.
+    assert st.front == frozenset()
     assert st.generation == 1
     assert st.digest() != before
 
@@ -237,18 +237,19 @@ def test_front_step_blocked_by_protected_edge() -> None:
     assert st.digest() == before
 
 
-def test_front_step_blocked_by_protected_node() -> None:
-    nodes = {0: (0.0, 0.0), 1: (2.0, 0.0), 2: (1.0, 0.3), 3: (1.0, 1.0)}
+def test_front_step_allows_protected_endpoint_participation() -> None:
+    nodes = {0: (0.0, 0.0), 1: (1.0, 0.0), 2: (0.0, 1.0), 3: (1.0, 1.0)}
     st = QuadMeshState(
         nodes=nodes,
-        cells={0: (0, 1, 2), 1: (0, 2, 3)},
-        initial_front=[(0, 1), (1, 2), (2, 3), (0, 3)],
-        protected_nodes=[3],  # a candidate endpoint is protected.
+        cells={0: (0, 1, 2), 1: (1, 3, 2)},
+        initial_front=[(0, 1), (0, 2), (1, 3), (2, 3)],
+        protected_nodes=[0],
     )
-    before = st.digest()
-    with pytest.raises(FrontNoCandidate):
-        front_step(st, (2, 3))
-    assert st.digest() == before
+    new_id, body = front_step(st, (0, 1))
+    assert 0 in body
+    assert st.cell_kind(new_id) == "Q4"
+    assert st.is_protected_node(0)
+    assert st.front == frozenset()
 
 
 def test_front_step_rejects_nonfront_edge() -> None:
