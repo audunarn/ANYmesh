@@ -2,8 +2,8 @@
 
 **Branch:** `opencode/quad-first-v1`
 **Baseline:** `2ccef37`
-**Task ID:** `full-programme` (Q0 → Q5)
-**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete**. Q4 (count-system + LEMON MCF worker adapter) **complete** `fe46879`. Q5 (TinyAD local optimisation on real Q4 patches) **complete in this commit**.
+**Task ID:** `full-programme` (Q0 → Q6)
+**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete**. Q4 (count-system + LEMON MCF worker adapter) **complete** `fe46879`. Q5 (TinyAD local optimisation on real Q4 patches) **complete** `de73fa4`. Q6/M2 (public quad-first integration + mixed structural qualification) **complete in this commit**.
 **Updated:** 2026-09-21
 
 ## Objective (Q0, from `Q0_EXECUTION.md` 1-11)
@@ -757,6 +757,67 @@ pytest tests/quad_first/                       -> 233 passed
 
 - S3 qualification and component publication (Q6/Q7).
 - Any change to `NativeMeshingOptions`, `_native`, or the legacy call path.
+
+---
+
+## Q6 / M2 — public quad-first integration and structural qualification
+
+**Status:** **complete in this commit**.
+
+Q6 exposes the Q3→Q4→Q5 route through the production hybrid meshing entry point
+while preserving `quad_options=None` as the legacy dispatch sentinel.
+
+### Public integration delivered
+
+- Explicit `QuadMeshingOptions` selects the quad-first route; `quad_face_ids`
+  permits a deterministic mixed call where selected faces use quad-first and
+  residual faces remain on the established mapped/native route.
+- Geometry-backed publication uses exact GeometryModel vertex, edge and face IDs:
+  `node_of_vertex`, intrinsic-order `nodes_of_edge`, `elements_of_face`, and
+  `elements_of_sheet` remain authoritative after publication.
+- Multi-face shared interfaces reuse exact geometry identity rather than
+  coordinate welding, including reversed shared-edge orientation.
+- Mixed merge remaps legacy shell/beam IDs deterministically and preserves
+  legacy metadata, including `thickness_of_face` and structural-preparation records.
+- Qualified S3 residuals are supported only through the already-qualified
+  legacy S3 production bridge. The qualified-S3 audit record is remapped onto
+  final merged node/element IDs.
+- Pure all-Q4 results do not run S3 preparation.
+- Beam/member generation reuses the established beam/connectivity pipeline and
+  publishes through-face couplings against final Q4 shell nodes.
+- Structural Sheet ownership and declared plate-junction bookkeeping survive
+  publication. Two-Sheet interfaces are ordinary junctions; 3+ Sheet
+  non-manifold ownership fails closed unless explicitly declared by geometry.
+- Curved/non-planar quad-first requests fail closed with `QuadPublicUnsupported`;
+  higher-order remains advertised unsupported.
+- Public capability reporting now truthfully advertises
+  `front_path="advancing_front"` and `mixed_q4_s3` only when the qualified S3
+  bridge is available.
+- Existing Mesh serialization remains unchanged; old payloads and
+  `quad_options=None` round-trip without persisting quad-selector runtime state.
+
+### Deliberate limitations retained at Q6
+
+- Quad-first public publication remains linear and planar only.
+- No new material/thickness ownership is invented for pure quad-first faces.
+  Existing mesher-owned thickness metadata is preserved when supplied by the
+  legacy/mapped side.
+- Qualified S3 is not synthesized for all-Q4 meshes and no S3 admission rule is weakened.
+- No push, main merge, release, tag, PyPI publication, or default-route promotion is part of Q6.
+
+### Evidence
+
+```text
+pytest tests/quad_first/test_q6_public_integration.py -q  -> 32 passed
+pytest tests/quad_first -q                                -> 265 passed in 6.28 s
+```
+
+### Q6 files
+
+- `src/anymesher/hybrid.py`
+- `src/anymesher/quad/public_integration.py`
+- `tests/quad_first/test_q6_public_integration.py`
+
 
 ---
 
