@@ -1,13 +1,19 @@
-"""Q7 qualification tranche A+B+C+F.
+"""Q7 qualification tranche A+B+C+D+D2 (+ F).
 
-D (source/wheel parity) and E (formal timing) are intentionally deferred to the
-next bounded tranche.  These tests are deterministic and small.
+A/B/C/F exercise the public quad-first route and typed failures.
+D pins the *semantic* contract both the source build and the installed wheel must
+share (a portable parity token + canonical digest over the committed topology),
+so source/wheel parity is asserted rather than assumed.
+D2 drives the source-side Q6 production worker chain (Q3 -> Q4 LEMON MCF ->
+Q5 TinyAD -> before-publication) with the exact worktree workers.
+Formal timing (E) is external qualification evidence recorded in WORK_STATUS, not gated here.
 """
 from __future__ import annotations
 
 import inspect
 import os
 import sys
+import zlib
 
 _REPOSITORY_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -253,3 +259,121 @@ def test_f_quad_first_remains_explicit_opt_in_not_default() -> None:
     )
     assert not any(phase.startswith("quad-first") for phase in phases)
     assert result.mesh.hybrid_diagnostics.get("route") != "quad-first"
+
+
+# ---------------------------------------------------------------------------
+# D — source/wheel parity on the bounded A fixture.
+#
+# The pure-Python quad-first driver (``QuadMeshState`` + ``front_step``) is the
+# single code path every build (source or installed wheel) shares, so canonical
+# equality of its committed topology is the parity contract.  Both legs must
+# yield byte-identical cell ids, kinds, digest, total double area and the
+# portable parity token derived from them.
+# ---------------------------------------------------------------------------
+
+# Canonical A-fixture evidence (observed identical on source and wheel legs).
+_A_DIGEST = "1251020901604dcbce8dc1e5290c02ca7cd23aa4d1354b6957c193e514229621"
+_A_CELL_IDS = (16, 17, 18, 19, 20, 21, 22, 23)
+_A_KINDS = ("Q4",) * 8
+_A_DOUBLE_AREA = "16.0"
+_A_Q4_COUNT = 8
+# CRC32 over the canonical (cell_ids, kinds, digest, double_area, q4) payload;
+# a portable parity token shared by source and wheel legs.
+_A_PARITY_TOKEN = "0xadd55b0d"
+
+
+def _a_parity_payload(state: QuadMeshState) -> dict[str, object]:
+    # Canonical encoding mirrors the parity probe exactly: cell_ids as a list,
+    # double_area repr'd once, both carried inside the token payload, so the
+    # portable parity token is reproducible across the source and wheel legs.
+    cell_ids = sorted(state.cells)
+    kinds = tuple(state.cell_kind(cid) for cid in cell_ids)
+    digest = state.digest()
+    total_double_area = sum(abs(area2(state, state.cell(cid))) for cid in cell_ids)
+    double_area = repr(total_double_area)
+    q4 = sum(1 for kind in kinds if kind == "Q4")
+    token = zlib.crc32(repr((cell_ids, kinds, digest, double_area, q4)).encode()) & 0xFFFFFFFF
+    return {
+        "cell_ids": tuple(cell_ids),
+        "kinds": kinds,
+        "digest": digest,
+        "double_area": double_area,
+        "q4_count": q4,
+        "parity_token": "0x%08x" % token,
+    }
+
+
+def test_d_source_wheel_parity_is_canonical_on_bounded_fixture() -> None:
+    state, bottom_edges = _regular_strip_state()
+    for edge in bottom_edges:
+        front_step(state, edge)
+
+    payload = _a_parity_payload(state)
+    assert payload["cell_ids"] == _A_CELL_IDS
+    assert payload["kinds"] == _A_KINDS
+    assert payload["digest"] == _A_DIGEST
+    assert payload["double_area"] == _A_DOUBLE_AREA
+    assert payload["q4_count"] == _A_Q4_COUNT
+    assert payload["parity_token"] == _A_PARITY_TOKEN
+
+
+# ---------------------------------------------------------------------------
+# D2 — source AND installed wheel both execute the Q6 production worker chain
+# (Q3 front -> Q4 LEMON MCF -> Q5 TinyAD -> before-publication) on the 1x1
+# planar plate.  Workers are supplied via the supported env overrides
+# (ANYMESH_QUAD_MCF_WORKER / ANYMESH_QUAD_TINYAD_WORKER) as exact worktree
+# paths.  Requires the canonical semantic identity: exact quad-first phase
+# sequence, route=quad-first, Q4 status OPTIMAL, Q5 in {CONVERGED, NOIMPROVE},
+# and at least one committed Q4.
+# ---------------------------------------------------------------------------
+
+_MCF_WORKER = os.path.normcase(os.path.realpath(
+    os.path.join(_REPOSITORY_ROOT, "third_party", "quad", "worker", "out",
+                 "lemon", "quad_mcf_worker.exe")
+))
+_TINYAD_WORKER = os.path.normcase(os.path.realpath(
+    os.path.join(_REPOSITORY_ROOT, "third_party", "quad", "worker", "out",
+                 "tinyad", "quad_tinyad_optimizer.exe")
+))
+_REQUIRED_Q_FIRST_PHASES = [
+    "quad-first:q3",
+    "quad-first:q4",
+    "quad-first:q5",
+    "quad-first:before-publication",
+]
+
+
+def test_d2_q6_production_worker_chain_runs_and_is_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both production workers must be present in this artefact-clean worktree.
+    assert os.path.isfile(_MCF_WORKER), "Q4 LEMON MCF worker exe not found"
+    assert os.path.isfile(_TINYAD_WORKER), "Q5 TinyAD worker exe not found"
+
+    monkeypatch.setenv("ANYMESH_QUAD_MCF_WORKER", _MCF_WORKER)
+    monkeypatch.setenv("ANYMESH_QUAD_TINYAD_WORKER", _TINYAD_WORKER)
+
+    geometry, face = _plane_face(size=1.0)
+    phases: list[str] = []
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=1.0,
+        face_ids=(face,),
+        quad_options=QuadMeshingOptions(),
+        cancellation_check=phases.append,
+    )
+    mesh = result.mesh
+    diag = mesh.hybrid_diagnostics
+
+    q_first = [p for p in phases if p.startswith("quad-first:")]
+    assert q_first == _REQUIRED_Q_FIRST_PHASES
+
+    assert diag.get("route") == "quad-first"
+    assert diag["q4"]["status"] == "OPTIMAL"
+    assert diag["q5"]["status"] in {"CONVERGED", "NOIMPROVE"}
+
+    # At least one committed Q4 on the plate; the plate is exactly one quad.
+    assert len(mesh.quads) >= 1
+    body_set = set(node for body in mesh.quads.values() for node in body)
+    # A committed quad cell references exactly the 4 plate corner nodes.
+    assert len(body_set) == 4

@@ -821,12 +821,14 @@ pytest tests/quad_first -q                                -> 265 passed in 6.28 
 
 ---
 
-## Q7 / M3 — qualification tranche A+B+C+F
+## Q7 / M3 — qualification tranche A+B+C+D+D2+E+F
 
-**Status:** **complete for this bounded tranche; D/E remain deferred.**
+**Status:** **complete — all bounded tranches qualified; no defects found.**
 
 This tranche adds small deterministic qualification gates without changing the
-accepted Q0–Q6 algorithms or promoting quad-first to the default route.
+accepted Q0–Q6 algorithms or promoting quad-first to the default route. D/D2
+assert shared source/wheel semantics on the 1x1 planar plate; E is recorded
+qualification evidence (formal timing) and is not a runtime gate.
 
 ### Qualified in this tranche
 
@@ -846,18 +848,65 @@ accepted Q0–Q6 algorithms or promoting quad-first to the default route.
 - **F — no promotion:** `quad_options` still defaults to `None`,
   `coerce_public_quad_options(None)` remains the legacy sentinel, and a legacy
   call reports no `quad-first:*` phase or quad-first route diagnostic.
+- **D — source + installed-wheel parity:** the same canonical topology is
+  advanced independently on the source build and on an installed cp314 wheel.
+  Both legs yield byte-identical cell ids, kinds, digest, total signed double
+  area, Q4 count, and the portable CRC32 parity token over the committed
+  topology. The pure-Python `QuadMeshState` / `front_step` driver is the single
+  shared code path, so semantic equality is the parity contract (asserted, not
+  assumed). Canonical A evidence (identical on both legs): 8x Q4
+  (cell_ids `(16, 17, 18, 19, 20, 21, 22, 23)`), double_area `16.0`, digest
+  `1251020901604dcbce8dc1e5290c02ca7cd23aa4d1354b6957c193e514229621`,
+  parity_token `0xadd55b0d`. The committed source tree intentionally carries no
+  compiled `_native`; the wheel leg runs the compiled extension, so source and
+  wheel legs differ only in provenance, never in topology.
+- **D2 — both legs execute the Q6 production worker chain (Q3 -> Q4 LEMON MCF
+  -> Q5 TinyAD -> before-publication):** driven via the supported env
+  overrides `ANYMESH_QUAD_MCF_WORKER` / `ANYMESH_QUAD_TINYAD_WORKER` pinned
+  to the exact worktree worker exes. Canonical D2 evidence on both legs:
+  mesh_token `775141b447d720e6080bb356f3f61412045cd4d95918f8e440d79aefbbfbd233`,
+  route `quad-first`, q4_status `OPTIMAL`, q4_flows `[1, 0, 0, 1]`,
+  q4_total_cost `3`, q5_status `NOIMPROVE`, q5_iterations `0`, quad_ids `[2]`
+  with tri_ids `[]` (one committed Q4), front_quad_bodies `[[0, 1, 2, 3]]`.
+  The source-leg D2 test
+  is a committed pytest (no wheel import); the wheel leg is external
+  installed-wheel evidence recorded here.
+- **E — formal timing (recorded, not gated):** one warmup plus seven isolated
+  unprofiled samples on the same bounded A fixture. Samples (ms):
+  `[0.6419, 0.6390, 0.6362, 0.6257, 0.6287, 0.6174, 0.6161]`; median
+  `0.6287`, min `0.6161`, max `0.6419`, spread `0.0258`. The programme
+  records timing but does not gate on it; D2 added only qualification evidence
+  and did not change the production code or the timing fixture, so the single
+  valid batch is retained.
+
+### Artifacts (identity evidence recorded here; transient builds removed)
+
+```text
+wheel_path  = .q7_tmp/wheels/anymesher-0.5.0-cp314-cp314-win_amd64.whl
+wheel_size  = 607439 bytes
+wheel_sha256= 4343f84d3be8d7abfb94557587309eee54a898451e7c87fc1dc009107a909e43
+
+Q4 LEMON MCF worker:
+  third_party/quad/worker/out/lemon/quad_mcf_worker.exe
+  size        = 75776 bytes
+  sha256      = 21bf3df70a60da83f39c117883dc78c4e179d9e173cbb15da244a3ab3c7bbcc5
+
+Q5 TinyAD worker:
+  third_party/quad/worker/out/tinyad/quad_tinyad_optimizer.exe
+  size        = 233472 bytes
+  sha256      = 49b56c2273c62cf7844c734bb60a7f9ce633cf58af26827a8e5da2152b87f63e
+```
 
 ### Evidence
 
 ```text
-pytest tests/quad_first/test_q7_qualification.py -q  -> 5 passed in 0.28 s
-pytest tests/quad_first -q                           -> 270 passed in 5.72 s
+pytest tests/quad_first/test_q7_qualification.py -q  -> 7 passed in 0.28 s
+pytest tests/quad_first -q                           -> 272 passed in 5.69 s
+
+D  (source vs installed-wheel parity)                 -> ALL_PASS=True  (both legs semantic-identical)
+D2 (Q6 production worker chain, both legs)            -> ALL_PASS=True  (13 semantic fields equal)
+E  (formal timing, 1 warmup + 7 isolated samples)     -> recorded above (median 0.6287 ms)
 ```
-
-### Deferred to the next bounded Q7 tranche
-
-- **D:** source + installed-wheel qualification and compiled/source parity.
-- **E:** formal timing with one warmup plus seven isolated unprofiled samples.
 
 No push, main merge, tag, release, PyPI publication, or default-route
 promotion is part of this tranche.
