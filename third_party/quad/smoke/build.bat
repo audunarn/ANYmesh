@@ -1,7 +1,7 @@
 @echo off
 setlocal enableextensions
 rem === Deterministic MSVC + Windows SDK dev environment (no cmake/ninja) ===
-set "REPO=C:\Github\ANYmesh\.worktrees\quad-first-v1"
+for %%I in ("%~dp0..\..\..") do set "REPO=%%~fI"
 set "VS=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.50.35717"
 set "SDK=C:\Program Files (x86)\Windows Kits\10"
 set "VENDOR=%REPO%\third_party\quad\vendor"
@@ -29,6 +29,7 @@ cl /nologo /std:c++17 /O2 /EHsc /MD /DEIGEN_MPL2_ONLY ^
    /I"%VENDOR%\tinyad\include" ^
    /I"%EIGEN%" ^
    "%REPO%\third_party\quad\smoke\tinyad_smoke.cc" ^
+   /Fo:"%OUTDIR%\tinyad_smoke.obj" ^
    /Fe:"%OUTDIR%\tinyad_smoke.exe"
 if errorlevel 1 ( echo COMPILE_FAILED & exit /b 1 )
 
