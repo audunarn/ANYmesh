@@ -1083,19 +1083,21 @@ def test_old_payload_deserializes_and_none_dispatch_round_trips() -> None:
     mesh must round-trip through the unchanged payload format."""
     from anymesher.serialize import mesh_from_dict, mesh_to_dict
 
-    # 1) Old payload: a minimal document with no quad/mixed keys at all.
+    # One explicit ``None`` dispatch exercises legacy behavior without persisting
+    # any quad-selector runtime state in the neutral Mesh payload.
     geometry, face = _plane_face()
-    data = mesh_to_dict(
-        generate_hybrid_mesh_result(
-            geometry,
-            target_size=1.0,
-            face_ids=(face,),
-            quad_options=None,
-        ).mesh
-    )
+    legacy = generate_hybrid_mesh_result(
+        geometry,
+        target_size=1.0,
+        face_ids=(face,),
+        quad_options=None,
+    ).mesh
+    payload = mesh_to_dict(legacy)
+
+    # Old payload: a minimal document with no mixed/structural diagnostic record.
     stale = {
         key: value
-        for key, value in data.items()
+        for key, value in payload.items()
         if key
         not in (
             "hybrid_diagnostics",
@@ -1106,16 +1108,7 @@ def test_old_payload_deserializes_and_none_dispatch_round_trips() -> None:
     loaded = mesh_from_dict(stale)
     assert loaded.order == "linear"
 
-    # 2) Legacy dispatch (quad_options absent) round-trips unchanged.
-    geometry, face = _plane_face()
-    legacy = generate_hybrid_mesh_result(
-        geometry,
-        target_size=0.5,
-        strategy="mapped",
-        face_ids=(face,),
-    ).mesh
-
-    payload = mesh_to_dict(legacy)
+    # The unchanged legacy payload also round-trips its geometry associations.
     assert "quad_options" not in payload
     restored = mesh_from_dict(payload)
     assert dict(restored.node_of_vertex) == dict(legacy.node_of_vertex)
