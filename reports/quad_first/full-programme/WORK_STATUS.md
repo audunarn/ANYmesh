@@ -2,9 +2,9 @@
 
 **Branch:** `opencode/quad-first-v1`
 **Baseline:** `2ccef37`
-**Task ID:** `full-programme` (Q0 → Q4)
-**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete**. Q4 (count-system + LEMON MCF worker adapter) **complete in this commit**.
-**Updated:** 2026-09-20
+**Task ID:** `full-programme` (Q0 → Q5)
+**Status:** Q0 (freeze) **complete** `0752f42`. Q1 (state/journal/front_step) **complete** `b410719`. Q2/M1 (bounded front-edge Steiner-split recovery) **complete**. Q3a (cross-field guidance) **complete**. Q3b (quad transitions: spacing_change / collision / closure) **complete**. Q4 (count-system + LEMON MCF worker adapter) **complete** `fe46879`. Q5 (TinyAD local optimisation on real Q4 patches) **complete in this commit**.
+**Updated:** 2026-09-21
 
 ## Objective (Q0, from `Q0_EXECUTION.md` 1-11)
 
@@ -631,6 +631,135 @@ pytest tests/quad_first/                    -> 205 passed
 
 ---
 
+## Q5 — TinyAD local optimisation on real Q4 patches (this commit)
+
+**Status:** **complete**.
+
+Q5 delivers the local quality-optimisation layer required by
+`QUAD_FIRST_FULL_PROGRAMME.md` Q5: a pure-Python patch energy model on true
+interior 2×2 quad patches, a vendored **TinyAD** C++ worker (exact same
+`scalar_function` + `eval_with_gradient` primitive as the Q0 smoke, now in a
+real multivariate objective), and a subprocess adapter with typed validation.
+No Java, no Gurobi, no new solver dependency; the worker is compiled with
+`-DEIGEN_MPL2_ONLY` against the vendored `eigen` + `tinyad` trees.
+
+### New — `src/anymesher/quad/patch_energy.py`
+
+| symbol | role |
+| ---- | ---- |
+| `PatchRejected(MeshError)` | structured domain rejection (bad indices, duplicates, free node not participating in any quad, boundary-edge free node, no-quads-with-free). State-free; raised before any solver launch. |
+| `InvalidSolutionQ4Patch(MeshError)` | a worker-returned solution failed a post-solve check (ERROR status, objective regression, out-of-box, or invalid in patch semantics). Carries optional `worker_message` detail. |
+| `ObjectiveRegression(MeshError)` | worker optimum is worse than the initial energy beyond tolerance. |
+| `SolutionOutsideBox(MeshError)` | worker moved a free node outside its box `[init − h/2, init + h/2]`. |
+| `PatchSpec` (frozen dataclass) | `nodes` (2-tuple array), `quads` (4-tuple arrays, CCW), `free` (tuple of interior node ids), `max_iter`, `tol`, `step_bound` (h = max edge length / 2 → box half-width). `__post_init__` runs the true-interior validator: `participating = {i for q in quads for i in q}`; free node not in `participating` → reject; build per-edge incident-node count → free node touching an edge with fewer than two participating quads (boundary edge) → reject; `quads` empty and `free` non-empty → reject. |
+| `patch_energy(spec, xs, ys)` | per-quad energy `Σ_q [ (|e1|²+|e2|²)²/(16·A²) + orthogonality term ]` over the free nodes of each quad only; pure Python, no solver. |
+| `gradient(spec, xs, ys, i)` | finite-difference central gradient of `patch_energy` at free node i (indices `2i`, `2i+1`); used by the tests as the reference oracle for the TinyAD analytic gradient. |
+
+### New — `src/anymesher/quad/quad_tinyad_worker.py`
+
+| symbol | role |
+| ---- | ---- |
+| `TinyADWorkerError(MeshError)` | base for worker-level failures. |
+| `TinyADWorkerNotFound` / `TinyADWorkerCrash` / `TinyADWorkerTimeout` / `TinyADWorkerMalformed` | Typed process-level failures, parallel to the Q4 `Worker*` family. |
+| `find_q5_worker()` / `default_q5_worker_path()` | Locate `third_party/quad/worker/out/tinyad/quad_tinyad_optimizer.exe`. |
+| `solve_patch(spec, worker=None, *, timeout=None) -> PatchSolution` | Composition: validate spec → encode request (JSON, schema-tagged) → spawn worker → decode → **validate chain**: ERROR status → `InvalidSolutionQ4Patch`; optimum energy > initial + tol → `ObjectiveRegression`; any free node outside its `[init − h/2, init + h/2]` box → `SolutionOutsideBox`; invalid patch geometry → `InvalidSolutionQ4Patch`. |
+| `PatchSolution` (frozen) | `status`, `initial_energy`, `final_energy`, `iterations`, `step_history`, `free_final` (dict of node-id → (x, y)). |
+
+### New — `third_party/quad/worker/`
+
+| path | role |
+| ---- | ---- |
+| `quad_tinyad_optimizer.cc` | TinyAD worker: builds the `patch_energy` objective as a `tinyad::scalar_function<N,double>` over the free-node coordinates, runs a BFGS-style gradient step to `tol`/`max_iter`, emits JSON `{status, initial_energy, final_energy, iterations, free_nodes, ...}`. Self-test harness (`--self-test crash`/`hang`) for lifecycle verification. Built with `cl /std:c++17 /DEIGEN_MPL2_ONLY` against `vendor/eigen` + `vendor/tinyad`. |
+| `build_quad_tinyad_optimizer.bat` | `cl` build script, no dependencies beyond the vendored trees. |
+
+### Modified — `src/anymesher/quad/__init__.py`
+
+- Imported the Q5 symbols (`PatchRejected`, `InvalidSolutionQ4Patch`,
+  `ObjectiveRegression`, `SolutionOutsideBox`, `PatchSpec`, `patch_energy`,
+  `gradient`, `TinyADWorkerError`, `TinyADWorkerNotFound`, `TinyADWorkerCrash`,
+  `TinyADWorkerTimeout`, `TinyADWorkerMalformed`, `solve_patch`, `PatchSolution`,
+  `find_q5_worker`, `default_q5_worker_path`) and added them to `__all__`.
+  Where a name collides with the Q4 surface (`find_worker`, `run_worker`) the
+  Q5 symbols are exported under their distinct names; the Q4 names are
+  unchanged.
+- **Top-level `anymesher/__init__.py` is NOT touched by Q5** — legacy surface
+  remains byte-identical.
+
+### New — `tests/quad_first/test_q5_tinyad.py` (28 tests)
+
+True-interior 2×2 patch fixture throughout: a 3×3 rectangular grid
+(nodes 0..8, unit spacing) carrying exactly two quads
+`((0,1,4,5),(1,2,5,6))` — a true interior 2×2 patch (all four quads' nodes
+participate in ≥2 quads, no free node on a boundary edge). Free node is
+node 4 (interior corner of both quads).
+
+1. **Spec validation.** `PatchRejected` on: out-of-range index, duplicate node
+   in a quad, duplicate free id, free node not in any quad, free node on a
+   boundary edge (edge incident to <2 quads), `quads=()` with `free` non-empty.
+   A valid interior spec constructs cleanly.
+2. **Energy sanity.** `patch_energy` is finite, non-negative, and invariant
+   under a simultaneous translation of all nodes (energy depends on edge
+   lengths and quads only).
+3. **FD gradient oracle.** Central-difference gradient at the initial point
+   agrees with the worker's first analytic gradient to `1e-6` (both x and y
+   of free node 4); at the converged optimum the FD gradient is `< 1e-9`
+   (stationarity).
+4. **Box half-width.** `step_bound = h/2` where `h` is the max edge length;
+   the box `[init − h/2, init + h/2]` is asserted in every test that
+   constrains the optimum.
+5. **Convergence.** From `node 4 = (1.3, 0.9)` the worker converges to
+   `node 4 ≈ (1.0, 1.0)` in < 300 iterations with `final_energy <
+   1e-8` and `initial_energy > final_energy` (objective improvement).
+6. **Protected nodes.** All eight non-free nodes of the interior spec remain
+   at their initial coordinates after a solve (`PatchSolution.free_final`
+   contains only node 4).
+7. **No-quads rejection.** `PatchSpec(quads=(), free=(0,))` raises
+   `PatchRejected` without launching a worker.
+8. **Invalid-solution rejection.** A stub worker returning
+   `free_nodes=[[0.5, 0.5]]` for a spec already at the optimum `(1.0, 1.0)`
+   raises `SolutionOutsideBox` (the returned point is in-box for that spec but
+   regresses the objective → caught by the validation chain).
+9. **Error status surfacing.** A stub worker returning `status="ERROR"` with a
+   message raises `InvalidSolutionQ4Patch` carrying `worker_message`.
+10. **Worker lifecycle.** `TinyADWorkerNotFound` (missing path),
+    `TinyADWorkerMalformed` (non-object JSON), `TinyADWorkerCrash`
+    (self-test crash), `TinyADWorkerTimeout` (self-test hang).
+11. **Determinism.** Two identical solves produce bit-identical
+    `final_energy`, `iterations`, and `free_final`.
+
+### Evidence
+
+```
+pytest tests/quad_first/test_q5_tinyad.py -v   -> 28 passed
+pytest tests/quad_first/                       -> 233 passed
+  (Q0 29 + Q1 45 + Q2 21 + Q3a 47 + Q3b 25 + Q4 38 + Q5 28)
+```
+
+### Invariants held at Q5 (beyond Q0-Q4)
+
+- No new solver dependency. The backend is the exact vendored TinyAD
+  `scalar_function` + `eval_with_gradient` primitive (same as the Q0 smoke,
+  now multivariate); the worker is compiled with `-DEIGEN_MPL2_ONLY`.
+- True-interior patches only: the `PatchSpec` validator rejects any free node
+  that does not belong to ≥2 quads or that touches a boundary edge; the
+  fixture and the validator agree that "interior" means topologically interior
+  to the quad patch, not merely non-boundary of the full mesh.
+- Typed failure. Every rejection path raises a `MeshError` subclass; no
+  `try/except` swallowing; worker lifecycle errors are a separate family from
+  domain errors (consistent with the Q4 convention).
+- `patch_energy` and `gradient` are pure Python, state-free, and importable
+  without the worker binary — the energy model is testable in isolation.
+- `anymesher/__init__.py` unchanged; legacy path byte-identical.
+- `third_party/quad/worker/out/` and build artifacts are git-ignored
+  (`.gitignore` line 21, unchanged from Q4).
+
+### Not done at Q5 (deliberately deferred)
+
+- S3 qualification and component publication (Q6/Q7).
+- Any change to `NativeMeshingOptions`, `_native`, or the legacy call path.
+
+---
+
 ## Files changed (this branch, vs baseline `2ccef37`)
 
 Added:
@@ -659,8 +788,12 @@ Added:
 - `src/anymesher/quad/count_model.py`      (Q4)
 - `src/anymesher/quad/count_mcf.py`        (Q4)
 - `src/anymesher/quad/quad_mcf_worker.py`  (Q4)
+- `src/anymesher/quad/patch_energy.py`     (Q5)
+- `src/anymesher/quad/quad_tinyad_worker.py`  (Q5)
 - `third_party/quad/worker/quad_mcf_worker.cc`  (Q4)
 - `third_party/quad/worker/build_quad_mcf_worker.bat`  (Q4)
+- `third_party/quad/worker/quad_tinyad_optimizer.cc`  (Q5)
+- `third_party/quad/worker/build_quad_tinyad_optimizer.bat`  (Q5)
 - `docs/QUAD_FIRST_DESIGN.md`
 - `docs/QUAD_FIRST_REUSE.md`
 - `tests/quad_first/test_q0_freeze.py`
