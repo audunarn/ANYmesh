@@ -966,9 +966,9 @@ def test_public_dispatch_rejects_curved_geometry_face() -> None:
         )
 
 
-def _quad_and_pentagon_faces() -> tuple:
-    """A quad face and a residual pentagon face sharing one exact geometry
-    edge.  The pentagon routes through the legacy body and triangulates."""
+def _quad_and_residual_triangle_faces() -> tuple:
+    """A quad face and a residual triangle face sharing one exact geometry
+    edge.  The triangle routes through the legacy body and triangulates."""
     geometry = GeometryModel()
     points = geometry.add_points(
         (
@@ -987,13 +987,13 @@ def _quad_and_pentagon_faces() -> tuple:
         OrientedEdge(geometry.add_line(points[4], points[0]), True),
     )
     quad_face = geometry.add_face_from_loop(quad_loop, (0, 1, 2, 3))
-    pent_loop = (
+    tri_loop = (
         OrientedEdge(shared, False),
         OrientedEdge(geometry.add_line(points[1], points[2]), True),
         OrientedEdge(geometry.add_line(points[2], points[3]), True),
     )
-    pent_face = geometry.add_face_from_loop(
-        pent_loop,
+    tri_face = geometry.add_face_from_loop(
+        tri_loop,
         corners=None,
         surface=Plane(
             np.asarray((1.0, 0.0, 0.0)),
@@ -1002,15 +1002,15 @@ def _quad_and_pentagon_faces() -> tuple:
         ),
     )
     geometry.add_sheet((quad_face,))
-    geometry.add_sheet((pent_face,))
-    return geometry, quad_face, pent_face
+    geometry.add_sheet((tri_face,))
+    return geometry, quad_face, tri_face
 
 
 def test_mixed_quad_and_qualified_s3_residual_route() -> None:
     """Mixed selector path: quad faces run the quad-first chain, the residual
     legacy triangles pass through the existing qualified-S3 bridge, and the
     published record carries the admitted S3 contract."""
-    geometry, quad_face, pent_face = _quad_and_pentagon_faces()
+    geometry, quad_face, tri_face = _quad_and_residual_triangle_faces()
     result = generate_hybrid_mesh_result(
         geometry,
         target_size=1.0,
@@ -1018,7 +1018,7 @@ def test_mixed_quad_and_qualified_s3_residual_route() -> None:
         native_backend="python",
         recombine=False,
         structural_preparation=False,
-        face_ids=(quad_face, pent_face),
+        face_ids=(quad_face, tri_face),
         quad_options=QuadMeshingOptions(),
         quad_face_ids=(quad_face,),
         qualified_s3=True,
@@ -1027,15 +1027,15 @@ def test_mixed_quad_and_qualified_s3_residual_route() -> None:
 
     assert dict(result.strategy_by_face) == {
         quad_face: "quad_first",
-        pent_face: "native",
+        tri_face: "native",
     }
     assert mesh.quads
     assert mesh.tris
     quad_face_quads = list(mesh.elements_of_face[quad_face])
     assert quad_face_quads
     assert set(quad_face_quads) <= set(mesh.quads)
-    pent_face_tris = list(mesh.elements_of_face[pent_face])
-    assert set(pent_face_tris) <= set(mesh.tris)
+    tri_face_tris = list(mesh.elements_of_face[tri_face])
+    assert set(tri_face_tris) <= set(mesh.tris)
 
     record = mesh.structural_preparation["qualified_s3"]
     assert record["status"] == "ADMITTED"

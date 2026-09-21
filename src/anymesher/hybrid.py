@@ -1821,7 +1821,7 @@ def _audit_geometry(
 
 
 # ---------------------------------------------------------------------------
-# Quad-first execution (slice 3): front -> count -> TinyAD -> atomic publish.
+# Quad-first execution: front -> count -> TinyAD -> atomic publish.
 #
 # An explicit, in-scope ``quad_options`` must NOT silently fall back to the
 # legacy body.  The worker chain below exercises the Q3 front step, the Q4
@@ -2560,7 +2560,7 @@ def generate_hybrid_mesh_result(
         raise MeshError("qualified_s3 must be Boolean")
 
     # Quad-first narrow dispatch: explicit ``quad_options`` is the only signal
-    # that the quad-first contract applies.  Slice 2 validates the scope (out-
+    # that the quad-first contract applies.  Public integration validates the scope (out-
     # of-scope ``order``/``planar`` raise a typed
     # :class:`QuadPublicUnsupported`) and advertises the capabilities (missing
     # worker binaries raise :class:`QuadCapabilityMissing`); ``None`` leaves
