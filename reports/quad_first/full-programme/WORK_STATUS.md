@@ -821,6 +821,49 @@ pytest tests/quad_first -q                                -> 265 passed in 6.28 
 
 ---
 
+## Q7 / M3 — qualification tranche A+B+C+F
+
+**Status:** **complete for this bounded tranche; D/E remain deferred.**
+
+This tranche adds small deterministic qualification gates without changing the
+accepted Q0–Q6 algorithms or promoting quad-first to the default route.
+
+### Qualified in this tranche
+
+- **A — driver-level Q4 fraction gate:** an eight-cell regular planar strip is
+  advanced through the resident `QuadMeshState` / `front_step` driver. The
+  resulting active mesh is 100% Q4 by element count and 100% Q4 by absolute
+  shell area, clearing the Q7 gates of >=85% by count and >=75% by area.
+- **B — bounded mixed Q4/S3:** eight selected planar quad faces plus one
+  residual triangular face execute in one mixed public call. Quad faces retain
+  exact `elements_of_face` Q4 ownership; the residual face retains T3 ownership;
+  qualified-S3 preparation is `ADMITTED`, forbids legacy fallback, and its
+  recorded element IDs exactly match the published triangles. The admitted
+  triangle fraction is constrained to the Q7 1–25% band.
+- **C — typed public refusals:** an off-centre trimmed hole and a concave
+  five-edge planar face are both rejected by explicit quad-first requests with
+  `QuadPublicUnsupported`; neither is silently routed through legacy meshing.
+- **F — no promotion:** `quad_options` still defaults to `None`,
+  `coerce_public_quad_options(None)` remains the legacy sentinel, and a legacy
+  call reports no `quad-first:*` phase or quad-first route diagnostic.
+
+### Evidence
+
+```text
+pytest tests/quad_first/test_q7_qualification.py -q  -> 5 passed in 0.28 s
+pytest tests/quad_first -q                           -> 270 passed in 5.72 s
+```
+
+### Deferred to the next bounded Q7 tranche
+
+- **D:** source + installed-wheel qualification and compiled/source parity.
+- **E:** formal timing with one warmup plus seven isolated unprofiled samples.
+
+No push, main merge, tag, release, PyPI publication, or default-route
+promotion is part of this tranche.
+
+---
+
 ## Files changed (this branch, vs baseline `2ccef37`)
 
 Added:
