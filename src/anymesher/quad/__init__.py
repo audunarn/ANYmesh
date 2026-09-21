@@ -48,6 +48,9 @@ from .guidance import (
     score_body,
 )
 
+from .domain import PlanarQuadDomain
+from .boundary import BoundaryStation, BoundaryStationKey, BoundaryStationRegistry
+from .seed import PlanarQuadSeed, build_planar_quad_seed
 from .transitions import (
     ParentReplacement,
     TransitionRejected,
@@ -222,4 +225,11 @@ __all__ = [
     "find_q5_worker",
     "run_q5_worker",
     "solve_q5_patch",
+    # planar production PQ2
+    "PlanarQuadDomain",
+    "BoundaryStation",
+    "BoundaryStationKey",
+    "BoundaryStationRegistry",
+    "PlanarQuadSeed",
+    "build_planar_quad_seed",
 ]

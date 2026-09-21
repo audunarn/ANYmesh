@@ -85,7 +85,50 @@ git diff --check
 ```
 
 No push, merge, release, publication, or default-route promotion occurred.
+## PQ2 — target-size planar seed + canonical boundary stations
+
+**Status: COMPLETE.**
+
+- `PlanarQuadDomain` freezes source model/revision/face identity and builds a deterministic orthonormal 2D chart without mutating source geometry.
+- `BoundaryStationRegistry` solves target-size edge divisions once and owns canonical stations by exact source vertex/edge identity; reversed edge use reuses the same station identities in reverse order.
+- `build_planar_quad_seed` creates a deterministic chart-space interior lattice, performs one Python constrained planar triangulation, and publishes an all-positive-T3 `QuadMeshState` with the exact outer segments as active front and protected boundary features.
+- No public `_quad_first_execute` / hybrid route changed in PQ2; public-driver integration remains PQ3.
+
+### PQ2 P01 size evidence
+
+| target `h` | boundary divisions | nodes | boundary nodes | T3 | `N_eq=T3/2` | `A/h^2` |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1.0 | 10, 6, 10, 6 | 77 | 32 | 120 | 60 | 60 |
+| 0.5 | 20, 12, 20, 12 | 273 | 64 | 480 | 240 | 240 |
+| 0.25 | 40, 24, 40, 24 | 1025 | 128 | 1920 | 960 | 960 |
+
+Halving `h` therefore gives the exact 4.0 equivalent-count ratio. Boundary segment medians equal the target spacing on P01 and the maximum remains within the PQ2 1.5h gate.
+
+P02 (rigidly rotated/translated P01) produces the same chart geometry within tolerance, the same division tuple, and at `h=0.5` the same 273 nodes / 480 T3. A two-face registry fixture with one exact shared geometry edge proves that the second face receives precisely the first face's station identities reversed; stations are not regenerated or coordinate-welded. Product tests also preserve source `model_id`, revision, vertices, edges, and face topology.
+
+### PQ2 evidence
+
+```text
+python -m pytest tests/quad_first_planar/test_pq2_size_seed.py -q
+  -> 8 passed in 7.09 s
+python -m pytest tests/quad_first_planar/test_pq0_baseline.py \
+             tests/quad_first_planar/test_pq1_front_semantics.py -q
+  -> 11 passed in 0.22 s
+python -m pytest tests/test_seeding.py \
+             tests/test_compiled_triangulation_contract.py \
+             tests/quad_first/test_q1_state.py -q
+  -> 43 passed, 4 skipped in 0.24 s
+     (compiled triangulation extension not rebuilt; Python contract exercised)
+python -m pytest tests/quad_first -q
+  -> 272 passed in 5.31 s
+python -m pytest tests/quad_first_planar -q
+  -> 19 passed in 7.10 s
+git diff --check
+  -> clean
+```
+
+No push, merge, release, publication, default-route promotion, or primary-worktree edit occurred.
 
 ## Next
 
-PQ2: target-size-driven one-face planar meshing on the Q4/T3 advancing front.
+PQ3: consume the committed PQ2 seed in the genuine planar quad driver; PQ3 has not been started.
