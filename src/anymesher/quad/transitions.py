@@ -11,8 +11,9 @@ sparse :class:`~.journal.Transaction` writer:
 
 Every operation is
 
-* **deterministic** — result cell ids are ``max(cells)+1``; node ids are never
-  welded/renumbered;
+* **deterministic** - result cell ids come from transaction-owned monotone
+  allocators and are only consumed by successful commits; node identity is
+  never coordinate-welded or renumbered;
 * **sparse-local** — only the touched boundary edges, the cell set and the
   front state of those edges change;
 * **transactional / cancellation-safe** — a failure raises a typed
@@ -22,9 +23,9 @@ Every operation is
 
 Geometry (strict convexity, signed area, CCW normalisation) is owned by
 :mod:`anymesher.quad.front`; the front reconciliation mirrors
-:func:`anymesher.quad.front.front_step` exactly (``edge_cells`` on the staged
-view). Node identity is the exact integer id; edges are keyed by the exact
-node pair (``lo < hi``).
+:func:`anymesher.quad.front.front_step` exactly (residual-T3 incidence on the
+staged view). Node identity is the exact integer id; edges are keyed by the
+exact node pair (``lo < hi``).
 """
 
 from __future__ import annotations
