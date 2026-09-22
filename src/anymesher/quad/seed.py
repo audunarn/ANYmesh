@@ -6,6 +6,7 @@ from typing import Mapping, Sequence
 import numpy as np
 from anygeometry.model import GeometryModel
 from ..errors import MeshError
+from ..refinement import SizeField
 from ..triangulation import PlanarTriangulation, orient2d, triangulate_polygon
 from .boundary import BoundaryStationKey, BoundaryStationRegistry
 from .domain import PlanarQuadDomain, Vec2
@@ -69,13 +70,81 @@ def _strict_inside(p: Vec2, polygon: Sequence[Vec2], tol: float) -> bool:
     return inside
 
 
-def _interior_lattice(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]], target_size: float) -> np.ndarray:
+def _interior_lattice(
+    domain: PlanarQuadDomain,
+    outer: Sequence[Vec2],
+    holes: Sequence[Sequence[Vec2]],
+    target_size: float,
+    size_field: SizeField | None = None,
+) -> np.ndarray:
     h = float(target_size)
     if not np.isfinite(h) or h <= 0.0:
         raise MeshError("target_size must be positive and finite")
+    if size_field is None or size_field.is_uniform:
+        min_x = min(p[0] for p in outer); max_x = max(p[0] for p in outer)
+        min_y = min(p[1] for p in outer); max_y = max(p[1] for p in outer)
+        tol = 1.0e-10 * max(max_x-min_x, max_y-min_y, 1.0)
+        xs = np.arange(min_x+h, max_x-tol, h, dtype=float)
+        ys = np.arange(min_y+h, max_y-tol, h, dtype=float)
+        points: list[tuple[float, float]] = []
+        for y in ys:
+            for x in xs:
+                point = (float(x), float(y))
+                if not _strict_inside(point, outer, tol):
+                    continue
+                if any(_strict_inside(point, hole, tol) for hole in holes):
+                    continue
+                # Cartesian lattice coordinates are unique by construction; avoid an
+                # unnecessary O(N^2) duplicate scan over previously accepted points.
+                points.append(point)
+        return np.asarray(points, dtype=float).reshape((-1, 2))
     min_x = min(p[0] for p in outer); max_x = max(p[0] for p in outer)
     min_y = min(p[1] for p in outer); max_y = max(p[1] for p in outer)
     tol = 1.0e-10 * max(max_x-min_x, max_y-min_y, 1.0)
+    coarse = _uniform_lattice_points(outer, list(holes), h, min_x, max_x, min_y, max_y, tol)
+    h_min = min(float(target_size), *(float(zone.size) for zone in size_field.zones))
+    nx = int(np.ceil((max_x - min_x) / h_min))
+    ny = int(np.ceil((max_y - min_y) / h_min))
+    if nx * ny > 250000:
+        raise MeshError("graded refinement lattice exceeds fine candidate budget")
+    accepted: list[np.ndarray] = [np.asarray(p, dtype=float) for p in coarse]
+    seen = {(float(p[0]), float(p[1])) for p in coarse}
+    for j in range(ny):
+        y = min_y + (j + 0.5) * h_min
+        if y > max_y - tol:
+            continue
+        for i in range(nx):
+            x = min_x + (i + 0.5) * h_min
+            if x > max_x - tol:
+                continue
+            point = (float(x), float(y))
+            if not _strict_inside(point, outer, tol):
+                continue
+            if any(_strict_inside(point, hole, tol) for hole in holes):
+                continue
+            key = point
+            if key in seen:
+                continue
+            h_local = float(size_field.size_at(np.asarray([domain.lift(point)], dtype=float))[0])
+            if h_local >= 0.999999 * target_size:
+                continue
+            if any(float(np.linalg.norm(np.asarray(p, dtype=float) - np.asarray(point, dtype=float))) < 0.75 * h_local for p in accepted):
+                continue
+            accepted.append(np.asarray(point, dtype=float))
+            seen.add(key)
+    return np.asarray(accepted, dtype=float).reshape((-1, 2))
+
+
+def _uniform_lattice_points(
+    outer: Sequence[Vec2],
+    holes: list[Sequence[Vec2]],
+    h: float,
+    min_x: float,
+    max_x: float,
+    min_y: float,
+    max_y: float,
+    tol: float,
+) -> list[tuple[float, float]]:
     xs = np.arange(min_x+h, max_x-tol, h, dtype=float)
     ys = np.arange(min_y+h, max_y-tol, h, dtype=float)
     points: list[tuple[float, float]] = []
@@ -86,10 +155,8 @@ def _interior_lattice(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]], ta
                 continue
             if any(_strict_inside(point, hole, tol) for hole in holes):
                 continue
-            # Cartesian lattice coordinates are unique by construction; avoid an
-            # unnecessary O(N^2) duplicate scan over previously accepted points.
             points.append(point)
-    return np.asarray(points, dtype=float).reshape((-1, 2))
+    return points
 
 
 def build_planar_quad_seed(
@@ -99,6 +166,7 @@ def build_planar_quad_seed(
     *,
     domain: PlanarQuadDomain | None = None,
     registry: BoundaryStationRegistry | None = None,
+    size_field: SizeField | None = None,
 ) -> PlanarQuadSeed:
     start_revision = int(geometry.revision)
     start_model_id = str(geometry.model_id)
@@ -106,7 +174,9 @@ def build_planar_quad_seed(
     if domain.face_id != int(face_id):
         raise MeshError("domain face does not match requested face")
     domain.assert_current(geometry)
-    registry = registry or BoundaryStationRegistry.for_domain(geometry, domain, target_size)
+    if size_field is not None and abs(float(size_field.target_size) - float(target_size)) > 1.0e-12 * max(1.0, abs(float(target_size))):
+        raise MeshError("provided size field target_size differs from seed target_size")
+    registry = registry or BoundaryStationRegistry.for_domain(geometry, domain, target_size, size_field=size_field)
     registry.assert_current(geometry)
     if abs(registry.target_size-float(target_size)) > 1.0e-15*max(1.0,abs(float(target_size))):
         raise MeshError("boundary registry target_size differs from seed target_size")
@@ -119,7 +189,7 @@ def build_planar_quad_seed(
         if len(hole_points) < 3:
             raise MeshError("hole boundary has fewer than three stations")
         hole_polys.append(np.asarray(hole_points, dtype=float))
-    interior = _interior_lattice(outer, tuple(hole_polys), float(target_size))
+    interior = _interior_lattice(domain, outer, tuple(hole_polys), float(target_size), size_field)
     triangulation = triangulate_polygon(
         np.asarray(outer, dtype=float),
         holes=hole_polys,

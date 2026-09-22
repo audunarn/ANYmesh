@@ -41,6 +41,8 @@ class BoundaryStationRegistry:
         geometry: GeometryModel,
         domains: Iterable[PlanarQuadDomain],
         target_size: float,
+        *,
+        size_field: SizeField | None = None,
     ) -> "BoundaryStationRegistry":
         domains = tuple(domains)
         if not domains:
@@ -48,7 +50,9 @@ class BoundaryStationRegistry:
         for domain in domains:
             domain.assert_current(geometry)
         edge_ids = sorted({edge_id for d in domains for loop in (d.edge_uses, *d.hole_edge_uses) for edge_id, _ in loop})
-        field = SizeField(geometry, float(target_size))
+        field = size_field if size_field is not None else SizeField(geometry, float(target_size))
+        if abs(float(field.target_size) - float(target_size)) > 1.0e-12 * max(1.0, abs(float(target_size))):
+            raise MeshError("provided size field target_size differs from registry target_size")
         seeding = solve_seeding(geometry, size_field=field, edge_ids=edge_ids)
         chains: dict[int, tuple[BoundaryStation, ...]] = {}
         for edge_id in edge_ids:
@@ -79,8 +83,15 @@ class BoundaryStationRegistry:
         return result
 
     @classmethod
-    def for_domain(cls, geometry: GeometryModel, domain: PlanarQuadDomain, target_size: float) -> "BoundaryStationRegistry":
-        return cls.for_domains(geometry, (domain,), target_size)
+    def for_domain(
+        cls,
+        geometry: GeometryModel,
+        domain: PlanarQuadDomain,
+        target_size: float,
+        *,
+        size_field: SizeField | None = None,
+    ) -> "BoundaryStationRegistry":
+        return cls.for_domains(geometry, (domain,), target_size, size_field=size_field)
 
     def loop_stations(self, domain: PlanarQuadDomain, loop_uses: tuple[tuple[int, bool], ...]) -> tuple[BoundaryStation, ...]:
         self._check_domain(domain)

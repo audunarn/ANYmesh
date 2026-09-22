@@ -2318,6 +2318,7 @@ def _quad_first_execute(
     certification_mode: "CertificationMode",
     options: "QuadMeshingOptions",
     capabilities: "Any",
+    refinements: tuple[Refinement, ...] = (),
     cancellation_check: "Callable[[str], None] | None" = None,
 ) -> "HybridMeshResult":
     """Execute the genuine PQ-M1 target-size planar quad route.
@@ -2334,6 +2335,7 @@ def _quad_first_execute(
     quad_face_ids = tuple(sorted(set(int(item) for item in face_ids)))
     if not quad_face_ids:
         raise MeshError("quad-first requires at least one selected face")
+    quad_size_field = SizeField(geometry, h, tuple(refinements))
 
     for face_id in quad_face_ids:
         face = geometry.faces.get(face_id)
@@ -2346,7 +2348,7 @@ def _quad_first_execute(
         )
     except MeshError as exc:
         raise QuadPublicUnsupported(str(exc)) from exc
-    registry = BoundaryStationRegistry.for_domains(geometry, domains, h)
+    registry = BoundaryStationRegistry.for_domains(geometry, domains, h, size_field=quad_size_field)
 
     global_nodes: dict[int, np.ndarray] = {}
     node_of_vertex: dict[int, int] = {}
@@ -2382,6 +2384,7 @@ def _quad_first_execute(
             h,
             domain=domain,
             registry=registry,
+            size_field=quad_size_field,
         )
         driven = run_planar_quad_driver(
             seed,
@@ -2724,6 +2727,7 @@ def generate_hybrid_mesh_result(
             certification_mode=certification_mode,
             options=_quad_normalized,
             capabilities=_quad_capabilities,
+            refinements=requested_refinements,
             cancellation_check=cancellation_check,
         )
         _check_cancellation(cancellation_check, "quad-mixed:legacy")
@@ -2797,6 +2801,7 @@ def generate_hybrid_mesh_result(
             certification_mode=certification_mode,
             options=_quad_normalized,
             capabilities=_quad_capabilities,
+            refinements=requested_refinements,
             cancellation_check=cancellation_check,
         )
         if not source_beams:
