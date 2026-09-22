@@ -11,7 +11,6 @@ from test_cylindrical_frontal_integration import _persistent_state
 from anymesher._cylindrical_patch import prepare_cylindrical_patch
 from anymesher.hybrid import generate_hybrid_mesh_result
 from anymesher.quad.options import QuadMeshingOptions
-from anymesher.quad.public_integration import QuadPublicUnsupported
 
 
 def _face_id(model, face_use) -> int:
@@ -111,12 +110,15 @@ def test_single_sector_linear_quads_refine_with_target_size() -> None:
     assert _persistent_state(fine_model) == fine_before
 
 
-def test_cylindrical_quadratic_remains_typed_fail_closed() -> None:
+def test_cylindrical_quadratic_is_qualified_after_ch4() -> None:
+    # CH4 qualified the previously fail-closed cylindrical quadratic scope;
+    # the full contract is asserted in tests/quad_first_curved/test_ch4_cylindrical_quadratic.py.
     model, selected = _sector_model(False)
     before = _persistent_state(model)
     face = _face_id(model, selected[0])
-    with pytest.raises(QuadPublicUnsupported):
-        _generate(model, (face,), 0.5, order="quadratic")
+    mesh = _generate(model, (face,), 0.5, order="quadratic").mesh
+    assert mesh.order == "quadratic"
+    assert mesh.quads
     assert _persistent_state(model) == before
 
 

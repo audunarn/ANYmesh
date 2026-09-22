@@ -285,3 +285,20 @@ The public pre-dispatch admits a `Cylinder` only for explicit `order="linear"` q
 - Every published shell node in the CH3 fixtures lies on the unit source cylinder within `1e-10`; source model state is unchanged. Cancellation during face seeding propagates without partial publication.
 
 Diagnostics identify the route as `quad-first-cylindrical`, preserve the genuine front counters per face, and record `geometry_family_by_face`. CH3 does not open cones, ruled/Coons surfaces, cylindrical Q8/T6, Q9, or a new option schema.
+
+## CH4 implementation record — cylindrical Q8/T6 promotion
+
+CH4 re-opens `order="quadratic"` for the CH3 owner-qualified cylindrical quad-first route. The CH3 linear Q4/T3 topology remains authoritative; CH4 applies the same staged CH2 promotion, preserving element IDs, corner connectivity, face ownership, source-edge station nodes and source geometry.
+
+Geometry-owned boundary intervals continue to use exact source-edge midpoint parameters. For non-boundary shell edges on a cylindrical face, the two linear endpoints are projected into that face's qualified physical `CylindricalQuadDomain`, averaged in circumferential-arc-length/axial chart coordinates, and lifted back through the owner chart. This places one canonical midside on the cylinder instead of using a 3D chord midpoint. Shared source seams are already owned by `nodes_of_edge` and therefore reuse one exact midside identity; there is no coordinate welding.
+
+The promotion still runs atomically on a detached mesh and every final Q8/T6 must pass the CH1 strict `certify_mapping_validity` certificate before publication. Cancellation at `quad-first:quadratic-promotion-ready` leaves the source model unchanged and publishes no partial quadratic mesh. Planar CH2 behavior is unchanged; general curved faces, cones/ruled/Coons surfaces, Q9 and orders above quadratic remain outside CH4.
+
+### CH4 measured qualification points
+
+- One pi/4 sector, h=0.5: linear `17 nodes / 8 Q4 / 2 T3` -> quadratic `43 nodes / 8 Q8 / 2 T6`, exactly `26` added unique midsides.
+- Same sector, h=0.25: linear `43 nodes / 30 Q4 / 2 T3` -> quadratic `117 nodes / 30 Q8 / 2 T6`, exactly `74` added unique midsides.
+- Full eight-sector ring, h=0.5: linear `88 nodes / 64 Q4 / 16 T3` -> quadratic `256 nodes / 64 Q8 / 16 T6`, exactly `168` added unique midsides. The periodic physical source seam keeps one expanded station chain and all added seam midsides remain on the unit cylinder within `1e-10`.
+- All qualified cylindrical Q8/T6 mappings are `CERTIFIED_POSITIVE`; repeat ring topology/counts are deterministic and source geometry is unchanged.
+
+The new cylindrical interior midside work is O(unique final shell edges): each edge is owned once, projected/lifted through its already-prepared face domain once, and inserted through the existing canonical midside registry. No cylindrical topology engine is added.

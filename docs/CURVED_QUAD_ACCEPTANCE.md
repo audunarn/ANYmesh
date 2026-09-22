@@ -259,3 +259,25 @@ CH3 acceptance is implemented in `tests/quad_first_curved/test_ch3_cylindrical_p
 - Cancellation during cylindrical face seeding propagates and the supplied GeometryModel remains unchanged; no partially published result escapes.
 
 Qualification additionally reruns CH0/CH1/CH2, the existing cylindrical metric/atlas/patch/frontal contracts, the accepted planar PQ public regressions, and the full curved, planar, and quad-first suites. CH4 may re-open cylindrical Q8/T6 only after this CH3 linear topology handoff is committed and clean.
+
+## CH4 acceptance — owner-qualified cylindrical Q8/T6 promotion
+
+CH4 acceptance is implemented in `tests/quad_first_curved/test_ch4_cylindrical_quadratic.py`. It re-opens only quadratic promotion on the already-qualified CH3 cylindrical linear topology:
+
+- h=0.5 on the authored pi/4 sector preserves the CH3 `8 Q4 / 2 T3` corner topology and shell IDs as `8 Q8 / 2 T6`, retains every linear node coordinate exactly, adds 26 unique midsides, expands every source-edge chain with the linear chain at even positions, and leaves the source model unchanged.
+- h=0.25 preserves `30 Q4 / 2 T3` as `30 Q8 / 2 T6` and adds 74 unique midsides, proving the higher-order route follows genuine CH3 target-size topology rather than a fixed quadratic template.
+- The full eight-sector h=0.5 ring preserves `64 Q4 / 16 T3` as `64 Q8 / 16 T6`, grows from 88 to 256 nodes, and uses one expanded quadratic station chain on the periodic physical seam. Added cylindrical midsides lie on radius 1 within `1e-10`.
+- Every final Q8/T6 passes CH1 `CERTIFIED_POSITIVE` mapping validity. Shared shell edges reuse exactly one midside ID.
+- Cancellation at the final quadratic-promotion checkpoint is atomic for the source model. General curved faces and Q9+ remain outside the qualified scope.
+
+### CH4 gate evidence
+
+- CH0+CH1+CH2+CH3+CH4 focused contract: `62 passed`.
+- Cylindrical metric/atlas/patch/frontal/surface-metric/quadratic consumers plus boundary preparation: `76 passed`.
+- PQ3/PQ4a/PQ4b/PQ5/PQ6 + Q6/Q7 public regressions: `84 passed, 3 skipped` (known compiled-triangulation extension capability skips).
+- Full `tests/quad_first_curved`: `62 passed`.
+- Full `tests/quad_first_planar`: `63 passed, 3 skipped`.
+- Full `tests/quad_first`: `275 passed`.
+
+A fresh review must additionally keep `git diff --check` clean, verify no transient CH4 evidence files are staged, and confirm the production diff is limited to cylindrical midside geometry/public scope plus the CH4 contract tests and documentation.
+- Serialization / quality / coupling / quadratic-staging consumers: `35 passed`.

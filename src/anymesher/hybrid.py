@@ -2348,9 +2348,10 @@ def _promote_quad_first_quadratic(
     geometry: GeometryModel,
     *,
     target_size: float,
+    domains_by_face: Mapping[int, Any] | None = None,
     cancellation_check: Callable[[str], None] | None = None,
 ) -> None:
-    """Promote final planar Q4/T3 cells to strict-valid canonical Q8/T6.
+    """Promote final quad-first Q4/T3 cells to strict-valid canonical Q8/T6.
 
     Work is staged on a detached copy.  Exact source-edge midsides are used on
     every geometry-owned boundary segment.  If that exact curvature would fold
@@ -2384,6 +2385,22 @@ def _promote_quad_first_quadratic(
             (min(first, second), max(first, second))
             for first, second in zip(corners, corners[1:] + corners[:1])
         )
+
+    face_domains = dict(domains_by_face or {})
+    owner_faces_by_edge: dict[tuple[int, int], set[int]] = {}
+    for face_id, element_ids in working.elements_of_face.items():
+        for element_id in element_ids:
+            body = working.quads.get(element_id)
+            corner_count = 4
+            if body is None:
+                body = working.tris.get(element_id)
+                corner_count = 3
+            if body is None:
+                continue
+            corners = tuple(int(node) for node in body[:corner_count])
+            for first, second in zip(corners, corners[1:] + corners[:1]):
+                key = (min(first, second), max(first, second))
+                owner_faces_by_edge.setdefault(key, set()).add(int(face_id))
 
     # Exact owner midsides for every current source-edge interval.
     boundary_data: dict[tuple[int, int], tuple[int, np.ndarray]] = {}
@@ -2432,7 +2449,26 @@ def _promote_quad_first_quadratic(
         key = (min(int(first), int(second)), max(int(first), int(second)))
         owned = boundary_data.get(key)
         if owned is not None:
-            return owned[1]
+            return np.asarray(owned[1], dtype=float)
+        owner_faces = tuple(sorted(owner_faces_by_edge.get(key, ())))
+        cylindrical = [
+            face_domains[face]
+            for face in owner_faces
+            if isinstance(face_domains.get(face), CylindricalQuadDomain)
+        ]
+        if cylindrical:
+            if len(owner_faces) != 1 or len(cylindrical) != 1:
+                raise MeshError(
+                    f"non-boundary cylindrical shell edge {key} has conflicting face ownership"
+                )
+            domain = cylindrical[0]
+            first_chart = domain.project(working.nodes[first])
+            second_chart = domain.project(working.nodes[second])
+            midpoint_chart = (
+                0.5 * (float(first_chart[0]) + float(second_chart[0])),
+                0.5 * (float(first_chart[1]) + float(second_chart[1])),
+            )
+            return np.asarray(domain.lift(midpoint_chart), dtype=float)
         return 0.5 * (
             np.asarray(working.nodes[first], dtype=float)
             + np.asarray(working.nodes[second], dtype=float)
@@ -2597,16 +2633,7 @@ def _promote_quad_first_quadratic(
     next_node = max(new_nodes, default=-1) + 1
     midside_of_edge: dict[tuple[int, int], int] = {}
     for first, second in sorted(edge_keys):
-        owned = boundary_data.get((first, second))
-        midpoint = (
-            np.asarray(owned[1], dtype=float)
-            if owned is not None
-            else 0.5
-            * (
-                np.asarray(working.nodes[first], dtype=float)
-                + np.asarray(working.nodes[second], dtype=float)
-            )
-        )
+        midpoint = _candidate_midpoint(first, second)
         if midpoint.shape != (3,) or not np.all(np.isfinite(midpoint)):
             raise MeshError(
                 f"quadratic promotion produced an invalid midside on edge {(first, second)}"
@@ -2743,10 +2770,6 @@ def _quad_first_execute(
         for face_id in quad_face_ids:
             surface = geometry.faces[face_id].surface
             if isinstance(surface, Cylinder):
-                if order == "quadratic":
-                    raise QuadPublicUnsupported(
-                        "cylindrical quadratic quad-first is not qualified until CH4"
-                    )
                 binding = cylindrical_bindings.get(face_id)
                 if binding is None:
                     raise QuadPublicUnsupported(
@@ -2932,7 +2955,11 @@ def _quad_first_execute(
     )
     if order == "quadratic":
         _promote_quad_first_quadratic(
-            mesh, geometry, target_size=h, cancellation_check=cancellation_check
+            mesh,
+            geometry,
+            target_size=h,
+            domains_by_face={domain.face_id: domain for domain in domains},
+            cancellation_check=cancellation_check,
         )
     q4_reports = tuple(face_q4.values())
     q4_statuses = tuple(str(item["status"]) for item in q4_reports)
@@ -3056,7 +3083,6 @@ def _quad_first_execute(
     if "cylindrical" in geometry_family_by_face.values():
         capability_dict["unsupported_scope"] = (
             "unqualified_curved",
-            "cylindrical_quadratic",
             "Q9+",
         )
     provisional = HybridMeshResult(
@@ -3217,10 +3243,6 @@ def generate_hybrid_mesh_result(
             if _surface is None or isinstance(_surface, Plane):
                 continue
             if isinstance(_surface, Cylinder):
-                if order == "quadratic":
-                    raise QuadPublicUnsupported(
-                        "cylindrical quadratic quad-first is not qualified until CH4"
-                    )
                 continue
             _corner_vertices = tuple(
                 source_geometry.face_corner_vertices(int(_quad_scope_face_id))

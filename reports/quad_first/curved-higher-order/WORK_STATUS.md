@@ -203,3 +203,28 @@ CH3 activates the public explicit quad-first route for owner-qualified `Cylinder
 - `git diff --check`: clean after documentation update.
 
 Fresh review confirmed owner binding is qualified once before per-face capture, source-edge/station identity survives periodic publication, the source model is read-only, cancellation is atomic, the existing front driver remains the only quad topology engine, target size changes real cylinder topology, and no cylindrical Q8/T6 or other CH4 scope is accidentally opened.
+
+## CH4 — owner-qualified cylindrical quadratic promotion
+
+**Status: QUALIFIED; ready for the CH4 milestone commit.**
+
+CH4 promotes the accepted CH3 cylindrical linear Q4/T3 topology to Q8/T6 using the CH2 staged promotion and CH1 strict validity kernel. Source-boundary midsides remain exact owner-edge midpoint samples; cylindrical interior midsides are physical-chart midpoints lifted through the already-qualified `CylindricalQuadDomain`. One canonical shell edge owns one midside and periodic source seams retain exact station identity.
+
+### Product evidence
+
+- pi/4 sector h=0.5: `17 nodes / 8 Q4 / 2 T3` -> `43 nodes / 8 Q8 / 2 T6`, `26` added unique midsides.
+- pi/4 sector h=0.25: `43 nodes / 30 Q4 / 2 T3` -> `117 nodes / 30 Q8 / 2 T6`, `74` added unique midsides.
+- full eight-sector ring h=0.5: `88 nodes / 64 Q4 / 16 T3` -> `256 nodes / 64 Q8 / 16 T6`, `168` added unique midsides; the periodic physical seam reuses one expanded source-edge chain and its midsides remain on radius 1 within `1e-10`.
+- Every final cylindrical Q8/T6 is `CERTIFIED_POSITIVE`; linear corner IDs/coordinates, shell IDs, face ownership and source geometry are retained. Cancellation before quadratic publication is atomic.
+
+### CH4 gate evidence
+
+- CH0+CH1+CH2+CH3+CH4 focused: `62 passed in 29.83s`.
+- cylindrical chart/atlas/patch/frontal/surface-metric/quadratic consumers and boundary preparation: `76 passed in 595.62s`.
+- accepted PQ public regression bundle: `84 passed, 3 skipped in 31.80s`; skips are the existing unreconstructed compiled-triangulation capability checks.
+- full curved quad-first: `62 passed in 30.07s`.
+- full planar quad-first: `63 passed, 3 skipped in 42.98s`.
+- full quad-first: `275 passed in 3.70s`.
+
+Fresh review confirmed the CH3 topology remains authoritative, boundary ownership precedes cylindrical interior projection, periodic station identity is not welded by coordinates, promotion is staged and strictly certified, and CH4 does not open general curved surfaces or Q9+.
+- serialization / quality / coupling / quadratic-staging consumers: `35 passed in 0.26s`.
