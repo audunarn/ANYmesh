@@ -281,3 +281,25 @@ CH4 acceptance is implemented in `tests/quad_first_curved/test_ch4_cylindrical_q
 
 A fresh review must additionally keep `git diff --check` clean, verify no transient CH4 evidence files are staged, and confirm the production diff is limited to cylindrical midside geometry/public scope plus the CH4 contract tests and documentation.
 - Serialization / quality / coupling / quadratic-staging consumers: `35 passed`.
+
+## CH5 acceptance — high-order geometry provenance certificate
+
+CH5 acceptance is implemented in `tests/quad_first_curved/test_ch5_high_order_geometry_report.py`. It adds reporting only; CH2/CH4 quadratic topology and CH1 strict validity remain authoritative. The hard contracts are:
+
+- Linear explicit quad-first reports high-order geometry as `NOT_APPLICABLE`. A successful quadratic result reports `CERTIFIED_POSITIVE` only after every final Q8/T6 has passed the CH1 strict validity gate.
+- `HighOrderBoundaryMidside`, `HighOrderGeometryReport`, and `HighOrderMeshCertificate` are immutable and JSON-safe. Each boundary/interface record carries canonical source edge/station identity, exact midpoint parameter/node ID, residual and one of `straight`, `analytic_curved`, or conservative `sampled` curvature provenance.
+- Each face report includes source model/revision, geometry family, chart kind and lifted 3D chart origin, Q8/T6 and certification counts, boundary/interior projection methods, curvature classes and geometry residuals. Positive face reports must certify every owned element.
+- The global certificate rejects duplicate face reports, model/revision mismatch, Q8/T6 count mismatch, conflicting canonical boundary provenance, inconsistent unique-boundary counts, or a residual envelope inconsistent with its face reports.
+- P01, P03, one owner-qualified cylindrical sector and the full eight-sector ring reproduce the CH2/CH4 topology/counts exactly while adding truthful provenance. P03 includes straight and analytic curved source intervals; the full ring has 72 globally unique canonical source-boundary/interface midsides with no conflicting payload.
+- P01 maximum geometry residual is `0.0`; P03 is `5.140558480280521e-13`; the cylinder sector and full ring are `2.854117595420714e-13` and `2.8563285926006375e-13`. All are below the qualified `1e-10` owner tolerance.
+- Cancellation at the final quadratic publication checkpoint raises before either topology or certificate publication; source geometry remains unchanged.
+
+### CH5 gate evidence
+
+- Focused CH5 contract: `8 passed`.
+- Full `tests/quad_first_curved`: `70 passed` after fresh-review strengthening of chart-origin, curvature-class and global-consistency contracts.
+- Full `tests/quad_first_planar`: `63 passed, 3 skipped`; the skips remain the known compiled-triangulation capability skips because the native extension is not rebuilt in this worktree.
+- Full `tests/quad_first`: `275 passed`.
+- The pre-review cylindrical consumer bundle remained green at `69 passed`; the post-review changes are confined to the new report metadata/consistency path and the explicit quad-first quadratic report assembly.
+
+A fresh review must keep `git diff --check` clean, remove all transient `.ch5_*`/gate evidence helpers before commit, and verify that CH5 does not open cones, ruled/Coons surfaces, Q9, a second topology engine, or a new public option schema.

@@ -22,6 +22,7 @@ from typing import Callable, Iterable
 import numpy as np
 
 
+
 class ElementFamily(str, Enum):
     Q4 = "Q4"
     Q8 = "Q8"
@@ -33,6 +34,44 @@ class ValidityStatus(str, Enum):
     CERTIFIED_POSITIVE = "CERTIFIED_POSITIVE"
     INVALID = "INVALID"
     UNRESOLVED = "UNRESOLVED"
+
+
+_CURVATURE_CLASSES = frozenset(("straight", "analytic_curved", "sampled"))
+
+
+@dataclass(frozen=True)
+class HighOrderBoundaryMidside:
+    canonical_edge: tuple[object, ...]
+    source_edge_id: int
+    station_interval: tuple[float, float]
+    parameter: float
+    node_id: int
+    residual: float
+    curvature_class: str
+
+    def __post_init__(self) -> None:
+        lower, upper = (float(v) for v in self.station_interval)
+        parameter = float(self.parameter)
+        residual = float(self.residual)
+        if not np.all(np.isfinite((lower, upper, parameter, residual))):
+            raise ValueError("high-order boundary provenance must be finite")
+        if lower > upper or parameter < lower - 1.0e-12 or parameter > upper + 1.0e-12:
+            raise ValueError("high-order midpoint parameter is outside its station interval")
+        if residual < 0.0:
+            raise ValueError("high-order boundary residual must be non-negative")
+        if str(self.curvature_class) not in _CURVATURE_CLASSES:
+            raise ValueError(f"unsupported high-order edge curvature class: {self.curvature_class!r}")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "canonical_edge": list(self.canonical_edge),
+            "source_edge": int(self.source_edge_id),
+            "station_interval": [float(value) for value in self.station_interval],
+            "midpoint_parameter": float(self.parameter),
+            "midpoint_node": int(self.node_id),
+            "residual": float(self.residual),
+            "curvature_class": str(self.curvature_class),
+        }
 
 
 class HighOrderCertificationCancelled(RuntimeError):
@@ -77,6 +116,139 @@ class ValidityReport:
             "max_depth_reached": int(self.max_depth_reached),
             "witness_value": None if self.witness_value is None else float(self.witness_value),
             "witness_parameter": None if self.witness_parameter is None else [float(v) for v in self.witness_parameter],
+        }
+
+
+@dataclass(frozen=True)
+class HighOrderGeometryReport:
+    model_id: str
+    revision: int
+    face_id: int
+    geometry_family: str
+    chart_kind: str
+    chart_origin: tuple[float, float, float]
+    boundary_projection: str
+    interior_projection: str
+    q8_count: int
+    t6_count: int
+    certified_elements: int
+    total_elements: int
+    boundary_midsides: tuple[HighOrderBoundaryMidside, ...]
+    edge_curvature_classes: tuple[str, ...]
+    interior_midside_count: int
+    max_geometry_residual: float
+    validity_status: str = "CERTIFIED_POSITIVE"
+    invalid_elements: int = 0
+
+    def __post_init__(self) -> None:
+        counts = (self.q8_count, self.t6_count, self.certified_elements, self.total_elements, self.interior_midside_count, self.invalid_elements)
+        if any(int(value) < 0 for value in counts):
+            raise ValueError("high-order geometry report counts must be non-negative")
+        if int(self.total_elements) != int(self.q8_count) + int(self.t6_count):
+            raise ValueError("high-order geometry report shell counts do not match total_elements")
+        if int(self.certified_elements) > int(self.total_elements) or int(self.invalid_elements) > int(self.total_elements):
+            raise ValueError("high-order geometry report certification counts are inconsistent")
+        origin = np.asarray(self.chart_origin, dtype=np.float64)
+        if origin.shape != (3,) or not np.all(np.isfinite(origin)):
+            raise ValueError("high-order chart origin must be a finite 3D point")
+        if not np.isfinite(float(self.max_geometry_residual)) or float(self.max_geometry_residual) < 0.0:
+            raise ValueError("high-order geometry residual must be finite and non-negative")
+        classes = tuple(sorted(set(str(value) for value in self.edge_curvature_classes)))
+        if classes != tuple(self.edge_curvature_classes) or any(value not in _CURVATURE_CLASSES for value in classes):
+            raise ValueError("high-order edge curvature classes must be sorted unique supported values")
+        boundary_classes = tuple(sorted({item.curvature_class for item in self.boundary_midsides}))
+        if boundary_classes != classes:
+            raise ValueError("high-order face curvature classes do not match boundary provenance")
+        if str(self.validity_status) == ValidityStatus.CERTIFIED_POSITIVE.value and (int(self.certified_elements) != int(self.total_elements) or int(self.invalid_elements)):
+            raise ValueError("positive high-order face report must certify every element")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "model_id": str(self.model_id), "revision": int(self.revision),
+            "face_id": int(self.face_id), "geometry_family": str(self.geometry_family),
+            "chart_kind": str(self.chart_kind), "chart_origin": [float(value) for value in self.chart_origin],
+            "boundary_projection": str(self.boundary_projection), "interior_projection": str(self.interior_projection),
+            "q8_count": int(self.q8_count), "t6_count": int(self.t6_count),
+            "certified_elements": int(self.certified_elements), "total_elements": int(self.total_elements),
+            "boundary_midsides": [item.to_dict() for item in self.boundary_midsides],
+            "edge_curvature_classes": list(self.edge_curvature_classes),
+            "interior_midside_count": int(self.interior_midside_count),
+            "max_geometry_residual": float(self.max_geometry_residual),
+            "validity_status": str(self.validity_status), "invalid_elements": int(self.invalid_elements),
+        }
+
+
+@dataclass(frozen=True)
+class HighOrderMeshCertificate:
+    status: ValidityStatus | str
+    model_id: str
+    revision: int
+    reports: tuple[HighOrderGeometryReport, ...]
+    q8_count: int
+    t6_count: int
+    unique_midside_count: int
+    unique_boundary_midside_count: int
+    max_geometry_residual: float
+    order: str = "quadratic"
+    target_size: float = 0.0
+    route: str = "quad-first"
+
+    def _unique_boundary(self) -> dict[tuple[object, ...], dict[str, object]]:
+        unique: dict[tuple[object, ...], dict[str, object]] = {}
+        for face in self.reports:
+            for item in face.boundary_midsides:
+                payload = item.to_dict()
+                key = tuple(payload["canonical_edge"])
+                prior = unique.get(key)
+                if prior is not None and prior != payload:
+                    raise ValueError(f"conflicting high-order boundary midside provenance for {key!r}")
+                unique[key] = payload
+        return unique
+
+    def __post_init__(self) -> None:
+        try:
+            status = self.status.value if isinstance(self.status, ValidityStatus) else ValidityStatus(str(self.status)).value
+        except ValueError as error:
+            raise ValueError(f"unsupported high-order certificate status: {self.status!r}") from error
+        counts = (self.q8_count, self.t6_count, self.unique_midside_count, self.unique_boundary_midside_count)
+        if any(int(value) < 0 for value in counts):
+            raise ValueError("high-order certificate counts must be non-negative")
+        if int(self.unique_boundary_midside_count) > int(self.unique_midside_count):
+            raise ValueError("boundary midside count exceeds total midside count")
+        if not np.isfinite(float(self.max_geometry_residual)) or float(self.max_geometry_residual) < 0.0:
+            raise ValueError("high-order certificate residual must be finite and non-negative")
+        if len({int(item.face_id) for item in self.reports}) != len(self.reports):
+            raise ValueError("high-order certificate contains duplicate face reports")
+        if any(str(item.model_id) != str(self.model_id) or int(item.revision) != int(self.revision) for item in self.reports):
+            raise ValueError("high-order face report model/revision does not match certificate")
+        if sum(int(item.q8_count) for item in self.reports) != int(self.q8_count) or sum(int(item.t6_count) for item in self.reports) != int(self.t6_count):
+            raise ValueError("high-order certificate shell counts do not match face reports")
+        unique = self._unique_boundary()
+        if len(unique) != int(self.unique_boundary_midside_count):
+            raise ValueError("high-order certificate boundary midside count is inconsistent")
+        interior_count = sum(int(item.interior_midside_count) for item in self.reports)
+        if interior_count + len(unique) != int(self.unique_midside_count):
+            raise ValueError("high-order certificate total midside count is inconsistent")
+        report_max = max((float(item.max_geometry_residual) for item in self.reports), default=0.0)
+        if not np.isclose(report_max, float(self.max_geometry_residual), rtol=0.0, atol=1.0e-15):
+            raise ValueError("high-order certificate residual does not match face reports")
+        if status == ValidityStatus.CERTIFIED_POSITIVE.value:
+            bad = [item.face_id for item in self.reports if item.validity_status != status or item.invalid_elements or item.certified_elements != item.total_elements]
+            if bad:
+                raise ValueError(f"positive high-order certificate contains invalid faces {bad}")
+
+    def to_dict(self) -> dict[str, object]:
+        status = self.status.value if isinstance(self.status, ValidityStatus) else str(self.status)
+        unique = self._unique_boundary()
+        return {
+            "status": status, "model_id": str(self.model_id), "revision": int(self.revision),
+            "order": str(self.order), "target_size": float(self.target_size), "route": str(self.route),
+            "reports": [item.to_dict() for item in self.reports],
+            "q8_count": int(self.q8_count), "t6_count": int(self.t6_count),
+            "unique_midside_count": int(self.unique_midside_count),
+            "unique_boundary_midside_count": int(self.unique_boundary_midside_count),
+            "max_geometry_residual": float(self.max_geometry_residual),
+            "boundary_midsides": [unique[key] for key in sorted(unique, key=repr)],
         }
 
 
@@ -489,9 +661,11 @@ def certify_mapping_validity(
     return ValidityReport(status, method, global_lower, global_upper, float(tol), subdivisions, depth_reached, float(witness_value), witness_param)
 
 
+
 __all__ = [
     "ElementFamily", "ValidityStatus", "HighOrderCertificationCancelled", "MappingEvaluation", "ValidityReport",
     "GeometryErrorReport", "NormalErrorReport", "shape_values", "shape_gradients",
     "evaluate_mapping", "physical_area", "geometry_error", "normal_error",
-    "certify_mapping_validity",
+    "certify_mapping_validity", "HighOrderBoundaryMidside", "HighOrderGeometryReport",
+    "HighOrderMeshCertificate",
 ]

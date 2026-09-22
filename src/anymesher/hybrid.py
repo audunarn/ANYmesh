@@ -50,7 +50,13 @@ from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.domain import CylindricalQuadDomain, PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
-from .quad.high_order import ValidityStatus, certify_mapping_validity
+from .quad.high_order import (
+    HighOrderBoundaryMidside,
+    HighOrderGeometryReport,
+    HighOrderMeshCertificate,
+    ValidityStatus,
+    certify_mapping_validity,
+)
 from .quad.options import QuadMeshingOptions
 from .quad.mcf_seed import optimize_q4_seed_mcf
 from .quad.optimize import optimize_quad_state
@@ -2387,6 +2393,9 @@ def _promote_quad_first_quadratic(
         )
 
     face_domains = dict(domains_by_face or {})
+    for face_id in working.elements_of_face:
+        if int(face_id) not in face_domains:
+            face_domains[int(face_id)] = PlanarQuadDomain.from_geometry(geometry, int(face_id))
     owner_faces_by_edge: dict[tuple[int, int], set[int]] = {}
     for face_id, element_ids in working.elements_of_face.items():
         for element_id in element_ids:
@@ -2694,6 +2703,81 @@ def _promote_quad_first_quadratic(
                 f"{report.status.value}"
             )
 
+    boundary_records_by_face: dict[int, list[HighOrderBoundaryMidside]] = {int(fid): [] for fid in working.elements_of_face}
+    for shell_edge, (source_edge_id, _exact_midpoint) in sorted(boundary_data.items()):
+        first, second = shell_edge
+        _p0, parameter0, _d0 = geometry.closest_edge_point(int(source_edge_id), working.nodes[first])
+        _p1, parameter1, _d1 = geometry.closest_edge_point(int(source_edge_id), working.nodes[second])
+        lower, upper = sorted((float(parameter0), float(parameter1)))
+        midside_id = int(midside_of_edge[shell_edge])
+        _near, parameter_mid, residual = geometry.closest_edge_point(int(source_edge_id), new_nodes[midside_id])
+        curve_name = type(geometry.edges[int(source_edge_id)].curve).__name__
+        curvature_class = (
+            "straight" if curve_name == "Straight"
+            else "analytic_curved" if curve_name == "Arc"
+            else "sampled"
+        )
+        record = HighOrderBoundaryMidside(
+            canonical_edge=(int(source_edge_id), round(lower, 15), round(upper, 15)),
+            source_edge_id=int(source_edge_id), station_interval=(float(lower), float(upper)),
+            parameter=float(parameter_mid), node_id=midside_id, residual=float(residual),
+            curvature_class=curvature_class,
+        )
+        for owner_face in sorted(owner_faces_by_edge.get(shell_edge, ())):
+            boundary_records_by_face.setdefault(int(owner_face), []).append(record)
+
+    face_reports: list[HighOrderGeometryReport] = []
+    all_residuals: list[float] = []
+    for face_id in sorted(working.elements_of_face):
+        domain = face_domains.get(int(face_id))
+        if domain is None:
+            raise MeshError(f"quadratic promotion lacks a chart domain for face {face_id}")
+        face_elements = tuple(int(item) for item in working.elements_of_face[face_id])
+        q8_count = sum(element_id in new_quads for element_id in face_elements)
+        t6_count = sum(element_id in new_tris for element_id in face_elements)
+        face_edges: set[tuple[int, int]] = set()
+        for element_id in face_elements:
+            body = new_quads.get(element_id)
+            corner_count = 4
+            if body is None:
+                body = new_tris.get(element_id)
+                corner_count = 3
+            if body is None:
+                raise MeshError(f"quadratic face {face_id} lost element {element_id}")
+            corners = tuple(int(node) for node in body[:corner_count])
+            face_edges.update((min(a, b), max(a, b)) for a, b in zip(corners, corners[1:] + corners[:1]))
+        boundary_records = tuple(sorted(boundary_records_by_face.get(int(face_id), ()), key=lambda item: repr(item.canonical_edge)))
+        residuals = [float(item.residual) for item in boundary_records]
+        interior_edges = sorted(face_edges.difference(boundary_data))
+        for shell_edge in interior_edges:
+            midpoint = np.asarray(new_nodes[midside_of_edge[shell_edge]], dtype=float)
+            projected = np.asarray(domain.lift(domain.project(midpoint)), dtype=float)
+            residuals.append(float(np.linalg.norm(projected - midpoint)))
+        max_residual = max(residuals, default=0.0)
+        all_residuals.extend(residuals)
+        cylindrical = isinstance(domain, CylindricalQuadDomain)
+        chart_origin = tuple(float(value) for value in (domain.lift((0.0, 0.0)) if cylindrical else domain.origin))
+        curvature_classes = tuple(sorted({item.curvature_class for item in boundary_records}))
+        face_reports.append(HighOrderGeometryReport(
+            model_id=str(geometry.model_id), revision=int(geometry.revision), face_id=int(face_id),
+            geometry_family="cylindrical" if cylindrical else "planar", chart_kind=type(domain).__name__,
+            chart_origin=chart_origin, boundary_projection="source-edge-parameter-midpoint",
+            interior_projection="owner-chart-midpoint" if cylindrical else "chord-midpoint",
+            q8_count=int(q8_count), t6_count=int(t6_count),
+            certified_elements=int(q8_count + t6_count), total_elements=int(q8_count + t6_count),
+            boundary_midsides=boundary_records, edge_curvature_classes=curvature_classes,
+            interior_midside_count=len(interior_edges), max_geometry_residual=float(max_residual),
+        ))
+
+    unique_boundary = {item.canonical_edge for report in face_reports for item in report.boundary_midsides}
+    certificate = HighOrderMeshCertificate(
+        status=ValidityStatus.CERTIFIED_POSITIVE, model_id=str(geometry.model_id), revision=int(geometry.revision),
+        reports=tuple(face_reports), q8_count=len(new_quads), t6_count=len(new_tris),
+        unique_midside_count=len(midside_of_edge), unique_boundary_midside_count=len(unique_boundary),
+        max_geometry_residual=max(all_residuals, default=0.0), order="quadratic", target_size=float(h),
+        route=str(working.hybrid_diagnostics.get("route", "quad-first")),
+    )
+
     diagnostics = deepcopy(working.hybrid_diagnostics)
     diagnostics["quadratic_promotion"] = {
         "status": "APPLIED",
@@ -2703,6 +2787,8 @@ def _promote_quad_first_quadratic(
         "repaired_corner_nodes": sorted(repaired_nodes),
         "max_corner_displacement": float(max_corner_displacement),
     }
+
+    diagnostics["high_order_geometry"] = certificate.to_dict()
 
     _check_cancellation(cancellation_check, "quad-first:quadratic-promotion-ready")
     mesh.nodes = new_nodes
@@ -2953,6 +3039,7 @@ def _quad_first_execute(
     mesh.declared_plate_junction_edges = _topology_plate_junction_edges(
         mesh, geometry
     )
+    mesh.hybrid_diagnostics["high_order_geometry"] = {"status": "NOT_APPLICABLE", "reports": []}
     if order == "quadratic":
         _promote_quad_first_quadratic(
             mesh,

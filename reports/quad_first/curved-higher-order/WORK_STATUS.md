@@ -228,3 +228,36 @@ CH4 promotes the accepted CH3 cylindrical linear Q4/T3 topology to Q8/T6 using t
 
 Fresh review confirmed the CH3 topology remains authoritative, boundary ownership precedes cylindrical interior projection, periodic station identity is not welded by coordinates, promotion is staged and strictly certified, and CH4 does not open general curved surfaces or Q9+.
 - serialization / quality / coupling / quadratic-staging consumers: `35 passed in 0.26s`.
+
+## CH5 — high-order geometry provenance certificate
+
+**Status: QUALIFIED; ready for the CH5 milestone commit.**
+
+CH5 closes the CH0 reporting seam without changing accepted topology. Successful explicit quadratic quad-first promotion now publishes an immutable, JSON-safe global `HighOrderMeshCertificate` containing one `HighOrderGeometryReport` per source face plus canonical boundary/interface midside provenance. Linear quad-first reports the capability truthfully as `NOT_APPLICABLE`.
+
+The certificate is built from the exact staged Q8/T6 coordinates/connectivity immediately after the CH1 strict final validity pass and before atomic publication. It checks model/revision and face uniqueness, per-face/global Q8/T6 counts, canonical source-edge/station midside identity, unique boundary counts and the global residual envelope. Conflicting canonical provenance or incomplete positive certification fails closed.
+### Product evidence
+
+- P01 h=0.5: `785 nodes / 240 Q8 / 0 T6`, 512 unique midsides, 64 unique source-boundary midsides, residual `0.0`, chart origin `(0,0,0)`, curvature class `straight`.
+- P03 h=0.5: `795 nodes / 233 Q8 / 10 T6`, 519 unique midsides, 76 unique source-boundary midsides, residual `5.140558480280521e-13`; straight and analytic-curved source intervals are distinguished.
+- Cylindrical pi/4 sector h=0.5: `43 nodes / 8 Q8 / 2 T6`, 26 unique midsides, 14 unique source-boundary midsides, residual `2.854117595420714e-13`; physical chart origin lifts to `(1,0,0)`.
+- Full eight-sector ring h=0.5: `256 nodes / 64 Q8 / 16 T6`, 168 unique midsides, 72 globally unique canonical source-boundary/interface midsides, eight face reports, residual `2.8563285926006375e-13`.
+- Final-checkpoint cancellation remains atomic and source geometry remains unchanged.
+
+### CH5 gate evidence
+
+```text
+focused CH5
+  -> 8 passed in 9.00 s
+post-review full tests/quad_first_curved
+  -> 70 passed in 38.83 s
+post-review full tests/quad_first_planar
+  -> 63 passed, 3 skipped in 42.11 s
+     skips: known compiled-triangulation parity capability; native extension not rebuilt
+post-review full tests/quad_first
+  -> 275 passed in 3.67 s
+pre-review cylindrical consumer bundle
+  -> 69 passed in 339.84 s
+```
+
+Fresh review added the originally frozen chart-origin and edge-curvature-class semantics, strengthened global count/provenance consistency, and confirmed CH5 remains report-only: no new surface family, topology engine, option schema, Q9 path, coordinate welding or `quality_v2` change.

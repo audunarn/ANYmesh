@@ -302,3 +302,19 @@ The promotion still runs atomically on a detached mesh and every final Q8/T6 mus
 - All qualified cylindrical Q8/T6 mappings are `CERTIFIED_POSITIVE`; repeat ring topology/counts are deterministic and source geometry is unchanged.
 
 The new cylindrical interior midside work is O(unique final shell edges): each edge is owned once, projected/lifted through its already-prepared face domain once, and inserted through the existing canonical midside registry. No cylindrical topology engine is added.
+
+## CH5 implementation record — high-order geometry provenance certificate
+
+CH5 closes the CH0 high-order reporting seam without opening a new topology or geometry family. Every successful explicit quad-first quadratic promotion now publishes one immutable `HighOrderMeshCertificate` in `mesh.hybrid_diagnostics["high_order_geometry"]`; linear quad-first truthfully publishes `NOT_APPLICABLE` instead. The certificate is assembled from the exact staged Q8/T6 mesh only after the existing CH1 strict final validity pass and before the atomic publication checkpoint.
+
+Each immutable `HighOrderGeometryReport` binds one source face to model UUID/revision, geometry family, chart type and a 3D chart-origin point. It records Q8/T6 and certification counts, boundary/interior projection methods, the number of interior midsides and the maximum geometry residual. Boundary/interface midside provenance is explicit: canonical source edge plus station interval, source-edge midpoint parameter, final midside node ID, owner residual and curvature class. Current supported source-curve classes are reported conservatively as `straight` for `Straight`, `analytic_curved` for `Arc`, and `sampled` for any other owner curve representation.
+
+The global certificate checks face uniqueness, model/revision consistency, per-face versus global Q8/T6 counts, unique boundary midside identity, total-versus-boundary midside counts and the global residual envelope. A positive certificate cannot contain an invalid or incompletely certified face report. Conflicting provenance for a canonical source interval fails closed rather than being merged by coordinate proximity.
+CH5 does not re-run or weaken the CH1 mapping proof: the report consumes the immediately preceding strict final Q8/T6 certification results and adds geometry-owner provenance over those same staged coordinates/connectivities. Cancellation at `quad-first:quadratic-promotion-ready` still occurs before any mesh mutation, so no partial quadratic topology or certificate can escape. Report construction is O(unique final shell edges + faces) and adds no topology engine, coordinate welding or `quality_v2` change.
+
+### CH5 measured qualification points
+
+- P01 h=0.5: `785 nodes / 240 Q8 / 0 T6`, 512 unique midsides and 64 unique source-boundary midsides; the planar chart origin is `(0,0,0)`, every source edge is classified `straight`, and the maximum reported geometry residual is exactly `0.0`.
+- P03 circular-hole h=0.5: `795 nodes / 233 Q8 / 10 T6`, 519 unique midsides and 76 unique source-boundary midsides; reports contain both `straight` and `analytic_curved` source intervals and the maximum residual is `5.140558480280521e-13`.
+- One cylindrical pi/4 sector h=0.5: `43 nodes / 8 Q8 / 2 T6`, 26 unique midsides and 14 unique source-boundary midsides; the physical owner-chart origin lifts to `(1,0,0)`, straight/analytic-curved source intervals are distinguished, and maximum residual is `2.854117595420714e-13`.
+- Full eight-sector cylindrical ring h=0.5: `256 nodes / 64 Q8 / 16 T6`, 168 unique midsides, 72 unique canonical source-boundary/interface midsides and eight face reports; maximum residual is `2.8563285926006375e-13` with no duplicate canonical provenance.
