@@ -146,6 +146,36 @@ PQ-M1 or PQ4a validity rules:
   and triangle connectivity. No native fallback or coordinate reordering is
   accepted as parity.
 
+## PQ5 activated actual-mesh TinyAD gates
+
+PQ5 activates Q5 only on the resident mesh produced by the genuine public
+quad-first route. It does not activate Q4 MCF.
+
+- `max_local_optimizations=0` must make zero Q5 worker calls and report
+  `DISABLED`; it must not fall back to the historical `NOT_INTEGRATED` tag.
+- A causal real-mesh case must retain identical Q4/T3 connectivity with Q5 on
+  and off, preserve every canonical boundary-station coordinate exactly, move
+  at least one unprotected interior node, and strictly reduce the validated Q5
+  objective while final planar validation remains green.
+- The qualified causal case uses the real locally graded P07 mesh. With base
+  `target_size=1.0` and the existing `size=0.25`, `radius=0.75`, `growth=1.5`
+  refinement, Q5 must use the real generated Q4 patch and not a synthetic test
+  patch.
+- The uniform P01 `h=0.5` mesh is a no-regression/no-op witness: topology and
+  coordinates must remain unchanged unless an accepted displacement is below
+  the explicit negligible tolerance.
+- Protected/boundary nodes are never free. First-tranche eligible centers touch
+  Q4 cells only; residual-T3-touching centers are excluded.
+- Worker calls are bounded globally by `min(max_local_optimizations, 8)`.
+  Missing worker capability is truthful `UNAVAILABLE_SKIPPED` with no mutation;
+  crash/malformed/invalid-solution failures remain typed failures rather than
+  silent fallbacks.
+- The independent planar validator runs after accepted coordinate moves. Area
+  closure, positive cells, incidence, owner/station identity, legacy sentinel,
+  and source-geometry immutability remain mandatory.
+- Q4 MCF remains `NOT_INTEGRATED` until the separate geometry-derived count
+  integration tranche is qualified.
+
 ## Legacy compatibility and exclusions
 
 - Explicit quad-first must not silently succeed as legacy-only: any explicit

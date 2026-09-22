@@ -1,4 +1,4 @@
-# ANYmesher Genuine Planar Quad Production Design (PQ0 freeze)
+﻿# ANYmesher Genuine Planar Quad Production Design (PQ0 freeze)
 
 ## Baseline
 
@@ -65,25 +65,25 @@ Correct identity handling is required to prevent accidental conflation.
 
 The production design proceeds in ordered phases.
 
-### PQ0 — Freeze contract
+### PQ0 â€” Freeze contract
 
 - Freeze invariants and ID semantics as stated above.
 - Define the capability table and the scope boundary.
 - Establish the contract that later phases must satisfy.
 
-### PQ1 — Correct resident semantics and locality
+### PQ1 â€” Correct resident semantics and locality
 
 - Correct the front/residual-region interface and pairing.
 - Fix protected endpoint semantics so identity and participation are distinct.
 - Ground recovery and insertion in the corrected local transaction machinery.
 
-### PQ2 — Planar domain, stations, size-aware constrained seed
+### PQ2 â€” Planar domain, stations, size-aware constrained seed
 
 - Introduce a size-aware constrained seed for the planar domain.
 - Use canonical boundary stations as the conformity reference.
 - Preserve the active accepted Q4 plus finalized T3 partition without helper T3.
 
-### PQ3 — Finite size-driven front driver, independent validation, public dispatch
+### PQ3 â€” Finite size-driven front driver, independent validation, public dispatch
 
 - Replace the fixed `front_step` demonstration with a finite size-driven front driver.
 - Add independent validation of the produced resident state.
@@ -123,9 +123,10 @@ explicit public quad-first route.
   represented on both sides by a bounded local re-tile in one transaction, so
   no hanging node is published. Failed candidate re-tiles roll back without
   consuming resident IDs.
-- The historical Q4 MCF and Q5 TinyAD adapters remain available for direct
-  qualification, but they are not in the PQ-M1 public dataflow and are reported
-  as `NOT_INTEGRATED` without being required at runtime.
+- At PQ-M1 the historical Q4 MCF and Q5 TinyAD adapters remained direct-only.
+  PQ5 now activates the existing TinyAD worker on bounded real Q4 patches after
+  the front driver and before final validation/publication. Q4 MCF remains
+  `NOT_INTEGRATED` pending its separate geometry-derived tranche.
 - `quad_options=None` remains the legacy dispatch sentinel. Curved surfaces and
   higher-order elements remain outside the qualified planar scope.
 - PQ4a separately qualifies simple planar exterior loops beyond four corners,
@@ -145,6 +146,33 @@ explicit public quad-first route.
   existing Sheet/FaceUse owner-authority requirement. Compiled triangulation is
   qualification-equivalent to Python on the staged seed corpus but is not required
   to replace the deterministic Python seed backend.
+
+
+### PQ5 — bounded actual-mesh TinyAD optimization
+
+PQ5 is a coordinate-only quality stage on the resident mesh produced by the
+front driver. It does not change topology, ownership, station identity, or the
+source geometry.
+
+- Eligible centers are unprotected interior nodes incident only to Q4 cells.
+  The optimization patch contains every Q4 incident to that one free center;
+  protected/boundary nodes are fixed and residual-T3-touching centers are
+  excluded in this tranche.
+- Candidate ordering is deterministic. Pure-Python patch energy ranks the
+  candidates; at most `min(max_local_optimizations, 8)` TinyAD worker calls are
+  allowed over one public execution.
+- A worker result is committed only when the independently validated TinyAD
+  response is `CONVERGED` with a strict objective decrease and the staged
+  resident patch remains positively oriented. The transaction then moves only
+  the center coordinate. `NOIMPROVE` leaves the resident state unchanged.
+- Public grading shares the existing `SizeField`; the local desired size is used
+  for the patch where a domain/field is available. Uniform routes preserve the
+  previous target-size behavior.
+- `max_local_optimizations=0` is an explicit `DISABLED` state. An unavailable
+  worker is `UNAVAILABLE_SKIPPED` and leaves coordinates untouched; worker
+  crashes, malformed replies, and invalid solutions are not hidden.
+- Final planar validation runs after TinyAD, so any accepted move must still
+  satisfy the existing incidence, area-closure, positivity, and station gates.
 
 The exact acceptance evidence and final gate results are recorded in
 `reports/quad_first/planar-production/WORK_STATUS.md`.

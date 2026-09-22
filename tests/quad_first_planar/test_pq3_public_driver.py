@@ -39,7 +39,7 @@ def test_p01_public_driver_h_parametrized(h):
     diag = _diagnostics(mesh)
     assert diag["route"] == "quad-first"
     assert diag["q4"]["status"] == "NOT_INTEGRATED"
-    assert diag["q5"]["status"] == "NOT_INTEGRATED"
+    assert diag["q5"]["status"] in {"NOIMPROVE", "NO_ELIGIBLE", "APPLIED", "UNAVAILABLE_SKIPPED"}
     face_validation = diag["validation"]["faces"]
     assert len(face_validation) == 1
     validation = next(iter(face_validation.values()))

@@ -326,8 +326,78 @@ shared station identity is unchanged, qualified-S3 owner authority is not
 bypassed, and native parity is qualification-only rather than a silent backend
 switch in production. No material blocker remains in the activated PQ4b scope.
 
+## PQ5 - actual-mesh TinyAD optimization
+
+**Status: COMPLETE through full regression gates; pending the local milestone commit.**
+
+PQ5 activates the already-qualified Q5 TinyAD worker on bounded patches of the
+real resident Q4 mesh. The stage runs after the front driver and before the
+independent final validator/publication. It is coordinate-only: no topology,
+source ownership, canonical boundary station, or element ID is changed. Q4 MCF
+remains truthfully `NOT_INTEGRATED`.
+
+### PQ5 causal evidence
+
+The causal public fixture is the real graded P07 8 m x 4 m face at base
+`target_size=1.0`, using the already-qualified local refinement
+`size=0.25`, `radius=0.75`, `growth=1.5` about `(2,2,0)`.
+
+- Q5 disabled: 96 nodes, 82 Q4, 2 residual T3; status `DISABLED`, zero worker
+  calls and zero coordinate moves.
+- Q5 enabled with `max_local_optimizations=4`: the same 96 nodes / 82 Q4 / 2
+  T3 and identical connectivity; 37 eligible real interior nodes, 4 attempts,
+  4 worker calls, 4 accepted moves.
+- Aggregate validated Q5 objective decreases from `85.42386140538405` to
+  `72.14196687331342`; maximum accepted displacement is
+  `0.2560234505295457` m. Moved resident node IDs are `[84, 77, 33, 78]`.
+- Final strict planar validation remains exact: area ratio `1.0`, Q4 count
+  fraction `0.9761904761904762`, Q4 area fraction `0.9975585937500001`,
+  `N_eq=83`, and final area `32.0`.
+- Every published canonical boundary-station node is byte-for-byte unchanged
+  between disabled and enabled runs; only unprotected interior coordinates
+  move.
+
+Uniform P01 at `h=0.5` is the no-op witness: 273 nodes / 240 Q4 / 0 T3,
+153 eligible interior candidates, 8 bounded worker calls, all returning
+`NOIMPROVE`; objective remains `32.0 -> 32.0`, no node moves, and topology and
+coordinates remain unchanged.
+
+Missing worker capability is explicitly `UNAVAILABLE_SKIPPED` with zero worker
+calls and no mutation. `max_local_optimizations=0` is explicitly `DISABLED`.
+Protected nodes are never offered as free variables; residual-T3-touching
+centres are excluded in this first causal Q5 tranche. Crash, malformed-response,
+and invalid-solution failures remain typed and are not hidden by the public
+optimizer.
+
+### PQ5 gate evidence
+
+```text
+python -m pytest tests/quad_first_planar/test_pq5_real_optimization.py -q
+  -> 7 passed in 2.18 s
+python -m pytest tests/quad_first/test_q5_tinyad.py -q
+  -> 28 passed in 2.38 s
+python -m pytest tests/quad_first_planar/test_pq3_public_driver.py \
+             tests/quad_first_planar/test_pq4_general_domains.py \
+             tests/quad_first_planar/test_pq4b_staged_domains.py \
+             tests/quad_first/test_q6_public_integration.py \
+             tests/quad_first/test_q7_qualification.py -q
+  -> 65 passed in 31.94 s
+python -m pytest tests/quad_first_planar -q
+  -> 51 passed in 40.34 s
+python -m pytest tests/quad_first -q
+  -> 275 passed in 5.44 s
+git diff --check
+  -> clean before documentation closeout
+```
+
+Primary `C:\Github\ANYmesh` remains on `main` at `6834162`; its unrelated
+pre-existing `pyproject.toml` / documentation changes were not touched.
+
 ## Next
 
-PQ4b is complete. Do not start a further planar-quad tranche until its scope is
-explicitly approved; curved surfaces, higher-order elements and unsupported
-anisotropy remain outside the qualified scope.
+Run the bounded PQ5 diff review, address any material finding and rerun affected
+plus full gates automatically, then commit locally as
+`PQ5: integrate TinyAD optimization on real quad mesh`. After PQ5 acceptance,
+hand off automatically to the already-approved geometry-derived Q4 MCF tranche.
+Curved surfaces, higher-order elements and unsupported anisotropy remain outside
+the qualified scope.

@@ -376,7 +376,7 @@ def test_d2_q6_production_worker_chain_runs_and_is_canonical(
     diag = mesh.hybrid_diagnostics
     assert diag["route"] == "quad-first"
     assert diag["q4"]["status"] == "NOT_INTEGRATED"
-    assert diag["q5"]["status"] == "NOT_INTEGRATED"
+    assert diag["q5"]["status"] == "NO_ELIGIBLE"
     assert mesh.quads
     assert all(len(body) == 4 and len(set(body)) == 4 for body in mesh.quads.values())
     assert set(mesh.node_of_vertex) == set(geometry.vertices)

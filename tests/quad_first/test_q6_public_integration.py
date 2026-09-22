@@ -182,7 +182,7 @@ def test_quad_first_exercises_worker_chain_when_explicit() -> None:
     diagnostics = result.mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
     assert diagnostics["q4"]["status"] == "NOT_INTEGRATED"
-    assert diagnostics["q5"]["status"] == "NOT_INTEGRATED"
+    assert diagnostics["q5"]["status"] == "NO_ELIGIBLE"
     driver = diagnostics["front"]["faces"][face]
     assert driver["final_q4"] > 0
     assert driver["final_t3"] >= 0
@@ -1134,7 +1134,7 @@ def test_quad_first_beam_coupling_slice() -> None:
     diagnostics = mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
     assert diagnostics["q4"]["status"] == "NOT_INTEGRATED"
-    assert diagnostics["q5"]["status"] == "NOT_INTEGRATED"
+    assert diagnostics["q5"]["status"] == "NO_ELIGIBLE"
     face_elements = list(mesh.elements_of_face[face])
     assert face_elements
     assert all(eid in mesh.quads or eid in mesh.tris for eid in face_elements)

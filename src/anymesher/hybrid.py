@@ -51,6 +51,7 @@ from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.domain import PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
 from .quad.options import QuadMeshingOptions
+from .quad.optimize import optimize_quad_state
 from .quad.seed import build_planar_quad_seed
 from .quad.public_integration import (
     QuadPublicUnsupported,
@@ -2403,6 +2404,9 @@ def _quad_first_execute(
     elements_of_face: dict[int, list[int]] = {}
     face_driver: dict[int, dict[str, Any]] = {}
     face_validation: dict[int, dict[str, Any]] = {}
+    face_q5: dict[int, dict[str, Any]] = {}
+    q5_budget_total = min(int(options.max_local_optimizations), 8)
+    q5_budget_remaining = q5_budget_total
     next_node_id = len(global_nodes)
     next_element_id = 0
 
@@ -2423,10 +2427,20 @@ def _quad_first_execute(
             cancellation_check=cancellation_check,
         )
         state = driven.state
+        q5_report = optimize_quad_state(
+            state,
+            target_size=h,
+            max_local_optimizations=q5_budget_remaining,
+            cancellation_check=cancellation_check,
+            size_field=quad_size_field,
+            domain=domain,
+        )
+        q5_budget_remaining = max(0, q5_budget_remaining - q5_report.worker_calls)
         validation = validate_planar_quad_result(
             state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed
         )
         face_driver[domain.face_id] = driven.report.to_dict()
+        face_q5[domain.face_id] = q5_report.to_dict()
         face_validation[domain.face_id] = validation.to_dict()
 
         local_to_global: dict[int, int] = {}
@@ -2515,6 +2529,34 @@ def _quad_first_execute(
     mesh.declared_plate_junction_edges = _topology_plate_junction_edges(
         mesh, geometry
     )
+    q5_reports = tuple(face_q5.values())
+    q5_statuses = tuple(str(item["status"]) for item in q5_reports)
+    if any(status == "APPLIED" for status in q5_statuses):
+        q5_status = "APPLIED"
+    elif q5_statuses and all(status == "DISABLED" for status in q5_statuses):
+        q5_status = "DISABLED"
+    elif any(status == "UNAVAILABLE_SKIPPED" for status in q5_statuses):
+        q5_status = "UNAVAILABLE_SKIPPED"
+    elif any(status == "NOIMPROVE" for status in q5_statuses):
+        q5_status = "NOIMPROVE"
+    else:
+        q5_status = "NO_ELIGIBLE"
+    q5_diagnostics = {
+        "status": q5_status,
+        "eligible_nodes": sum(int(item["eligible_nodes"]) for item in q5_reports),
+        "attempts": sum(int(item["attempts"]) for item in q5_reports),
+        "applied": sum(int(item["applied"]) for item in q5_reports),
+        "worker_calls": sum(int(item["worker_calls"]) for item in q5_reports),
+        "objective_initial_sum": sum(float(item["objective_initial_sum"]) for item in q5_reports),
+        "objective_final_sum": sum(float(item["objective_final_sum"]) for item in q5_reports),
+        "moved_node_ids": [node for item in q5_reports for node in item["moved_node_ids"]],
+        "max_displacement": max((float(item["max_displacement"]) for item in q5_reports), default=0.0),
+        "worker_statuses": [status for item in q5_reports for status in item["worker_statuses"]],
+        "budget": q5_budget_total,
+        "budget_cap": 8,
+        "faces": face_q5,
+    }
+
     mesh.hybrid_diagnostics.update(
         {
             "route": "quad-first",
@@ -2526,7 +2568,7 @@ def _quad_first_execute(
             "front": {"faces": face_driver},
             "validation": {"faces": face_validation},
             "q4": {"status": "NOT_INTEGRATED"},
-            "q5": {"status": "NOT_INTEGRATED"},
+            "q5": q5_diagnostics,
         }
     )
 
