@@ -1023,9 +1023,8 @@ def test_mixed_quad_and_qualified_s3_residual_route() -> None:
         assert float(np.linalg.norm(np.asarray(value, dtype=float))) > 0.0
 
 
-def test_pure_all_q4_result_does_not_run_s3_preparation() -> None:
-    """Pure all-Q4 results do not run S3 preparation: no qualified_s3 record
-    is attached even when the control is requested."""
+def test_pure_all_q4_result_publishes_s3_no_triangle_admission() -> None:
+    """Explicit qualified-S3 control remains observable on an all-Q4 result."""
     geometry, face = _translated_plane_face()
     result = generate_hybrid_mesh_result(
         geometry,
@@ -1036,8 +1035,15 @@ def test_pure_all_q4_result_does_not_run_s3_preparation() -> None:
     )
     assert result.mesh.quads
     assert not result.mesh.tris
-    assert not result.mesh.structural_preparation
-    assert "qualified_s3" not in result.mesh.structural_preparation
+    record = result.mesh.structural_preparation["qualified_s3"]
+    assert record["status"] == "NOT_APPLICABLE_NO_TRIANGLES"
+    assert record["element_ids"] == []
+    assert record["legacy_fallback"] == "FORBIDDEN"
+    assert record["admission"] == {
+        "elements": [],
+        "qualified_junction_edges": [],
+        "topology_violations": [],
+    }
 
 
 def test_mixed_capability_advertised_truthfully(

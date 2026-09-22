@@ -2310,6 +2310,36 @@ def _merge_quad_first_and_legacy(
     )
 
 
+def _quad_first_apply_qualified_s3(
+    result: HybridMeshResult,
+    source_geometry: GeometryModel,
+    cancellation_check: Callable[[str], None] | None,
+) -> HybridMeshResult:
+    """Attach the established qualified-S3 admission to a quad-first result."""
+    _check_cancellation(cancellation_check, "quad-first qualified S3 preparation start")
+    prepared_mesh, record = prepare_qualified_s3_mesh(result.mesh, source_geometry)
+    record["authority_model"].update(
+        {
+            "source_model_id": str(source_geometry.model_id),
+            "source_revision": int(source_geometry.revision),
+        }
+    )
+    payload = dict(prepared_mesh.structural_preparation)
+    payload["qualified_s3"] = record
+    prepared_mesh.structural_preparation = payload
+    diagnostics = dict(prepared_mesh.hybrid_diagnostics)
+    diagnostics["qualified_s3_preparation"] = {
+        "contract_id": record["contract_id"],
+        "element_count": len(record["element_ids"]),
+        "formulation_id": record["formulation_id"],
+        "legacy_fallback": record["legacy_fallback"],
+        "status": record["status"],
+    }
+    prepared_mesh.hybrid_diagnostics = diagnostics
+    _check_cancellation(cancellation_check, "quad-first qualified S3 preparation complete")
+    return replace(result, mesh=prepared_mesh)
+
+
 def _quad_first_execute(
     geometry: GeometryModel,
     *,
@@ -2805,6 +2835,10 @@ def generate_hybrid_mesh_result(
             cancellation_check=cancellation_check,
         )
         if not source_beams:
+            if qualified_s3:
+                quad_result = _quad_first_apply_qualified_s3(
+                    quad_result, source_geometry, cancellation_check
+                )
             return quad_result
 
         _check_cancellation(cancellation_check, "quad-first:beam-generation")
@@ -2843,6 +2877,10 @@ def generate_hybrid_mesh_result(
             quad_result=quad_result,
             legacy_result=beam_result,
         )
+        if qualified_s3:
+            merged = _quad_first_apply_qualified_s3(
+                merged, source_geometry, cancellation_check
+            )
 
         active_sheets, active_members = _active_structural_owners(
             source_view, source_faces, source_beams

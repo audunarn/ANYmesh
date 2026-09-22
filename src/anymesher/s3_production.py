@@ -245,6 +245,11 @@ def prepare_qualified_s3_mesh(
     triangle_ids = tuple(sorted(int(value) for value in mesh.tris))
     if not triangle_ids:
         return mesh, {
+            "admission": {
+                "elements": [],
+                "qualified_junction_edges": [],
+                "topology_violations": [],
+            },
             "authority_model": {
                 "prepared_revision": int(geometry.revision),
                 "scope": "PREPARED_GEOMETRY_ORIENTED_SHEET_FACE_USE",
