@@ -47,18 +47,18 @@ from .metric import (
     MetricFieldSpec,
 )
 from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
-from .quad.count_model import CountInstance
-from .quad.front import front_step
+from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
+from .quad.domain import PlanarQuadDomain
+from .quad.driver import run_planar_quad_driver
 from .quad.options import QuadMeshingOptions
-from .quad.patch_energy import PatchSpec
+from .quad.seed import build_planar_quad_seed
 from .quad.public_integration import (
     QuadPublicUnsupported,
     publish_atomically,
     route_quad_first,
 )
-from .quad.quad_mcf_worker import solve_count_instance
-from .quad.quad_tinyad_worker import solve_q5_patch
 from .quad.state import QuadMeshState
+from .quad.validate import validate_planar_quad_result
 from .s3_production import prepare_qualified_s3_mesh
 from .seeding import Seeding, edge_distribution, solve_seeding
 from .serialize import mesh_from_dict, mesh_to_dict
@@ -1991,7 +1991,14 @@ def _merge_quad_first_and_legacy(
         int(element_id): tuple(int(node) for node in quad_body)
         for element_id, quad_body in quad_mesh.quads.items()
     }
-    next_element_id = (max(merged_quads) + 1) if merged_quads else 0
+    merged_tris: dict[int, tuple[int, ...]] = {
+        int(element_id): tuple(int(node) for node in tri_body)
+        for element_id, tri_body in quad_mesh.tris.items()
+    }
+    occupied_quad_shell_ids = set(merged_quads) | set(merged_tris)
+    next_element_id = (
+        max(occupied_quad_shell_ids) + 1 if occupied_quad_shell_ids else 0
+    )
 
     def _remap_body(body: Any) -> tuple[int, ...]:
         return tuple(node_map[int(node)] for node in body)
@@ -2006,12 +2013,11 @@ def _merge_quad_first_and_legacy(
         merged_quads[new_id] = _remap_body(
             legacy_mesh.quads[legacy_element_id]
         )
-    legacy_tris: dict[int, tuple[int, ...]] = {}
     for legacy_element_id in sorted(int(e) for e in legacy_mesh.tris):
         new_id = next_element_id
         next_element_id += 1
         element_id_map[legacy_element_id] = new_id
-        legacy_tris[new_id] = _remap_body(
+        merged_tris[new_id] = _remap_body(
             legacy_mesh.tris[legacy_element_id]
         )
     if legacy_mesh.beams:
@@ -2098,7 +2104,7 @@ def _merge_quad_first_and_legacy(
         geometry_revision=quad_mesh.geometry_revision,
         nodes=merged_nodes,
         quads=merged_quads,
-        tris=legacy_tris,
+        tris=merged_tris,
         beams=legacy_beams,
         node_of_vertex=vertex_to_node,
         nodes_of_edge=nodes_of_edge,
@@ -2314,103 +2320,159 @@ def _quad_first_execute(
     capabilities: "Any",
     cancellation_check: "Callable[[str], None] | None" = None,
 ) -> "HybridMeshResult":
-    """Execute the quad-first route for an explicit, in-scope request.
+    """Execute the genuine PQ-M1 target-size planar quad route.
 
-    Never falls back to the legacy body.  The worker reports are retained in
-    ``mesh.hybrid_diagnostics`` as the honest provenance for the published
-    result.
+    A shared exact boundary-station registry is captured first, then every face
+    receives a fresh PQ2 seed consumed by the bounded PQ-M1 front driver.
+    Q4 MCF and TinyAD remain available as direct adapters, but are not part of
+    this public dataflow and are reported truthfully as NOT_INTEGRATED.
     """
     h = float(target_size)
     if not np.isfinite(h) or h <= 0.0:
         raise MeshError("quad-first target_size must be finite and positive")
-
-    # -- Q3: seed + advance the resident front, independently per face ----
-    _check_cancellation(cancellation_check, "quad-first:q3")
+    _check_cancellation(cancellation_check, "quad-first:seed")
     quad_face_ids = tuple(sorted(set(int(item) for item in face_ids)))
-    node_of_vertex: dict[int, int] = {}
-    global_nodes: dict[int, np.ndarray] = {}
-    quad_results: list[dict[str, Any]] = []
+    if not quad_face_ids:
+        raise MeshError("quad-first requires at least one selected face")
+
     for face_id in quad_face_ids:
-        state, front_edge, quad_nodes, face_vertex_nodes = _quad_first_seed(
-            geometry, face_id
+        face = geometry.faces.get(face_id)
+        if face is None:
+            raise QuadPublicUnsupported(f"unknown quad-first face {face_id}")
+        if getattr(face, "holes", ()):
+            raise QuadPublicUnsupported("quad-first PQ-M1 does not support holes")
+        if len(getattr(face, "loop", ())) != 4 or len(getattr(face, "corners", ())) != 4:
+            raise QuadPublicUnsupported("quad-first PQ-M1 requires one four-corner planar loop")
+    try:
+        domains = tuple(
+            PlanarQuadDomain.from_geometry(geometry, face_id)
+            for face_id in quad_face_ids
         )
-        vertex_for_local = {node: vertex for vertex, node in face_vertex_nodes.items()}
-        merged: dict[int, int] = {}
-        for local_node in sorted(quad_nodes):
-            vertex_id = vertex_for_local[local_node]
-            existing = node_of_vertex.get(vertex_id)
-            if existing is None:
-                existing = max(global_nodes) + 1 if global_nodes else 0
-                node_of_vertex[vertex_id] = existing
-                global_nodes[existing] = quad_nodes[local_node]
-            merged[local_node] = existing
-        quad_local_id, quad_local_body = front_step(state, front_edge, options)
-        quad_id = (
-            int(quad_local_id)
-            if not quad_results
-            else max(result["quad_id"] for result in quad_results) + 1
-        )
-        quad_results.append(
-            {
-                "face_id": face_id,
-                "quad_id": quad_id,
-                "quad_body": tuple(merged[local] for local in quad_local_body),
-                "front_edge": front_edge,
-            }
-        )
+    except MeshError as exc:
+        raise QuadPublicUnsupported(str(exc)) from exc
+    registry = BoundaryStationRegistry.for_domains(geometry, domains, h)
 
-    # -- Q4: integer min-cost-flow count worker ---------------------------
-    _check_cancellation(cancellation_check, "quad-first:q4")
-    count_instance = CountInstance(
-        supplies=(1, 1), demands=(1, 1), cost=((1, 4), (7, 2))
+    global_nodes: dict[int, np.ndarray] = {}
+    node_of_vertex: dict[int, int] = {}
+    global_node_of_station: dict[BoundaryStationKey, int] = {}
+    station_objects: dict[BoundaryStationKey, Any] = {}
+    for edge_id in sorted(registry.chains):
+        for station in registry.chain(edge_id, True):
+            station_objects.setdefault(station.key, station)
+    station_keys = sorted(
+        station_objects,
+        key=lambda key: (0 if key.kind == "vertex" else 1, int(key.entity_id), int(key.divisions), int(key.ordinal)),
     )
-    count_report = solve_count_instance(count_instance)
-    if count_report.status != "OPTIMAL":
-        raise MeshError(
-            "quad-first Q4 count worker did not reach an optimal flow: "
-            f"{count_report.status!r} ({count_report.message})"
-        )
+    for global_id, key in enumerate(station_keys):
+        station = station_objects[key]
+        global_node_of_station[key] = global_id
+        global_nodes[global_id] = np.asarray(station.position, dtype=float)
+        if key.kind == "vertex":
+            node_of_vertex[int(key.entity_id)] = global_id
 
-    # -- Q5: TinyAD patch optimizer (2-quad strip, one interior free node) --
-    _check_cancellation(cancellation_check, "quad-first:q5")
-    patch_spec = PatchSpec(
-        h=h,
-        ux=1.0,
-        uy=0.0,
-        nx=(0, 1, 2, 0, 1, 2, 0, 1, 2),
-        ny=(0, 0, 0, 1, 1, 1, 2, 2, 2),
-        free=(4,),
-        quads=((0, 1, 4, 3), (1, 2, 5, 4), (3, 4, 7, 6), (4, 5, 8, 7)),
-        max_iter=max(1, int(options.max_local_optimizations)),
-    )
-    patch_report = solve_q5_patch(patch_spec)
-    if patch_report.status not in ("CONVERGED", "NOIMPROVE"):
-        raise MeshError(
-            "quad-first Q5 TinyAD worker returned an error status: "
-            f"{patch_report.status!r} ({patch_report.message})"
-        )
+    quads: dict[int, tuple[int, ...]] = {}
+    tris: dict[int, tuple[int, ...]] = {}
+    elements_of_face: dict[int, list[int]] = {}
+    face_driver: dict[int, dict[str, Any]] = {}
+    face_validation: dict[int, dict[str, Any]] = {}
+    next_node_id = len(global_nodes)
+    next_element_id = 0
 
-    # -- Assemble the neutral result -------------------------------------
+    for domain in domains:
+        _check_cancellation(cancellation_check, "quad-first:face-seed")
+        seed = build_planar_quad_seed(
+            geometry,
+            domain.face_id,
+            h,
+            domain=domain,
+            registry=registry,
+        )
+        driven = run_planar_quad_driver(
+            seed,
+            options,
+            allow_recovery=True,
+            cancellation_check=cancellation_check,
+        )
+        state = driven.state
+        validation = validate_planar_quad_result(
+            state, face=domain.face_id, reference_area=domain.area, seed=seed
+        )
+        face_driver[domain.face_id] = driven.report.to_dict()
+        face_validation[domain.face_id] = validation.to_dict()
+
+        local_to_global: dict[int, int] = {}
+        station_for_local = {
+            int(local): key for key, local in seed.station_to_node.items()
+        }
+        for local_node in sorted(int(node) for node in state.nodes):
+            key = station_for_local.get(local_node)
+            lifted = np.asarray(domain.lift(state.position(local_node)), dtype=float)
+            if key is not None:
+                global_id = global_node_of_station.get(key)
+                if global_id is None:
+                    raise MeshError(f"boundary station {key!r} was not preallocated")
+                existing = global_nodes[global_id]
+                scale = max(
+                    1.0,
+                    float(np.max(np.abs(existing))),
+                    float(np.max(np.abs(lifted))),
+                )
+                if not np.allclose(
+                    existing, lifted, rtol=0.0, atol=1.0e-10 * scale
+                ):
+                    raise MeshError(
+                        f"shared boundary station {key!r} has inconsistent lifted coordinates"
+                    )
+                local_to_global[local_node] = global_id
+            else:
+                global_id = next_node_id
+                next_node_id += 1
+                global_nodes[global_id] = lifted
+                local_to_global[local_node] = global_id
+
+        face_elements: list[int] = []
+        for local_cell in sorted(int(cid) for cid in state.cells):
+            body = tuple(
+                local_to_global[int(node)] for node in state.cell(local_cell)
+            )
+            element_id = next_element_id
+            next_element_id += 1
+            kind = state.cell_kind(local_cell)
+            if kind == "Q4":
+                quads[element_id] = body
+            elif kind == "T3":
+                tris[element_id] = body
+            else:
+                raise MeshError(
+                    f"quad-first final cell {local_cell} has kind {kind!r}"
+                )
+            face_elements.append(element_id)
+        elements_of_face[domain.face_id] = face_elements
+        domain.assert_current(geometry)
+
+    nodes_of_edge: dict[int, list[int]] = {}
+    for edge_id in sorted(registry.chains):
+        chain_nodes: list[int] = []
+        for station in registry.chain(edge_id, True):
+            global_id = global_node_of_station.get(station.key)
+            if global_id is None:
+                raise MeshError(
+                    f"canonical boundary station {station.key!r} was not published"
+                )
+            chain_nodes.append(global_id)
+        nodes_of_edge[int(edge_id)] = chain_nodes
+
     mesh = Mesh(
         geometry_model_id=getattr(geometry, "model_id", None),
         geometry_revision=getattr(geometry, "revision", None),
-        nodes={node: np.array(pos, dtype=float) for node, pos in global_nodes.items()},
-        quads={
-            item["quad_id"]: tuple(item["quad_body"]) for item in quad_results
-        },
+        nodes=global_nodes,
+        quads=quads,
+        tris=tris,
+        node_of_vertex=node_of_vertex,
+        nodes_of_edge=nodes_of_edge,
+        elements_of_face=elements_of_face,
         order="linear",
     )
-    mesh.node_of_vertex.update(node_of_vertex)
-    for item in quad_results:
-        face = geometry.faces[int(item["face_id"])]
-        for use in face.loop:
-            edge_id = int(use.edge)
-            edge = geometry.edges[edge_id]
-            mesh.nodes_of_edge[edge_id] = [
-                node_of_vertex[int(edge.start)],
-                node_of_vertex[int(edge.end)],
-            ]
-        mesh.elements_of_face[int(item["face_id"])] = [int(item["quad_id"])]
     for sheet_id, sheet in geometry.sheets.items():
         mesh.elements_of_sheet[int(sheet_id)] = sorted(
             {
@@ -2421,7 +2483,9 @@ def _quad_first_execute(
                 )
             }
         )
-    mesh.declared_plate_junction_edges = _topology_plate_junction_edges(mesh, geometry)
+    mesh.declared_plate_junction_edges = _topology_plate_junction_edges(
+        mesh, geometry
+    )
     mesh.hybrid_diagnostics.update(
         {
             "route": "quad-first",
@@ -2430,63 +2494,51 @@ def _quad_first_execute(
             "orientation": options.orientation,
             "quality_model": options.quality_model,
             "line_search": options.line_search,
-            "front": {
-                "faces": {
-                    int(item["face_id"]): {
-                        "edge": tuple(item["front_edge"]),
-                        "quad_cell": int(item["quad_id"]),
-                        "quad_body": list(item["quad_body"]),
-                    }
-                    for item in quad_results
-                }
-            },
-            "q4": {
-                "status": count_report.status,
-                "flows": list(count_report.flows),
-                "total_cost": count_report.total_cost,
-            },
-            "q5": {
-                "status": patch_report.status,
-                "objective_initial": patch_report.objective_initial,
-                "objective_final": patch_report.objective_final,
-                "iterations": patch_report.iterations,
-                "free_final": [list(p) for p in patch_report.free_final],
-            },
+            "front": {"faces": face_driver},
+            "validation": {"faces": face_validation},
+            "q4": {"status": "NOT_INTEGRATED"},
+            "q5": {"status": "NOT_INTEGRATED"},
         }
     )
 
-    strategy_by_face = {face_id: "quad_first" for face_id in face_ids}
-    triangulation_backend_by_face = {
-        face_id: {"backend": "quad_first", "q4": count_report.status}
-        for face_id in face_ids
+    strategy_by_face = {
+        face_id: "quad_first" for face_id in quad_face_ids
     }
-    preflight = (
-        {
-            "capability": capabilities.to_dict()
-            if getattr(capabilities, "to_dict", None) is not None
-            else dict(capabilities)
-        },
-    )
-
+    triangulation_backend_by_face = {
+        face_id: {"backend": "quad_first", "q4": "NOT_INTEGRATED"}
+        for face_id in quad_face_ids
+    }
+    if capabilities is None:
+        capability_dict: dict[str, Any] = {}
+    elif getattr(capabilities, "to_dict", None) is not None:
+        capability_dict = capabilities.to_dict()
+    else:
+        capability_dict = dict(capabilities)
     provisional = HybridMeshResult(
         mesh=mesh,
         strategy_by_face=strategy_by_face,
         triangulation_backend_by_face=triangulation_backend_by_face,
-        preflight=preflight,
+        preflight=({"capability": capability_dict},),
         connectivity=None,
         audit_report=None,
         certification_mode=certification_mode,
         certifiable=True,
     )
-
     def _validate(candidate: Any) -> None:
         if not isinstance(candidate, HybridMeshResult):
-            raise MeshError("quad-first provisional result is not a HybridMeshResult")
+            raise MeshError(
+                "quad-first provisional result is not a HybridMeshResult"
+            )
         if not candidate.mesh.quads:
             raise MeshError("quad-first result exposed no quad elements")
-        coords = np.asarray([p for p in candidate.mesh.nodes.values()], dtype=float)
-        if not np.all(np.isfinite(coords)):
-            raise MeshError("quad-first result exposed a non-finite mesh")
+        coords = np.asarray(list(candidate.mesh.nodes.values()), dtype=float)
+        if coords.size == 0 or not np.all(np.isfinite(coords)):
+            raise MeshError(
+                "quad-first result exposed a non-finite or empty mesh"
+            )
+        for domain in domains:
+            domain.assert_current(geometry)
+        registry.assert_current(geometry)
 
     return publish_atomically(
         provisional,
@@ -2494,7 +2546,6 @@ def _quad_first_execute(
         cancellation_check=cancellation_check,
         publish=lambda published: published,
     )
-
 
 def generate_hybrid_mesh_result(
     geometry: GeometryModel,
@@ -2560,16 +2611,17 @@ def generate_hybrid_mesh_result(
         raise MeshError("qualified_s3 must be Boolean")
 
     # Quad-first narrow dispatch: explicit ``quad_options`` is the only signal
-    # that the quad-first contract applies.  Public integration validates the scope (out-
-    # of-scope ``order``/``planar`` raise a typed
-    # :class:`QuadPublicUnsupported`) and advertises the capabilities (missing
-    # worker binaries raise :class:`QuadCapabilityMissing`); ``None`` leaves
-    # the legacy body byte-identical; ``None`` stays legacy.  When quad
-    # options are present the result is produced by the quad worker chain
-    # (count / TinyAD / front); residual faces remain on the legacy body
-    # and the two routes are merged with deterministic conflict checks.
+    # that the quad-first contract applies.  Public integration validates the
+    # scope (out-of-scope ``order`` raises a typed
+    # :class:`QuadPublicUnsupported`).  ``require_workers=False`` keeps the
+    # PQ-M1 public route self-contained: no worker probes run, and the
+    # capability report truthfully reports both workers as NOT_INTEGRATED.
+    # ``None`` leaves the legacy body byte-identical; ``None`` stays legacy.
+    # When quad options are present the result is produced by the genuine
+    # planar quad driver; residual faces remain on the legacy body and the
+    # two routes are merged with deterministic conflict checks.
     _quad_normalized, _quad_capabilities = route_quad_first(
-        quad_options, order=order, planar=True
+        quad_options, order=order, planar=True, require_workers=False
     )
     if quad_options is not None and _quad_normalized is None:
         raise MeshError("explicit quad_options must not coerce to None")

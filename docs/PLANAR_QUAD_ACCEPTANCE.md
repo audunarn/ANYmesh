@@ -130,6 +130,10 @@ is NOT an acceptance target and must not be cited as PQ-M1 evidence.
 
 ## Non-claims
 
-This document freezes the acceptance contract. It does not claim PQ-M1 is
-implemented, that any fixture passes, or that the recovery/insertion causal
-case exists today.
+This document remains the frozen acceptance contract. PQ-M1 implementation
+and evidence are now recorded separately in `WORK_STATUS.md`: P01 passes all
+three mandatory resolutions with 100% Q4 count/area fraction and exact area
+closure; P02 is rigid-transform invariant at the qualified resolution; and a
+small trapezoid public-path case proves causal, conforming recovery by improving
+from 24 Q4 / 8 T3 with recovery disabled to 26 Q4 / 6 T3 with recovery enabled.
+The frozen thresholds above are unchanged by that implementation evidence.

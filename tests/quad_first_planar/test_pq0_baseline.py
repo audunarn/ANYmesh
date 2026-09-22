@@ -35,8 +35,8 @@ def _corner_vertex_ids(geometry, face_id: int) -> tuple[int, ...]:
     return tuple(out)
 
 
-def test_pq0_current_public_route_is_one_q4_and_size_nonresponsive() -> None:
-    """Freeze baseline limitation; PQ3 intentionally replaces this expectation."""
+def test_pq0_historical_prototype_is_superseded_without_geometry_mutation() -> None:
+    """PQ3 supersedes the frozen one-Q4 baseline while preserving source identity."""
     geometry, face = p01_geometry()
     before_revision = geometry.revision
     before_face_ids = tuple(sorted(geometry.faces))
@@ -63,15 +63,14 @@ def test_pq0_current_public_route_is_one_q4_and_size_nonresponsive() -> None:
 
     for result in (coarse, fine):
         mesh = result.mesh
-        assert len(mesh.quads) == 1
+        assert len(mesh.quads) > 1
         assert len(mesh.tris) == 0
-        assert len(mesh.nodes) == 4
+        assert len(mesh.nodes) > 4
         assert mesh.elements_of_face[face] == list(mesh.quads)
         assert set(mesh.node_of_vertex) == expected_corner_vertices
 
-    coarse_body = tuple(int(n) for n in next(iter(coarse.mesh.quads.values())))
-    fine_body = tuple(int(n) for n in next(iter(fine.mesh.quads.values())))
-    assert coarse_body == fine_body
+    assert len(fine.mesh.quads) == 4 * len(coarse.mesh.quads)
+    assert len(fine.mesh.nodes) > len(coarse.mesh.nodes)
     assert geometry.revision == before_revision
     assert tuple(sorted(geometry.faces)) == before_face_ids
     assert tuple(sorted(geometry.edges)) == before_edge_ids

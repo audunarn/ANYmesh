@@ -174,6 +174,7 @@ def route_quad_first(
     planar: bool = True,
     mcf_worker_path: "str | os.PathLike[str] | None" = None,
     q5_worker_path: "str | os.PathLike[str] | None" = None,
+    require_workers: bool = True,
 ) -> "tuple[QuadMeshingOptions, QuadCapabilityReport]":
     """Validate the request and advertise public quad-first capabilities.
 
@@ -182,13 +183,33 @@ def route_quad_first(
     *before* the worker probes run and *without* raising
     :class:`QuadCapabilityMissing`.  ``None`` short-circuits to
     ``(None, None)`` — the legacy dispatch sentinel.
+
+    ``require_workers=True`` (the default) preserves the historical
+    advertise-and-fail capability contract: a missing worker binary raises
+    :class:`QuadCapabilityMissing`.  The PQ-M1 public face route executes
+    self-contained and instead calls with ``require_workers=False``, which
+    returns a truthful report (``compiled_native_support=False``, both workers
+    ``NOT_INTEGRATED``) without probing.
     """
     if options is None:
         return None, None
     normalized = coerce_public_quad_options(options, order=order, planar=planar)
     if normalized is None:
         raise MeshError("explicit quad_options must not coerce to None")
-    return normalized, advertise_quad_capabilities(
-        mcf_worker_path=mcf_worker_path,
-        q5_worker_path=q5_worker_path,
+    if require_workers:
+        return normalized, advertise_quad_capabilities(
+            mcf_worker_path=mcf_worker_path,
+            q5_worker_path=q5_worker_path,
+        )
+    # PQ-M1 public execution is self-contained: the historical Q4 MCF and Q5
+    # TinyAD adapters remain directly probeable via advertise_quad_capabilities,
+    # but they are no longer required by the genuine planar front dataflow.
+    return normalized, QuadCapabilityReport(
+        quad_first_api="public/1",
+        compiled_native_support=False,
+        front_path="advancing_front",
+        q4_count_worker="NOT_INTEGRATED",
+        q5_tinyad_worker="NOT_INTEGRATED",
+        mixed_q4_s3=bool(_MIXED_Q4_S3_ROUTE_SUPPORTED and _s3_production_available()),
+        unsupported_scope=("curved", "higher-order"),
     )

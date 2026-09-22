@@ -104,6 +104,31 @@ PQ-M1 scopes the first production milestone precisely.
 
 ## Non-claims
 
-This document defines the design and boundary. It does not claim that PQ-M1 is
-already implemented. All statements above the PQ-M1 boundary are forward design
-targets to be realized in PQ1 through PQ3.
+## PQ-M1 implementation status (PQ3)
+
+PQ-M1 is implemented on the supported planar scope. The PQ0 baseline statements
+above remain historical starting-point evidence; they no longer describe the
+explicit public quad-first route.
+
+- The public route captures one canonical `BoundaryStationRegistry` for all
+  selected planar domains, builds a fresh target-size PQ2 seed per face, runs a
+  bounded deterministic front driver, independently validates the resident
+  result, then publishes every final Q4 and residual T3.
+- `target_size` causally controls topology. On P01, `h=1.0/0.5/0.25` produces
+  exactly `60/240/960` Q4 with no residual T3 and exact area closure.
+- Boundary station identity, not coordinate welding, controls shared-edge
+  conformity. Complete intrinsic source-edge station chains are published in
+  `nodes_of_edge`; exact endpoint station provenance supplies `node_of_vertex`.
+- Recovery on a Q4/T3 active-front interface is conforming: a Steiner split is
+  represented on both sides by a bounded local re-tile in one transaction, so
+  no hanging node is published. Failed candidate re-tiles roll back without
+  consuming resident IDs.
+- The historical Q4 MCF and Q5 TinyAD adapters remain available for direct
+  qualification, but they are not in the PQ-M1 public dataflow and are reported
+  as `NOT_INTEGRATED` without being required at runtime.
+- `quad_options=None` remains the legacy dispatch sentinel. Curved,
+  higher-order, holes/concavity and later staged fixture expansion remain
+  outside this milestone unless separately qualified.
+
+The exact acceptance evidence and final gate results are recorded in
+`reports/quad_first/planar-production/WORK_STATUS.md`.

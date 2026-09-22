@@ -386,3 +386,58 @@ def test_hole_plate_pure_pairing():
     new_id, body = front_step(st, (0, 1))
     assert st.cell_kind(new_id) == "Q4"
     assert st.digest() != before
+
+
+def _conforming_recovery_fixture():
+    from anygeometry.model import GeometryModel
+    from anymesher.quad.driver import run_planar_quad_driver
+    from anymesher.quad.seed import build_planar_quad_seed
+
+    geometry = GeometryModel()
+    vertices = geometry.add_points(
+        ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (3.0, 4.0, 0.0), (1.0, 4.0, 0.0))
+    )
+    face = geometry.add_plate(vertices)
+    seed = build_planar_quad_seed(geometry, face, 0.75)
+    result = run_planar_quad_driver(seed, QuadMeshingOptions(), allow_recovery=False)
+    return geometry, face, seed, result.state
+
+
+def test_q4_t3_recovery_is_conforming_and_area_preserving():
+    from anymesher.quad.front import body_edges, edge_key
+    from anymesher.quad.validate import validate_planar_quad_result
+
+    _geometry, face, seed, state = _conforming_recovery_fixture()
+    parent = edge_key(29, 33)
+    assert state.is_front_edge(parent)
+    assert {state.cell_kind(cid) for cid in state.edge_cells(parent)} == {"Q4", "T3"}
+    report = recover_then_front_step(state, parent, options=QuadMeshingOptions())
+    assert report.midpoint_id in state.nodes
+    assert all(parent not in body_edges(state.cell(cid)) for cid in state.cells)
+    assert sum(report.midpoint_id in state.cell(cid) for cid in state.cells) >= 3
+    validation = validate_planar_quad_result(state, face=face, reference_area=12.0, seed=seed)
+    assert validation.area_ratio == pytest.approx(1.0)
+    assert validation.cell_area_sum == pytest.approx(12.0)
+
+
+def test_q4_t3_conforming_recovery_failed_retile_rolls_back(monkeypatch):
+    import anymesher.quad.recovery as recovery_module
+    from anymesher.quad.front import edge_key
+
+    _geometry, _face, _seed, state = _conforming_recovery_fixture()
+    parent = edge_key(29, 33)
+    before = state.digest()
+    before_generation = state.generation
+    before_node_id = state.next_node_id
+    before_cell_id = state.next_cell_id
+
+    def reject_retile(*_args, **_kwargs):
+        raise RecoveryRejected("forced conforming-retile rejection")
+
+    monkeypatch.setattr(recovery_module, "make_quad", reject_retile)
+    with pytest.raises(RecoveryExhausted):
+        recover_then_front_step(state, parent, ratios=(0.5,), options=QuadMeshingOptions())
+    assert state.digest() == before
+    assert state.generation == before_generation
+    assert state.next_node_id == before_node_id
+    assert state.next_cell_id == before_cell_id

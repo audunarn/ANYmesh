@@ -36,13 +36,17 @@ from typing import Any, Mapping, Sequence
 
 from ..errors import MeshError
 from .front import (
+    EPS,
     FrontRejected,
     _is_residual_front,
+    area2,
+    body_edges,
     candidate_partners,
     classify,
     edge_key,
     find_source_cell,
     front_step,
+    make_quad,
 )
 from .options import QuadMeshingOptions
 from .state import EdgeKey, QuadMeshState
@@ -105,6 +109,7 @@ class AdvanceReport:
     quad_body: tuple[int, int, int, int]
     enabling_edge: tuple[int, int]
     attempts: tuple[Attempt, ...]
+    local_front_edges: tuple[EdgeKey, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +177,93 @@ def _stage_split(tx: Any, source: int, a: int, b: int, third: int,
     tx.add_front_edge(a, m_id)
     tx.add_front_edge(m_id, b)
     return m_id, ca_id, cb_id
+
+
+def _ccw_tri(view: Any, raw: Sequence[int]) -> tuple[int, int, int]:
+    body = tuple(int(x) for x in raw)
+    if len(body) != 3 or len(set(body)) != 3:
+        raise RecoveryRejected(f"triangle body {body!r} must have three distinct nodes")
+    signed = area2(view, body)
+    if abs(signed) <= EPS:
+        raise RecoveryRejected(f"triangle body {body!r} is degenerate")
+    return body if signed > 0.0 else (body[0], body[2], body[1])
+
+
+def _accepted_q4_neighbor(state: QuadMeshState, fe: EdgeKey, source: int) -> int | None:
+    q4 = [
+        int(cid)
+        for cid in state.edge_cells(fe)
+        if int(cid) != int(source) and state.cell_kind(int(cid)) == "Q4"
+    ]
+    if len(q4) > 1:
+        raise RecoveryRejected(
+            f"front edge {tuple(fe)} has multiple accepted Q4 neighbours {tuple(sorted(q4))}"
+        )
+    return q4[0] if q4 else None
+
+
+def _q4_edge_walk(state: QuadMeshState, q4_cell: int, fe: EdgeKey) -> tuple[int, int, int, int]:
+    body = tuple(int(x) for x in state.cell(q4_cell))
+    if len(body) != 4:
+        raise RecoveryRejected(f"accepted cell {q4_cell} is not a four-node Q4")
+    for i in range(4):
+        u, v = body[i], body[(i + 1) % 4]
+        if edge_key(u, v) == fe:
+            return (u, v, body[(i + 2) % 4], body[(i + 3) % 4])
+    raise RecoveryRejected(f"accepted Q4 {q4_cell} does not contain front edge {tuple(fe)}")
+
+
+def _stage_conforming_split(
+    tx: Any,
+    state: QuadMeshState,
+    source: int,
+    fe: EdgeKey,
+    third: int,
+    pm: tuple[float, float],
+    accepted_q4: int,
+    variant: int,
+) -> tuple[int, int, int, tuple[EdgeKey, ...]]:
+    """Split a Q4/T3 front edge on both sides with one shared midpoint."""
+    a, b = fe
+    source_body = tuple(int(x) for x in state.cell(source))
+    q4_body = tuple(int(x) for x in state.cell(accepted_q4))
+    u, v, c, d = _q4_edge_walk(state, accepted_q4, fe)
+
+    m_id = tx.allocate_node(pm)
+    tx.remove_cell(source)
+    ca_body = _ccw_tri(tx.view, (a, m_id, third))
+    cb_body = _ccw_tri(tx.view, (m_id, b, third))
+    ca_id = tx.allocate_cell(ca_body, "T3")
+    cb_id = tx.allocate_cell(cb_body, "T3")
+
+    tx.remove_cell(accepted_q4)
+    if variant == 0:
+        accepted_tri = _ccw_tri(tx.view, (u, m_id, d))
+        accepted_quad = make_quad(tx.view, (m_id, v, c, d))
+    elif variant == 1:
+        accepted_tri = _ccw_tri(tx.view, (m_id, v, c))
+        accepted_quad = make_quad(tx.view, (u, m_id, c, d))
+    else:
+        raise RecoveryRejected(f"unknown conforming recovery variant {variant}")
+    tx.allocate_cell(accepted_quad, "Q4")
+    tx.allocate_cell(accepted_tri, "T3")
+
+    touched = (
+        set(body_edges(source_body))
+        | set(body_edges(q4_body))
+        | set(body_edges(ca_body))
+        | set(body_edges(cb_body))
+        | set(body_edges(accepted_quad))
+        | set(body_edges(accepted_tri))
+    )
+    for k in sorted(touched):
+        is_front_now = _is_residual_front(tx.view, k)
+        was_front = state.is_front_edge(k)
+        if is_front_now and not was_front:
+            tx.add_front_edge(k[0], k[1])
+        elif (not is_front_now) and was_front:
+            tx.remove_front_edge(k[0], k[1])
+    return m_id, ca_id, cb_id, tuple(sorted(touched))
 
 
 # ---------------------------------------------------------------------------
@@ -258,15 +350,12 @@ def recover_then_front_step(
     ratios: Sequence[float] = DEFAULT_RECOVERY_RATIOS,
     options: QuadMeshingOptions | Mapping[str, Any] | None = None,
 ) -> AdvanceReport:
-    """Enable a ``Q4`` at ``edge`` from a T3-only state via bounded Steiner split.
+    """Enable a Q4 through bounded recovery without creating a hanging interface.
 
-    Ratios are tried in the given order (default :data:`DEFAULT_RECOVERY_RATIOS`).
-    For each ratio the split is *dry-run* through a transaction view; only when a
-    child front edge is provably admissible for :func:`front_step` is the split
-    committed, and the **real** :func:`front_step` then runs on that child edge to
-    publish the ``Q4``.  A ratio that cannot enable a quad is discarded
-    (state unchanged).  If no ratio succeeds, :class:`RecoveryExhausted` is raised
-    and the state is left exactly as found.
+    Pure-T3 recovery keeps the original one-sided split contract.  When the
+    active front separates a residual T3 from an accepted Q4, the accepted Q4
+    is re-tiled in the same transaction as one Q4 plus one T3 using the same
+    midpoint, so the committed mesh remains conforming.
     """
     _validate_options(options)
     if ratios is None:
@@ -276,47 +365,78 @@ def recover_then_front_step(
     source = _resolve_source(state, fe)
     third = _third_vertex(tuple(state.cell(source)), fe)
     a, b = fe
+    accepted_q4 = _accepted_q4_neighbor(state, fe, source)
 
     attempts: list[Attempt] = []
     for r in ratios:
         rr = _validate_ratio(r)
         state.checkpoint()
-        # Transaction cursors start at ``state.next_*`` and the previous dry-run
-        # (if any) was rolled back, so each ratio's allocation ids are the
-        # deterministic ``base.next_*`` for this stage; commit is what advances
-        # the resident counters.
-        m_id = state.next_node_id
-        ca_id = state.next_cell_id
-        cb_id = state.next_cell_id + 1
         pm = _midpoint(state, a, b, rr)
+        ratio_details: list[str] = []
+        variants = (0, 1) if accepted_q4 is not None else (None,)
 
-        enabled: tuple[int, int] | None = None
-        detail = ""
-        with state.transaction() as tx:
-            _stage_split(tx, source, a, b, third, pm)
-            view = tx.view
-            enabled, detail = _dry_run_enables(view, a, b, m_id)
-            if enabled is not None:
-                tx.commit()
+        for variant in variants:
+            m_id = state.next_node_id
+            ca_id = state.next_cell_id
+            cb_id = state.next_cell_id + 1
+            enabled: tuple[int, int] | None = None
+            detail = ""
+            touched: tuple[EdgeKey, ...] = ()
+            try:
+                with state.transaction() as tx:
+                    if accepted_q4 is None:
+                        _stage_split(tx, source, a, b, third, pm)
+                        touched = tuple(
+                            sorted(
+                                set(body_edges(state.cell(source)))
+                                | {edge_key(a, m_id), edge_key(m_id, b)}
+                            )
+                        )
+                    else:
+                        m_id, ca_id, cb_id, touched = _stage_conforming_split(
+                            tx, state, source, fe, third, pm, accepted_q4, int(variant)
+                        )
+                    view = tx.view
+                    enabled, detail = _dry_run_enables(view, a, b, m_id)
+                    if enabled is not None:
+                        tx.commit()
+            except (FrontRejected, RecoveryRejected) as exc:
+                ratio_details.append(f"variant={variant}: {exc}")
+                continue
 
-        if enabled is None:
-            attempts.append(Attempt(rr, m_id, None, False, detail or "no enabling child edge"))
-            continue
+            if enabled is None:
+                ratio_details.append(
+                    f"variant={variant}: {detail or 'no enabling child edge'}"
+                )
+                continue
 
-        # Split committed.  Drive the real front driver on the enabling child edge.
-        new_id, body = front_step(state, enabled, options)
+            new_id, body = front_step(state, enabled, options)
+            local = set(touched) | set(body_edges(body))
+            local_front = tuple(sorted(k for k in local if state.is_front_edge(k)))
+            success_detail = detail or "enabled"
+            if accepted_q4 is not None:
+                success_detail = f"conforming variant={variant}; {success_detail}"
+            attempts.append(Attempt(rr, m_id, tuple(enabled), True, success_detail))
+            return AdvanceReport(
+                front_edge=fe,
+                ratio=rr,
+                midpoint_id=m_id,
+                child_cells=(ca_id, cb_id),
+                quad_cell_id=new_id,
+                quad_body=tuple(body),
+                enabling_edge=edge_key(*enabled),
+                attempts=tuple(attempts),
+                local_front_edges=local_front,
+            )
+
         attempts.append(
-            Attempt(rr, m_id, tuple(enabled), True, detail or "enabled")
-        )
-        return AdvanceReport(
-            front_edge=fe,
-            ratio=rr,
-            midpoint_id=m_id,
-            child_cells=(ca_id, cb_id),
-            quad_cell_id=new_id,
-            quad_body=tuple(body),
-            enabling_edge=edge_key(*enabled),
-            attempts=tuple(attempts),
+            Attempt(
+                rr,
+                state.next_node_id,
+                None,
+                False,
+                " | ".join(ratio_details) or "no enabling child edge",
+            )
         )
 
     raise RecoveryExhausted(

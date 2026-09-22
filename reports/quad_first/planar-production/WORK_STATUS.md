@@ -129,6 +129,63 @@ git diff --check
 
 No push, merge, release, publication, default-route promotion, or primary-worktree edit occurred.
 
+## PQ3 / PQ-M1 - genuine target-size planar quad driver
+
+**Status: COMPLETE, pending the local milestone commit.**
+
+The committed PQ2 seed is now consumed by a finite deterministic public driver. A shared canonical station registry is captured before face execution; each selected planar face receives a fresh seed, one frozen cross-field report, guided/direct local pairing, bounded conforming recovery, independent validation, and exact neutral-mesh publication. The old fixed `CountInstance` and synthetic `PatchSpec` calls are absent from the PQ-M1 public dataflow. Q4 MCF and Q5 TinyAD remain direct qualified adapters, while public PQ-M1 diagnostics report both as `NOT_INTEGRATED` and do not require their binaries.
+
+### P01 production evidence
+
+| target `h` | nodes | Q4 | residual T3 | `N_eq` | Q4 count fraction | Q4 area fraction | final area | edge-chain lengths |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1.0 | 77 | 60 | 0 | 60 | 1.0 | 1.0 | 60.0 | [7,7,11,11] |
+| 0.5 | 273 | 240 | 0 | 240 | 1.0 | 1.0 | 60.0 | [13,13,21,21] |
+| 0.25 | 1025 | 960 | 0 | 960 | 1.0 | 1.0 | 60.0 | [25,25,41,41] |
+
+Equivalent count is exactly `A/h^2` at every mandatory resolution and halving `h` gives the exact 4.0 count ratio. Driver counters are deterministic:
+
+| `h` | initial T3 | attempts | stale skips | guided accepts | direct accepts | recovery accepts | queue pushes | final Q4/T3 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1.0 | 120 | 60 | 55 | 60 | 0 | 0 | 136 | 60 / 0 |
+| 0.5 | 480 | 240 | 239 | 240 | 0 | 0 | 512 | 240 / 0 |
+| 0.25 | 1920 | 960 | 967 | 960 | 0 | 0 | 1984 | 960 / 0 |
+
+P02 at `h=0.5` has the same 273 nodes, 240 Q4, zero T3, `N_eq=240`, and `[13,13,21,21]` station-chain lengths after the prescribed rigid transform. Source geometry identity/revision/topology remains unchanged by public meshing.
+
+### Causal conforming recovery evidence
+
+The public recovery fixture is the planar trapezoid `(0,0)-(4,0)-(3,4)-(1,4)` at `h=0.75`.
+
+- recovery enabled: 26 Q4 / 6 T3, `N_eq=29`, Q4 count fraction `0.8125`, Q4 area fraction `0.946875`, one accepted recovery and one inserted node;
+- same fresh seed with `allow_recovery=False`: 24 Q4 / 8 T3, `N_eq=28`, Q4 count fraction `0.75`, Q4 area fraction `0.9`;
+- both close area at 12.0 within floating tolerance;
+- strict canonical-boundary/incidence validation passes after the Q4/T3-interface split is made conforming by a same-transaction accepted-side local re-tile;
+- a forced accepted-side re-tile rejection proves rollback preserves digest, generation, and next node/cell IDs.
+
+The mixed quad-first/legacy merge preserves residual quad-first T3 IDs in one shared shell-element namespace and remaps legacy Q4/T3/beam IDs above the occupied quad-first shell IDs.
+
+### PQ-M1 qualification evidence
+
+```text
+python -m pytest tests/quad_first/test_q2_recovery.py tests/quad_first_planar/test_pq3_public_driver.py -q
+  -> 31 passed
+python -m pytest tests/quad_first/test_q6_public_integration.py tests/quad_first/test_q7_qualification.py -q
+  -> 40 passed
+python -m pytest tests/quad_first/test_q1_front.py tests/quad_first/test_q2_recovery.py tests/quad_first/test_q3_guidance.py -q
+  -> 92 passed
+python -m pytest tests/quad_first_planar -q
+  -> 27 passed
+python -m pytest tests/quad_first -q
+  -> 275 passed
+git diff --check
+  -> clean
+```
+
+Fresh bounded PQ3 review against target-size causality, worker isolation, exact station ownership, residual publication, conforming recovery/rollback, cancellation, validator incidence/area closure, legacy sentinel, source immutability, and structural mixed/S3/beam contracts found no material blocker after the final recovery correction.
+
+No push, main merge, tag, release, PyPI operation, PQ4 work, or primary-worktree edit is part of PQ-M1.
+
 ## Next
 
-PQ3: consume the committed PQ2 seed in the genuine planar quad driver; PQ3 has not been started.
+Stop after the local PQ-M1 milestone commit for administrator handoff. PQ4 is not started by this milestone.

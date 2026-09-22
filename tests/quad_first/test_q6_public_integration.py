@@ -156,13 +156,8 @@ def _plane_face() -> tuple:
 
 
 def test_quad_first_exercises_worker_chain_when_explicit() -> None:
-    """An explicit, in-scope ``quad_options`` must run the quad-first worker
-    chain (Q3 front -> Q4 count -> Q5 TinyAD) and publish atomically — it must
-    NOT silently return the legacy body's result.  We observe the route through
-    the diagnostic safe-phase names the chain reports to ``cancellation_check``,
-    which the legacy body never emits."""
     geometry, face = _plane_face()
-    phases: list = []
+    phases: list[str] = []
     result = generate_hybrid_mesh_result(
         geometry,
         target_size=1.0,
@@ -170,24 +165,27 @@ def test_quad_first_exercises_worker_chain_when_explicit() -> None:
         quad_options=QuadMeshingOptions(),
         cancellation_check=phases.append,
     )
-    # The four quad-first phases appear, in order, and the legacy start phase
-    # precedes them.
-    quad_phases = [
-        "quad-first:q3",
-        "quad-first:q4",
-        "quad-first:q5",
+    quad_phases = [p for p in phases if p.startswith("quad-first:")]
+    expected = [
+        "quad-first:seed",
+        "quad-first:face-seed",
+        "quad-first:driver-start",
+        "quad-first:driver-iteration",
         "quad-first:before-publication",
     ]
-    for name in quad_phases:
-        assert name in phases
-    assert [p for p in phases if p.startswith("quad-first")] == quad_phases
+    assert [quad_phases.index(name) for name in expected] == sorted(
+        quad_phases.index(name) for name in expected
+    )
+    assert "quad-first:q4" not in quad_phases
+    assert "quad-first:q5" not in quad_phases
 
-    # The published result is a genuine quad-first record.
-    assert result.mesh.quads
     diagnostics = result.mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
-    assert diagnostics["q4"]["status"] == "OPTIMAL"
-    assert diagnostics["q5"]["status"] in ("CONVERGED", "NOIMPROVE")
+    assert diagnostics["q4"]["status"] == "NOT_INTEGRATED"
+    assert diagnostics["q5"]["status"] == "NOT_INTEGRATED"
+    driver = diagnostics["front"]["faces"][face]
+    assert driver["final_q4"] > 0
+    assert driver["final_t3"] >= 0
 
 
 def test_none_dispatch_stays_on_legacy_path() -> None:
@@ -331,10 +329,8 @@ def _translated_plane_face() -> tuple:
 
 
 def test_explicit_quad_route_uses_requested_face_geometry() -> None:
-    """An explicit quad request must publish the requested face's actual
-    geometry (translated/scaled), not the canonical unit-square seed."""
     geometry, face = _translated_plane_face()
-    phases: list = []
+    phases: list[str] = []
     result = generate_hybrid_mesh_result(
         geometry,
         target_size=1.0,
@@ -342,20 +338,22 @@ def test_explicit_quad_route_uses_requested_face_geometry() -> None:
         quad_options=QuadMeshingOptions(),
         cancellation_check=phases.append,
     )
-
-    quad_phases = [
-        "quad-first:q3",
-        "quad-first:q4",
-        "quad-first:q5",
+    quad_phases = [p for p in phases if p.startswith("quad-first:")]
+    expected = [
+        "quad-first:seed",
+        "quad-first:face-seed",
+        "quad-first:driver-start",
+        "quad-first:driver-iteration",
         "quad-first:before-publication",
     ]
-    for name in quad_phases:
-        assert name in phases
-    assert [p for p in phases if p.startswith("quad-first")] == quad_phases
-    assert result.mesh.hybrid_diagnostics["route"] == "quad-first"
+    assert [quad_phases.index(name) for name in expected] == sorted(
+        quad_phases.index(name) for name in expected
+    )
+    assert "quad-first:q4" not in quad_phases
+    assert "quad-first:q5" not in quad_phases
 
+    assert result.mesh.hybrid_diagnostics["route"] == "quad-first"
     nodes = [np.asarray(node, dtype=float) for node in result.mesh.nodes.values()]
-    assert nodes
     xs = [float(node[0]) for node in nodes]
     ys = [float(node[1]) for node in nodes]
     assert min(xs) == pytest.approx(10.0)
@@ -366,69 +364,48 @@ def test_explicit_quad_route_uses_requested_face_geometry() -> None:
 
 def test_quad_first_single_face_exact_geometry_associations() -> None:
     geometry, face_id = _translated_plane_face()
-    result = generate_hybrid_mesh_result(
-        geometry,
-        target_size=1.0,
-        face_ids=(face_id,),
+    mesh = generate_hybrid_mesh_result(
+        geometry, target_size=1.0, face_ids=(face_id,),
         quad_options=QuadMeshingOptions(),
-    )
-    mesh = result.mesh
+    ).mesh
     face = geometry.faces[face_id]
-
     corner_vertex_ids = []
     for corner_index in face.corners:
         use = face.loop[int(corner_index)]
         edge = geometry.edges[int(use.edge)]
         corner_vertex_ids.append(int(edge.start if use.forward else edge.end))
-
     assert set(mesh.node_of_vertex) == set(corner_vertex_ids)
-    expected_node_ids = {mesh.node_of_vertex[vertex_id] for vertex_id in corner_vertex_ids}
-    assert len(expected_node_ids) == 4
-    assert set(mesh.nodes) == expected_node_ids
-    assert len(mesh.quads) == 1
-    for vertex_id in corner_vertex_ids:
-        node_id = mesh.node_of_vertex[vertex_id]
-        assert np.array_equal(
-            np.asarray(mesh.nodes[node_id], dtype=float),
-            np.asarray(geometry.vertices[vertex_id].position, dtype=float),
-        )
-
+    corner_node_ids = {mesh.node_of_vertex[v] for v in corner_vertex_ids}
+    assert corner_node_ids <= set(mesh.nodes)
+    assert len(mesh.nodes) > len(corner_node_ids)
     assert set(mesh.nodes_of_edge) == {int(use.edge) for use in face.loop}
     for use in face.loop:
-        edge = geometry.edges[int(use.edge)]
-        assert mesh.nodes_of_edge[int(use.edge)] == [
-            mesh.node_of_vertex[int(edge.start)],
-            mesh.node_of_vertex[int(edge.end)],
-        ]
-
-    assert mesh.elements_of_face[face_id] == list(mesh.quads)
+        edge_id = int(use.edge)
+        edge = geometry.edges[edge_id]
+        chain = list(mesh.nodes_of_edge[edge_id])
+        assert chain[0] == mesh.node_of_vertex[int(edge.start)]
+        assert chain[-1] == mesh.node_of_vertex[int(edge.end)]
+        assert len(chain) >= 2
+        assert set(chain) <= set(mesh.nodes)
+    assert set(mesh.elements_of_face[face_id]) == set(mesh.quads) | set(mesh.tris)
 
 
 def test_quad_first_single_face_quad_body_is_corner_set() -> None:
     geometry, face_id = _translated_plane_face()
-    result = generate_hybrid_mesh_result(
-        geometry,
-        target_size=1.0,
-        face_ids=(face_id,),
+    mesh = generate_hybrid_mesh_result(
+        geometry, target_size=1.0, face_ids=(face_id,),
         quad_options=QuadMeshingOptions(),
-    )
-    mesh = result.mesh
-    face = geometry.faces[face_id]
-
-    corner_vertex_ids = []
-    for corner_index in face.corners:
-        use = face.loop[int(corner_index)]
-        edge = geometry.edges[int(use.edge)]
-        corner_vertex_ids.append(int(edge.start if use.forward else edge.end))
-    corner_node_ids = {mesh.node_of_vertex[vertex_id] for vertex_id in corner_vertex_ids}
-
-    assert len(mesh.quads) == 1
-    quad_id = next(iter(mesh.quads))
-    body = [int(node) for node in mesh.quads[quad_id]]
-    assert len(body) == 4
-    assert set(body) == corner_node_ids
-    for node_id in body:
-        assert node_id in corner_node_ids
+    ).mesh
+    assert len(mesh.quads) > 1
+    for body in mesh.quads.values():
+        assert len(body) == 4
+        assert len(set(body)) == 4
+        assert set(body) <= set(mesh.nodes)
+    validation = mesh.hybrid_diagnostics["validation"]["faces"][face_id]
+    assert validation["q4_count_fraction"] >= 0.85
+    assert validation["q4_area_fraction"] >= 0.85
+    assert validation["area_ratio"] == pytest.approx(1.0)
+    assert set(mesh.elements_of_face[face_id]) == set(mesh.quads) | set(mesh.tris)
 
 
 def test_quad_first_single_face_associations_survive_json_round_trip() -> None:
@@ -1142,53 +1119,68 @@ def _beam_through_face_fixture():
 
 
 def test_quad_first_beam_coupling_slice() -> None:
-    geometry, face, _part, sheet, member, member_edge = (
-        _beam_through_face_fixture()
-    )
+    geometry, face, _part, sheet, member, member_edge = _beam_through_face_fixture()
     result = generate_hybrid_mesh_result(
-        geometry,
-        target_size=1.0,
-        face_ids=(face,),
-        member_ids=(member,),
+        geometry, target_size=1.0, face_ids=(face,), member_ids=(member,),
         quad_options=QuadMeshingOptions(),
     )
     mesh = result.mesh
     diagnostics = mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
-    assert diagnostics["q4"]["status"] == "OPTIMAL"
-    assert diagnostics["q5"]["status"] in ("CONVERGED", "NOIMPROVE")
-
-    # Quad shell is authoritative: exactly one quad owning the face.
-    assert len(mesh.quads) == 1
+    assert diagnostics["q4"]["status"] == "NOT_INTEGRATED"
+    assert diagnostics["q5"]["status"] == "NOT_INTEGRATED"
     face_elements = list(mesh.elements_of_face[face])
-    assert len(face_elements) == 1
-    quad_id = int(face_elements[0])
-    assert quad_id in mesh.quads
-    quad_nodes = set(int(node) for node in mesh.quads[quad_id])
-    assert len(quad_nodes) == 4
+    assert face_elements
+    assert all(eid in mesh.quads or eid in mesh.tris for eid in face_elements)
     assert list(mesh.elements_of_sheet[sheet]) == face_elements
-
-    # Beam slice: the member edge carries nodes and beam elements.
+    face_nodes = set()
+    for eid in face_elements:
+        body = mesh.quads[eid] if eid in mesh.quads else mesh.tris[eid]
+        face_nodes.update(int(node) for node in body)
     assert mesh.beams
     assert member_edge in mesh.elements_of_edge
     assert member_edge in mesh.nodes_of_edge
     edge_nodes = set(int(node) for node in mesh.nodes_of_edge[member_edge])
     beam_ids = set(int(element) for element in mesh.elements_of_edge[member_edge])
-    for beam_id in beam_ids:
-        assert beam_id in mesh.beams
-
-    # Exactly one coupling at station 0.5, wired into the published topology.
+    assert all(beam_id in mesh.beams for beam_id in beam_ids)
     couplings = list(mesh.couplings.values())
     assert len(couplings) == 1
     coupling = couplings[0]
     assert int(coupling.beam_node) == int(mesh.nodes_of_edge[member_edge][1])
     np.testing.assert_allclose(mesh.nodes[int(coupling.beam_node)], (0.5, 0.5, 0.0))
     assert int(coupling.beam_node) in edge_nodes
-    assert set(int(node) for node in coupling.plate_nodes) <= quad_nodes
+    assert set(int(node) for node in coupling.plate_nodes) <= face_nodes
     assert sum(coupling.weights) == pytest.approx(1.0)
-
-    # Connectivity report is populated with the one declared attachment and no issues.
     assert result.connectivity is not None
-    report = result.connectivity
-    assert report.connected == 1
-    assert not report.issues
+    assert result.connectivity.connected == 1
+    assert not result.connectivity.issues
+
+
+def test_mixed_merge_preserves_quad_first_residual_t3_namespace() -> None:
+    geometry = GeometryModel()
+    quad_vertices = geometry.add_points(
+        ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (3.0, 4.0, 0.0), (1.0, 4.0, 0.0))
+    )
+    quad_face = geometry.add_plate(quad_vertices)
+    legacy_vertices = geometry.add_points(
+        ((10.0, 0.0, 0.0), (12.0, 0.0, 0.0), (12.0, 2.0, 0.0), (10.0, 2.0, 0.0))
+    )
+    legacy_face = geometry.add_plate(legacy_vertices)
+
+    mesh = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.75,
+        face_ids=(quad_face, legacy_face),
+        strategy="mapped",
+        quad_options=QuadMeshingOptions(),
+        quad_face_ids=(quad_face,),
+    ).mesh
+
+    quad_shells = set(mesh.elements_of_face[quad_face])
+    legacy_shells = set(mesh.elements_of_face[legacy_face])
+    residual = quad_shells & set(mesh.tris)
+    assert residual
+    assert quad_shells == (quad_shells & set(mesh.quads)) | residual
+    assert not (set(mesh.quads) & set(mesh.tris))
+    assert not (quad_shells & legacy_shells)
+    assert min(legacy_shells) > max(quad_shells)

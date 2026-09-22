@@ -346,34 +346,37 @@ _REQUIRED_Q_FIRST_PHASES = [
 def test_d2_q6_production_worker_chain_runs_and_is_canonical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Both production workers must be present in this artefact-clean worktree.
     assert os.path.isfile(_MCF_WORKER), "Q4 LEMON MCF worker exe not found"
     assert os.path.isfile(_TINYAD_WORKER), "Q5 TinyAD worker exe not found"
-
     monkeypatch.setenv("ANYMESH_QUAD_MCF_WORKER", _MCF_WORKER)
     monkeypatch.setenv("ANYMESH_QUAD_TINYAD_WORKER", _TINYAD_WORKER)
-
     geometry, face = _plane_face(size=1.0)
     phases: list[str] = []
-    result = generate_hybrid_mesh_result(
-        geometry,
-        target_size=1.0,
-        face_ids=(face,),
-        quad_options=QuadMeshingOptions(),
-        cancellation_check=phases.append,
+    mesh = generate_hybrid_mesh_result(
+        geometry, target_size=1.0, face_ids=(face,),
+        quad_options=QuadMeshingOptions(), cancellation_check=phases.append,
+    ).mesh
+    quad_phases = [p for p in phases if p.startswith("quad-first:")]
+    expected = [
+        "quad-first:seed",
+        "quad-first:face-seed",
+        "quad-first:driver-start",
+        "quad-first:driver-iteration",
+        "quad-first:before-publication",
+    ]
+    assert [quad_phases.index(name) for name in expected] == sorted(
+        quad_phases.index(name) for name in expected
     )
-    mesh = result.mesh
+    assert "quad-first:q4" not in quad_phases
+    assert "quad-first:q5" not in quad_phases
+
     diag = mesh.hybrid_diagnostics
-
-    q_first = [p for p in phases if p.startswith("quad-first:")]
-    assert q_first == _REQUIRED_Q_FIRST_PHASES
-
-    assert diag.get("route") == "quad-first"
-    assert diag["q4"]["status"] == "OPTIMAL"
-    assert diag["q5"]["status"] in {"CONVERGED", "NOIMPROVE"}
-
-    # At least one committed Q4 on the plate; the plate is exactly one quad.
-    assert len(mesh.quads) >= 1
-    body_set = set(node for body in mesh.quads.values() for node in body)
-    # A committed quad cell references exactly the 4 plate corner nodes.
-    assert len(body_set) == 4
+    assert diag["route"] == "quad-first"
+    assert diag["q4"]["status"] == "NOT_INTEGRATED"
+    assert diag["q5"]["status"] == "NOT_INTEGRATED"
+    assert mesh.quads
+    assert all(len(body) == 4 and len(set(body)) == 4 for body in mesh.quads.values())
+    assert set(mesh.node_of_vertex) == set(geometry.vertices)
+    validation = diag["validation"]["faces"][face]
+    assert validation["area_ratio"] == pytest.approx(1.0)
+    assert validation["q4_area_fraction"] >= 0.85
