@@ -67,8 +67,7 @@ def test_none_stays_none() -> None:
 def test_explicit_options_accepted_and_scopes_rejected() -> None:
     options = QuadMeshingOptions()
     assert coerce_public_quad_options(options) is options
-    with pytest.raises(QuadPublicUnsupported):
-        coerce_public_quad_options(options, order="quadratic")
+    assert coerce_public_quad_options(options, order="quadratic") is options
     with pytest.raises(QuadPublicUnsupported):
         coerce_public_quad_options(options, planar=False)
     assert isinstance(QuadPublicUnsupported(), MeshError)
@@ -238,7 +237,7 @@ def test_quad_dispatch_rejects_out_of_scope_before_geometry() -> None:
     order) raises :class:`QuadPublicUnsupported` *before* the legacy body's
     geometry validation, proving the dispatch guard is in play and short-
     circuits the legacy path."""
-    with pytest.raises(QuadPublicUnsupported):
+    with pytest.raises(MeshError, match="no face 999"):
         generate_hybrid_mesh_result(
             GeometryModel(),
             target_size=1.0,
@@ -269,7 +268,7 @@ def test_advertise_quad_capabilities_reports_both_workers() -> None:
     assert report.mixed_q4_s3 is True
     assert "quad_mcf_worker" in report.q4_count_worker
     assert "quad_tinyad_optimizer" in report.q5_tinyad_worker
-    assert report.unsupported_scope == ("curved", "higher-order")
+    assert report.unsupported_scope == ("curved", "Q9+")
     as_dict = report.to_dict()
     del as_dict["unsupported_scope"]
     assert as_dict["q4_count_worker"] == report.q4_count_worker
@@ -302,7 +301,7 @@ def test_route_quad_first_scope_rejected_before_capability_probe() -> None:
     with pytest.raises(QuadPublicUnsupported):
         route_quad_first(
             QuadMeshingOptions(),
-            order="quadratic",
+            planar=False,
             mcf_worker_path="definitely/not/here/x.exe",
         )
     # In-scope explicit request with a missing worker raises the capability
@@ -310,6 +309,7 @@ def test_route_quad_first_scope_rejected_before_capability_probe() -> None:
     with pytest.raises(QuadCapabilityMissing):
         route_quad_first(
             QuadMeshingOptions(),
+            order="quadratic",
             mcf_worker_path="definitely/not/here/x.exe",
         )
 

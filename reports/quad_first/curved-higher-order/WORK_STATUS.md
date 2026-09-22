@@ -1,4 +1,4 @@
-﻿# Curved / higher-order quad programme â€” work status
+# Curved / higher-order quad programme â€” work status
 
 ## CH0 â€” contract freeze
 
@@ -142,3 +142,39 @@ budget-exhausted and cancelled certification paths.
   one shared midside per canonical edge; hard P01 h=0.5 target is 240 Q8,
   0 T6 and 785 nodes (273 retained corner nodes + 512 unique midsides).
 - CH3 remains separate and is not opened until CH2 is complete.
+
+## CH2 — planar quad-first Q8/T6 promotion
+
+**Status: QUALIFIED; ready for the CH2 milestone commit.**
+
+CH2 opens `order="quadratic"` only for the already-qualified explicit planar quad-first route. The linear topology remains authoritative, then promotion stages one midside per unique final shell edge and publishes Q8/T6 atomically only after the CH1 strict mapping-validity gate. Curved-surface quad-first remains typed unsupported; Q9 is deferred; quadratic beam/coupling output fails closed because B3 ownership is not qualified in CH2.
+
+### Product evidence
+
+- P01 h=0.5: linear `273 nodes / 240 Q4 / 0 T3`; quadratic `785 nodes / 240 Q8 / 0 T6`; `512` unique midsides, `64` exact source-boundary midsides, `0` repairs. All original node IDs/coordinates, shell IDs, corner connectivity, face ownership and source geometry are retained.
+- Residual trapezoid h=0.75: linear `40 nodes / 26 Q4 / 6 T3`; quadratic `111 nodes / 26 Q8 / 6 T6`; `71` unique midsides, `20` exact boundary midsides, no repair. Q8/Q8 and Q8/T6 interfaces reuse the same midside IDs and all final mappings certify positive.
+- P03 circular hole h=0.5: `795 nodes / 233 Q8 / 10 T6`; `519` unique midsides and `76` exact source-boundary midsides. Added hole-boundary midsides are exact source-arc samples and stay at radius `0.9` about `(3.2, 2.4)` within `1e-10`. Three unprotected interior opposite corners require bounded T6 repair; maximum displacement is `0.12266702535935825`, below the `0.5*h` cap. Protected boundary/station nodes and source geometry do not move.
+- P07 local grading h=1.0: `275 nodes / 82 Q8 / 2 T6`; `179` unique midsides and `24` exact boundary midsides, with the qualified linear graded corner topology preserved.
+- Promotion is idempotent and staged; a cancellation at the final ready checkpoint leaves a supplied linear mesh unchanged.
+
+### CH2 gate evidence
+
+```text
+focused CH2
+  -> 15 passed in 16.39 s
+CH0 + CH1
+  -> 38 passed in 0.47 s
+PQ3/PQ4a/PQ4b/PQ5/PQ6 + Q6/Q7 regression bundle
+  -> 84 passed, 3 skipped in 32.00 s
+     skips are the known compiled-triangulation parity capability skips
+full tests/quad_first_curved
+  -> 53 passed in 16.39 s
+full tests/quad_first_planar
+  -> 63 passed, 3 skipped in 39.21 s
+full tests/quad_first
+  -> 275 passed in 3.69 s
+serialization / quality / coupling / quadratic-staging consumers
+  -> 35 passed in 0.26 s
+```
+
+Fresh review confirmed exact source-edge midpoint ownership, one canonical midside per unique final shell edge, strict Q8/T6 validity, stable topology IDs, atomic cancellation, fail-closed mixed-order beam handling, unchanged `quality_v2`, and bounded edge-linear promotion work. No CH3 cylinder tranche is opened by CH2.

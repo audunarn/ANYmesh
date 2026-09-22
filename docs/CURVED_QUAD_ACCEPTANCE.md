@@ -1,4 +1,4 @@
-# Curved and Higher-Order Quad Meshing — Acceptance Record (CH0–CH1)
+# Curved and Higher-Order Quad Meshing — Acceptance Record (CH0–CH2)
 
 This file records the invariants that the CH0 baseline-contract test suite
 `tests/quad_first_curved/test_ch0_baseline_contract.py` asserts. The suite
@@ -101,21 +101,9 @@ The test imports each by its documented path and asserts the object is present
 and, where it is a callable, that `callable(...)` is true. This pins the exact
 re-use surface so a later tranche cannot fork to a private name.
 
-## Test 6 — `test_quad_first_public_route_rejects_nonlinear_nonplanar`
+## Test 6 — `test_quad_first_public_route_accepts_planar_orders_rejects_nonplanar`
 
-The public route stays **linear + planar only** at CH0, and the guard is not
-accidentally removed. `QuadPublicUnsupported` (src/anymesher/quad/public_integration.py:34)
-must be raised, from `coerce_public_quad_options`
-(src/anymesher/quad/public_integration.py), for:
-
-1. `order="quadratic", planar=True` — higher-order is not yet a public quad-first
-   route.
-2. `order="linear", planar=False` — curved is not yet a public quad-first route.
-
-And for the accepted pair `order="linear", planar=True` the call must return the
-same `QuadMeshingOptions` instance (no error). This is the boundary between the
-qualified planar route and the curved/HO scope; both guards must fire.
-
+CH2 explicitly re-opens the planar quadratic portion of the CH0 guard. `coerce_public_quad_options` accepts both `order="linear"` and `order="quadratic"` when `planar=True`, returns the same explicit `QuadMeshingOptions` instance, rejects `planar=False` for either order, and rejects unsupported order tokens such as `cubic`. Curved-surface quad-first is therefore still fail-closed while planar Q8/T6 is now a qualified public route.
 ## Test 7 — `test_linear_planar_route_is_the_qualified_public_contract`
 
 The qualified public baseline remains a **real** explicit linear quad-first
@@ -213,3 +201,49 @@ skeleton-only.  Acceptance requires all of the following:
   corner-only `quality_v2` metrics do not change.
 - Reports are deterministic and JSON-safe through `to_dict()`; cancellation is
   checked deterministically and leaves inputs unchanged.
+
+---
+
+## CH2 acceptance — planar explicit Q8/T6 promotion
+
+CH2 acceptance is implemented in `tests/quad_first_curved/test_ch2_planar_quadratic_promotion.py` and re-opens only the planar higher-order scope. The hard product contracts are:
+
+- P01 h=0.5 retains all 273 linear node IDs and coordinates, all 240 shell IDs/corner connectivities and face ownership, and promotes to exactly 785 nodes / 240 Q8 / 0 T6 with 512 unique midsides. Every expanded source-edge chain contains the original linear chain at even positions.
+- A real residual trapezoid retains 26 Q4 / 6 T3 as 26 Q8 / 6 T6. Shared Q8/Q8 and Q8/T6 interfaces use one midside ID, and every final high-order shell is `CERTIFIED_POSITIVE` under the CH1 validity kernel.
+- P03 analytic circular-hole boundary midsides are sampled on their owning source edge at the exact midpoint parameter. The added hole midsides remain at radius 0.9 about `(3.2, 2.4)` within `1e-10`; source geometry and boundary ownership are unchanged. Bounded repair may move only unprotected opposite T6 corners and must leave all incident high-order elements certified.
+- P05 concave and P07 locally graded routes retain the qualified linear corner topology/counts and pass strict high-order validity; local grading is not replaced by a global finest-size mesh.
+- Promotion is idempotent. A cancellation at the final pre-publish checkpoint leaves a supplied linear mesh byte-for-byte equivalent through serialization. Source geometry is unchanged on cancellation.
+- Explicit quadratic quad-first with beams/couplings fails closed rather than publishing B2 beams under `mesh.order="quadratic"`.
+- Explicit curved-surface quad-first remains typed unsupported through CH2. Q9 remains deferred. `quality_v2` is unchanged.
+
+### CH2 gate evidence
+
+```text
+python -m pytest tests/quad_first_curved/test_ch2_planar_quadratic_promotion.py -q
+  -> 15 passed in 16.39 s
+
+python -m pytest tests/quad_first_curved/test_ch0_baseline_contract.py \
+  tests/quad_first_curved/test_ch1_high_order_validity.py -q
+  -> 38 passed in 0.47 s
+
+python -m pytest \
+  tests/quad_first_planar/test_pq3_public_driver.py \
+  tests/quad_first_planar/test_pq4_general_domains.py \
+  tests/quad_first_planar/test_pq4b_staged_domains.py \
+  tests/quad_first_planar/test_pq5_real_optimization.py \
+  tests/quad_first_planar/test_pq6_geometry_mcf.py \
+  tests/quad_first/test_q6_public_integration.py \
+  tests/quad_first/test_q7_qualification.py -q
+  -> 84 passed, 3 skipped in 32.00 s
+     skips: compiled triangulation parity; native extension not rebuilt in this worktree
+
+python -m pytest tests/quad_first_curved -q
+  -> 53 passed in 16.39 s
+python -m pytest tests/quad_first_planar -q
+  -> 63 passed, 3 skipped in 39.21 s
+python -m pytest tests/quad_first -q
+  -> 275 passed in 3.69 s
+python -m pytest tests/test_quality_and_serialize.py tests/test_coupling.py \
+  tests/test_cylindrical_quadratic_staging.py -q
+  -> 35 passed in 0.26 s
+```

@@ -86,14 +86,18 @@ def coerce_public_quad_options(
     """Validate the public quad-first option contract.
 
     ``None`` passes through unchanged as the legacy dispatch sentinel.  An
-    explicit option outside the supported scope (``order != 'linear'`` or
-    ``planar is False``) raises :class:`QuadPublicUnsupported` with no fallback.
+    explicit option outside the supported scope (``planar is False``, or an
+    ``order`` other than ``'linear'``/``'quadratic'``) raises
+    :class:`QuadPublicUnsupported` with no fallback.  ``order='quadratic'``
+    is admitted only for the planar explicit scope; the quad-first result is
+    then promoted in place to Q8/T6 after the linear topology is qualified.
     """
-    if order != "linear" or not (type(planar) is bool and planar):
+    if order not in ("linear", "quadratic") or not (type(planar) is bool and planar):
         if value is None:
             return None
         raise QuadPublicUnsupported(
-            "quad-first public route requires order='linear' and planar=True"
+            "quad-first public route requires planar=True and "
+            "order='linear' or order='quadratic'"
         )
     return QuadMeshingOptions.coerce(value)
 
@@ -134,7 +138,7 @@ def advertise_quad_capabilities(
     *,
     mcf_worker_path: "str | os.PathLike[str] | None" = None,
     q5_worker_path: "str | os.PathLike[str] | None" = None,
-    unsupported_scope: "str | tuple[str, ...]" = ("curved", "higher-order"),
+    unsupported_scope: "str | tuple[str, ...]" = ("curved", "Q9+"),
 ) -> QuadCapabilityReport:
     """Build the :class:`QuadCapabilityReport` for the public route.
 
@@ -211,5 +215,5 @@ def route_quad_first(
         q4_count_worker="NOT_INTEGRATED",
         q5_tinyad_worker="NOT_INTEGRATED",
         mixed_q4_s3=bool(_MIXED_Q4_S3_ROUTE_SUPPORTED and _s3_production_available()),
-        unsupported_scope=("curved", "higher-order"),
+        unsupported_scope=("curved", "Q9+"),
     )

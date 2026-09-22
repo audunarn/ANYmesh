@@ -50,6 +50,7 @@ from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.domain import PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
+from .quad.high_order import ValidityStatus, certify_mapping_validity
 from .quad.options import QuadMeshingOptions
 from .quad.mcf_seed import optimize_q4_seed_mcf
 from .quad.optimize import optimize_quad_state
@@ -2342,6 +2343,348 @@ def _quad_first_apply_qualified_s3(
     return replace(result, mesh=prepared_mesh)
 
 
+def _promote_quad_first_quadratic(
+    mesh: Mesh,
+    geometry: GeometryModel,
+    *,
+    target_size: float,
+    cancellation_check: Callable[[str], None] | None = None,
+) -> None:
+    """Promote final planar Q4/T3 cells to strict-valid canonical Q8/T6.
+
+    Work is staged on a detached copy.  Exact source-edge midsides are used on
+    every geometry-owned boundary segment.  If that exact curvature would fold
+    a boundary-adjacent T6, only an unprotected opposite corner may be moved,
+    deterministically along the source-curve bulge direction.  Publication is
+    atomic after a final strict CH1 validity pass.
+    """
+    if mesh.is_quadratic:
+        return
+    if mesh.beams or mesh.couplings:
+        raise QuadPublicUnsupported(
+            "quadratic quad-first does not yet qualify beam/coupling promotion"
+        )
+    h = float(target_size)
+    if not np.isfinite(h) or h <= 0.0:
+        raise MeshError("quadratic promotion target_size must be finite and positive")
+    _check_cancellation(cancellation_check, "quad-first:quadratic-promotion")
+
+    working = deepcopy(mesh)
+
+    edge_keys: set[tuple[int, int]] = set()
+    for body in working.quads.values():
+        corners = tuple(int(node) for node in body[:4])
+        edge_keys.update(
+            (min(first, second), max(first, second))
+            for first, second in zip(corners, corners[1:] + corners[:1])
+        )
+    for body in working.tris.values():
+        corners = tuple(int(node) for node in body[:3])
+        edge_keys.update(
+            (min(first, second), max(first, second))
+            for first, second in zip(corners, corners[1:] + corners[:1])
+        )
+
+    # Exact owner midsides for every current source-edge interval.
+    boundary_data: dict[tuple[int, int], tuple[int, np.ndarray]] = {}
+    for edge_id, sequence in working.nodes_of_edge.items():
+        chain = [int(node) for node in sequence]
+        for first, second in zip(chain, chain[1:]):
+            key = (min(first, second), max(first, second))
+            if key not in edge_keys:
+                raise MeshError(
+                    f"quadratic promotion boundary segment {key} is not a final-cell edge"
+                )
+            _point0, parameter0, _distance0 = geometry.closest_edge_point(
+                int(edge_id), working.nodes[first]
+            )
+            _point1, parameter1, _distance1 = geometry.closest_edge_point(
+                int(edge_id), working.nodes[second]
+            )
+            parameter = 0.5 * (float(parameter0) + float(parameter1))
+            midpoint = np.asarray(
+                geometry.sample_edge(
+                    int(edge_id), np.asarray([parameter], dtype=float)
+                )[0],
+                dtype=float,
+            )
+            if midpoint.shape != (3,) or not np.all(np.isfinite(midpoint)):
+                raise MeshError(
+                    f"quadratic promotion produced an invalid source-edge midside on edge {edge_id}"
+                )
+            previous = boundary_data.get(key)
+            if previous is not None and not np.allclose(
+                previous[1], midpoint, rtol=0.0, atol=1.0e-12
+            ):
+                raise MeshError(
+                    f"quadratic promotion has conflicting source-edge midsides for {key}"
+                )
+            boundary_data[key] = (int(edge_id), midpoint)
+
+    protected_nodes = {
+        int(node)
+        for sequence in working.nodes_of_edge.values()
+        for node in sequence
+    }
+    protected_nodes.update(int(node) for node in working.node_of_vertex.values())
+
+    def _candidate_midpoint(first: int, second: int) -> np.ndarray:
+        key = (min(int(first), int(second)), max(int(first), int(second)))
+        owned = boundary_data.get(key)
+        if owned is not None:
+            return owned[1]
+        return 0.5 * (
+            np.asarray(working.nodes[first], dtype=float)
+            + np.asarray(working.nodes[second], dtype=float)
+        )
+
+    def _tentative_report(body: tuple[int, ...], family: str):
+        corner_count = 4 if family == "Q8" else 3
+        corners = tuple(int(node) for node in body[:corner_count])
+        midsides = [
+            _candidate_midpoint(corners[index], corners[(index + 1) % corner_count])
+            for index in range(corner_count)
+        ]
+        coordinates = np.asarray(
+            [working.nodes[node] for node in corners] + midsides, dtype=float
+        )
+        return certify_mapping_validity(coordinates, family)
+
+    element_specs: dict[tuple[int, str], tuple[int, ...]] = {}
+    incident_by_node: dict[int, set[tuple[int, str]]] = {}
+    curved_boundary_keys: set[tuple[int, int]] = set()
+    scale_tol = max(1.0e-13, 128.0 * np.finfo(np.float64).eps * max(1.0, h))
+
+    for key, (_edge_id, exact_midpoint) in boundary_data.items():
+        first, second = key
+        chord = 0.5 * (
+            np.asarray(working.nodes[first], dtype=float)
+            + np.asarray(working.nodes[second], dtype=float)
+        )
+        if float(np.linalg.norm(np.asarray(exact_midpoint) - chord)) > scale_tol:
+            curved_boundary_keys.add(key)
+
+    for element_id, body in sorted(working.quads.items()):
+        key = (int(element_id), "Q8")
+        corners = tuple(int(node) for node in body[:4])
+        element_specs[key] = corners
+        for node in corners:
+            incident_by_node.setdefault(node, set()).add(key)
+    for element_id, body in sorted(working.tris.items()):
+        key = (int(element_id), "T6")
+        corners = tuple(int(node) for node in body[:3])
+        element_specs[key] = corners
+        for node in corners:
+            incident_by_node.setdefault(node, set()).add(key)
+
+    repair_scope = tuple(
+        key
+        for key, corners in element_specs.items()
+        if any(
+            (min(first, second), max(first, second)) in curved_boundary_keys
+            for first, second in zip(corners, corners[1:] + corners[:1])
+        )
+    )
+
+    def _noncertified_scope():
+        result: list[tuple[int, str, tuple[int, ...], Any]] = []
+        for element_id, family in repair_scope:
+            body = element_specs[(element_id, family)]
+            report = _tentative_report(body, family)
+            if report.status is not ValidityStatus.CERTIFIED_POSITIVE:
+                result.append((element_id, family, body, report))
+        result.sort(key=lambda row: (row[0], row[1]))
+        return result
+
+    repair_count = 0
+    repaired_nodes: set[int] = set()
+    max_corner_displacement = 0.0
+    repair_cap = min(256, max(32, len(curved_boundary_keys)))
+    alpha_values = (0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0)
+
+    while True:
+        before_rows = _noncertified_scope()
+        if not before_rows:
+            break
+        if repair_count >= repair_cap:
+            raise MeshError(
+                f"quadratic promotion exhausted {repair_cap} bounded corner repairs"
+            )
+        _check_cancellation(
+            cancellation_check, "quad-first:quadratic-promotion-repair"
+        )
+
+        element_id, family, corners, report = before_rows[0]
+        if family != "T6":
+            raise MeshError(
+                "quadratic promotion requires an unqualified Q8 boundary retile "
+                f"outside CH2 scope (element {element_id}, status={report.status.value})"
+            )
+
+        candidates: list[
+            tuple[float, tuple[int, int], int, int, np.ndarray]
+        ] = []
+        for index in range(3):
+            first = corners[index]
+            second = corners[(index + 1) % 3]
+            opposite = corners[(index + 2) % 3]
+            key = (min(first, second), max(first, second))
+            owned = boundary_data.get(key)
+            if key not in curved_boundary_keys or owned is None:
+                continue
+            chord = 0.5 * (
+                np.asarray(working.nodes[first], dtype=float)
+                + np.asarray(working.nodes[second], dtype=float)
+            )
+            direction = np.asarray(owned[1], dtype=float) - chord
+            magnitude = float(np.linalg.norm(direction))
+            if magnitude <= scale_tol or opposite in protected_nodes:
+                continue
+            candidates.append(
+                (magnitude, key, int(owned[0]), int(opposite), direction)
+            )
+        if not candidates:
+            raise MeshError(
+                "quadratic promotion cannot repair non-certified T6 element "
+                f"{element_id}: no movable curved-boundary opposite corner"
+            )
+        candidates.sort(key=lambda item: (-item[0], item[1], item[3]))
+
+        accepted = False
+        for _magnitude, edge_key, source_edge, corner_id, direction in candidates:
+            old_position = np.asarray(working.nodes[corner_id], dtype=float).copy()
+            incident = tuple(sorted(incident_by_node.get(corner_id, ())))
+            for alpha in alpha_values:
+                displacement = float(alpha) * direction
+                displacement_norm = float(np.linalg.norm(displacement))
+                if displacement_norm > 0.5 * h + scale_tol:
+                    continue
+                candidate = old_position + displacement
+                if candidate.shape != (3,) or not np.all(np.isfinite(candidate)):
+                    continue
+                working.nodes[corner_id] = candidate
+                if all(
+                    _tentative_report(
+                        element_specs[incident_key], incident_key[1]
+                    ).status
+                    is ValidityStatus.CERTIFIED_POSITIVE
+                    for incident_key in incident
+                ):
+                    accepted = True
+                    repair_count += 1
+                    repaired_nodes.add(corner_id)
+                    total_displacement = float(
+                        np.linalg.norm(
+                            np.asarray(working.nodes[corner_id], dtype=float)
+                            - np.asarray(mesh.nodes[corner_id], dtype=float)
+                        )
+                    )
+                    max_corner_displacement = max(
+                        max_corner_displacement, total_displacement
+                    )
+                    break
+            if accepted:
+                break
+            working.nodes[corner_id] = old_position
+
+        if not accepted:
+            raise MeshError(
+                "quadratic promotion could not repair T6 element "
+                f"{element_id} beside an exact curved source edge"
+            )
+    # Allocate exactly one midside per final shell edge after all corner repairs.
+    new_nodes = dict(working.nodes)
+    next_node = max(new_nodes, default=-1) + 1
+    midside_of_edge: dict[tuple[int, int], int] = {}
+    for first, second in sorted(edge_keys):
+        owned = boundary_data.get((first, second))
+        midpoint = (
+            np.asarray(owned[1], dtype=float)
+            if owned is not None
+            else 0.5
+            * (
+                np.asarray(working.nodes[first], dtype=float)
+                + np.asarray(working.nodes[second], dtype=float)
+            )
+        )
+        if midpoint.shape != (3,) or not np.all(np.isfinite(midpoint)):
+            raise MeshError(
+                f"quadratic promotion produced an invalid midside on edge {(first, second)}"
+            )
+        midside_of_edge[(first, second)] = next_node
+        new_nodes[next_node] = midpoint.copy()
+        next_node += 1
+
+    def _mid(first: int, second: int) -> int:
+        key = (min(int(first), int(second)), max(int(first), int(second)))
+        try:
+            return midside_of_edge[key]
+        except KeyError as error:
+            raise MeshError(
+                f"quadratic promotion shell segment {key} is not a final-cell edge"
+            ) from error
+
+    new_quads: dict[int, tuple[int, ...]] = {}
+    for element_id, body in working.quads.items():
+        c0, c1, c2, c3 = (int(node) for node in body[:4])
+        new_quads[int(element_id)] = (
+            c0, c1, c2, c3,
+            _mid(c0, c1), _mid(c1, c2), _mid(c2, c3), _mid(c3, c0),
+        )
+    new_tris: dict[int, tuple[int, ...]] = {}
+    for element_id, body in working.tris.items():
+        c0, c1, c2 = (int(node) for node in body[:3])
+        new_tris[int(element_id)] = (
+            c0, c1, c2, _mid(c0, c1), _mid(c1, c2), _mid(c2, c0),
+        )
+
+    new_nodes_of_edge: dict[int, list[int]] = {}
+    for edge_id, sequence in working.nodes_of_edge.items():
+        chain = [int(node) for node in sequence]
+        if not chain:
+            new_nodes_of_edge[int(edge_id)] = []
+            continue
+        expanded = [chain[0]]
+        for first, second in zip(chain, chain[1:]):
+            expanded.extend((_mid(first, second), second))
+        new_nodes_of_edge[int(edge_id)] = expanded
+
+    # Final strict CH1 validity gate on the exact connectivity to be published.
+    for element_id, body in sorted(new_quads.items()):
+        coordinates = np.asarray([new_nodes[node] for node in body], dtype=float)
+        report = certify_mapping_validity(coordinates, "Q8")
+        if report.status is not ValidityStatus.CERTIFIED_POSITIVE:
+            raise MeshError(
+                f"quadratic promotion final Q8 element {element_id} is "
+                f"{report.status.value}"
+            )
+    for element_id, body in sorted(new_tris.items()):
+        coordinates = np.asarray([new_nodes[node] for node in body], dtype=float)
+        report = certify_mapping_validity(coordinates, "T6")
+        if report.status is not ValidityStatus.CERTIFIED_POSITIVE:
+            raise MeshError(
+                f"quadratic promotion final T6 element {element_id} is "
+                f"{report.status.value}"
+            )
+
+    diagnostics = deepcopy(working.hybrid_diagnostics)
+    diagnostics["quadratic_promotion"] = {
+        "status": "APPLIED",
+        "unique_midsides": len(midside_of_edge),
+        "exact_boundary_midsides": len(boundary_data),
+        "repair_count": repair_count,
+        "repaired_corner_nodes": sorted(repaired_nodes),
+        "max_corner_displacement": float(max_corner_displacement),
+    }
+
+    _check_cancellation(cancellation_check, "quad-first:quadratic-promotion-ready")
+    mesh.nodes = new_nodes
+    mesh.quads = new_quads
+    mesh.tris = new_tris
+    mesh.nodes_of_edge = new_nodes_of_edge
+    mesh.hybrid_diagnostics = diagnostics
+    mesh.order = "quadratic"
+
 def _quad_first_execute(
     geometry: GeometryModel,
     *,
@@ -2350,6 +2693,7 @@ def _quad_first_execute(
     certification_mode: "CertificationMode",
     options: "QuadMeshingOptions",
     capabilities: "Any",
+    order: str = "linear",
     refinements: tuple[Refinement, ...] = (),
     cancellation_check: "Callable[[str], None] | None" = None,
 ) -> "HybridMeshResult":
@@ -2546,6 +2890,10 @@ def _quad_first_execute(
     mesh.declared_plate_junction_edges = _topology_plate_junction_edges(
         mesh, geometry
     )
+    if order == "quadratic":
+        _promote_quad_first_quadratic(
+            mesh, geometry, target_size=h, cancellation_check=cancellation_check
+        )
     q4_reports = tuple(face_q4.values())
     q4_statuses = tuple(str(item["status"]) for item in q4_reports)
     if any(status == "APPLIED" for status in q4_statuses):
@@ -2852,6 +3200,10 @@ def generate_hybrid_mesh_result(
                 raise QuadPublicUnsupported(
                     "quad-first public route currently requires a planar face"
                 )
+    if _quad_normalized is not None and order == "quadratic" and source_beams:
+        raise QuadPublicUnsupported(
+            "quadratic quad-first beam/coupling promotion is not qualified in CH2"
+        )
     if _quad_face_selector is not None and quad_options is None:
         raise MeshError(
             "quad_face_ids requires an explicit quad_options selector"
@@ -2874,6 +3226,7 @@ def generate_hybrid_mesh_result(
             certification_mode=certification_mode,
             options=_quad_normalized,
             capabilities=_quad_capabilities,
+            order=order,
             refinements=requested_refinements,
             cancellation_check=cancellation_check,
         )
@@ -2948,6 +3301,7 @@ def generate_hybrid_mesh_result(
             certification_mode=certification_mode,
             options=_quad_normalized,
             capabilities=_quad_capabilities,
+            order=order,
             refinements=requested_refinements,
             cancellation_check=cancellation_check,
         )

@@ -1,4 +1,4 @@
-# Curved and Higher-Order Quad Meshing — Design Record (CH0–CH1)
+# Curved and Higher-Order Quad Meshing — Design Record (CH0–CH2)
 
 ## Scope and intent
 
@@ -136,7 +136,7 @@ exist yet; CH1 owns interpolation/validity seams and CH2 owns planar Q8/T6 enric
 | Capability | Public status at CH0 |
 | --- | --- |
 | Planar linear quad-first (order=`linear`, `planar=True`) | **QUALIFIED** through PQ6; the accepted public route. |
-| Planar quadratic / curved (planar face, higher-order order token) | **QUAD-FIRST MISSING** — guard stays; no public driver. |
+| Planar quadratic Q8/T6 (`order="quadratic"`, planar face) | **QUALIFIED at CH2** through post-topology promotion and strict CH1 validity. |
 | Curved-surface quad-first (cylinder, cone, general curved face) | **QUAD-FIRST MISSING** — `QuadPublicUnsupported("...requires a planar face")` raised; no public driver. |
 | Higher-order (Q8/T6/B3) quad-first | **QUAD-FIRST MISSING** — `ELEMENT_ORDERS` accepts `quadratic` but the quad-first public dataflow does not promote; container and shape functions are ready. |
 | Q9 / non-serendipity / cubic order | **NO CONTRACT** — deferred; not named, not rejected, simply absent. |
@@ -246,3 +246,24 @@ dense signed-Jacobian samples enclosed by the reported bounds, an
 `UNRESOLVED` case that becomes certified with deeper subdivision, and hidden
 Q8/T6 midside inversions with evaluated invalid witnesses.  The existing
 `skeleton-only` `quality_v2` contract remains unchanged.
+
+## CH2 implementation record — planar Q8/T6 promotion
+
+CH2 explicitly re-opens the CH0 planar higher-order guard while keeping curved-surface quad-first closed. For an explicit planar quad-first request with `order="quadratic"`, the already-qualified linear Q4/T3 topology is generated first and then promoted atomically. No second topology engine is introduced.
+
+Promotion allocates exactly one midside node for each unique final shell corner edge. Q4 connectivity becomes Q8 in the frozen corner-plus-cyclic-midside order and T3 becomes T6. Existing element IDs, face ownership, vertex ownership, corner IDs, and linear boundary-station node IDs are retained. `nodes_of_edge` is expanded in source-edge orientation so the original linear chain occupies every even position. Calling promotion on an already quadratic mesh is a no-op.
+
+Geometry-owned boundary intervals are not promoted with raw 3D chord midpoints. The final linear `nodes_of_edge` chain identifies source-edge ownership; adjacent station parameters are recovered from ANYgeometry and the source edge is sampled at their parameter midpoint. This preserves exact analytic ownership, including the P03 radius-0.9 circular-hole boundary. Interior shell edges continue to use chord midpoints. One canonical undirected edge key owns each midside, including Q8/Q8 and Q8/T6 interfaces and reversed shared source edges.
+
+Every proposed Q8/T6 is checked with the CH1 `certify_mapping_validity` kernel before publication. Exact curvature can make a coarse boundary-adjacent residual T6 non-positive even though its linear T3 was valid. CH2 therefore permits a bounded, deterministic repair only for an unprotected opposite corner of such a T6; protected source-boundary/station nodes never move, the move is capped at `0.5 * target_size`, all incident high-order elements must certify after the move, and the entire promotion remains staged until the final validity pass. P03 h=0.5 requires three such interior-corner repairs; the maximum measured displacement is 0.12266702535935825 m. P01, the residual trapezoid, P05, and P07 require no topology change, and P01 performs no corner repair at all.
+
+Cancellation before the final publish checkpoint leaves the supplied linear mesh unchanged. Quadratic quad-first with beam/coupling content fails closed because CH2 does not qualify B3 ownership. Explicit curved-surface quad-first remains `QuadPublicUnsupported`; cylinder work begins in CH3. Q9 and orders above quadratic remain deferred. `quality_v2` retains its frozen skeleton-only semantics.
+
+### CH2 measured qualification points
+
+- P01 h=0.5: 273 linear nodes / 240 Q4 / 0 T3 -> 785 nodes / 240 Q8 / 0 T6, exactly 512 unique midsides, 64 exact source-boundary midsides, zero corner repairs.
+- Residual trapezoid h=0.75: 40 linear nodes / 26 Q4 / 6 T3 -> 111 nodes / 26 Q8 / 6 T6, 71 unique midsides; all Q8/T6 certify positive and Q8/T6 interfaces reuse one midside ID.
+- P03 circular hole h=0.5: 795 nodes / 233 Q8 / 10 T6, 519 unique midsides, 76 exact source-boundary midsides; all added hole-boundary midsides lie on the exact source arcs (radius 0.9 about `(3.2, 2.4)` within `1e-10`).
+- P07 graded h=1.0: 275 nodes / 82 Q8 / 2 T6, 179 unique midsides, with the qualified graded linear corner topology preserved.
+
+The promotion cost is O(unique final shell edges) for midside ownership/allocation plus a bounded curved-boundary T6 repair pass. There is no coordinate welding and no per-element source-curve ownership search after the boundary interval map is built.

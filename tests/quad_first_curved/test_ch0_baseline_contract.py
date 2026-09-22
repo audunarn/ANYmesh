@@ -210,13 +210,11 @@ def test_public_symbols_resolve_at_documented_paths() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — QuadPublicUnsupported guards still fire for HO/curved requests
+# Test 6 — CH2 admits planar quadratic while curved/nonplanar remains unsupported
 # ---------------------------------------------------------------------------
 
-def test_quad_first_public_route_rejects_nonlinear_nonplanar() -> None:
-    """order="quadratic" and planar=False must each raise
-    QuadPublicUnsupported. order="linear"+planar=True must pass.
-    """
+def test_quad_first_public_route_accepts_planar_orders_rejects_nonplanar() -> None:
+    """CH2 reopens quadratic only for the explicit planar quad-first route."""
 
     from anymesher.quad.options import QuadMeshingOptions
     from anymesher.quad.public_integration import (
@@ -226,15 +224,15 @@ def test_quad_first_public_route_rejects_nonlinear_nonplanar() -> None:
 
     options = QuadMeshingOptions()
 
-    with pytest.raises(QuadPublicUnsupported):
-        coerce_public_quad_options(options, order="quadratic", planar=True)
+    assert coerce_public_quad_options(options, order="linear", planar=True) is options
+    assert coerce_public_quad_options(options, order="quadratic", planar=True) is options
 
     with pytest.raises(QuadPublicUnsupported):
         coerce_public_quad_options(options, order="linear", planar=False)
-
-    # The accepted pair: no error, returns the same instance
-    result = coerce_public_quad_options(options, order="linear", planar=True)
-    assert result is options
+    with pytest.raises(QuadPublicUnsupported):
+        coerce_public_quad_options(options, order="quadratic", planar=False)
+    with pytest.raises(QuadPublicUnsupported):
+        coerce_public_quad_options(options, order="cubic", planar=True)
 
 
 # ---------------------------------------------------------------------------
