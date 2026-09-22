@@ -126,9 +126,15 @@ explicit public quad-first route.
 - The historical Q4 MCF and Q5 TinyAD adapters remain available for direct
   qualification, but they are not in the PQ-M1 public dataflow and are reported
   as `NOT_INTEGRATED` without being required at runtime.
-- `quad_options=None` remains the legacy dispatch sentinel. Curved,
-  higher-order, holes/concavity and later staged fixture expansion remain
-  outside this milestone unless separately qualified.
+- `quad_options=None` remains the legacy dispatch sentinel. Curved surfaces and
+  higher-order elements remain outside the qualified planar scope.
+- PQ4a separately qualifies simple planar exterior loops beyond four corners,
+  single and multiple interior holes, and concavity. Canonical source-edge station
+  identity is retained on every outer and hole loop; analytic planar boundary
+  curves are sampled at the exact geometry stations, while area closure is
+  validated against the resulting authoritative station/chord domain. Graded
+  refinement, narrow/transition-heavy qualification and broader multiface staged
+  fixtures remain later work.
 
 The exact acceptance evidence and final gate results are recorded in
 `reports/quad_first/planar-production/WORK_STATUS.md`.

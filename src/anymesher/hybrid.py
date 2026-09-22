@@ -2339,10 +2339,6 @@ def _quad_first_execute(
         face = geometry.faces.get(face_id)
         if face is None:
             raise QuadPublicUnsupported(f"unknown quad-first face {face_id}")
-        if getattr(face, "holes", ()):
-            raise QuadPublicUnsupported("quad-first PQ-M1 does not support holes")
-        if len(getattr(face, "loop", ())) != 4 or len(getattr(face, "corners", ())) != 4:
-            raise QuadPublicUnsupported("quad-first PQ-M1 requires one four-corner planar loop")
     try:
         domains = tuple(
             PlanarQuadDomain.from_geometry(geometry, face_id)
@@ -2395,7 +2391,7 @@ def _quad_first_execute(
         )
         state = driven.state
         validation = validate_planar_quad_result(
-            state, face=domain.face_id, reference_area=domain.area, seed=seed
+            state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed
         )
         face_driver[domain.face_id] = driven.report.to_dict()
         face_validation[domain.face_id] = validation.to_dict()

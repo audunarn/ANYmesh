@@ -186,6 +186,83 @@ Fresh bounded PQ3 review against target-size causality, worker isolation, exact 
 
 No push, main merge, tag, release, PyPI operation, PQ4 work, or primary-worktree edit is part of PQ-M1.
 
+## PQ4a - holed and concave planar domains
+
+**Status: COMPLETE through fresh review; ready for the local milestone commit.**
+
+PQ4a extends the genuine public quad-first route from the PQ-M1 four-corner
+nominal scope to qualified simple planar exterior loops with concavity and true
+interior holes. `PlanarQuadDomain` now records outer/hole loop provenance,
+validates closed planar non-overlapping topology, and reports net source-chart
+area. `BoundaryStationRegistry` includes every outer and hole source edge once,
+and the seed passes one outer loop plus all hole station loops to the constrained
+Python triangulator. Boundary station/protection provenance therefore covers all
+loops without coordinate welding.
+
+For analytic circular hole edges, the mesh boundary uses the exact geometry
+station coordinates. The strict final validator continues to enforce resident
+incidence/nonmanifold/boundary rules; its area reference is the authoritative
+station/chord seed domain, avoiding a false comparison against the coarse source
+corner polygon while keeping exact source-curve ownership.
+
+### PQ4a P03 refinement evidence
+
+| target `h` | nodes | Q4 | residual T3 | `N_eq` | Q4 count fraction | Q4 area fraction | discrete area | hole edge-chain lengths | max hole chord |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 0.5 | 276 | 233 | 10 | 238 | 0.9588477 | 0.9890414 | 57.57 | [4,4,4,4] | 0.4658743 |
+| 0.25 | 1009 | 927 | 12 | 933 | 0.9872204 | 0.99737636 | 57.4842788816 | [7,7,7,7] | 0.23494715 |
+
+The equivalent-count refinement ratio is `933/238 = 3.920168...`. Every P03
+hole boundary station is on the exact radius-0.9 source circle about
+`(3.2, 2.4)` within `1e-10`; maximum chord remains below `1.5 h`; non-hole
+nodes remain outside the exact circle up to the conservative chord-sagitta
+allowance. A fresh repeated `h=0.25` run reproduces node/Q4/T3 counts, edge-chain
+lengths and validation fractions. Source model/revision/topology is unchanged.
+
+P05 (concave exterior loop) and P03b (two disjoint holes) also execute on the
+public `quad_first` route with exact discrete-area closure, at least 75% Q4 by
+count/area where gated, complete source-edge chains, no hole fill, and
+deterministic repeated topology. The obsolete Q7 hole/concave rejection cases
+are intentionally converted to positive qualified-route assertions; unrelated
+unsupported curved-surface and higher-order contracts remain unchanged.
+
+### PQ4a gate evidence
+
+```text
+python -m pytest tests/quad_first_planar/test_pq4_general_domains.py -q
+  -> 10 passed in 19.29 s
+python -m pytest tests/quad_first_planar/test_pq3_public_driver.py \
+             tests/quad_first/test_q2_recovery.py \
+             tests/quad_first/test_q6_public_integration.py \
+             tests/quad_first/test_q7_qualification.py \
+             tests/test_seeding.py tests/test_compiled_triangulation_contract.py -q
+  -> 91 passed, 4 skipped in 12.43 s
+     (compiled triangulation extension not rebuilt)
+python -m pytest tests/quad_first_planar -q
+  -> 37 passed in 32.29 s
+python -m pytest tests/quad_first -q
+  -> 275 passed in 3.41 s
+git diff --check
+  -> clean
+```
+
+Primary `C:\Github\ANYmesh` remains on `main` at `6834162` with only its known
+pre-existing unrelated local changes. PQ4a has not pushed, merged, tagged,
+released or published anything.
+
+The bounded fresh PQ4a review found one performance issue but no validity or
+ownership defect: `_interior_lattice` performed a redundant O(N^2) duplicate
+scan even though Cartesian lattice coordinates are unique by construction. The
+scan was removed without changing topology or acceptance results. The affected
+PQ4a product gate then improved from 48.17 s to 19.29 s and the full planar
+suite from 92.23 s to 32.29 s on the same workstation. A proposed duplicate
+self-intersection check was intentionally not added because authoritative
+`ANYgeometry` already rejects self-intersecting face loops at geometry commit;
+PQ4a does not duplicate that kernel responsibility.
+
 ## Next
 
-Stop after the local PQ-M1 milestone commit for administrator handoff. PQ4 is not started by this milestone.
+Run the bounded fresh PQ4a diff review, fix and rerun any affected gates, then
+commit locally as `PQ4a: support holed and concave planar quad domains`. After
+PQ4a acceptance, hand off automatically to the already-approved PQ4b
+grading/narrow/parity/S3 tranche.

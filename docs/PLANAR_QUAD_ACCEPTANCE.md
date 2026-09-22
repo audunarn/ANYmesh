@@ -100,6 +100,25 @@ is NOT an acceptance target and must not be cited as PQ-M1 evidence.
 | PQ3 | Size-driven front driver, independent validation, public dispatch; the full public P01 PQ-M1 gates and causal recovery are required here |
 | PQ4-PQ10 | Staged fixtures P03/P05/P06/P07/P09 as enabled; curved and higher-order remain later |
 
+## PQ4a activated planar-domain gates
+
+PQ4a activates the previously staged P03 and P05 scope without changing the
+frozen PQ-M1 thresholds:
+
+- P03 is a true off-centre analytic circular hole in the 10 m x 6 m planar
+  plate; P03b extends the same contract to two disjoint holes.
+- P05 is a simple concave planar exterior loop. Explicit quad-first must accept
+  these qualified planar domains without legacy fallback and preserve source
+  geometry.
+- Hole and outer source edges retain complete canonical station chains. Every
+  analytic circular-hole station lies on the source circle within `1e-10` and
+  the maximum chord is bounded by `1.5 h`.
+- Halving P03 from `h=0.5` to `h=0.25` must retain `3.2 <= N_eq(h/2)/N_eq(h)
+  <= 5.0`, at least 75% Q4 by active count and area, exact discrete-domain area
+  closure, deterministic repeat topology, and no non-boundary node intrusion
+  beyond the conservative chord sagitta.
+- Curved *surfaces* and higher-order elements remain unqualified; this gate is
+  for planar faces whose boundary edges may be analytic curves.
 ## Legacy compatibility and exclusions
 
 - Explicit quad-first must not silently succeed as legacy-only: any explicit

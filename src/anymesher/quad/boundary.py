@@ -47,7 +47,7 @@ class BoundaryStationRegistry:
             raise MeshError("boundary station registry needs at least one domain")
         for domain in domains:
             domain.assert_current(geometry)
-        edge_ids = sorted({edge_id for d in domains for edge_id, _ in d.edge_uses})
+        edge_ids = sorted({edge_id for d in domains for loop in (d.edge_uses, *d.hole_edge_uses) for edge_id, _ in loop})
         field = SizeField(geometry, float(target_size))
         seeding = solve_seeding(geometry, size_field=field, edge_ids=edge_ids)
         chains: dict[int, tuple[BoundaryStation, ...]] = {}
@@ -81,6 +81,38 @@ class BoundaryStationRegistry:
     @classmethod
     def for_domain(cls, geometry: GeometryModel, domain: PlanarQuadDomain, target_size: float) -> "BoundaryStationRegistry":
         return cls.for_domains(geometry, (domain,), target_size)
+
+    def loop_stations(self, domain: PlanarQuadDomain, loop_uses: tuple[tuple[int, bool], ...]) -> tuple[BoundaryStation, ...]:
+        self._check_domain(domain)
+        out: list[BoundaryStation] = []
+        for edge_id, forward in loop_uses:
+            if int(edge_id) not in self.chains:
+                raise MeshError("boundary registry is missing a loop edge")
+            chain = self.chain(int(edge_id), forward)
+            out.extend(chain[:-1])
+        if len(out) < 3:
+            raise MeshError("loop boundary has fewer than three stations")
+        return tuple(out)
+
+    def outer_stations(self, domain: PlanarQuadDomain) -> tuple[BoundaryStation, ...]:
+        return self.loop_stations(domain, domain.edge_uses)
+
+    def hole_stations(self, domain: PlanarQuadDomain, index: int = 0) -> tuple[BoundaryStation, ...]:
+        index = int(index)
+        if index < 0 or index >= len(domain.hole_edge_uses):
+            raise MeshError(f"domain has no hole {index}")
+        return self.loop_stations(domain, domain.hole_edge_uses[index])
+
+    def all_loop_stations(self, domain: PlanarQuadDomain) -> tuple[BoundaryStation, ...]:
+        out: list[BoundaryStation] = []
+        out.extend(self.outer_stations(domain))
+        for index in range(len(domain.hole_edge_uses)):
+            out.extend(self.hole_stations(domain, index))
+        return tuple(out)
+
+    def _check_domain(self, domain: PlanarQuadDomain) -> None:
+        if domain.model_id != self.model_id or domain.revision != self.revision:
+            raise MeshError("domain and boundary registry are from different geometry revisions")
 
     def assert_current(self, geometry: GeometryModel) -> None:
         if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:

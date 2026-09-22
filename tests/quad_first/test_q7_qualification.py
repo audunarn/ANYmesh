@@ -104,28 +104,31 @@ def _concave_five_corner_face() -> tuple[GeometryModel, int]:
     return geometry, face
 
 
-def test_c_public_quad_rejects_off_centre_hole_without_fallback() -> None:
+def test_c_public_quad_accepts_off_centre_hole_without_fallback() -> None:
     geometry, face = _off_centre_hole_face()
-    with pytest.raises(QuadPublicUnsupported):
-        generate_hybrid_mesh_result(
-            geometry,
-            target_size=0.5,
-            face_ids=(face,),
-            quad_options=QuadMeshingOptions(),
-        )
+    result = generate_hybrid_mesh_result(
+        geometry, target_size=0.5, face_ids=(face,),
+        quad_options=QuadMeshingOptions(),
+    )
+    assert result.strategy_by_face[face] == "quad_first"
+    assert result.mesh.hybrid_diagnostics["route"] == "quad-first"
+    validation = result.mesh.hybrid_diagnostics["validation"]["faces"][face]
+    assert validation["area_ratio"] == pytest.approx(1.0)
+    assert result.mesh.elements_of_face[face]
 
 
-def test_c_public_quad_rejects_concave_non_four_corner_without_fallback() -> None:
+def test_c_public_quad_accepts_concave_non_four_corner_without_fallback() -> None:
     geometry, face = _concave_five_corner_face()
     assert len(geometry.faces[face].loop) != 4
-    with pytest.raises(QuadPublicUnsupported):
-        generate_hybrid_mesh_result(
-            geometry,
-            target_size=0.5,
-            face_ids=(face,),
-            quad_options=QuadMeshingOptions(),
-        )
-
+    result = generate_hybrid_mesh_result(
+        geometry, target_size=0.5, face_ids=(face,),
+        quad_options=QuadMeshingOptions(),
+    )
+    assert result.strategy_by_face[face] == "quad_first"
+    assert result.mesh.hybrid_diagnostics["route"] == "quad-first"
+    validation = result.mesh.hybrid_diagnostics["validation"]["faces"][face]
+    assert validation["area_ratio"] == pytest.approx(1.0)
+    assert result.mesh.elements_of_face[face]
 
 def _regular_strip_state(count: int = 8) -> tuple[QuadMeshState, list[tuple[int, int]]]:
     nodes: dict[int, tuple[float, float]] = {}
