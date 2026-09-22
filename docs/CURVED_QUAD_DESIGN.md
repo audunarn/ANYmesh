@@ -1,4 +1,4 @@
-# Curved and Higher-Order Quad Meshing — Design Record (CH0)
+# Curved and Higher-Order Quad Meshing — Design Record (CH0–CH1)
 
 ## Scope and intent
 
@@ -199,3 +199,50 @@ ordering, the `QuadPublicUnsupported` planar guard, `None` sentinel, container
 Q8/T6/B3 widths, and that no curved/HO public route accidentally exists yet. They
 are documentation-as-code: they go green at CH0 and must stay green after CH1/CH2
 unless the corresponding freeze is explicitly re-opened.
+
+## CH1 implementation record — interpolation and strict element validity
+
+CH1 adds the internal module `anymesher.quad.high_order`.  It does **not** open
+any new public meshing route.  `generate_hybrid_mesh_result` keeps the CH0
+planar-linear guard and `quality_v2` keeps its corner/skeleton semantics.
+
+The shared kernel covers the four frozen shell families:
+
+- Q4: four cyclic corners on `[-1,1]^2`;
+- Q8: the same four corners followed by midsides 01, 12, 23, 30;
+- T3: corners 0, 1, 2 on the reference triangle;
+- T6: the same corners followed by midsides 01, 12, 20.
+
+`shape_values` and `shape_gradients` use one ordering, and
+`evaluate_mapping` returns the mapped points, both parametric derivatives, the
+surface-Jacobian vector, its magnitude, signed Jacobian and a normalized
+mapping-quality measure. `physical_area` uses bounded deterministic quadrature.
+`geometry_error` and `normal_error` compare against caller-supplied reference
+points/normals only; CH1 deliberately does not bind to an ANYgeometry owner.
+
+### Strict signed-Jacobian certificate
+
+`certify_mapping_validity` is deliberately stricter than point sampling.  The
+signed Jacobian scalar is enclosed with Bernstein coefficients: tensor-product
+bicubic bounds on the Q4/Q8 square and total-degree-two bounds on the T3/T6
+triangle.  Positive Gauss or witness samples alone can never produce
+`CERTIFIED_POSITIVE`.  Ambiguous patches are subdivided deterministically;
+exhausting the bounded depth/subdivision budget gives `UNRESOLVED`.
+
+`INVALID` requires an actually evaluated non-positive witness under the
+scale-aware tolerance semantics.  The report's lower/upper values retain the
+conservative whole-reference-element Bernstein envelope, while subdivision
+leaf bounds provide the positivity proof.  Float64 reconstruction residuals
+and a scale-aware roundoff guard are included so numerically uncertain
+near-zero cases fail closed.
+
+Reports are immutable and expose deterministic `to_dict()` output containing
+JSON primitives only.  Certification accepts a deterministic cancellation
+callback checked before work and at each active patch; a truthy callback raises
+`HighOrderCertificationCancelled` without mutating element coordinates.
+
+CH1 tests include genuinely non-affine curved Q8 and T6 mappings, independent
+dense signed-Jacobian samples enclosed by the reported bounds, an
+`UNRESOLVED` case that becomes certified with deeper subdivision, and hidden
+Q8/T6 midside inversions with evaluated invalid witnesses.  The existing
+`skeleton-only` `quality_v2` contract remains unchanged.

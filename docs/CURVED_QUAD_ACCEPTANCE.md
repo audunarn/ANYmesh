@@ -1,4 +1,4 @@
-# Curved and Higher-Order Quad Meshing — Acceptance Record (CH0)
+# Curved and Higher-Order Quad Meshing — Acceptance Record (CH0–CH1)
 
 This file records the invariants that the CH0 baseline-contract test suite
 `tests/quad_first_curved/test_ch0_baseline_contract.py` asserts. The suite
@@ -185,3 +185,31 @@ No gate requires a compiled native extension. The Q4/Q5 worker executables used 
   or `HighOrderGeometryReport` — these are **names frozen in the design doc
   only**; they do not exist as classes yet and are not imported.
 - No test evaluates explicit quad-first on a curved face (cylinder, cone, etc.); cylinder work begins in CH3 after CH1 validity and CH2 planar Q8/T6 qualification.
+
+---
+
+## CH1 acceptance — shared interpolation and strict higher-order validity
+
+CH1 adds only the internal `anymesher.quad.high_order` kernel.  Public
+quad-first routing remains planar/linear and `quality_v2` remains
+skeleton-only.  Acceptance requires all of the following:
+
+- Q4/Q8/T3/T6 shape values are a partition of unity, analytic gradients sum to
+  zero and match independent finite differences, with the frozen corner/midside
+  ordering.
+- Affine mappings reproduce exactly; rigid transforms and uniform positive
+  scale preserve validity and normalized mapping quality, with physical area
+  scaling by the square of scale.
+- Strict validity returns only `CERTIFIED_POSITIVE`, `INVALID`, or `UNRESOLVED`.
+  Sampling alone never certifies.  Bernstein/subdivision bounds provide the
+  proof; invalidity requires a directly evaluated non-positive witness.
+- Genuinely curved positive Q8 and T6 examples certify, and dense independent
+  signed-Jacobian samples lie inside the reported conservative whole-element
+  lower/upper envelope.
+- A shallow-budget ambiguous Q8 is `UNRESOLVED` and becomes
+  `CERTIFIED_POSITIVE` with the qualified bounded budget; a known inverted Q8
+  stays `INVALID` when the budget is increased.
+- Hidden Q8 and T6 midside inversions are detected even though the frozen
+  corner-only `quality_v2` metrics do not change.
+- Reports are deterministic and JSON-safe through `to_dict()`; cancellation is
+  checked deterministically and leaves inputs unchanged.

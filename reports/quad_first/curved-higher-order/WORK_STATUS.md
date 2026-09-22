@@ -83,3 +83,62 @@ accepted CH0 evidence was corrected to use isolated-worktree facts only.
   validity kernel.
 - CH2: planar explicit quad-first Q8/T6 promotion with unique shared midsides.
 - CH3, separately after CH-M1: cylindrical explicit quad-first work.
+
+## CH1 — shared interpolation and strict high-order validity
+
+**Status: QUALIFIED; ready for the CH1 milestone commit.**
+
+CH1 adds `src/anymesher/quad/high_order.py` only on the production side.  It
+keeps the CH0 public-route guard and the existing `quality_v2` skeleton metrics
+unchanged.  Qualified families are Q4/Q8 on the reference square and T3/T6 on
+the reference triangle.
+
+The strict certificate uses conservative Bernstein/subdivision bounds for the
+signed Jacobian.  Positive samples never certify; `INVALID` requires an actual
+evaluated non-positive witness; budget exhaustion is `UNRESOLVED`.  Reports
+carry a conservative whole-element envelope, scale-aware tolerance, witness,
+subdivision/depth counters, deterministic JSON-safe serialization and bounded
+cancellation checkpoints.
+
+### CH1 gate evidence
+
+```text
+python -m pytest tests/quad_first_curved/test_ch1_high_order_validity.py -q
+  -> 29 passed in 0.46 s
+
+python -m pytest tests/quad_first_curved/test_ch0_baseline_contract.py \
+  tests/test_coupling.py tests/test_quality_and_serialize.py -q
+  -> 33 passed in 0.27 s
+
+python -m pytest tests/test_cylindrical_quadratic_staging.py -q
+  -> 11 passed in 0.19 s
+python -m pytest tests/test_quadratic_boundary_prepare.py -q
+  -> 3 passed in 0.18 s
+python -m pytest tests/test_cylindrical_public_quadratic.py -q
+  -> 4 passed in 277.22 s
+
+python -m pytest tests/quad_first_curved -q
+  -> 38 passed in 0.46 s
+python -m pytest tests/quad_first_planar -q
+  -> 63 passed, 3 skipped in 38.93 s
+     skips: compiled triangulation parity because _native is not rebuilt here
+python -m pytest tests/quad_first -q
+  -> 275 passed in 3.72 s
+
+git diff --check
+  -> clean (line-ending warning only before documentation normalization)
+```
+
+CH1 adversarial evidence includes hidden Q8 and T6 midside inversions that the
+frozen corner-only quality metrics do not see, a near-zero fail-closed case,
+genuinely curved positive Q8/T6 mappings, dense independent bound checks, and a
+case that progresses from `UNRESOLVED` to `CERTIFIED_POSITIVE` with a larger
+bounded subdivision budget.  Input coordinates remain unchanged on normal,
+budget-exhausted and cancelled certification paths.
+
+### Next after CH1
+
+- CH2: promote the already-qualified planar explicit topology to Q8/T6 using
+  one shared midside per canonical edge; hard P01 h=0.5 target is 240 Q8,
+  0 T6 and 785 nodes (273 retained corner nodes + 512 unique midsides).
+- CH3 remains separate and is not opened until CH2 is complete.
