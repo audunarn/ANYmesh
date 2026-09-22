@@ -2440,7 +2440,9 @@ def _quad_first_execute(
             state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed
         )
         face_driver[domain.face_id] = driven.report.to_dict()
-        face_q5[domain.face_id] = q5_report.to_dict()
+        q5_face_report = q5_report.to_dict()
+        q5_face_report["resident_moved_node_ids"] = list(q5_face_report["moved_node_ids"])
+        face_q5[domain.face_id] = q5_face_report
         face_validation[domain.face_id] = validation.to_dict()
 
         local_to_global: dict[int, int] = {}
@@ -2472,6 +2474,11 @@ def _quad_first_execute(
                 next_node_id += 1
                 global_nodes[global_id] = lifted
                 local_to_global[local_node] = global_id
+
+        face_q5[domain.face_id]["moved_node_ids"] = [
+            local_to_global[int(node)]
+            for node in face_q5[domain.face_id]["resident_moved_node_ids"]
+        ]
 
         face_elements: list[int] = []
         for local_cell in sorted(int(cid) for cid in state.cells):

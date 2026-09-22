@@ -156,18 +156,21 @@ def optimize_quad_state(
         return _report("DISABLED", eligible=0, budget=0)
 
     candidates: list[tuple[float, int]] = []
+    eligible_count = 0
     for node in sorted(state.nodes):
         if not _eligible(state, node):
             continue
+        eligible_count += 1
         local_h = _local_h(state, node, h, size_field, domain)
         spec = _patch_spec(state, node, local_h)
         e0 = _patch_energy(spec)
         if math.isfinite(e0) and e0 > _ENERGY_EPS:
             candidates.append((e0, node))
     candidates.sort(key=lambda item: (-item[0], item[1]))
-    eligible_count = len(candidates)
-    if not candidates:
+    if eligible_count == 0:
         return _report("NO_ELIGIBLE", eligible=0, budget=budget)
+    if not candidates:
+        return _report("NOIMPROVE", eligible=eligible_count, budget=budget)
     if os.environ.get("ANYMESH_Q5_DISABLE_WORKER") == "1":
         return _report("UNAVAILABLE_SKIPPED", eligible=eligible_count, budget=budget)
     try:

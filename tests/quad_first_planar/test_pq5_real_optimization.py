@@ -25,13 +25,12 @@ from anymesher.quad.optimize import (
     default_q5_worker_exe,
     default_q5_worker_root,
 )
-from anymesher.quad.quad_tinyad_worker import WorkerNotFoundQ5
 
 # ---------------------------------------------------------------------------
 # Geometry fixtures
 # ---------------------------------------------------------------------------
 
-CAUSAL_DISTORTED_POINTS = (
+CAUSAL_GRADED_POINTS = (
     (0.0, 0.0),
     (8.0, 0.0),
     (8.0, 4.0),
@@ -123,23 +122,22 @@ def _public_result(points: tuple, *, h: float, max_local: int, refinements=()):
 
 
 # ===========================================================================
-# A. CAUSAL DISTORTED REAL MESH
+# A. CAUSAL GRADED REAL MESH
 # ===========================================================================
 
-def test_causal_distorted_mesh_applies_q5_moves() -> None:
-    disabled = _public_result(CAUSAL_DISTORTED_POINTS, h=1.0, max_local=0, refinements=CAUSAL_REFINEMENTS)
-    enabled = _public_result(CAUSAL_DISTORTED_POINTS, h=1.0, max_local=4, refinements=CAUSAL_REFINEMENTS)
+def test_causal_graded_mesh_applies_q5_moves() -> None:
+    disabled = _public_result(CAUSAL_GRADED_POINTS, h=1.0, max_local=0, refinements=CAUSAL_REFINEMENTS)
+    enabled = _public_result(CAUSAL_GRADED_POINTS, h=1.0, max_local=4, refinements=CAUSAL_REFINEMENTS)
 
     md, me = _mesh(disabled), _mesh(enabled)
 
     # Strict validity + area preservation + source geometry preserved.
-    area_src = _poly_area(CAUSAL_DISTORTED_POINTS)
     face_validation = next(iter(me.hybrid_diagnostics["validation"]["faces"].values()))
     assert face_validation["area_ratio"] == pytest.approx(1.0, rel=1e-6)
 
     pos_d = _node_positions(md)
     pos_e = _node_positions(me)
-    assert _boundary_displacement(pos_d, pos_e, CAUSAL_DISTORTED_POINTS) == 0.0
+    assert _boundary_displacement(pos_d, pos_e, CAUSAL_GRADED_POINTS) == 0.0
     assert _boundary_node_ids(md) == _boundary_node_ids(me)
     for nid in _boundary_node_ids(md):
         assert pos_d[nid] == pos_e[nid]
@@ -153,12 +151,15 @@ def test_causal_distorted_mesh_applies_q5_moves() -> None:
     assert q5["budget_cap"] == 8
     assert q5["budget"] == 4
     assert isinstance(q5["moved_node_ids"], list) and q5["moved_node_ids"]
+    assert all(int(node) in me.nodes for node in q5["moved_node_ids"])
+    face_q5 = next(iter(q5["faces"].values()))
+    assert face_q5["resident_moved_node_ids"]
 
     q5_d = _q5_diagnostics(disabled)
     assert q5_d["status"] == "DISABLED"
 
     # Causality: at least one NON-boundary node moved.
-    src = _boundary_set(CAUSAL_DISTORTED_POINTS)
+    src = _boundary_set(CAUSAL_GRADED_POINTS)
     interior_moved = [
         nid for nid in pos_d
         if pos_d[nid] != pos_e[nid] and (round(pos_d[nid][0], 9), round(pos_d[nid][1], 9)) not in src
@@ -212,7 +213,7 @@ def test_protected_nodes_never_free_and_never_move() -> None:
 
     geometry = GeometryModel()
     vertices = geometry.add_points(
-        tuple((float(x), float(y), 0.0) for x, y in CAUSAL_DISTORTED_POINTS)
+        tuple((float(x), float(y), 0.0) for x, y in CAUSAL_GRADED_POINTS)
     )
     face = geometry.add_face(geometry.add_polyline(vertices, close=True), surface=None)
     domain = PlanarQuadDomain.from_geometry(geometry, face)
@@ -236,8 +237,8 @@ def test_protected_nodes_never_free_and_never_move() -> None:
         assert not state.is_protected_node(nid), f"moved node {nid} is protected"
 
 
-def test_worker_notfound_typed_error() -> None:
-    """Missing worker binary stays a typed WorkerNotFoundQ5 for direct calls."""
+def test_worker_notfound_returns_unavailable_without_mutation() -> None:
+    """Missing worker is mapped truthfully to an unavailable no-mutation report."""
     from anymesher.quad.driver import run_planar_quad_driver
     from anymesher.quad.seed import build_planar_quad_seed
 
@@ -267,7 +268,7 @@ def test_worker_notfound_typed_error() -> None:
 # ===========================================================================
 
 def test_disabled_contract_zero_worker_calls() -> None:
-    result = _public_result(CAUSAL_DISTORTED_POINTS, h=0.5, max_local=0)
+    result = _public_result(CAUSAL_GRADED_POINTS, h=0.5, max_local=0)
     q5 = _q5_diagnostics(result)
     assert q5["status"] == "DISABLED", "must be DISABLED, never NOT_INTEGRATED"
     assert q5["worker_calls"] == 0
@@ -284,8 +285,8 @@ def test_public_route_worker_unavailable_skipped_no_mutation(monkeypatch) -> Non
     """Public route must not silently claim optimization when the worker
     binary is missing: UNAVAILABLE_SKIPPED, no coordinate change."""
     monkeypatch.setenv("ANYMESH_Q5_DISABLE_WORKER", "1")
-    disabled = _public_result(CAUSAL_DISTORTED_POINTS, h=1.0, max_local=0, refinements=CAUSAL_REFINEMENTS)
-    result = _public_result(CAUSAL_DISTORTED_POINTS, h=1.0, max_local=4, refinements=CAUSAL_REFINEMENTS)
+    disabled = _public_result(CAUSAL_GRADED_POINTS, h=1.0, max_local=0, refinements=CAUSAL_REFINEMENTS)
+    result = _public_result(CAUSAL_GRADED_POINTS, h=1.0, max_local=4, refinements=CAUSAL_REFINEMENTS)
     q5 = _q5_diagnostics(result)
     assert q5["status"] == "UNAVAILABLE_SKIPPED"
     assert q5["worker_calls"] == 0
@@ -309,6 +310,7 @@ def test_report_to_dict_deterministic_json_safe() -> None:
     r1 = optimize_quad_state(
         driver_result.state, target_size=0.5, max_local_optimizations=2,
     )
+    assert default_q5_worker_root() == default_q5_worker_exe().parent
     d1 = r1.to_dict()
     d2 = r1.to_dict()
     assert d1 == d2
