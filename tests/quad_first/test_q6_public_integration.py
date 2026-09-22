@@ -169,19 +169,21 @@ def test_quad_first_exercises_worker_chain_when_explicit() -> None:
     expected = [
         "quad-first:seed",
         "quad-first:face-seed",
+        "quad-first:q4-mcf-worker",
+        "quad-first:q4-mcf-commit",
         "quad-first:driver-start",
-        "quad-first:driver-iteration",
         "quad-first:before-publication",
     ]
     assert [quad_phases.index(name) for name in expected] == sorted(
         quad_phases.index(name) for name in expected
     )
-    assert "quad-first:q4" not in quad_phases
     assert "quad-first:q5" not in quad_phases
 
     diagnostics = result.mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
-    assert diagnostics["q4"]["status"] == "NOT_INTEGRATED"
+    assert diagnostics["q4"]["status"] == "APPLIED"
+    assert diagnostics["q4"]["worker_calls"] == 1
+    assert diagnostics["q4"]["applied_pairs"] == 1
     assert diagnostics["q5"]["status"] == "NO_ELIGIBLE"
     driver = diagnostics["front"]["faces"][face]
     assert driver["final_q4"] > 0
@@ -1133,7 +1135,7 @@ def test_quad_first_beam_coupling_slice() -> None:
     mesh = result.mesh
     diagnostics = mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
-    assert diagnostics["q4"]["status"] == "NOT_INTEGRATED"
+    assert diagnostics["q4"]["status"] == "APPLIED"
     assert diagnostics["q5"]["status"] == "NO_ELIGIBLE"
     face_elements = list(mesh.elements_of_face[face])
     assert face_elements

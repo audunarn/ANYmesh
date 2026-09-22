@@ -363,19 +363,20 @@ def test_d2_q6_production_worker_chain_runs_and_is_canonical(
     expected = [
         "quad-first:seed",
         "quad-first:face-seed",
+        "quad-first:q4-mcf-worker",
+        "quad-first:q4-mcf-commit",
         "quad-first:driver-start",
-        "quad-first:driver-iteration",
         "quad-first:before-publication",
     ]
     assert [quad_phases.index(name) for name in expected] == sorted(
         quad_phases.index(name) for name in expected
     )
-    assert "quad-first:q4" not in quad_phases
     assert "quad-first:q5" not in quad_phases
 
     diag = mesh.hybrid_diagnostics
     assert diag["route"] == "quad-first"
-    assert diag["q4"]["status"] == "NOT_INTEGRATED"
+    assert diag["q4"]["status"] == "APPLIED"
+    assert diag["q4"]["worker_calls"] == 1
     assert diag["q5"]["status"] == "NO_ELIGIBLE"
     assert mesh.quads
     assert all(len(body) == 4 and len(set(body)) == 4 for body in mesh.quads.values())

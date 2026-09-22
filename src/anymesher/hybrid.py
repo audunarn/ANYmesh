@@ -51,6 +51,7 @@ from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.domain import PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
 from .quad.options import QuadMeshingOptions
+from .quad.mcf_seed import optimize_q4_seed_mcf
 from .quad.optimize import optimize_quad_state
 from .quad.seed import build_planar_quad_seed
 from .quad.public_integration import (
@@ -2404,6 +2405,7 @@ def _quad_first_execute(
     elements_of_face: dict[int, list[int]] = {}
     face_driver: dict[int, dict[str, Any]] = {}
     face_validation: dict[int, dict[str, Any]] = {}
+    face_q4: dict[int, dict[str, Any]] = {}
     face_q5: dict[int, dict[str, Any]] = {}
     q5_budget_total = min(int(options.max_local_optimizations), 8)
     q5_budget_remaining = q5_budget_total
@@ -2420,6 +2422,14 @@ def _quad_first_execute(
             registry=registry,
             size_field=quad_size_field,
         )
+        q4_report = optimize_q4_seed_mcf(
+            seed.state,
+            target_size=h,
+            cancellation_check=cancellation_check,
+            size_field=quad_size_field,
+            domain=domain,
+        )
+        face_q4[domain.face_id] = q4_report.to_dict()
         driven = run_planar_quad_driver(
             seed,
             options,
@@ -2536,6 +2546,64 @@ def _quad_first_execute(
     mesh.declared_plate_junction_edges = _topology_plate_junction_edges(
         mesh, geometry
     )
+    q4_reports = tuple(face_q4.values())
+    q4_statuses = tuple(str(item["status"]) for item in q4_reports)
+    if any(status == "APPLIED" for status in q4_statuses):
+        q4_status = "APPLIED"
+    elif any(status == "UNAVAILABLE_SKIPPED" for status in q4_statuses):
+        q4_status = "UNAVAILABLE_SKIPPED"
+    elif any(status == "NO_MATCH" for status in q4_statuses):
+        q4_status = "NO_MATCH"
+    else:
+        q4_status = "NO_ELIGIBLE"
+    q4_diagnostics = {
+        "status": q4_status,
+        "candidate_components": sum(int(item["candidate_components"]) for item in q4_reports),
+        "eligible_components": sum(int(item["eligible_components"]) for item in q4_reports),
+        "solved_components": sum(int(item["solved_components"]) for item in q4_reports),
+        "worker_calls": sum(int(item["worker_calls"]) for item in q4_reports),
+        "applied_pairs": sum(int(item["applied_pairs"]) for item in q4_reports),
+        "initial_t3": sum(int(item["initial_t3"]) for item in q4_reports),
+        "final_t3": sum(int(item["final_t3"]) for item in q4_reports),
+        "initial_q4": sum(int(item["initial_q4"]) for item in q4_reports),
+        "final_q4": sum(int(item["final_q4"]) for item in q4_reports),
+        "skipped_large": sum(int(item["skipped_large"]) for item in q4_reports),
+        "skipped_unbalanced": sum(int(item["skipped_unbalanced"]) for item in q4_reports),
+        "skipped_nonbipartite": sum(int(item["skipped_nonbipartite"]) for item in q4_reports),
+        "skipped_infeasible": sum(int(item["skipped_infeasible"]) for item in q4_reports),
+        "skipped_component_cap": sum(int(item["skipped_component_cap"]) for item in q4_reports),
+        "component_sizes": [
+            int(value)
+            for item in q4_reports
+            for value in item["component_sizes"]
+        ],
+        "arc_counts": [
+            int(value)
+            for item in q4_reports
+            for value in item["arc_counts"]
+        ],
+        "added_q4_ids_by_face": {
+            int(face_id): list(item["added_q4_ids"])
+            for face_id, item in face_q4.items()
+        },
+        "generation_by_face": {
+            int(face_id): {
+                "before": int(item["generation_before"]),
+                "after": int(item["generation_after"]),
+            }
+            for face_id, item in face_q4.items()
+        },
+        "selected_pairs_by_face": {
+            int(face_id): list(item["selected_pairs"])
+            for face_id, item in face_q4.items()
+        },
+        "total_cost": sum(int(item["total_cost"]) for item in q4_reports),
+        "component_bounds": (
+            list(q4_reports[0]["component_bounds"]) if q4_reports else []
+        ),
+        "faces": face_q4,
+    }
+
     q5_reports = tuple(face_q5.values())
     q5_statuses = tuple(str(item["status"]) for item in q5_reports)
     if any(status == "APPLIED" for status in q5_statuses):
@@ -2574,7 +2642,7 @@ def _quad_first_execute(
             "line_search": options.line_search,
             "front": {"faces": face_driver},
             "validation": {"faces": face_validation},
-            "q4": {"status": "NOT_INTEGRATED"},
+            "q4": q4_diagnostics,
             "q5": q5_diagnostics,
         }
     )
@@ -2583,7 +2651,7 @@ def _quad_first_execute(
         face_id: "quad_first" for face_id in quad_face_ids
     }
     triangulation_backend_by_face = {
-        face_id: {"backend": "quad_first", "q4": "NOT_INTEGRATED"}
+        face_id: {"backend": "quad_first", "q4": face_q4[face_id]["status"]}
         for face_id in quad_face_ids
     }
     if capabilities is None:

@@ -328,7 +328,7 @@ switch in production. No material blocker remains in the activated PQ4b scope.
 
 ## PQ5 - actual-mesh TinyAD optimization
 
-**Status: COMPLETE through full regression gates; pending the local milestone commit.**
+**Status: COMPLETE and committed at `cc81fb7`, with diagnostic closeout correction `367da9c`.**
 
 PQ5 activates the already-qualified Q5 TinyAD worker on bounded patches of the
 real resident Q4 mesh. The stage runs after the front driver and before the
@@ -393,11 +393,71 @@ git diff --check
 Primary `C:\Github\ANYmesh` remains on `main` at `6834162`; its unrelated
 pre-existing `pyproject.toml` / documentation changes were not touched.
 
+## PQ6 - geometry-derived real-seed MCF count planning
+
+**Status: COMPLETE through closeout gates; this changeset is the PQ6 milestone commit.**
+
+PQ6 runs the existing qualified Q4 integer MCF worker on bounded connected
+components of the actual constrained T3 seed before the front driver. The public
+route no longer uses a fixed/demo count instance. Q5 remains downstream and is
+otherwise unchanged.
+
+### PQ6 causal and contract evidence
+
+- Skew fixture `((0,0),(4,0),(3.2,2.5),(0.4,2.5))`, `h=0.5`: seed has 78 T3.
+  Candidate components are `(71 cells, 91 arcs)` and `(6 cells, 5 arcs)`. The
+  first is reported `skipped_large`; the balanced 6-cell component is solved in
+  one worker call and selects cell pairs `(13,14)`, `(16,18)`, `(17,20)`.
+- The three pairs are applied in one transaction as Q4 IDs `[78,79,80]`; resident
+  generation advances `0 -> 1`, yielding 3 Q4 / 72 T3 before the front driver.
+- Enabled public execution finishes with 38 Q4 / 2 T3, 53 nodes, area ratio
+  `1.0`, Q4 count fraction `0.95`, Q4 area fraction
+  `0.9891176470588237`, and 41 front attempts. With
+  `ANYMESH_Q4_DISABLE_WORKER=1`, the same source geometry remains strict-valid
+  with the same 38 Q4 / 2 T3 counts but 44 front attempts and a different final
+  Q4 body set. Source model/revision/topology is unchanged in both runs.
+- Uniform P01 at `h=0.5`: the real seed candidate graph is one 480-cell /
+  688-arc component, reported `skipped_large`; zero Q4 worker calls and zero
+  seed mutation occur. The established final result remains 273 nodes / 240 Q4 /
+  0 T3, area ratio `1.0`.
+- Protected shared diagonals are excluded while protected endpoints remain
+  admissible. Missing workers, explicit infeasibility and cancellation do not
+  mutate resident generation or allocator IDs. `CountRejected` propagates as an
+  internal modelling error; only `CountInfeasible` is an explicit nonfatal skip.
+- Report/diagnostics now carry large/component-cap/unbalanced/non-bipartite/
+  infeasible skip counts, component sizes/arc counts, selected
+  pairs, total derived cost, added Q4 IDs and generation provenance. A perturbed
+  real skew changes the generated component/cost signature, demonstrating that
+  the production cost system is geometry-derived rather than hard-coded.
+
+### PQ6 final gate evidence
+
+```text
+python -m pytest tests/quad_first_planar/test_pq6_geometry_mcf.py -q
+  -> 15 passed in 0.91 s
+python -m pytest tests/quad_first/test_q4_mcf.py -q
+  -> 38 passed in 2.79 s
+python -m pytest tests/quad_first_planar/test_pq3_public_driver.py \
+             tests/quad_first_planar/test_pq4_general_domains.py \
+             tests/quad_first_planar/test_pq4b_staged_domains.py \
+             tests/quad_first_planar/test_pq5_real_optimization.py \
+             tests/quad_first/test_q6_public_integration.py \
+             tests/quad_first/test_q7_qualification.py -q
+  -> 72 passed in 32.27 s
+python -m pytest tests/quad_first_planar -q
+  -> 66 passed in 45.98 s
+python -m pytest tests/quad_first -q
+  -> 275 passed in 5.63 s
+git diff --check
+  -> clean
+```
+
+Primary `C:\Github\ANYmesh` remains on `main` at `6834162`; its pre-existing
+unrelated local changes were not modified. No push, merge, tag, release, PyPI,
+reset or clean operation is part of PQ6.
+
 ## Next
 
-Run the bounded PQ5 diff review, address any material finding and rerun affected
-plus full gates automatically, then commit locally as
-`PQ5: integrate TinyAD optimization on real quad mesh`. After PQ5 acceptance,
-hand off automatically to the already-approved geometry-derived Q4 MCF tranche.
-Curved surfaces, higher-order elements and unsupported anisotropy remain outside
-the qualified scope.
+Stop at the PQ6 planar-programme milestone after the local commit. Curved
+surfaces, higher-order elements and unsupported anisotropy remain outside this
+qualified scope unless a separate tranche is explicitly opened.

@@ -101,7 +101,7 @@ def _q5_diagnostics(result) -> dict:
 
 def _q4_diagnostics(result) -> dict:
     diag = _mesh(result).hybrid_diagnostics
-    assert diag["q4"]["status"] == "NOT_INTEGRATED"
+    assert diag["q4"]["status"] == "NO_ELIGIBLE"
     return diag["q4"]
 
 
@@ -171,7 +171,7 @@ def test_causal_graded_mesh_applies_q5_moves() -> None:
     assert set(pos_d) == set(pos_e)
     assert pos_d != pos_e
 
-    # Q4 MCF remains NOT_INTEGRATED in this tranche.
+    # PQ6 MCF is active but this large graded component is intentionally bounded out.
     _q4_diagnostics(enabled)
 
 

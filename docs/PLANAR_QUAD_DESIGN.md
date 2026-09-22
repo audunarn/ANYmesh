@@ -124,9 +124,10 @@ explicit public quad-first route.
   no hanging node is published. Failed candidate re-tiles roll back without
   consuming resident IDs.
 - At PQ-M1 the historical Q4 MCF and Q5 TinyAD adapters remained direct-only.
-  PQ5 now activates the existing TinyAD worker on bounded real Q4 patches after
-  the front driver and before final validation/publication. Q4 MCF remains
-  `NOT_INTEGRATED` pending its separate geometry-derived tranche.
+  PQ5 activates the existing TinyAD worker on bounded real Q4 patches after the
+  front driver. PQ6 now activates Q4 MCF earlier, on the real constrained T3 seed
+  before the front driver; no fixed/demo `CountInstance` is part of the public
+  path. Final validation/publication remains after the front and Q5 stages.
 - `quad_options=None` remains the legacy dispatch sentinel. Curved surfaces and
   higher-order elements remain outside the qualified planar scope.
 - PQ4a separately qualifies simple planar exterior loops beyond four corners,
@@ -176,3 +177,40 @@ source geometry.
 
 The exact acceptance evidence and final gate results are recorded in
 `reports/quad_first/planar-production/WORK_STATUS.md`.
+
+### PQ6 - geometry-derived seed-stage MCF count planning
+
+PQ6 integrates the qualified integer MCF worker as a bounded topology stage on
+the actual constrained planar T3 seed, before the front driver.
+
+- Candidate arcs are geometry-derived pairs of resident T3 cells sharing one
+  removable diagonal whose union is a strict canonical Q4. A protected shared
+  diagonal is never consumed; protected endpoints may still participate.
+- Connected candidate components are classified deterministically. Production
+  caps are four solved components per face, 12 cells per component, and 12
+  admissible pair arcs. Large/bounded, component-cap, unbalanced, non-bipartite
+  and infeasible skips are reported explicitly together with component sizes and
+  arc counts.
+- Each eligible balanced bipartite component produces a real integer
+  `CountInstance` with unit supplies/demands and deterministic nonnegative costs
+  derived from the generated geometry/local desired size. Non-candidate cross
+  arcs are blocked. `CountRejected` is an internal modelling error and
+  propagates; only `CountInfeasible` is a nonfatal component skip.
+- All component solves complete before topology mutation. Selected disjoint pairs
+  are applied in one transaction, replacing two T3 by one Q4 per selected pair.
+  The report records allocated Q4 IDs and resident generation before/after; a
+  successful nonempty application advances generation exactly once. Worker
+  unavailability, cancellation and infeasibility consume no resident IDs.
+- The public diagnostics aggregate the real per-face MCF status and provenance.
+  The existing front driver then operates on the residual T3 region, Q5 follows
+  unchanged, and the independent final validator remains authoritative.
+
+The qualified skew witness starts from 78 T3. Its candidate graph contains a
+71-cell/91-arc component that is bounded out and one eligible 6-cell/5-arc
+component. One worker call selects three pairs, producing 3 Q4 + 72 T3 in one
+generation before the front driver. The final mesh remains 38 Q4 / 2 T3 with
+exact area ratio 1.0, while front attempts fall from 44 with Q4 MCF disabled to
+41 with it enabled and the final Q4 body set changes. Uniform P01 at `h=0.5` is
+a bounded no-op witness: its 480-cell/688-arc candidate component is skipped,
+zero Q4 worker calls occur, and the established 240 Q4 / 0 T3 final mesh is
+unchanged.

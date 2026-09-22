@@ -149,7 +149,8 @@ PQ-M1 or PQ4a validity rules:
 ## PQ5 activated actual-mesh TinyAD gates
 
 PQ5 activates Q5 only on the resident mesh produced by the genuine public
-quad-first route. It does not activate Q4 MCF.
+quad-first route. At the PQ5 checkpoint it did not activate Q4 MCF; PQ6 below
+adds that separate seed-stage integration without changing the PQ5 contract.
 
 - `max_local_optimizations=0` must make zero Q5 worker calls and report
   `DISABLED`; it must not fall back to the historical `NOT_INTEGRATED` tag.
@@ -173,8 +174,40 @@ quad-first route. It does not activate Q4 MCF.
 - The independent planar validator runs after accepted coordinate moves. Area
   closure, positive cells, incidence, owner/station identity, legacy sentinel,
   and source-geometry immutability remain mandatory.
-- Q4 MCF remains `NOT_INTEGRATED` until the separate geometry-derived count
-  integration tranche is qualified.
+- At the PQ5 checkpoint Q4 MCF remains `NOT_INTEGRATED`; the separately
+  qualified PQ6 gates below supersede that current-status tag.
+
+## PQ6 activated geometry-derived Q4 MCF gates
+
+PQ6 qualifies the count worker only on bounded components of the real planar T3
+seed and before the genuine front driver. The following are mandatory:
+
+- Candidate pairing must be derived from resident seed geometry. A protected
+  shared diagonal is ineligible while protected endpoints remain legal. No fixed
+  or demonstration `CountInstance` may drive the public route.
+- Component processing is deterministic and bounded to four solved components
+  per face, 12 cells per component and 12 admissible pair arcs. Diagnostics must
+  expose component sizes/arc counts and explicit large, component-cap,
+  unbalanced, non-bipartite and infeasible skip counts.
+- Internally generated `CountRejected` must propagate as a modelling defect. A
+  worker-reported `CountInfeasible` is the only nonfatal solver skip. Missing
+  worker capability is truthful `UNAVAILABLE_SKIPPED` with no mutation.
+- All selected pairs are solved before mutation and applied atomically. A
+  successful nonempty application advances the resident generation exactly once
+  and reports the added Q4 IDs; cancellation/unavailability/infeasibility must
+  leave digest, generation and resident allocator IDs unchanged.
+- The causal skew fixture at `h=0.5` must apply three seed pairs with one worker
+  call, retain a strict-valid final 38 Q4 / 2 T3 mesh, change the final Q4 body
+  set relative to worker-disabled execution, and reduce front attempts from 44
+  to 41. Source geometry must remain immutable in both executions.
+- Uniform P01 at `h=0.5` is a mandatory bounded no-op: the oversized seed
+  component is reported as skipped, zero count-worker calls occur, and the final
+  240 Q4 / 0 T3 result remains unchanged.
+- A real geometry perturbation must change the derived component/cost signature;
+  hard-coded production cost matrices are forbidden.
+
+Curved surfaces, higher-order elements and unsupported anisotropy remain outside
+the qualified planar scope.
 
 ## Legacy compatibility and exclusions
 
