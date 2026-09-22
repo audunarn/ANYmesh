@@ -267,3 +267,21 @@ Cancellation before the final publish checkpoint leaves the supplied linear mesh
 - P07 graded h=1.0: 275 nodes / 82 Q8 / 2 T6, 179 unique midsides, with the qualified graded linear corner topology preserved.
 
 The promotion cost is O(unique final shell edges) for midside ownership/allocation plus a bounded curved-boundary T6 repair pass. There is no coordinate welding and no per-element source-curve ownership search after the boundary interval map is built.
+## CH3 implementation record — owner-qualified cylindrical linear quad-first
+
+CH3 opens the explicit quad-first public route for **linear cylindrical faces only**. It does not introduce a second topology engine. The existing owner-qualified cylindrical atlas/patch preparation remains the authority for face selection and chart binding, and the resulting physical metric chart is adapted to the same boundary registry, constrained T3 seed, Q4/Q5 planning, residual-front driver, validator, and publication pipeline used by the planar route.
+
+`CylindricalQuadDomain` is the seed-facing adapter. It binds one source FaceUse to its qualified `CylindricalMetricChart`, stores boundary topology by exact source edge identity, projects source positions into circumferential-arc-length / axial physical chart coordinates, and lifts chart nodes back through the owner chart. Model UUID/revision and chart currency are checked before use. Owner atlas qualification is performed once by `_cylindrical_public.prepare_bindings`; the per-face domain does not duplicate that full-atlas proof in the hot path.
+
+Boundary stations remain source-edge/station identities. `BoundaryStationRegistry` is shared across selected cylinder faces, so a physical shared seam receives one station chain and one set of published mesh-node IDs; no coordinate welding is used. `nodes_of_edge` remains in intrinsic source-edge direction. The source GeometryModel stays read-only.
+
+The public pre-dispatch admits a `Cylinder` only for explicit `order="linear"` quad-first requests. Cylindrical `order="quadratic"` remains typed unsupported until CH4, while unqualified/general curved surfaces remain unsupported. Planar requests and the `quad_options=None` legacy sentinel are unchanged.
+
+### CH3 measured qualification points
+
+- One pi/4 sector at target size 0.5: 17 nodes / 8 Q4 / 2 T3, `N_eq=9`, with 14 front attempts and 8 guided accepts.
+- The same sector at target size 0.25: 43 nodes / 30 Q4 / 2 T3, `N_eq=31`, with 36 front attempts and 30 guided accepts; target-size refinement therefore changes the genuine topology rather than only diagnostics.
+- The full authored eight-sector ring at target size 0.5: 88 global nodes / 64 Q4 / 16 T3, `N_eq=72`. The physical seam shared by sectors 0 and 7 reuses the exact same source-station node IDs on both faces and repeat execution is deterministic.
+- Every published shell node in the CH3 fixtures lies on the unit source cylinder within `1e-10`; source model state is unchanged. Cancellation during face seeding propagates without partial publication.
+
+Diagnostics identify the route as `quad-first-cylindrical`, preserve the genuine front counters per face, and record `geometry_family_by_face`. CH3 does not open cones, ruled/Coons surfaces, cylindrical Q8/T6, Q9, or a new option schema.

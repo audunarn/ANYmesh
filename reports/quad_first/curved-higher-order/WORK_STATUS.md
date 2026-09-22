@@ -178,3 +178,28 @@ serialization / quality / coupling / quadratic-staging consumers
 ```
 
 Fresh review confirmed exact source-edge midpoint ownership, one canonical midside per unique final shell edge, strict Q8/T6 validity, stable topology IDs, atomic cancellation, fail-closed mixed-order beam handling, unchanged `quality_v2`, and bounded edge-linear promotion work. No CH3 cylinder tranche is opened by CH2.
+## CH3 — owner-qualified cylindrical linear quad-first
+
+**Status: QUALIFIED; ready for the CH3 milestone commit.**
+
+CH3 activates the public explicit quad-first route for owner-qualified `Cylinder` faces with `order="linear"`. It reuses `_cylindrical_public.prepare_bindings`, the qualified physical cylindrical chart, and the existing boundary/seed/Q4/Q5/front/validator/publication dataflow. No cylindrical topology fork or coordinate welding was added. Cylindrical quadratic remains fail-closed for CH4.
+
+### Product evidence
+
+- pi/4 sector, h=0.5: `17 nodes / 8 Q4 / 2 T3`, `N_eq=9`; 14 front attempts, 8 guided accepts.
+- same sector, h=0.25: `43 nodes / 30 Q4 / 2 T3`, `N_eq=31`; 36 front attempts, 30 guided accepts.
+- full eight-sector ring, h=0.5: `88 nodes / 64 Q4 / 16 T3`, `N_eq=72`; the sector-0/sector-7 physical seam reuses one exact source-station node chain and repeat counts are deterministic.
+- all published shell nodes in the unit-cylinder fixtures satisfy radial residual <= `1e-10`; source geometry is unchanged. Cancellation at `quad-first:face-seed` publishes no partial result.
+
+### CH3 gate evidence
+
+- focused CH3 product: `5 passed`.
+- CH0 + CH1 + CH2 focused regression: `53 passed`.
+- cylindrical metric chart + atlas binding + patch binding + frontal integration: `15 passed`.
+- PQ3/PQ4a/PQ4b/PQ5/PQ6 + Q6/Q7 public regression bundle: accepted without CH3 regression.
+- full `tests/quad_first_curved`: `58 passed`.
+- full `tests/quad_first_planar`: `63 passed, 3 skipped` (known compiled-triangulation capability skips in this worktree).
+- full `tests/quad_first`: `275 passed`.
+- `git diff --check`: clean after documentation update.
+
+Fresh review confirmed owner binding is qualified once before per-face capture, source-edge/station identity survives periodic publication, the source model is read-only, cancellation is atomic, the existing front driver remains the only quad topology engine, target size changes real cylinder topology, and no cylindrical Q8/T6 or other CH4 scope is accidentally opened.

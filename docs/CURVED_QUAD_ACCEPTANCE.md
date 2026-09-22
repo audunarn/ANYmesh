@@ -247,3 +247,15 @@ python -m pytest tests/test_quality_and_serialize.py tests/test_coupling.py \
   tests/test_cylindrical_quadratic_staging.py -q
   -> 35 passed in 0.26 s
 ```
+## CH3 acceptance — owner-qualified cylindrical linear quad-first
+
+CH3 acceptance is implemented in `tests/quad_first_curved/test_ch3_cylindrical_public.py` and opens only the linear cylindrical public route. The hard contracts are:
+
+- A source-authored pi/4 cylindrical sector can be captured as a `CylindricalQuadDomain` only through an owner-qualified binding; chart projection/lift round-trips source vertices and leaves the source model unchanged.
+- Public explicit quad-first at target sizes 0.5 and 0.25 produces real target-size refinement while all shell nodes remain on the unit cylinder within `1e-10`. The coarse case is 17 nodes / 8 Q4 / 2 T3 (`N_eq=9`); the fine case is 43 nodes / 30 Q4 / 2 T3 (`N_eq=31`).
+- Complete source-edge chains are published and the full authored eight-sector ring reuses the exact source-station node IDs across the periodic physical seam. The ring is 88 global nodes / 64 Q4 / 16 T3 at target size 0.5 and repeats deterministically.
+- `elements_of_face` contains every final Q4 and residual T3 for each selected cylindrical face. Diagnostics report `quad-first-cylindrical`, the per-face geometry family, and genuine front-driver counters.
+- Cylindrical `order="quadratic"` fails closed with `QuadPublicUnsupported` through CH3. Other unqualified curved surfaces also remain typed unsupported; the planar route and `quad_options=None` sentinel are unchanged.
+- Cancellation during cylindrical face seeding propagates and the supplied GeometryModel remains unchanged; no partially published result escapes.
+
+Qualification additionally reruns CH0/CH1/CH2, the existing cylindrical metric/atlas/patch/frontal contracts, the accepted planar PQ public regressions, and the full curved, planar, and quad-first suites. CH4 may re-open cylindrical Q8/T6 only after this CH3 linear topology handoff is committed and clean.

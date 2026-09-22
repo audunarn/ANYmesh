@@ -48,7 +48,7 @@ from .metric import (
 )
 from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
-from .quad.domain import PlanarQuadDomain
+from .quad.domain import CylindricalQuadDomain, PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
 from .quad.high_order import ValidityStatus, certify_mapping_validity
 from .quad.options import QuadMeshingOptions
@@ -2717,11 +2717,51 @@ def _quad_first_execute(
         face = geometry.faces.get(face_id)
         if face is None:
             raise QuadPublicUnsupported(f"unknown quad-first face {face_id}")
+    cylinder_face_ids = tuple(
+        face_id for face_id in quad_face_ids
+        if isinstance(geometry.faces[face_id].surface, Cylinder)
+    )
+    cylindrical_bindings: dict[int, Any] = {}
+    if cylinder_face_ids:
+        from ._cylindrical_public import prepare_bindings
+
+        try:
+            cylindrical_bindings = prepare_bindings(
+                geometry,
+                cylinder_face_ids,
+                NativeMeshingOptions(point_placement="frontal_delaunay"),
+                cancellation_check=cancellation_check,
+            )
+        except MeshError as exc:
+            raise QuadPublicUnsupported(
+                "quad-first public route requires planar or owner-qualified "
+                f"cylindrical faces: {exc}"
+            ) from exc
+    domains_list: list[Any] = []
+    geometry_family_by_face: dict[int, str] = {}
     try:
-        domains = tuple(
-            PlanarQuadDomain.from_geometry(geometry, face_id)
-            for face_id in quad_face_ids
-        )
+        for face_id in quad_face_ids:
+            surface = geometry.faces[face_id].surface
+            if isinstance(surface, Cylinder):
+                if order == "quadratic":
+                    raise QuadPublicUnsupported(
+                        "cylindrical quadratic quad-first is not qualified until CH4"
+                    )
+                binding = cylindrical_bindings.get(face_id)
+                if binding is None:
+                    raise QuadPublicUnsupported(
+                        f"owner cylindrical binding unavailable for face {face_id}"
+                    )
+                domain = CylindricalQuadDomain.from_binding(
+                    geometry, face_id, binding
+                )
+                family = "cylindrical"
+            else:
+                domain = PlanarQuadDomain.from_geometry(geometry, face_id)
+                family = "planar"
+            domains_list.append(domain)
+            geometry_family_by_face[face_id] = family
+        domains = tuple(domains_list)
     except MeshError as exc:
         raise QuadPublicUnsupported(str(exc)) from exc
     registry = BoundaryStationRegistry.for_domains(geometry, domains, h, size_field=quad_size_field)
@@ -2982,7 +3022,12 @@ def _quad_first_execute(
 
     mesh.hybrid_diagnostics.update(
         {
-            "route": "quad-first",
+            "route": (
+                "quad-first-cylindrical"
+                if "cylindrical" in geometry_family_by_face.values()
+                else "quad-first"
+            ),
+            "geometry_family_by_face": dict(geometry_family_by_face),
             "quad_first_api": "public/1",
             "seed_mode": options.seed_mode,
             "orientation": options.orientation,
@@ -3008,6 +3053,12 @@ def _quad_first_execute(
         capability_dict = capabilities.to_dict()
     else:
         capability_dict = dict(capabilities)
+    if "cylindrical" in geometry_family_by_face.values():
+        capability_dict["unsupported_scope"] = (
+            "unqualified_curved",
+            "cylindrical_quadratic",
+            "Q9+",
+        )
     provisional = HybridMeshResult(
         mesh=mesh,
         strategy_by_face=strategy_by_face,
@@ -3164,6 +3215,12 @@ def generate_hybrid_mesh_result(
                 None,
             )
             if _surface is None or isinstance(_surface, Plane):
+                continue
+            if isinstance(_surface, Cylinder):
+                if order == "quadratic":
+                    raise QuadPublicUnsupported(
+                        "cylindrical quadratic quad-first is not qualified until CH4"
+                    )
                 continue
             _corner_vertices = tuple(
                 source_geometry.face_corner_vertices(int(_quad_scope_face_id))
