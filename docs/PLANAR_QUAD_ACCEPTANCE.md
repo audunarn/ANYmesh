@@ -119,6 +119,33 @@ frozen PQ-M1 thresholds:
   beyond the conservative chord sagitta.
 - Curved *surfaces* and higher-order elements remain unqualified; this gate is
   for planar faces whose boundary edges may be analytic curves.
+## PQ4b activated staged gates
+
+PQ4b activates the remaining staged planar fixtures without changing the
+PQ-M1 or PQ4a validity rules:
+
+- P06 is the narrow-ligament / transition-heavy planar domain at `h=0.25`.
+  It must remain valid with exact area closure, deterministic repeat topology,
+  actual node/cell occupancy in the narrow connector, and at least 75% Q4 by
+  active count and area.
+- P07 activates public isotropic `Refinement` plumbing. A local
+  `size=0.25`, `radius=0.75` zone about `(2,2,0)` on an 8 m x 4 m face with
+  base `target_size=1.0` must increase total and near-zone node counts without
+  globally collapsing the mesh to the finest size. Source geometry remains
+  immutable.
+- P09 activates two selected planar faces sharing one edge in reverse
+  orientation. Both faces reuse the exact same global station/node IDs; the
+  face-oriented station chains are exact reversals.
+- `qualified_s3=True` may be combined with the explicit quad-first route. An
+  all-Q4 result truthfully reports `NOT_APPLICABLE_NO_TRIANGLES` with legacy
+  fallback forbidden; if residual T3 are present, the existing qualified-S3
+  Sheet/FaceUse owner-authority contract remains mandatory.
+- When the compiled triangulation extension is available, the canonical seed
+  rows for P06, graded P07, and both P09 faces must reproduce Python
+  preparation exactly: point bytes, segments, boundary/mandatory segments,
+  and triangle connectivity. No native fallback or coordinate reordering is
+  accepted as parity.
+
 ## Legacy compatibility and exclusions
 
 - Explicit quad-first must not silently succeed as legacy-only: any explicit

@@ -260,9 +260,74 @@ self-intersection check was intentionally not added because authoritative
 `ANYgeometry` already rejects self-intersecting face loops at geometry commit;
 PQ4a does not duplicate that kernel responsibility.
 
+## PQ4b - grading, narrow domains, shared-edge publication, S3 and native parity
+
+**Status: COMPLETE through staged qualification and compiled-parity review.**
+
+PQ4b was delivered in bounded local milestones: `1880f9e` activates graded
+quad-first refinement and `58ec9aa` combines the explicit quad-first route with
+qualified-S3 preparation. The final parity gate replaces the former pending
+marker with exact Python/native checks on the actual staged seed corpus.
+
+### PQ4b staged evidence
+
+- P06 narrow domain (`h=0.25`): 569 nodes, 416 Q4, 92 residual T3, Q4 count
+  fraction `0.8188976377952756`, Q4 area fraction `0.988951032540676`, exact
+  area ratio `1.0`, deterministic repeat, and real node/cell occupancy in the
+  narrow connector.
+- P07 uniform (`h=1.0`): 45 nodes, 32 Q4, 0 T3, 5 nodes within radius 1.25 of
+  the refinement centre. With the local `size=0.25`, `radius=0.75`,
+  `growth=1.5` refinement: 96 nodes, 82 Q4, 2 T3, 53 near-centre nodes, Q4
+  count fraction `0.9761904761904762`, Q4 area fraction `0.99755859375`. The
+  mesh therefore refines locally rather than globally using the finest size.
+- P09 two-face shared edge (`h=0.5`): 27 global nodes, 16 Q4, 0 T3; both faces
+  publish 8 Q4 and reuse one 3-node shared-edge chain with exact reversed
+  face orientation.
+- Explicit all-Q4 `qualified_s3=True`: 32 Q4 / 0 T3 and the established
+  `NOT_APPLICABLE_NO_TRIANGLES` record with legacy fallback `FORBIDDEN`.
+  Residual-T3 cases continue to require authoritative Sheet/FaceUse normals;
+  PQ4b does not weaken that existing S3 contract.
+- Compiled parity: the rebuilt `anymesher._native` CPython 3.14 extension is
+  present. P06 (569 prepared points / 924 seed T3), graded P07 (88 / 150), and
+  both P09 face seeds match Python exactly in point bytes, segments, boundary
+  and mandatory segments, and triangle connectivity; selected native backend is
+  `anymesher-cpp17`.
+
+### PQ4b gate evidence
+
+```text
+python -m pytest tests/quad_first_planar/test_pq4b_staged_domains.py -q
+  -> 7 passed in 4.45 s
+python -m pytest tests/test_compiled_triangulation_contract.py -q
+  -> 13 passed, 1 skipped in 0.21 s
+     (the one skip is the inverse capability-absent contract because native is present)
+python -m pytest tests/quad_first_planar/test_pq2_size_seed.py \
+             tests/quad_first_planar/test_pq3_public_driver.py \
+             tests/quad_first_planar/test_pq4_general_domains.py \
+             tests/quad_first/test_q6_public_integration.py -q
+  -> 59 passed in 31.69 s
+python -m pytest tests/test_seeding.py -q
+  -> 10 passed in 0.20 s
+python -m pytest tests/quad_first_planar -q
+  -> 44 passed in 36.66 s
+python -m pytest tests/quad_first -q
+  -> 275 passed in 5.84 s
+git diff --check
+  -> clean
+```
+
+Primary `C:\Github\ANYmesh` remains on `main` at `6834162` with only its known
+pre-existing unrelated changes. No push, merge, tag, release, PyPI operation,
+reset or clean is part of PQ4b.
+
+The bounded PQ4b review confirmed that uniform seed generation remains the PQ4a
+path, graded refinement is bounded to at most 250000 fine candidate sites, exact
+shared station identity is unchanged, qualified-S3 owner authority is not
+bypassed, and native parity is qualification-only rather than a silent backend
+switch in production. No material blocker remains in the activated PQ4b scope.
+
 ## Next
 
-Run the bounded fresh PQ4a diff review, fix and rerun any affected gates, then
-commit locally as `PQ4a: support holed and concave planar quad domains`. After
-PQ4a acceptance, hand off automatically to the already-approved PQ4b
-grading/narrow/parity/S3 tranche.
+PQ4b is complete. Do not start a further planar-quad tranche until its scope is
+explicitly approved; curved surfaces, higher-order elements and unsupported
+anisotropy remain outside the qualified scope.

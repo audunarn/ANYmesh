@@ -7,9 +7,12 @@ from anygeometry.entities import OrientedEdge
 from anygeometry.model import GeometryModel
 from anymesher.hybrid import generate_hybrid_mesh_result
 from anymesher.native_cpp import COMPILED_TRIANGULATION_AVAILABLE
+from anymesher.quad.boundary import BoundaryStationRegistry
 from anymesher.quad.domain import PlanarQuadDomain
+from anymesher.quad.seed import build_planar_quad_seed
 from anymesher.quad.options import QuadMeshingOptions
-from anymesher.refinement import Refinement
+from anymesher.refinement import Refinement, SizeField
+from anymesher.triangulation import constrained_planar_triangulation
 
 
 def _signature(geometry: GeometryModel) -> tuple:
@@ -164,7 +167,72 @@ def test_explicit_quad_first_qualified_s3_publishes_admission() -> None:
     assert isinstance(record.get("admission"), dict) and record["admission"]
 
 
-def test_compiled_triangulation_parity_is_explicitly_pending() -> None:
-    if not COMPILED_TRIANGULATION_AVAILABLE:
-        pytest.skip("PQ4b compiled triangulation parity requires rebuilt native extension")
-    pytest.xfail("PQ4b dedicated Python/native parity corpus pending explicit parity gate")
+def _assert_seed_native_parity(
+    geometry: GeometryModel,
+    face: int,
+    h: float,
+    *,
+    refinements=(),
+    registry: BoundaryStationRegistry | None = None,
+) -> None:
+    before = _signature(geometry)
+    domain = PlanarQuadDomain.from_geometry(geometry, face)
+    field = SizeField(geometry, float(h), tuple(refinements))
+    registry = registry or BoundaryStationRegistry.for_domain(
+        geometry, domain, float(h), size_field=field
+    )
+    seed = build_planar_quad_seed(
+        geometry, face, float(h), domain=domain, registry=registry, size_field=field
+    )
+    python = seed.triangulation
+    native = constrained_planar_triangulation(
+        python.points, python.outer_loop, holes=python.hole_loops, backend="native"
+    )
+    assert native.actual_backend == "anymesher-cpp17"
+    assert native.points.tobytes() == python.points.tobytes()
+    np.testing.assert_array_equal(native.segments, python.segments)
+    np.testing.assert_array_equal(native.boundary_segments, python.boundary_segments)
+    np.testing.assert_array_equal(native.mandatory_segments, python.mandatory_segments)
+    np.testing.assert_array_equal(native.triangles, python.triangles)
+    assert _signature(geometry) == before
+
+
+@pytest.mark.skipif(
+    not COMPILED_TRIANGULATION_AVAILABLE,
+    reason="PQ4b compiled triangulation parity requires rebuilt native extension",
+)
+def test_compiled_triangulation_matches_p06_narrow_seed_exactly() -> None:
+    geometry, face = _p06_geometry()
+    _assert_seed_native_parity(geometry, face, 0.25)
+
+
+@pytest.mark.skipif(
+    not COMPILED_TRIANGULATION_AVAILABLE,
+    reason="PQ4b compiled triangulation parity requires rebuilt native extension",
+)
+def test_compiled_triangulation_matches_p07_graded_seed_exactly() -> None:
+    geometry, face = _p07_geometry()
+    _assert_seed_native_parity(
+        geometry,
+        face,
+        1.0,
+        refinements=(
+            Refinement(size=0.25, radius=0.75, center=(2.0, 2.0, 0.0), growth=1.5, name="p07-local"),
+        ),
+    )
+
+
+@pytest.mark.skipif(
+    not COMPILED_TRIANGULATION_AVAILABLE,
+    reason="PQ4b compiled triangulation parity requires rebuilt native extension",
+)
+def test_compiled_triangulation_matches_p09_shared_edge_seeds_exactly() -> None:
+    geometry, f1, f2, _shared = _p09_geometry()
+    d1 = PlanarQuadDomain.from_geometry(geometry, f1)
+    d2 = PlanarQuadDomain.from_geometry(geometry, f2)
+    field = SizeField(geometry, 0.5)
+    registry = BoundaryStationRegistry.for_domains(
+        geometry, (d1, d2), 0.5, size_field=field
+    )
+    _assert_seed_native_parity(geometry, f1, 0.5, registry=registry)
+    _assert_seed_native_parity(geometry, f2, 0.5, registry=registry)

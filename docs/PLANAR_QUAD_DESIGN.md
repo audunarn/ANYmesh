@@ -132,9 +132,19 @@ explicit public quad-first route.
   single and multiple interior holes, and concavity. Canonical source-edge station
   identity is retained on every outer and hole loop; analytic planar boundary
   curves are sampled at the exact geometry stations, while area closure is
-  validated against the resulting authoritative station/chord domain. Graded
-  refinement, narrow/transition-heavy qualification and broader multiface staged
-  fixtures remain later work.
+  validated against the resulting authoritative station/chord domain.
+- PQ4b qualifies the remaining staged planar scope. The explicit route constructs
+  one existing `SizeField` from the public `Refinement` set and shares it between
+  canonical boundary seeding and each face seed. The uniform branch remains
+  byte-compatible with PQ4a; nonuniform interiors retain the coarse target-size
+  lattice and add bounded deterministic fine candidates only where the local size
+  field is smaller. Shared-edge identity still comes exclusively from one
+  `BoundaryStationRegistry`, never coordinate welding. Qualified-S3 preparation is
+  applied after quad-first publication (or after the mixed beam merge); all-Q4
+  meshes report the established no-triangle status, while residual T3 retain the
+  existing Sheet/FaceUse owner-authority requirement. Compiled triangulation is
+  qualification-equivalent to Python on the staged seed corpus but is not required
+  to replace the deterministic Python seed backend.
 
 The exact acceptance evidence and final gate results are recorded in
 `reports/quad_first/planar-production/WORK_STATUS.md`.
