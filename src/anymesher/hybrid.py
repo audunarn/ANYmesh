@@ -3360,13 +3360,20 @@ def generate_hybrid_mesh_result(
             if _quad_face_selector is None
             else tuple(_quad_face_selector)
         )
-        if order == "quadratic" and source_beams and any(
-            isinstance(source_geometry.faces[int(face_id)].surface, Cone)
-            for face_id in _quad_scope_faces
-        ):
-            raise QuadPublicUnsupported(
-                "quadratic conical quad-first with beam/coupling content is not qualified in CH9"
+        if order == "quadratic" and source_beams:
+            _conical_boundary_edges = {
+                int(use.edge)
+                for face_id in _quad_scope_faces
+                if isinstance(source_geometry.faces[int(face_id)].surface, Cone)
+                for use in source_geometry.faces[int(face_id)].loop
+            }
+            _coowned_conical_beams = sorted(
+                set(map(int, source_beams)) & _conical_boundary_edges
             )
+            if _coowned_conical_beams:
+                raise QuadPublicUnsupported(
+                    "quadratic conical quad-first does not qualify beam ownership on a source-boundary edge"
+                )
         for _quad_scope_face_id in _quad_scope_faces:
             _surface = getattr(
                 source_geometry.faces[int(_quad_scope_face_id)],

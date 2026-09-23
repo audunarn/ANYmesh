@@ -151,7 +151,7 @@ def test_ch9_repeat_and_cancellation_are_atomic() -> None:
     assert _persistent_state(cancelled_model) == before
 
 
-def test_ch9_conical_quadratic_with_beam_remains_typed_unsupported() -> None:
+def test_ch9_conical_quadratic_source_boundary_beam_remains_typed_unsupported() -> None:
     model, face, _ = _model_face("cone")
     before = _persistent_state(model)
     straight_edge = next(

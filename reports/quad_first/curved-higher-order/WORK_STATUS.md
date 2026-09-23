@@ -415,3 +415,26 @@ Quadratic ruled/Coons beam/coupling content remains typed unsupported. Plane, cy
 - chart / physical-quality / serialization / coupling / quadratic-staging consumers: `58 passed in 0.73s`.
 
 Fresh review confirmed exact owner-chart interior midsides, exact source-boundary ownership, stable linear topology IDs, strict validity and provenance truth, atomic cancellation, no topology fork, and no activation of curved B3 or Q9.
+
+## CH12 — conical quadratic B3 ownership
+
+**Status: QUALIFIED; ready for the CH12 milestone commit.**
+
+CH12 narrows the CH9 blanket beam prohibition. Independent straight member content now reuses the existing mapped B3 generator and structural coupling pipeline alongside the accepted conical Q8/T6 shell. A beam that is itself a conical source-boundary edge remains typed unsupported; curved quadratic beam edges remain rejected; ruled/Coons quadratic B3 remains deferred to CH13.
+
+### Product evidence
+
+- cone h=0.6 + one straight through-face member: `126 nodes / 28 Q8 / 6 T6 / 4 B3 / 1 coupling`;
+- member edge: 9 station nodes / 4 B3 elements; all B3 midsides exact chord midpoints;
+- coupling eccentricity magnitude: `1.9027882047564422e-05`;
+- maximum shell owner-support residual: `3.1401849173675503e-16`;
+- every final Q8/T6 is `CERTIFIED_POSITIVE`; serialization/determinism/cancellation/source immutability are green.
+
+### CH12 gate evidence
+
+- focused CH12: `5 passed in 2.89s`;
+- CH6+CH7+CH9+CH11+CH12: `26 passed in 26.61s`;
+- structural/coupling/serialization consumers: `58 passed in 0.62s`;
+- full curved: `111 passed in 68.89s`;
+- full planar: `63 passed, 3 skipped in 38.56s`;
+- full quad-first: `275 passed in 3.67s`.

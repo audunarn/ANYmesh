@@ -410,3 +410,18 @@ Quadratic ruled/Coons output with beam/coupling content remains typed unsupporte
 - A bounded locally graded h=0.6 fixture for each family preserves `35 linear nodes / 25 Q4 / 4 T3` as `98 nodes / 25 Q8 / 4 T6`, with `63` unique midsides, `14` exact boundary midsides and zero corner repairs. Every final Q8/T6 is `CERTIFIED_POSITIVE`.
 
 Original linear node IDs/coordinates, shell IDs, corner connectivity, source-edge station chains and source geometry are retained. Repeat generation is deterministic and cancellation before quadratic publication is atomic.
+
+## CH12 implementation record — conical quadratic B3 ownership
+
+CH12 re-opens straight member ownership on the accepted CH9 conical quadratic route. The CH9 Q8/T6 shell topology, CH6 mapped straight-sided B3 generator and existing structural merge/coupling pipeline remain authoritative; no shell or beam topology engine is added.
+
+Independent straight member edges may now coexist with a conical Q8/T6 face. Their quadratic beam bodies remain B3 in frozen `start-mid-end` order and use exact endpoint chord midpoints. The exact owner-surface attachment station is retained, while the small Q8/T6 polynomial projection gap is preserved as coupling eccentricity rather than moving the owner point or shell.
+
+CH12 deliberately does **not** qualify a beam edge that is the same source edge as a conical face boundary. That co-owned edge case remains typed unsupported because the beam and shell station chains have distinct ownership/subdivision contracts. Curved quadratic beam edges remain rejected by the existing B3 preflight. Ruled/Coons quadratic beam ownership remains closed for CH13.
+
+### CH12 measured qualification point
+
+- Cone h=0.6 with one straight through-face member: `126 nodes / 28 Q8 / 6 T6 / 4 B3 / 1 coupling`; the shell counts/corner topology remain exactly CH9.
+- The member source edge publishes 9 station nodes and 4 B3 elements; every B3 midside is the exact endpoint chord midpoint.
+- The owner attachment point is unchanged. Coupling eccentricity magnitude is `1.9027882047564422e-05`; maximum shell owner-support residual is `3.1401849173675503e-16`.
+- All Q8/T6 remain CH1 `CERTIFIED_POSITIVE`; serialization preserves B3 edge ownership/coupling; repeat generation is deterministic and cancellation at `quad-first:quadratic-promotion-ready` is atomic.
