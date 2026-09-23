@@ -303,3 +303,14 @@ CH5 acceptance is implemented in `tests/quad_first_curved/test_ch5_high_order_ge
 - The pre-review cylindrical consumer bundle remained green at `69 passed`; the post-review changes are confined to the new report metadata/consistency path and the explicit quad-first quadratic report assembly.
 
 A fresh review must keep `git diff --check` clean, remove all transient `.ch5_*`/gate evidence helpers before commit, and verify that CH5 does not open cones, ruled/Coons surfaces, Q9, a second topology engine, or a new public option schema.
+
+
+## CH6 acceptance — coherent B3 on quadratic quad-first mixed output
+
+CH6 acceptance is implemented by `tests/quad_first_curved/test_ch6_quadratic_beam_ownership.py`. A straight member-through-planar-face fixture that was deliberately fail-closed at CH2 must now complete through the public explicit quadratic quad-first route.
+
+Acceptance requires all final shell connectivities to be Q8/T6, every beam connectivity to contain exactly three nodes in start-mid-end order, and every B3 middle node to equal the endpoint chord midpoint within `1e-12`. The member `nodes_of_edge` sequence must contain one quadratic midside between each retained linear station, and the through-face structural coupling must reference the exact member station at the plate intersection.
+
+The accepted target-size-1 fixture publishes `13 nodes / 1 Q8 / 0 T6 / 2 B3 / 1 coupling`; the member edge chain has five stations and the coupling uses its centre station. Repeated generation is deterministic and source geometry is unchanged. Cancellation at the quadratic publication checkpoint is atomic.
+
+Curved quadratic beam edges remain rejected by the existing straight-sided B3 rule. Cylindrical quadratic shell/beam requests remain typed unsupported in CH6. The CH2 direct-promotion test for arbitrary supplied B2 beam content remains fail-closed; CH6 only qualifies beams produced coherently by the public mixed generation route.

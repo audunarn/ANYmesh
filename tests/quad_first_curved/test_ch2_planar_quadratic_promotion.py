@@ -416,16 +416,15 @@ def test_public_explicit_quadratic_curved_surface_remains_typed_unsupported():
     assert _source_signature(geometry) == before
 
 
-def test_quadratic_quad_first_with_beam_coupling_fails_closed():
-    from anymesher.quad.public_integration import QuadPublicUnsupported
-
+def test_quadratic_quad_first_with_beam_coupling_uses_qualified_b3_route():
     geometry, face, _part, _sheet, member, _member_edge = _beam_through_face_fixture()
-    with pytest.raises(QuadPublicUnsupported, match="beam|coupling|quadratic"):
-        generate_hybrid_mesh_result(
-            geometry,
-            target_size=1.0,
-            face_ids=(face,),
-            member_ids=(member,),
-            quad_options=QuadMeshingOptions(),
-            order="quadratic",
-        )
+    mesh = generate_hybrid_mesh_result(
+        geometry,
+        target_size=1.0,
+        face_ids=(face,),
+        member_ids=(member,),
+        quad_options=QuadMeshingOptions(),
+        order="quadratic",
+    ).mesh
+    assert mesh.order == "quadratic"
+    assert mesh.beams and all(len(body) == 3 for body in mesh.beams.values())

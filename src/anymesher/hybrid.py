@@ -30,7 +30,11 @@ from anygeometry.surfaces import Cylinder, Plane
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
 from .errors import MeshError
-from .mapped import ELEMENT_ORDERS, generate_mesh as generate_mapped_mesh
+from .mapped import (
+    ELEMENT_ORDERS,
+    _refuse_curved_beams,
+    generate_mesh as generate_mapped_mesh,
+)
 from .mesh import Mesh
 from .meshing_view import GeometryMeshingView
 from .prepared import remap_prepared_mesh_associations
@@ -3366,9 +3370,17 @@ def generate_hybrid_mesh_result(
                 raise QuadPublicUnsupported(
                     "quad-first public route currently requires a planar face"
                 )
-    if _quad_normalized is not None and order == "quadratic" and source_beams:
+    if (
+        _quad_normalized is not None
+        and order == "quadratic"
+        and source_beams
+        and any(
+            isinstance(source_geometry.faces[int(face_id)].surface, Cylinder)
+            for face_id in _quad_scope_faces
+        )
+    ):
         raise QuadPublicUnsupported(
-            "quadratic quad-first beam/coupling promotion is not qualified in CH2"
+            "quadratic cylindrical quad-first beam/coupling ownership is not qualified in CH6"
         )
     if _quad_face_selector is not None and quad_options is None:
         raise MeshError(

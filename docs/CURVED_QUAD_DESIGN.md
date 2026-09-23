@@ -318,3 +318,14 @@ CH5 does not re-run or weaken the CH1 mapping proof: the report consumes the imm
 - P03 circular-hole h=0.5: `795 nodes / 233 Q8 / 10 T6`, 519 unique midsides and 76 unique source-boundary midsides; reports contain both `straight` and `analytic_curved` source intervals and the maximum residual is `5.140558480280521e-13`.
 - One cylindrical pi/4 sector h=0.5: `43 nodes / 8 Q8 / 2 T6`, 26 unique midsides and 14 unique source-boundary midsides; the physical owner-chart origin lifts to `(1,0,0)`, straight/analytic-curved source intervals are distinguished, and maximum residual is `2.854117595420714e-13`.
 - Full eight-sector cylindrical ring h=0.5: `256 nodes / 64 Q8 / 16 T6`, 168 unique midsides, 72 unique canonical source-boundary/interface midsides and eight face reports; maximum residual is `2.8563285926006375e-13` with no duplicate canonical provenance.
+
+
+## CH6 implementation record — quadratic quad-first B3 ownership
+
+CH6 re-opens the CH2 fail-closed mixed shell/beam boundary for **straight** beam/member content on the planar explicit quadratic quad-first route. It does not add a beam topology engine. The public mixed route continues to build the accepted quad-first Q8/T6 shell mesh and the existing mapped quadratic beam slice separately, then merges them through the established structural pipeline.
+
+The mapped beam implementation remains authoritative: a quadratic beam spans two linear stations and uses the intervening station as its third node, yielding B3 connectivity in frozen `start-mid-end` order. The middle node is the exact chord midpoint required by ANYsolver's straight-sided B3. Existing mapped rejection of curved quadratic beam edges remains in force; CH6 does not define a curved beam.
+
+The old blanket public guard that rejected every quadratic quad-first request containing beam/member content is removed. The private `_promote_quad_first_quadratic` guard for arbitrary pre-existing B2 content remains unchanged: CH6 only re-opens the coherent public mixed route where the beam slice is generated as B3 from the outset.
+
+Structural coupling is still owned by the existing merge/preparation pipeline. No hidden B2 element is published under `mesh.order="quadratic"`; all shell bodies are Q8/T6 and all beam bodies are B3. Source geometry remains read-only and cancellation before quadratic publication remains atomic. Cylindrical quadratic shell/beam ownership remains fail-closed for a later tranche; CH6 does not widen the CH4 cylinder route.

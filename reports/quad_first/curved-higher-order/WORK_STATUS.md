@@ -261,3 +261,27 @@ pre-review cylindrical consumer bundle
 ```
 
 Fresh review added the originally frozen chart-origin and edge-curvature-class semantics, strengthened global count/provenance consistency, and confirmed CH5 remains report-only: no new surface family, topology engine, option schema, Q9 path, coordinate welding or `quality_v2` change.
+
+
+## CH6 — quadratic quad-first B3 ownership
+
+**Status: QUALIFIED; ready for the CH6 milestone commit.**
+
+CH6 removes the obsolete public blanket rejection of planar quadratic quad-first requests with straight beam/member content. The existing mapped quadratic beam generator remains the sole B3 implementation; arbitrary pre-existing B2 content still fails closed in direct shell promotion, and curved quadratic beam lines remain unsupported.
+
+### Product evidence
+
+- straight member-through-face, target size 1.0: `13 nodes / 1 Q8 / 0 T6 / 2 B3 / 1 coupling`;
+- member edge chain: five stations, with two B3 spans and exact start-mid-end chord midpoint geometry;
+- through-face coupling references the centre member station at `(0.5, 0.5, 0.0)` and retains the established shell interpolation weights;
+- quadratic output contains no B2 beam body and no linear shell body;
+- repeated execution is deterministic; cancellation at `quad-first:quadratic-promotion-ready` is atomic; source geometry remains unchanged;
+- a curved beam edge remains a typed straight-sided-B3 rejection; cylindrical quadratic shell/beam ownership remains typed unsupported.
+
+### CH6 gate evidence
+
+- focused CH6 + evolved CH2 quadratic contract: `19 passed`;
+- curved programme plus beam/coupling/serialization consumers: `107 passed`;
+- full `tests/quad_first_curved`: `74 passed`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped` (known compiled-triangulation parity capability skips);
+- full `tests/quad_first`: `275 passed`.
