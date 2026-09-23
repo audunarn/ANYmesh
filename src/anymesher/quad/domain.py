@@ -371,3 +371,140 @@ class CylindricalQuadDomain:
         if values.shape != (1, 3) or not np.all(np.isfinite(values)):
             raise MeshError("cylindrical chart lift returned an invalid point")
         return (float(values[0, 0]), float(values[0, 1]), float(values[0, 2]))
+
+
+@dataclass(frozen=True)
+class ConicalQuadDomain:
+    """Analytic owner Cone face expressed in an exact developable chart."""
+
+    model_id: str
+    revision: int
+    face_id: int
+    chart: object
+    vertex_ids: tuple[int, ...]
+    edge_uses: tuple[tuple[int, bool], ...]
+    outer_chart: tuple[Vec2, ...]
+    hole_vertex_loops: tuple[tuple[int, ...], ...] = ()
+    hole_edge_uses: tuple[tuple[tuple[int, bool], ...], ...] = ()
+    hole_charts: tuple[tuple[Vec2, ...], ...] = ()
+    outer_area: float = 0.0
+    hole_areas: tuple[float, ...] = ()
+    area: float = 0.0
+
+    @staticmethod
+    def _vertices_from_uses(geometry, uses):
+        vertices: list[int] = []
+        expected = None
+        for edge_id, forward in uses:
+            edge = geometry.edges[int(edge_id)]
+            start, end = (edge.start, edge.end) if bool(forward) else (edge.end, edge.start)
+            if expected is not None and int(start) != expected:
+                raise MeshError("conical boundary loop is not connected")
+            vertices.append(int(start))
+            expected = int(end)
+        if not vertices or expected != vertices[0] or len(set(vertices)) != len(vertices):
+            raise MeshError("conical boundary loop is invalid")
+        return tuple(vertices)
+
+    @staticmethod
+    def _project_positions(chart, positions):
+        projection = chart.face_chart.project(np.asarray(positions, dtype=float))
+        scale = max(abs(float(chart.radius_start)), abs(float(chart.radius_end)), abs(float(chart.height)), 1.0)
+        if np.any(projection.distances > 1.0e-9 * scale):
+            raise MeshError("conical source boundary is not on its owner face")
+        physical = np.asarray(chart.to_chart(projection.uv), dtype=float)
+        if physical.shape != (len(positions), 2) or not np.all(np.isfinite(physical)):
+            raise MeshError("conical physical chart projection is invalid")
+        return tuple((float(row[0]), float(row[1])) for row in physical)
+
+    @classmethod
+    def from_geometry(cls, geometry, face_id):
+        from .._conical_chart import ConicalMetricChart
+
+        if int(face_id) not in geometry.faces:
+            raise MeshError(f"unknown conical face {face_id}")
+        chart = ConicalMetricChart.from_geometry(geometry, int(face_id))
+        face = geometry.faces[int(face_id)]
+        source_loop = tuple(face.loop)
+        if len(source_loop) < 3:
+            raise MeshError("conical quad face needs at least three boundary edges")
+        edge_uses = tuple((int(item.edge), bool(item.forward)) for item in source_loop)
+        vertices = cls._vertices_from_uses(geometry, edge_uses)
+        positions = [geometry.vertex_position(vertex) for vertex in vertices]
+        outer_chart = cls._project_positions(chart, positions)
+        scale = max(abs(float(chart.radius_start)), abs(float(chart.radius_end)), abs(float(chart.height)), 1.0)
+        tol = 1.0e-10 * scale
+        signed = _signed_chart_area(outer_chart)
+        if abs(signed) <= tol * tol:
+            raise MeshError("conical quad face has zero physical chart area")
+        if signed < 0.0:
+            edge_uses = tuple((edge_id, not forward) for edge_id, forward in reversed(edge_uses))
+            vertices = cls._vertices_from_uses(geometry, edge_uses)
+            positions = [geometry.vertex_position(vertex) for vertex in vertices]
+            outer_chart = cls._project_positions(chart, positions)
+            signed = _signed_chart_area(outer_chart)
+        if signed <= tol * tol:
+            raise MeshError("conical quad outer chart is not positively oriented")
+
+        hole_vertex_loops = []
+        hole_edge_uses = []
+        hole_charts = []
+        hole_areas = []
+        for index, hole in enumerate(tuple(getattr(face, "holes", ()) or ())):
+            uses = tuple((int(item.edge), bool(item.forward)) for item in tuple(hole))
+            hole_vertices = cls._vertices_from_uses(geometry, uses)
+            hole_positions = [geometry.vertex_position(vertex) for vertex in hole_vertices]
+            hole_chart = cls._project_positions(chart, hole_positions)
+            hole_area = abs(_signed_chart_area(hole_chart))
+            if hole_area <= tol * tol:
+                raise MeshError(f"conical hole {index} has zero chart area")
+            hole_vertex_loops.append(hole_vertices)
+            hole_edge_uses.append(uses)
+            hole_charts.append(hole_chart)
+            hole_areas.append(float(hole_area))
+
+        outer_area = float(signed)
+        area = outer_area - float(sum(hole_areas))
+        if area <= tol * tol:
+            raise MeshError("conical quad face area is not positive")
+        result = cls(
+            str(geometry.model_id), int(geometry.revision), int(face_id), chart,
+            vertices, edge_uses, outer_chart,
+            tuple(hole_vertex_loops), tuple(hole_edge_uses), tuple(hole_charts),
+            outer_area, tuple(hole_areas), float(area),
+        )
+        result.assert_current(geometry)
+        return result
+
+    def assert_current(self, geometry):
+        if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:
+            raise MeshError("source geometry changed after conical-domain capture")
+        self.chart._current()
+
+    def project(self, point):
+        self.chart._current()
+        projection = self.chart.face_chart.project(
+            np.asarray([tuple(map(float, point))], dtype=float)
+        )
+        scale = max(
+            abs(float(self.chart.radius_start)),
+            abs(float(self.chart.radius_end)),
+            abs(float(self.chart.height)),
+            1.0,
+        )
+        if float(projection.distances[0]) > 1.0e-9 * scale:
+            raise MeshError("point is not on the owner conical face")
+        physical = np.asarray(self.chart.to_chart(projection.uv), dtype=float)
+        return (float(physical[0, 0]), float(physical[0, 1]))
+
+    def lift(self, point):
+        self.chart._current()
+        values = np.asarray(
+            self.chart.evaluate(
+                np.asarray([[float(point[0]), float(point[1])]], dtype=float)
+            ),
+            dtype=float,
+        )
+        if values.shape != (1, 3) or not np.all(np.isfinite(values)):
+            raise MeshError("conical chart lift returned an invalid point")
+        return (float(values[0, 0]), float(values[0, 1]), float(values[0, 2]))

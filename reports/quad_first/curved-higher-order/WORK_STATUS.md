@@ -310,3 +310,29 @@ CH7 qualifies coherent straight B3/member content on the CH4 owner-qualified cyl
 - full `tests/quad_first`: `275 passed in 5.82s`.
 
 Fresh review confirmed the tolerance expansion is quadratic-only, restricted to the explicitly owned target-face element set, derived from actual midside/chord curvature, and does not change linear attachment behavior. CH7 adds no topology engine, coordinate welding, new option schema, or general curved-surface family.
+
+## CH8 — analytic conical linear quad-first
+
+**Status: QUALIFIED; ready for the CH8 milestone commit.**
+
+CH8 adds an exact developable `ConicalMetricChart` and `ConicalQuadDomain` for analytic ANYgeometry Cone faces, then reuses the existing target-size boundary registry, seed, MCF/Q5, front driver, validator and publication path. No second topology engine or coordinate welding is introduced. The chart and domain are model/revision bound through `FaceChart`; source geometry remains read-only.
+
+### Product evidence
+
+- h=0.6: `42 nodes / 28 Q4 / 6 T3`, `N_eq=31`, edge-chain lengths `[6,6,6,6]`, 52 front attempts, 24 guided accepts, 4 recovery accepts, owner residual `2.48e-16`;
+- h=0.3: `118 nodes / 89 Q4 / 14 T3`, `N_eq=96`, edge-chain lengths `[11,12,11,12]`, 120 front attempts, 86 guided accepts, owner residual `3.14e-16`;
+- target-size halving changes real topology (`N_eq` 31 -> 96) while the owner-developed reference area remains `7.148291545723455` and final cells close the sampled boundary polygon;
+- repeat generation is deterministic; cancellation is atomic; `quad-first-conical` diagnostics and per-face `conical` family are public;
+- conical quadratic remains typed unsupported for CH9, while Plane/Cylinder routes remain unchanged.
+
+### CH8 gate evidence
+
+- focused CH8: `7 passed`;
+- CH0-CH7 focused curved contracts: `75 passed in 52.04s`;
+- curved native/chart/physical-quality/serialization consumers: `43 passed in 8.58s`;
+- accepted PQ public regression bundle: `84 passed, 3 skipped in 31.76s` (known native triangulation extension capability skips);
+- full curved: `82 passed in 53.83s`;
+- full planar: `63 passed, 3 skipped in 38.44s`;
+- full quad-first: `275 passed in 3.67s`.
+
+Fresh review confirmed the analytic unroll is locally isometric, inverse angle selection is unique within the owning sector, source/edge identity is unchanged, and CH8 opens no quadratic cone, ruled/Coons or Q9 path.

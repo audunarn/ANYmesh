@@ -326,3 +326,24 @@ Attachment resolution may widen tolerance only for quadratic target-face element
 Repeated public generation is deterministic, source geometry is unchanged, and cancellation at `quad-first:quadratic-promotion-ready` is atomic. Curved B3 lines remain typed unsupported through the existing CH6 straight-sided preflight.
 
 Qualification evidence: focused CH6+CH7 plus structural/coupling/serialization consumers `63 passed`; full `tests/quad_first_curved` `75 passed`; full `tests/quad_first_planar` `63 passed, 3 skipped` for the known unreconstructed native triangulation capability; full `tests/quad_first` `275 passed`.
+
+## CH8 acceptance — analytic conical linear quad-first
+
+CH8 acceptance is implemented in `tests/quad_first_curved/test_ch8_conical_public.py` and opens only the linear analytic Cone route.
+
+- `ConicalQuadDomain` must bind model/revision/face identity, round-trip owner positions through the analytic developed chart, and leave source geometry unchanged.
+- Public h=0.6 and h=0.3 executions must show real target-size causality, positive/full chart-space coverage, complete intrinsic source-edge chains, all final Q4 plus residual T3 in `elements_of_face`, owner support residual <= `1e-10`, and genuine front counters under route `quad-first-conical`.
+- Repeat generation must be deterministic. Cancellation during face seeding or before publication must propagate without partial output or source mutation.
+- Conical `order="quadratic"` remains typed unsupported through CH8. Existing planar and cylindrical public routes remain unchanged; ruled/Coons/general curved surfaces and Q9 are not opened.
+
+### CH8 gate evidence
+
+- focused CH8 product: `7 passed`;
+- CH0 through CH7 focused curved contracts: `75 passed in 52.04s`;
+- curved native qualification plus chart/physical-quality/serialization consumers: `43 passed in 8.58s`;
+- accepted PQ3/PQ4a/PQ4b/PQ5/PQ6 + Q6/Q7 public regression bundle: `84 passed, 3 skipped in 31.76s`; the three skips are the known unreconstructed native triangulation parity capability checks;
+- full `tests/quad_first_curved`: `82 passed in 53.83s`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped in 38.44s`;
+- full `tests/quad_first`: `275 passed in 3.67s`.
+
+Fresh review additionally verifies the developed-map inverse branch, local metric isometry, source/revision binding, exact edge ownership, target-size topology change, cancellation, and that no conical quadratic, ruled/Coons, or Q9 route was activated.

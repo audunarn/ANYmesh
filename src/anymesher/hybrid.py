@@ -25,7 +25,7 @@ from anygeometry.curves import Straight
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
-from anygeometry.surfaces import Cylinder, Plane
+from anygeometry.surfaces import Cone, Cylinder, Plane
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
@@ -52,7 +52,7 @@ from .metric import (
 )
 from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
-from .quad.domain import CylindricalQuadDomain, PlanarQuadDomain
+from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
 from .quad.high_order import (
     HighOrderBoundaryMidside,
@@ -2869,6 +2869,9 @@ def _quad_first_execute(
                     geometry, face_id, binding
                 )
                 family = "cylindrical"
+            elif isinstance(surface, Cone):
+                domain = ConicalQuadDomain.from_geometry(geometry, face_id)
+                family = "conical"
             else:
                 domain = PlanarQuadDomain.from_geometry(geometry, face_id)
                 family = "planar"
@@ -3141,9 +3144,13 @@ def _quad_first_execute(
     mesh.hybrid_diagnostics.update(
         {
             "route": (
-                "quad-first-cylindrical"
-                if "cylindrical" in geometry_family_by_face.values()
-                else "quad-first"
+                "quad-first-conical"
+                if "conical" in geometry_family_by_face.values()
+                else (
+                    "quad-first-cylindrical"
+                    if "cylindrical" in geometry_family_by_face.values()
+                    else "quad-first"
+                )
             ),
             "geometry_family_by_face": dict(geometry_family_by_face),
             "quad_first_api": "public/1",
@@ -3334,6 +3341,12 @@ def generate_hybrid_mesh_result(
             if _surface is None or isinstance(_surface, Plane):
                 continue
             if isinstance(_surface, Cylinder):
+                continue
+            if isinstance(_surface, Cone):
+                if order != "linear":
+                    raise QuadPublicUnsupported(
+                        "quadratic conical quad-first is not qualified in CH8"
+                    )
                 continue
             _corner_vertices = tuple(
                 source_geometry.face_corner_vertices(int(_quad_scope_face_id))

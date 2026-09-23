@@ -339,3 +339,20 @@ The public blanket rejection of cylindrical quadratic shell/beam combinations is
 An exact owner-surface attachment point does not generally lie exactly on the polynomial Q8/T6 interior map. CH7 therefore permits a second, quadratic-only BVH lookup when the existing base tolerance misses. The extra tolerance is derived from the largest midside-to-chord deviation of the allowed target-face Q8/T6 elements; linear meshes are unchanged and unrelated faces are never admitted. The resulting coupling retains the physical projection gap explicitly as eccentricity rather than moving the owner point or shell.
 
 The qualified full eight-sector ring with one straight radial member publishes `261 nodes / 64 Q8 / 16 T6 / 2 B3 / 1 coupling`. B3 midsides remain exact endpoint chord midpoints, the centre member station lies exactly on the unit owner cylinder, the shell remains owner-bound, serialization is stable, repeat generation is deterministic, cancellation remains atomic, and source geometry remains read-only.
+
+## CH8 implementation record — analytic conical linear quad-first
+
+CH8 opens the explicit quad-first public route for **linear analytic `Cone` faces**. `ConicalMetricChart` is a revision-bound `FaceChart` consumer and uses the exact developable isometry with `dr=r1-r0`, slant length `L=sqrt(H^2+dr^2)`, `rho(v)=r(v)L/abs(dr)` and `phi(u)=u*sweep*abs(dr)/L`. The inverse selects the unique angle representative inside the owning developed sector and then enforces strict owner-parameter bounds.
+
+`ConicalQuadDomain` adapts that physical chart to the existing boundary-station / constrained-seed / MCF-Q5 / residual-front / validator / publication pipeline. Source edge identities and intrinsic directions remain authoritative; there is no coordinate welding and no second conical topology engine. Final chart nodes are lifted through the owner `FaceChart`, so source model/revision currency is checked and the GeometryModel stays read-only.
+
+The public route labels cone faces `conical`, emits `quad-first-conical`, and admits only `order="linear"`. Conical quadratic output remains typed unsupported for CH9. Plane and Cylinder dispatch are unchanged. Degenerate apex patches and `Cone` objects whose radius change is below the conical-chart tolerance fail closed; exact cylindrical geometry remains on the established `Cylinder` route. Ruled/Coons/general curved faces and Q9 remain outside CH8.
+
+### CH8 measured qualification points
+
+- Cone fixture, h=0.6: `42 nodes / 28 Q4 / 6 T3`, `N_eq=31`, developed boundary chains `[6,6,6,6]`, 52 front attempts, 24 guided accepts and 4 recovery accepts.
+- Same cone, h=0.3: `118 nodes / 89 Q4 / 14 T3`, `N_eq=96`, boundary chains `[11,12,11,12]`, 120 front attempts and 86 guided accepts. Halving target size changes genuine topology (`N_eq` ratio about 3.10).
+- The developed-domain reference area is `7.148291545723455` for the corner polygon; final cells close the sampled source-boundary chart polygon to the qualified tolerance. Maximum owner-surface residual is `3.2e-16` in the measured fixtures.
+- Independent fresh-review differentiation checks at `(u,v)=(0.37,0.61)` matched chart/world metric derivatives to about `1e-9` relative and chart round-trip error was `3.33e-16`.
+
+Cancellation before publication is atomic, repeat generation is deterministic, complete `nodes_of_edge` chains remain source-oriented, and `elements_of_face` contains every final Q4 and residual T3.
