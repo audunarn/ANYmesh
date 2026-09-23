@@ -3490,6 +3490,9 @@ def generate_hybrid_mesh_result(
                 )
             return quad_result
 
+        if order == "quadratic":
+            _refuse_curved_beams(source_geometry, source_beams)
+
         _check_cancellation(cancellation_check, "quad-first:beam-generation")
         beam_result = generate_hybrid_mesh_result(
             source_geometry,
