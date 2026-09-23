@@ -1,0 +1,75 @@
+{
+  "schema": "anymesher.native-v2-corrected-baseline/1",
+  "approved_plan": "docs/FIELD_GUIDED_0_5_IMPLEMENTATION_PLAN.md",
+  "compatibility_reference": "27e428188a891705288fef82bab0b166e330aff2",
+  "corrected_commit": "246658c17096cd6e07075c4a4596c28e10c318a6",
+  "corrected_parent": "7c1e1ffa348b76e0429b5c31c1dd487ee78ac29c",
+  "corrected_tree": "e923c6126fa06cb57b956ab7dd658d4ffa7474c8",
+  "source_root": "C:/Github/ANYmesh",
+  "package_version": "0.5.0",
+  "anygeometry": {
+    "commit": "a4f798ad8e52b12f91396bec71a84428b5e17201",
+    "tree": "1578b4a95e5f245d51e3fbf4921f186a4c26bddf",
+    "version": "0.4.3",
+    "source_root": "C:/Github/ANYgeometry",
+    "tracked_changes": false,
+    "preserved_untracked": [
+      ".idea/vcs.xml"
+    ]
+  },
+  "python": {
+    "version": "3.13.9",
+    "executable": "C:/Python/Python313/python.exe"
+  },
+  "numpy": {
+    "version": "2.4.3",
+    "origin": "C:/Python/Python313/Lib/site-packages/numpy/__init__.py"
+  },
+  "tested_extension": {
+    "path": "build/native-t3-owned-connectivity-20260906/lib/anymesher/_native.cp313-win_amd64.pyd",
+    "sha256": "56DF7F6BF076FE607AC2288518D1A590B0C55EEFC15D7DDE2B854B8684F06413",
+    "installed_wheel": false
+  },
+  "qualification": [
+    {
+      "scope": "runtime/storage/incidence/frontal, selected foundation, planar/curved corpus, benchmark authorization",
+      "passed": 83,
+      "seconds": 4.12
+    },
+    {
+      "scope": "metric memory, release correctness guards, trim certificates",
+      "passed": 66,
+      "seconds": 0.35
+    }
+  ],
+  "durable_qualification": {
+    "result": "reports/native_v2_corrected_baseline_246658c/result.json",
+    "result_sha256": "F4C38E7BD10E0B7FEC2BDE141F388B7A06C7E0CCC359638F3F10BECA98F11D13",
+    "tests": 149,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "returncode": 0,
+    "extension_unchanged": true
+  },
+  "microbenchmark": {
+    "resource_request": "ab55ebcb455b460c9176bdda7160a642",
+    "status": "independently_accepted",
+    "result": "benchmarks/results-t3-runtime-ab55ebcb455b460c9176bdda7160a642/result.json",
+    "bytes": 11542,
+    "sha256": "147F217D72081B8AC589E44FC781A0EA3BEE0A0DD0A12F6360C31C18CE0A5CFC",
+    "end_to_end_qualification": false
+  },
+  "preserved_anymesh_untracked": [
+    ".worktrees/"
+  ],
+  "remaining": [
+    "independent corrected-baseline freeze review",
+    "persistent incremental topology and certified location",
+    "actual-front scaling and mapped overhead",
+    "planar field-guided quad fronts",
+    "curved and junction integration",
+    "source/installed-wheel cross-platform qualification and normal CI"
+  ],
+  "release_authorized": false
+}

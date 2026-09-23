@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import acos, degrees
-from typing import Any, Sequence
+from math import acos, atan2, degrees, pi
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
 from .core import MeshCore, corner_edges
 from .errors import MeshError
+from .native_cpp import native_element_quality
 
 __all__ = [
     "ElementQuality",
@@ -153,20 +154,29 @@ def triangle_quality(
         raise MeshError("triangle connectivity must be T3 or T6")
     count = len(connectivity)
     ids = np.arange(1, count + 1) if element_ids is None else np.asarray(element_ids, dtype=np.int64)
-    area = np.empty(count)
-    aspect = np.empty(count)
-    min_angle = np.empty(count)
-    max_angle = np.empty(count)
-    jacobian = np.empty(count)
-    for row, element in enumerate(connectivity):
-        corners = coordinates[element[:3]]
-        lengths, angles, jacobians = _corner_data(corners)
-        area[row] = 0.5 * np.linalg.norm(np.cross(corners[1] - corners[0], corners[2] - corners[0]))
-        aspect[row] = float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-300))
-        min_angle[row] = float(np.min(angles))
-        max_angle[row] = float(np.max(angles))
-        jacobian[row] = float(np.min(jacobians))
-    return ElementQuality(ids, area, aspect, min_angle, max_angle, jacobian, np.zeros(count))
+    native_values = native_element_quality(
+        np.ascontiguousarray(coordinates, dtype=np.float64),
+        np.ascontiguousarray(connectivity[:, :3], dtype=np.int64),
+        3,
+    )
+    if native_values is None:
+        area = np.empty(count)
+        aspect = np.empty(count)
+        min_angle = np.empty(count)
+        max_angle = np.empty(count)
+        jacobian = np.empty(count)
+        for row, element in enumerate(connectivity):
+            corners = coordinates[element[:3]]
+            lengths, angles, jacobians = _corner_data(corners)
+            area[row] = 0.5 * np.linalg.norm(np.cross(corners[1] - corners[0], corners[2] - corners[0]))
+            aspect[row] = float(np.max(lengths) / max(float(np.min(lengths)), 1.0e-300))
+            min_angle[row] = float(np.min(angles))
+            max_angle[row] = float(np.max(angles))
+            jacobian[row] = float(np.min(jacobians))
+        native_values = np.column_stack(
+            (area, aspect, min_angle, max_angle, jacobian, np.zeros(count))
+        )
+    return ElementQuality(ids, *(native_values[:, column] for column in range(6)))
 
 
 def _quad_values(corners: np.ndarray) -> tuple[float, float, float, float, float, float]:
@@ -177,8 +187,13 @@ def _quad_values(corners: np.ndarray) -> tuple[float, float, float, float, float
     first_norm = float(np.linalg.norm(first_cross))
     second_norm = float(np.linalg.norm(second_cross))
     if first_norm > 0.0 and second_norm > 0.0:
-        cosine = float(np.clip(np.dot(first_cross, second_cross) / (first_norm * second_norm), -1.0, 1.0))
-        warpage = degrees(acos(cosine)) / 180.0
+        first_unit = first_cross / first_norm
+        second_unit = second_cross / second_norm
+        # acos amplifies rounding near parallel normals. Keep the same
+        # diagonal and normals, but resolve their angle without that loss.
+        sine = float(np.linalg.norm(np.cross(first_unit, second_unit)))
+        cosine = float(np.dot(first_unit, second_unit))
+        warpage = atan2(sine, cosine) / pi
     else:
         warpage = 1.0
     return (
@@ -217,9 +232,15 @@ def quad_quality(
         raise MeshError("quadrilateral connectivity must be Q4 or Q8")
     count = len(connectivity)
     ids = np.arange(1, count + 1) if element_ids is None else np.asarray(element_ids, dtype=np.int64)
-    values = np.asarray([_quad_values(coordinates[element[:4]]) for element in connectivity], dtype=float)
-    if count == 0:
-        values = np.empty((0, 6), dtype=float)
+    values = native_element_quality(
+        np.ascontiguousarray(coordinates, dtype=np.float64),
+        np.ascontiguousarray(connectivity[:, :4], dtype=np.int64),
+        4,
+    )
+    if values is None:
+        values = np.asarray([_quad_values(coordinates[element[:4]]) for element in connectivity], dtype=float)
+        if count == 0:
+            values = np.empty((0, 6), dtype=float)
     return ElementQuality(ids, *(values[:, column] for column in range(6)))
 
 
@@ -228,12 +249,23 @@ def validate_mesh(
     *,
     tolerance: float | None = None,
     raise_on_error: bool = False,
+    declared_plate_junction_edges: Iterable[Sequence[int]] = (),
 ) -> ValidityReport:
     if not isinstance(mesh, MeshCore):
         raise TypeError("validate_mesh expects MeshCore")
     extent = max(float(np.ptp(mesh.node_coordinates, axis=0).max()) if mesh.num_nodes else 0.0, 1.0)
     area_tolerance = extent * extent * 1.0e-14 if tolerance is None else float(tolerance)
     errors: list[str] = []
+    declared_junctions: set[tuple[int, int]] = set()
+    for raw_edge in declared_plate_junction_edges:
+        edge = tuple(int(value) for value in raw_edge)
+        if len(edge) != 2 or edge[0] == edge[1]:
+            raise MeshError(
+                "declared_plate_junction_edges must contain distinct node-row pairs"
+            )
+        if min(edge) < 0 or max(edge) >= mesh.num_nodes:
+            raise MeshError("declared plate-junction node row is outside the mesh")
+        declared_junctions.add((min(edge), max(edge)))
     active_elements: list[tuple[str, int, np.ndarray]] = []
     for row in np.flatnonzero(mesh.triangle_active):
         active_elements.append(("triangle", int(mesh.triangle_ids[row]), mesh.triangle_connectivity[row]))
@@ -272,7 +304,7 @@ def validate_mesh(
                 midside_edges[midside] = edge
 
     for edge, attached in incidence.items():
-        if len(attached) > 2:
+        if len(attached) > 2 and edge not in declared_junctions:
             errors.append(f"non-manifold edge {edge} belongs to {len(attached)} active elements")
 
     if mesh.active_triangle_count:
@@ -306,15 +338,34 @@ def validate_mesh(
     return report
 
 
-def assert_valid_mesh(mesh: MeshCore, *, tolerance: float | None = None) -> ValidityReport:
-    return validate_mesh(mesh, tolerance=tolerance, raise_on_error=True)
+def assert_valid_mesh(
+    mesh: MeshCore,
+    *,
+    tolerance: float | None = None,
+    declared_plate_junction_edges: Iterable[Sequence[int]] = (),
+) -> ValidityReport:
+    return validate_mesh(
+        mesh,
+        tolerance=tolerance,
+        raise_on_error=True,
+        declared_plate_junction_edges=declared_plate_junction_edges,
+    )
 
 
 hard_validity_check = assert_valid_mesh
 
 
-def mesh_quality(mesh: MeshCore, *, check_validity: bool = True) -> MeshQualityV2:
-    validity = validate_mesh(mesh, raise_on_error=check_validity)
+def mesh_quality(
+    mesh: MeshCore,
+    *,
+    check_validity: bool = True,
+    declared_plate_junction_edges: Iterable[Sequence[int]] = (),
+) -> MeshQualityV2:
+    validity = validate_mesh(
+        mesh,
+        raise_on_error=check_validity,
+        declared_plate_junction_edges=declared_plate_junction_edges,
+    )
     triangle_rows = np.flatnonzero(mesh.triangle_active)
     quad_rows = np.flatnonzero(mesh.quad_active)
     triangles = triangle_quality(
@@ -331,4 +382,3 @@ def mesh_quality(mesh: MeshCore, *, check_validity: bool = True) -> MeshQualityV
 
 
 evaluate_quality = mesh_quality
-

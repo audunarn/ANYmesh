@@ -6,9 +6,8 @@ refinement, a built-in mapped (transfinite Coons) mesher, mapped-face
 decomposition, optional Gmsh meshing, geometry-to-mesh associations, quality
 metrics, a tkinter mesher and a command-line interface.
 
-After the first package-index release, install with
-`python -m pip install ANYmesher`. Until then, use the editable development
-setup below.
+Install the released package with `python -m pip install ANYmesher`. For local
+development, use the editable setup below.
 
 The repository is `ANYmesh`, but `anymesh` was already taken on PyPI, so the
 distribution is **`ANYmesher`** and the import package is **`anymesher`**.
@@ -61,6 +60,21 @@ anymesher panel --length 4 --width 3 --thickness 0.012 --height 0.3 --web-thickn
 
 `panel`, `plate`, `beam`, `quality` and `backends`, each with `--json`.
 `--output` writes the mesh as JSON.
+
+### Provider-neutral automation
+
+`anymesher automation --geometry model.json` starts a JSON Lines session for
+LLMs and agent frameworks. The core accepts strict structured tools only; it has
+no model SDK, prompt parser, credentials, network access, or arbitrary shell or
+filesystem command. Discover the exact schemas with `mesh_capabilities`, plan a
+revision-bound batch with `plan_mesh`, inspect the detached candidate, and
+publish it exactly once with `apply_mesh`.
+
+Qualified commands configure meshing, select geometry scope, pin edge divisions,
+manage named refinements, generate, undo, and redo. Direct node/element mutation
+is intentionally unavailable because it would invalidate topology associations
+and deterministic numbering. Geometry edits remain in ANYgeometry's own
+automation protocol.
 
 `anymesher-gui` opens the mesher: enter a panel, plate or beam, watch it re-mesh
 as you type, read the quality report, and save the result. It is deliberately not
@@ -229,6 +243,40 @@ or `.inp` file belongs to [ANYfileio](https://github.com/audunarn/ANYfileIO), wh
 depends on this package — so the arrow cannot point back. The JSON in
 `anymesher.serialize` is the mesh container written out as itself, not an
 interchange format.
+
+## License
+
+### Opt-in native-v2 planar meshing
+
+ANYmesher 0.5.0 adds provider-neutral, immutable controls for a bounded planar
+Frontal-Delaunay route while retaining the legacy native defaults:
+
+```python
+from anymesher import MetricFieldSpec, NativeMeshingOptions, generate_mesh
+
+mesh = generate_mesh(
+    geometry,
+    backend="native",
+    target_size=0.2,
+    native_options=NativeMeshingOptions(
+        point_placement="frontal_delaunay",
+        metric_mode="isotropic_spatial",
+        metric_field=MetricFieldSpec.uniform(0.2),
+    ),
+)
+```
+
+Metric specifications are strict serializable data. Runtime callbacks are
+explicitly experimental and cannot be serialized or passed through automation.
+
+Starting with version 0.4.0, ANYmesher source code is licensed under the
+Mozilla Public License 2.0. See `LICENSE` for the full terms and `NOTICE` for
+the prospective relicensing statement. Earlier published versions remain
+available under the license terms that applied to those versions.
+
+Original project documentation under `docs/` is licensed under Creative
+Commons Attribution 4.0 as described in `docs/LICENSE.md`. Dependency and
+optional-tool licenses are recorded in `THIRD_PARTY_NOTICES.md`.
 
 ## Units
 

@@ -30,6 +30,7 @@ from .primitives import (
 )
 from .quality import verify_mesh_quality
 from .serialize import load_mesh, save_mesh
+from .automation.cli import add_parser as add_automation_parser, run as run_automation
 
 __all__ = ["main"]
 
@@ -191,6 +192,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     quality = sub.add_parser("quality", help="report on a saved mesh")
     quality.add_argument("input")
 
+    add_automation_parser(sub)
+
     args = parser.parse_args(argv)
     handlers = {
         "backends": _command_backends,
@@ -198,6 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "plate": _command_plate,
         "beam": _command_beam,
         "quality": _command_quality,
+        "automation": run_automation,
     }
     try:
         return handlers[args.command](args)

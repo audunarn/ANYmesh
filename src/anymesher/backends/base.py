@@ -14,6 +14,7 @@ index has to say so.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Dict, Protocol, Tuple, runtime_checkable
 
 from anygeometry.model import GeometryModel
@@ -108,4 +109,65 @@ def generate_mesh(
     feature sets rather than silently dropping unsupported controls.
     """
 
-    return resolve_backend(backend)(geometry, **options)
+    key = str(backend).strip().lower()
+    selected = resolve_backend(key)
+    if key != "auto":
+        return selected(geometry, **options)
+    try:
+        return selected(geometry, **options)
+    except MeshError as primary:
+        eligible, reason = _qualified_gmsh_fallback(geometry, options)
+        if not eligible:
+            raise
+        try:
+            fallback = _gmsh_backend()
+        except MeshError:
+            raise primary
+        gmsh_options = {
+            name: options[name]
+            for name in ("target_size", "face_ids", "order", "recombine")
+            if name in options
+        }
+        try:
+            mesh = fallback(geometry, **gmsh_options)
+        except MeshError as secondary:
+            raise MeshError(
+                f"automatic hybrid meshing rejected: {primary}; qualified "
+                f"Gmsh fallback also rejected: {secondary}"
+            ) from secondary
+        mesh.geometry_model_id = geometry.model_id
+        mesh.geometry_revision = geometry.revision
+        mesh.hybrid_diagnostics["complex_geometry"] = {
+            "classification": "planar_unshared_external_fallback",
+            "attempted_strategies": ["hybrid", "gmsh"],
+            "selected_strategy": "gmsh",
+            "fallback_reason": str(primary),
+            "qualification_reason": reason,
+        }
+        return mesh
+
+
+def _qualified_gmsh_fallback(
+    geometry: GeometryModel,
+    options: Dict[str, Any],
+) -> tuple[bool, str]:
+    allowed = {"target_size", "face_ids", "order", "recombine"}
+    if set(options).difference(allowed):
+        return False, "hybrid-only controls are present"
+    selected_faces = (
+        tuple(int(face_id) for face_id in options["face_ids"])
+        if options.get("face_ids") is not None
+        else tuple(int(face_id) for face_id in geometry.faces)
+    )
+    if not selected_faces:
+        return False, "no selected faces"
+    edge_counts: Counter[int] = Counter()
+    for face_id in selected_faces:
+        face = geometry.faces.get(face_id)
+        if face is None:
+            return False, f"unknown face {face_id}"
+        for boundary in (face.loop, *getattr(face, "holes", ())):
+            edge_counts.update(int(item.edge) for item in boundary)
+    if any(count > 1 for count in edge_counts.values()):
+        return False, "selected faces share topology-owned edges"
+    return True, "planar unshared faces with Gmsh-compatible controls"

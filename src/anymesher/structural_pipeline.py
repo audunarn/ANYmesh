@@ -52,7 +52,13 @@ class OverlapPolicy(StrEnum):
 
 
 class GeometryMutationPolicy(StrEnum):
-    """Permission for topology preparation; source geometry is never mutated."""
+    """Ownership contract for geometry supplied to one mesh generation.
+
+    ``READ_ONLY`` preserves an editable source by preparing on a clone.
+    ``WORKING_COPY`` declares that the caller already owns an isolated mesh-job
+    copy. That copy can be consumed and structurally finalized directly without
+    another full topology clone.
+    """
 
     READ_ONLY = "read_only"
     WORKING_COPY = "working_copy"
@@ -564,6 +570,35 @@ class StructuralMeshingPipeline:
             )
         )
 
+    @staticmethod
+    def _quadratic_face_projection_tolerance(
+        mesh: Mesh, element_ids: Iterable[int], base: float
+    ) -> float:
+        """Bound owner-surface to quadratic-shell projection by edge curvature.
+
+        Exact curved owner points do not generally lie exactly on a polynomial
+        Q8/T6 interior map.  The canonical midside-to-chord deviation supplies
+        a local, mesh-derived geometric scale without relaxing linear meshes.
+        """
+
+        tolerance = float(base)
+        for element_id in element_ids:
+            body = mesh.quads.get(int(element_id))
+            if body is None:
+                body = mesh.tris.get(int(element_id))
+            if body is None or len(body) not in (6, 8):
+                continue
+            corner_count = 4 if len(body) == 8 else 3
+            corners = tuple(int(node) for node in body[:corner_count])
+            midsides = tuple(int(node) for node in body[corner_count:])
+            for index, midside in enumerate(midsides):
+                first = corners[index]
+                second = corners[(index + 1) % corner_count]
+                chord_midpoint = 0.5 * (mesh.nodes[first] + mesh.nodes[second])
+                deviation = float(np.linalg.norm(mesh.nodes[midside] - chord_midpoint))
+                tolerance = max(tolerance, float(base) + deviation)
+        return tolerance
+
     def _add_attachment_coupling(
         self,
         mesh: Mesh,
@@ -659,11 +694,22 @@ class StructuralMeshingPipeline:
                 dtype=float,
             )
             extent = 0.0 if not len(face_points) else float(np.max(np.ptp(face_points, axis=0)))
+            base_tolerance = self.view.effective_length(extent)
             hit = bvh.locate(
                 point,
                 element_ids=allowed,
-                tolerance=self.view.effective_length(extent),
+                tolerance=base_tolerance,
             )
+            if hit is None and mesh.is_quadratic:
+                curved_tolerance = self._quadratic_face_projection_tolerance(
+                    mesh, allowed, base_tolerance
+                )
+                if curved_tolerance > base_tolerance:
+                    hit = bvh.locate(
+                        point,
+                        element_ids=allowed,
+                        tolerance=curved_tolerance,
+                    )
             if hit is None:
                 return None, PreflightIssue(
                     "unresolved-attachment",

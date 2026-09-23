@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Sequence
 import numpy as np
 
 from .errors import MeshError
+from .native_cpp import native_constrained_smoothing, native_local_edge_flip
 from .triangulation import orient2d
 
 __all__ = [
@@ -215,6 +216,30 @@ def constrained_smoothing(
         for value in constrained_edges
     }
     fixed.update(node for edge in constraints for node in edge)
+    if topology and iteration_limit > 0 and not callable(metric) and projector is None:
+        padded_cells = np.full((len(topology), 4), -1, dtype=np.int64)
+        for row, cell in enumerate(topology):
+            padded_cells[row, :len(cell)] = cell
+        native = native_constrained_smoothing(
+            coordinates,
+            padded_cells,
+            np.asarray(sorted(fixed), dtype=np.int64).reshape((-1, 1)),
+            np.asarray(sorted(constraints), dtype=np.int64).reshape((-1, 2)),
+            preserve_boundary,
+            _metric_values(metric, coordinates),
+            iteration_limit,
+            made_relaxation,
+        )
+        if native is not None:
+            native_points, native_moved, diagnostics = native
+            return SmoothingResult(
+                native_points,
+                native_moved,
+                diagnostics["iterations"],
+                diagnostics["accepted_moves"],
+                diagnostics["rejected_moves"],
+                diagnostics["converged"],
+            )
     if preserve_boundary:
         fixed.update(
             node for edge, attached in incidence.items() if attached == 1 for node in edge
@@ -237,10 +262,28 @@ def constrained_smoothing(
                 edge_metric = 0.5 * (metrics[node] + metrics[other])
                 system += edge_metric
                 right += edge_metric @ coordinates[other]
-            try:
-                target = np.linalg.solve(system, right)
-            except np.linalg.LinAlgError:
+            determinant = float(
+                system[0, 0] * system[1, 1]
+                - system[0, 1] * system[1, 0]
+            )
+            if determinant == 0.0 or not np.isfinite(determinant):
                 target = np.mean(coordinates[sorted(neighbors[node])], axis=0)
+            else:
+                target = np.asarray(
+                    (
+                        (
+                            right[0] * system[1, 1]
+                            - system[0, 1] * right[1]
+                        )
+                        / determinant,
+                        (
+                            system[0, 0] * right[1]
+                            - right[0] * system[1, 0]
+                        )
+                        / determinant,
+                    ),
+                    dtype=np.float64,
+                )
             candidate = coordinates[node] + made_relaxation * (
                 target - coordinates[node]
             )
@@ -381,6 +424,23 @@ def local_edge_flip(
             raise MeshError("max_flips must be a non-negative integer") from error
         if flip_limit < 0:
             raise MeshError("max_flips must be a non-negative integer")
+
+    protected_array = np.asarray(sorted(protected), dtype=np.int64).reshape((-1, 2))
+    native = native_local_edge_flip(
+        coordinates,
+        np.ascontiguousarray(work),
+        np.ascontiguousarray(protected_array),
+        np.ascontiguousarray(metrics),
+        flip_limit,
+    )
+    if native is not None:
+        native_triangles, diagnostics = native
+        return EdgeFlipResult(
+            native_triangles,
+            diagnostics["flip_count"],
+            diagnostics["queue_visits"],
+            diagnostics["converged"],
+        )
 
     incidence = _triangle_incidence(work)
     queue: list[tuple[int, int]] = []

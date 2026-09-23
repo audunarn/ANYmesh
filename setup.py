@@ -58,6 +58,12 @@ if os.environ.get("ANYMESHER_DISABLE_NATIVE", "0") not in {"1", "true", "TRUE"}:
         Extension(
             "anymesher._native",
             ["src/anymesher/_native.cpp"],
+            depends=[
+                "src/anymesher/_triangulation_native.hpp",
+                "src/anymesher/_quality_pipeline_native.hpp",
+                "src/anymesher/_native_v2.hpp",
+                "src/anymesher/_native_t3_storage.hpp",
+            ],
             language="c++",
             extra_compile_args=compile_args,
             extra_link_args=link_args,

@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-04
+
+Alpha preparation: final source, platform, installed-wheel, performance and
+hosted-CI qualification remains pending. This entry is not release approval.
+
+- Add immutable native-v2 options and serializable spatial metric controls while
+  retaining the byte-compatible legacy lattice and metric defaults.
+- Add deterministic SPD metric evaluation, physical/chart pullback, gradation
+  limiting, and optional GIL-releasing C++17 kernels with Python oracles.
+- Add an atomic mutable T3 topology, protected-edge contracts, component-owned
+  shared seed identities, and deterministic canonical export.
+- Add opt-in planar Frontal-Delaunay insertion with bounded queues, metric-aware
+  off-centres, cancellation, geometry-limited diagnostics, and quality guarding.
+- Extend the opt-in route to owner-certified cylindrical patches and connected
+  sector assemblies using physical chart lengths and topology-owned shared
+  boundaries. Full-cylinder support uses connected sectors, not new single-face
+  periodic topology. Other curved surface types remain outside this extension.
+- Retain Python reference behavior while introducing persistent native topology
+  storage and immutable local incidence, geometry, row and export caches.
+  Keep protected identities, failed-candidate isolation and existing defaults.
+- Add the frozen native-v2 baseline corpus and performance acceptance envelope.
+- Require ANYgeometry 0.4.3 or newer within the qualified 0.4 line so clean
+  production installs cannot resolve an older, unqualified geometry runtime.
+- Defer field-guided quad-first meshing to a later release. Existing boundary
+  collars and triangle recombination do not implement orientation-field solving
+  or advancing quad fronts; no `field_guided_front` option is included.
+
+## 0.4.0 - 2026-09-03
+
+- Change the project license prospectively to the Mozilla Public License 2.0.
+  Earlier published versions retain their historical license terms.
+- Declare original project documentation under Creative Commons Attribution
+  4.0 and add an explicit third-party dependency notice inventory.
+- Add release-time assertions for the MPL SPDX expression and required license
+  and notice files in source and binary distributions.
+
+- Bind qualified triangle admission and deterministic bounded repair to the
+  accepted S3 V2D formulation identity for the coordinated 0.3.2 activation
+  candidate. Failed admission remains a typed failure with no legacy fallback.
+
+- Score and refine native surface candidates against angle, scaled-Jacobian, and adjacent-element-growth limits in addition to aspect ratio, preventing quality-invalid slivers from being selected for automatic fallback.
+
+- Propagate short imprint-edge spacing across arbitrary native face boundaries before triangulation, preventing acute and rapid-growth transitions without moving topology-owned nodes or relaxing quality policy.
+
+- Allow automatic native fallback to refine edges from rejected structured faces instead of retaining their structured seed solution as hard overrides; mapped/native interface seeds remain locked and conformal.
+
+- Preserve declared transverse plate-junction edges through upstream imprinting and structured-layout edge descendants so valid three- and four-shell junctions pass strict quality validation.
+
+- Refine native seeding across thin four-sided imprint fragments so opposite intersection curves retain compatible divisions without relaxing structured quality limits.
+
+- Preserve declared plate-junction incidence when meshing geometry that an upstream owner has already imprinted along an exact shared transverse boundary.
+
+## 0.3.1 - 2026-08-27
+
+- Permit structured shell edges with more than two attached shell elements only when they are exact node segments derived from an explicitly applied plate/plate intersection; undeclared non-manifold edges remain hard failures.
+- Preserve declared plate-junction edge evidence through mesh serialization and add structured crossing-plate and fail-closed regressions.
+
+## 0.3.0 - 2026-08-25
+
+- Add a provider-neutral, strict JSON mesh command protocol with capability
+  discovery, geometry selection, bounded mesh queries, revision-bound planning,
+  atomic candidate publication, and typed failures.
+- Add qualified commands for mesh controls, scope, edge divisions, local
+  refinement, generation, and bounded in-memory undo/redo without exposing raw
+  node or element mutation.
+- Add a long-lived `anymesher automation` JSON Lines transport. Natural-language
+  interpretation, model clients, credentials, network access, and filesystem
+  paths remain outside command payloads.
+- Require ANYgeometry 0.4 for its provider-neutral quantities, selectors,
+  canonical entity handles, errors, and automation protocol primitives.
+
 ## 0.2.5 - 2026-08-22
 
 - Add a bounded global structured-layout planner with exact shared-edge seed

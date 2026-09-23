@@ -1,0 +1,650 @@
+"""Immutable planar-face chart used by the production quad seed."""
+from __future__ import annotations
+from dataclasses import dataclass
+from math import sqrt
+from typing import Sequence
+import numpy as np
+from anygeometry.model import GeometryModel
+from ..errors import MeshError
+
+Vec3 = tuple[float, float, float]
+Vec2 = tuple[float, float]
+
+def _sub(a: Sequence[float], b: Sequence[float]) -> Vec3:
+    return (float(a[0]-b[0]), float(a[1]-b[1]), float(a[2]-b[2]))
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2])
+def _cross(a: Sequence[float], b: Sequence[float]) -> Vec3:
+    return (float(a[1]*b[2]-a[2]*b[1]), float(a[2]*b[0]-a[0]*b[2]), float(a[0]*b[1]-a[1]*b[0]))
+def _unit(a: Sequence[float]) -> Vec3:
+    n = sqrt(_dot(a,a))
+    if n <= 0.0:
+        raise MeshError("planar quad face has a degenerate direction")
+    return (float(a[0]/n), float(a[1]/n), float(a[2]/n))
+
+def _cross2d(ax: float, ay: float, bx: float, by: float) -> float:
+    return float(ax*by - ay*bx)
+
+def _on_segment2d(p: Sequence[float], a: Sequence[float], b: Sequence[float], tol: float) -> bool:
+    x, y = float(p[0]), float(p[1])
+    if x < min(a[0], b[0]) - tol or x > max(a[0], b[0]) + tol:
+        return False
+    if y < min(a[1], b[1]) - tol or y > max(a[1], b[1]) + tol:
+        return False
+    return abs(_cross2d(b[0]-a[0], b[1]-a[1], x-a[0], y-a[1])) <= tol
+
+def _segments_intersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2, tol: float) -> bool:
+    def orient(p: Sequence[float], q: Sequence[float], r: Sequence[float]) -> int:
+        value = _cross2d(q[0]-p[0], q[1]-p[1], r[0]-p[0], r[1]-p[1])
+        if abs(value) <= tol:
+            return 0
+        return 1 if value > 0.0 else -1
+    o1 = orient(a, b, c); o2 = orient(a, b, d)
+    o3 = orient(c, d, a); o4 = orient(c, d, b)
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and _on_segment2d(c, a, b, tol):
+        return True
+    if o2 == 0 and _on_segment2d(d, a, b, tol):
+        return True
+    if o3 == 0 and _on_segment2d(a, c, d, tol):
+        return True
+    if o4 == 0 and _on_segment2d(b, c, d, tol):
+        return True
+    return False
+
+def _strictly_inside_chart(point: Sequence[float], polygon: Sequence[Vec2], tol: float) -> bool:
+    x, y = float(point[0]), float(point[1])
+    for i in range(len(polygon)):
+        if _on_segment2d(point, polygon[i], polygon[(i+1) % len(polygon)], tol):
+            return False
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        a = polygon[i]; b = polygon[j]
+        if (a[1] > y) != (b[1] > y):
+            crossing = a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+            if x < crossing:
+                inside = not inside
+        j = i
+    return inside
+
+def _signed_chart_area(chart: Sequence[Vec2]) -> float:
+    n = len(chart)
+    return 0.5 * sum(
+        chart[i][0]*chart[(i+1) % n][1] - chart[(i+1) % n][0]*chart[i][1]
+        for i in range(n)
+    )
+
+def _loop_vertex_ids(geometry: GeometryModel, oriented_edges: Sequence) -> tuple[int, ...]:
+    vertices: list[int] = []
+    expected: int | None = None
+    for item in oriented_edges:
+        edge = geometry.edges[int(item.edge)]
+        start, end = (edge.start, edge.end) if bool(item.forward) else (edge.end, edge.start)
+        if expected is not None and int(start) != expected:
+            raise MeshError("planar boundary loop is not a connected oriented loop")
+        vertices.append(int(start))
+        expected = int(end)
+    if expected is None or expected != vertices[0]:
+        raise MeshError("planar boundary loop is not closed")
+    return tuple(vertices)
+
+def _loop_is_valid(geometry: GeometryModel, loop: Sequence, label: str) -> tuple[int, ...]:
+    if len(loop) < 3:
+        raise MeshError(f"{label} boundary needs at least three edges")
+    vertices = _loop_vertex_ids(geometry, loop)
+    if len(set(vertices)) != len(vertices):
+        raise MeshError(f"{label} boundary repeats source vertices")
+    return vertices
+
+@dataclass(frozen=True)
+class PlanarQuadDomain:
+    model_id: str
+    revision: int
+    face_id: int
+    vertex_ids: tuple[int, ...]
+    edge_uses: tuple[tuple[int, bool], ...]
+    origin: Vec3
+    x_hat: Vec3
+    y_hat: Vec3
+    normal: Vec3
+    outer_chart: tuple[Vec2, ...]
+    hole_vertex_loops: tuple[tuple[int, ...], ...] = ()
+    hole_edge_uses: tuple[tuple[tuple[int, bool], ...], ...] = ()
+    hole_charts: tuple[tuple[Vec2, ...], ...] = ()
+    outer_area: float = 0.0
+    hole_areas: tuple[float, ...] = ()
+    area: float = 0.0
+
+    @classmethod
+    def from_geometry(cls, geometry: GeometryModel, face_id: int) -> "PlanarQuadDomain":
+        if face_id not in geometry.faces:
+            raise MeshError(f"unknown planar face {face_id}")
+        face = geometry.faces[face_id]
+        loop = tuple(face.loop)
+        if len(loop) < 3:
+            raise MeshError("planar quad face needs at least three boundary edges")
+        vertices = _loop_is_valid(geometry, loop, "outer")
+        points = [tuple(map(float, geometry.vertex_position(v))) for v in vertices]
+        origin = points[0]
+        x_hat = _unit(_sub(points[1], origin))
+        normal = None
+        for i in range(1, len(points)-1):
+            c = _cross(_sub(points[i], origin), _sub(points[i+1], origin))
+            if _dot(c,c) > 1.0e-24:
+                normal = _unit(c); break
+        if normal is None:
+            raise MeshError("planar quad face is degenerate")
+        y_hat = _unit(_cross(normal, x_hat))
+        chart = tuple((_dot(_sub(p, origin), x_hat), _dot(_sub(p, origin), y_hat)) for p in points)
+        extent = max(max(abs(x) for x,y in chart), max(abs(y) for x,y in chart), 1.0)
+        tol = 1.0e-10 * extent
+        for p in points:
+            if abs(_dot(_sub(p, origin), normal)) > tol:
+                raise MeshError("face is not planar within PQ2 tolerance")
+        signed = _signed_chart_area(chart)
+        if abs(signed) <= tol*tol:
+            raise MeshError("planar quad face has zero chart area")
+        if signed < 0.0:
+            normal = tuple(-v for v in normal)  # type: ignore[assignment]
+            y_hat = tuple(-v for v in y_hat)  # type: ignore[assignment]
+            chart = tuple((_dot(_sub(p, origin), x_hat), _dot(_sub(p, origin), y_hat)) for p in points)
+            signed = -signed
+        outer_vertices = tuple(vertices)
+        hole_vertex_loops: list[tuple[int, ...]] = []
+        hole_edge_uses: list[tuple[tuple[int, bool], ...]] = []
+        hole_charts: list[tuple[Vec2, ...]] = []
+        hole_areas: list[float] = []
+        source_holes = tuple(getattr(face, "holes", ()) or ())
+        for index, hole in enumerate(source_holes):
+            hole = tuple(hole)
+            hole_tag = f"hole {index}"
+            hole_vertices = _loop_is_valid(geometry, hole, hole_tag)
+            hole_points = [tuple(map(float, geometry.vertex_position(v))) for v in hole_vertices]
+            for p in hole_points:
+                if abs(_dot(_sub(p, origin), normal)) > tol:
+                    raise MeshError(f"{hole_tag} is not planar with the face")
+            hole_chart = tuple(
+                (_dot(_sub(p, origin), x_hat), _dot(_sub(p, origin), y_hat)) for p in hole_points
+            )
+            hole_area = abs(_signed_chart_area(hole_chart))
+            if hole_area <= tol * tol:
+                raise MeshError(f"{hole_tag} has zero chart area")
+            for p in hole_chart:
+                if not _strictly_inside_chart(p, chart, tol):
+                    raise MeshError(f"{hole_tag} is not strictly inside the outer boundary")
+            for i in range(len(hole_chart)):
+                a = hole_chart[i]; b = hole_chart[(i+1) % len(hole_chart)]
+                for j in range(len(chart)):
+                    if _segments_intersect(a, b, chart[j], chart[(j+1) % len(chart)], tol):
+                        raise MeshError(f"{hole_tag} crosses the outer boundary")
+            for k in range(len(hole_charts)):
+                other = hole_charts[k]
+                for p in hole_chart:
+                    if _strictly_inside_chart(p, other, tol):
+                        raise MeshError(f"{hole_tag} overlaps hole {k}")
+                for q in other:
+                    if _strictly_inside_chart(q, hole_chart, tol):
+                        raise MeshError(f"hole {k} overlaps {hole_tag}")
+                for i in range(len(hole_chart)):
+                    for j in range(len(other)):
+                        if _segments_intersect(
+                            hole_chart[i], hole_chart[(i+1) % len(hole_chart)],
+                            other[j], other[(j+1) % len(other)],
+                            tol,
+                        ):
+                            raise MeshError(f"{hole_tag} intersects hole {k}")
+            hole_vertex_loops.append(hole_vertices)
+            hole_edge_uses.append(
+                tuple((int(item.edge), bool(item.forward)) for item in hole)
+            )
+            hole_charts.append(hole_chart)
+            hole_areas.append(float(hole_area))
+        outer_area = float(signed)
+        area = outer_area - float(sum(hole_areas))
+        if area <= tol * tol:
+            raise MeshError("planar quad face area is not positive after hole subtraction")
+        return cls(
+            str(geometry.model_id), int(geometry.revision), int(face_id),
+            outer_vertices,
+            tuple((int(item.edge), bool(item.forward)) for item in loop),
+            origin, x_hat, y_hat, normal, chart,
+            tuple(hole_vertex_loops), tuple(hole_edge_uses), tuple(hole_charts),
+            outer_area, tuple(hole_areas), float(area),
+        )
+
+    def assert_current(self, geometry: GeometryModel) -> None:
+        if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:
+            raise MeshError("source geometry changed after planar-domain capture")
+    def project(self, point: Sequence[float]) -> Vec2:
+        d = _sub(point, self.origin); return (_dot(d,self.x_hat), _dot(d,self.y_hat))
+    def lift(self, point: Sequence[float]) -> Vec3:
+        x,y=float(point[0]),float(point[1]); return (self.origin[0]+x*self.x_hat[0]+y*self.y_hat[0], self.origin[1]+x*self.x_hat[1]+y*self.y_hat[1], self.origin[2]+x*self.x_hat[2]+y*self.y_hat[2])
+
+
+@dataclass(frozen=True)
+class CylindricalQuadDomain:
+    """Owner-qualified cylindrical face expressed in physical chart metres."""
+
+    model_id: str
+    revision: int
+    face_id: int
+    face_use: object
+    binding: object
+    chart: object
+    vertex_ids: tuple[int, ...]
+    edge_uses: tuple[tuple[int, bool], ...]
+    outer_chart: tuple[Vec2, ...]
+    hole_vertex_loops: tuple[tuple[int, ...], ...] = ()
+    hole_edge_uses: tuple[tuple[tuple[int, bool], ...], ...] = ()
+    hole_charts: tuple[tuple[Vec2, ...], ...] = ()
+    outer_area: float = 0.0
+    hole_areas: tuple[float, ...] = ()
+    area: float = 0.0
+
+    @staticmethod
+    def _vertices_from_uses(geometry, uses):
+        vertices = []
+        expected = None
+        for edge_id, forward in uses:
+            edge = geometry.edges[int(edge_id)]
+            start, end = (edge.start, edge.end) if bool(forward) else (edge.end, edge.start)
+            if expected is not None and int(start) != expected:
+                raise MeshError("cylindrical boundary loop is not connected")
+            vertices.append(int(start))
+            expected = int(end)
+        if not vertices or expected != vertices[0] or len(set(vertices)) != len(vertices):
+            raise MeshError("cylindrical boundary loop is invalid")
+        return tuple(vertices)
+
+    @staticmethod
+    def _project_positions(chart, positions):
+        projection = chart.face_chart.project(np.asarray(positions, dtype=float))
+        scale = max(float(chart.circumferential_length), float(chart.axial_length), 1.0)
+        if np.any(projection.distances > 1.0e-9 * scale):
+            raise MeshError("cylindrical source boundary is not on its owner face")
+        physical = np.asarray(chart.to_chart(projection.uv), dtype=float)
+        if physical.shape != (len(positions), 2) or not np.all(np.isfinite(physical)):
+            raise MeshError("cylindrical physical chart projection is invalid")
+        return tuple((float(row[0]), float(row[1])) for row in physical)
+
+    @classmethod
+    def from_binding(cls, geometry, binding, face_use):
+        if isinstance(binding, (int, np.integer)):
+            requested_face_id = int(binding)
+            binding = face_use
+            matches = tuple(
+                use for use, chart in binding.charts
+                if int(chart.face_chart.face_id) == requested_face_id
+            )
+            if len(matches) != 1:
+                raise MeshError("cylindrical binding does not uniquely own the requested face")
+            face_use = matches[0]
+        if not hasattr(binding, "charts"):
+            raise MeshError("cylindrical domain requires an owner-qualified binding")
+        if str(binding.model_id) != str(geometry.model_id) or int(binding.revision) != int(geometry.revision):
+            raise MeshError("cylindrical binding belongs to another geometry revision")
+        use_id = int(face_use.id)
+        if use_id not in geometry.face_uses:
+            raise MeshError("unknown cylindrical FaceUse")
+        face_id = int(geometry.face_uses[use_id].face_id)
+        charts = tuple(
+            chart for use, chart in binding.charts
+            if int(use.id) == use_id
+        )
+        if len(charts) != 1:
+            raise MeshError("cylindrical binding does not uniquely own the requested FaceUse")
+        chart = charts[0]
+        if int(chart.face_chart.face_id) != face_id:
+            raise MeshError("cylindrical chart does not own the requested FaceUse")
+        face = geometry.faces[face_id]
+        source_loop = tuple(face.loop)
+        if len(source_loop) < 3:
+            raise MeshError("cylindrical quad face needs at least three boundary edges")
+        edge_uses = tuple((int(item.edge), bool(item.forward)) for item in source_loop)
+        vertices = cls._vertices_from_uses(geometry, edge_uses)
+        positions = [geometry.vertex_position(vertex) for vertex in vertices]
+        outer_chart = cls._project_positions(chart, positions)
+        scale = max(float(chart.circumferential_length), float(chart.axial_length), 1.0)
+        tol = 1.0e-10 * scale
+        signed = _signed_chart_area(outer_chart)
+        if abs(signed) <= tol * tol:
+            raise MeshError("cylindrical quad face has zero physical chart area")
+        if signed < 0.0:
+            edge_uses = tuple((edge_id, not forward) for edge_id, forward in reversed(edge_uses))
+            vertices = cls._vertices_from_uses(geometry, edge_uses)
+            positions = [geometry.vertex_position(vertex) for vertex in vertices]
+            outer_chart = cls._project_positions(chart, positions)
+            signed = _signed_chart_area(outer_chart)
+        if signed <= tol * tol:
+            raise MeshError("cylindrical quad outer chart is not positively oriented")
+        hole_vertex_loops = []
+        hole_edge_uses = []
+        hole_charts = []
+        hole_areas = []
+        for index, hole in enumerate(tuple(getattr(face, "holes", ()) or ())):
+            uses = tuple((int(item.edge), bool(item.forward)) for item in tuple(hole))
+            hole_vertices = cls._vertices_from_uses(geometry, uses)
+            hole_positions = [geometry.vertex_position(vertex) for vertex in hole_vertices]
+            hole_chart = cls._project_positions(chart, hole_positions)
+            hole_area = abs(_signed_chart_area(hole_chart))
+            if hole_area <= tol * tol:
+                raise MeshError(f"cylindrical hole {index} has zero chart area")
+            hole_vertex_loops.append(hole_vertices)
+            hole_edge_uses.append(uses)
+            hole_charts.append(hole_chart)
+            hole_areas.append(float(hole_area))
+
+        outer_area = float(signed)
+        area = outer_area - float(sum(hole_areas))
+        if area <= tol * tol:
+            raise MeshError("cylindrical quad face area is not positive")
+        result = cls(
+            str(geometry.model_id), int(geometry.revision), face_id,
+            face_use, binding, chart, vertices, edge_uses, outer_chart,
+            tuple(hole_vertex_loops), tuple(hole_edge_uses), tuple(hole_charts),
+            outer_area, tuple(hole_areas), float(area),
+        )
+        result.assert_current(geometry)
+        return result
+
+    def assert_current(self, geometry):
+        if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:
+            raise MeshError("source geometry changed after cylindrical-domain capture")
+        # Owner qualification is performed once before domain capture.
+        self.chart._current()
+
+    def project(self, point):
+        self.chart._current()
+        projection = self.chart.face_chart.project(np.asarray([tuple(map(float, point))], dtype=float))
+        scale = max(float(self.chart.circumferential_length), float(self.chart.axial_length), 1.0)
+        if float(projection.distances[0]) > 1.0e-9 * scale:
+            raise MeshError("point is not on the owner cylindrical face")
+        physical = np.asarray(self.chart.to_chart(projection.uv), dtype=float)
+        return (float(physical[0, 0]), float(physical[0, 1]))
+
+    def lift(self, point):
+        self.chart._current()
+        values = np.asarray(self.chart.evaluate(np.asarray([[float(point[0]), float(point[1])]], dtype=float)), dtype=float)
+        if values.shape != (1, 3) or not np.all(np.isfinite(values)):
+            raise MeshError("cylindrical chart lift returned an invalid point")
+        return (float(values[0, 0]), float(values[0, 1]), float(values[0, 2]))
+
+
+@dataclass(frozen=True)
+class ConicalQuadDomain:
+    """Analytic owner Cone face expressed in an exact developable chart."""
+
+    model_id: str
+    revision: int
+    face_id: int
+    chart: object
+    vertex_ids: tuple[int, ...]
+    edge_uses: tuple[tuple[int, bool], ...]
+    outer_chart: tuple[Vec2, ...]
+    hole_vertex_loops: tuple[tuple[int, ...], ...] = ()
+    hole_edge_uses: tuple[tuple[tuple[int, bool], ...], ...] = ()
+    hole_charts: tuple[tuple[Vec2, ...], ...] = ()
+    outer_area: float = 0.0
+    hole_areas: tuple[float, ...] = ()
+    area: float = 0.0
+
+    @staticmethod
+    def _vertices_from_uses(geometry, uses):
+        vertices: list[int] = []
+        expected = None
+        for edge_id, forward in uses:
+            edge = geometry.edges[int(edge_id)]
+            start, end = (edge.start, edge.end) if bool(forward) else (edge.end, edge.start)
+            if expected is not None and int(start) != expected:
+                raise MeshError("conical boundary loop is not connected")
+            vertices.append(int(start))
+            expected = int(end)
+        if not vertices or expected != vertices[0] or len(set(vertices)) != len(vertices):
+            raise MeshError("conical boundary loop is invalid")
+        return tuple(vertices)
+
+    @staticmethod
+    def _project_positions(chart, positions):
+        projection = chart.face_chart.project(np.asarray(positions, dtype=float))
+        scale = max(abs(float(chart.radius_start)), abs(float(chart.radius_end)), abs(float(chart.height)), 1.0)
+        if np.any(projection.distances > 1.0e-9 * scale):
+            raise MeshError("conical source boundary is not on its owner face")
+        physical = np.asarray(chart.to_chart(projection.uv), dtype=float)
+        if physical.shape != (len(positions), 2) or not np.all(np.isfinite(physical)):
+            raise MeshError("conical physical chart projection is invalid")
+        return tuple((float(row[0]), float(row[1])) for row in physical)
+
+    @classmethod
+    def from_geometry(cls, geometry, face_id):
+        from .._conical_chart import ConicalMetricChart
+
+        if int(face_id) not in geometry.faces:
+            raise MeshError(f"unknown conical face {face_id}")
+        chart = ConicalMetricChart.from_geometry(geometry, int(face_id))
+        face = geometry.faces[int(face_id)]
+        source_loop = tuple(face.loop)
+        if len(source_loop) < 3:
+            raise MeshError("conical quad face needs at least three boundary edges")
+        edge_uses = tuple((int(item.edge), bool(item.forward)) for item in source_loop)
+        vertices = cls._vertices_from_uses(geometry, edge_uses)
+        positions = [geometry.vertex_position(vertex) for vertex in vertices]
+        outer_chart = cls._project_positions(chart, positions)
+        scale = max(abs(float(chart.radius_start)), abs(float(chart.radius_end)), abs(float(chart.height)), 1.0)
+        tol = 1.0e-10 * scale
+        signed = _signed_chart_area(outer_chart)
+        if abs(signed) <= tol * tol:
+            raise MeshError("conical quad face has zero physical chart area")
+        if signed < 0.0:
+            edge_uses = tuple((edge_id, not forward) for edge_id, forward in reversed(edge_uses))
+            vertices = cls._vertices_from_uses(geometry, edge_uses)
+            positions = [geometry.vertex_position(vertex) for vertex in vertices]
+            outer_chart = cls._project_positions(chart, positions)
+            signed = _signed_chart_area(outer_chart)
+        if signed <= tol * tol:
+            raise MeshError("conical quad outer chart is not positively oriented")
+
+        hole_vertex_loops = []
+        hole_edge_uses = []
+        hole_charts = []
+        hole_areas = []
+        for index, hole in enumerate(tuple(getattr(face, "holes", ()) or ())):
+            uses = tuple((int(item.edge), bool(item.forward)) for item in tuple(hole))
+            hole_vertices = cls._vertices_from_uses(geometry, uses)
+            hole_positions = [geometry.vertex_position(vertex) for vertex in hole_vertices]
+            hole_chart = cls._project_positions(chart, hole_positions)
+            hole_area = abs(_signed_chart_area(hole_chart))
+            if hole_area <= tol * tol:
+                raise MeshError(f"conical hole {index} has zero chart area")
+            hole_vertex_loops.append(hole_vertices)
+            hole_edge_uses.append(uses)
+            hole_charts.append(hole_chart)
+            hole_areas.append(float(hole_area))
+
+        outer_area = float(signed)
+        area = outer_area - float(sum(hole_areas))
+        if area <= tol * tol:
+            raise MeshError("conical quad face area is not positive")
+        result = cls(
+            str(geometry.model_id), int(geometry.revision), int(face_id), chart,
+            vertices, edge_uses, outer_chart,
+            tuple(hole_vertex_loops), tuple(hole_edge_uses), tuple(hole_charts),
+            outer_area, tuple(hole_areas), float(area),
+        )
+        result.assert_current(geometry)
+        return result
+
+    def assert_current(self, geometry):
+        if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:
+            raise MeshError("source geometry changed after conical-domain capture")
+        self.chart._current()
+
+    def project(self, point):
+        self.chart._current()
+        projection = self.chart.face_chart.project(
+            np.asarray([tuple(map(float, point))], dtype=float)
+        )
+        scale = max(
+            abs(float(self.chart.radius_start)),
+            abs(float(self.chart.radius_end)),
+            abs(float(self.chart.height)),
+            1.0,
+        )
+        if float(projection.distances[0]) > 1.0e-9 * scale:
+            raise MeshError("point is not on the owner conical face")
+        physical = np.asarray(self.chart.to_chart(projection.uv), dtype=float)
+        return (float(physical[0, 0]), float(physical[0, 1]))
+
+    def lift(self, point):
+        self.chart._current()
+        values = np.asarray(
+            self.chart.evaluate(
+                np.asarray([[float(point[0]), float(point[1])]], dtype=float)
+            ),
+            dtype=float,
+        )
+        if values.shape != (1, 3) or not np.all(np.isfinite(values)):
+            raise MeshError("conical chart lift returned an invalid point")
+        return (float(values[0, 0]), float(values[0, 1]), float(values[0, 2]))
+
+
+@dataclass(frozen=True)
+class ParametricQuadDomain:
+    """Revision-bound owner face in a centre-metric-normalized chart."""
+    model_id: str
+    revision: int
+    face_id: int
+    chart: object
+    transform: tuple[tuple[float, float], tuple[float, float]]
+    inverse_transform: tuple[tuple[float, float], tuple[float, float]]
+    vertex_ids: tuple[int, ...]
+    edge_uses: tuple[tuple[int, bool], ...]
+    outer_chart: tuple[Vec2, ...]
+    hole_vertex_loops: tuple[tuple[int, ...], ...] = ()
+    hole_edge_uses: tuple[tuple[tuple[int, bool], ...], ...] = ()
+    hole_charts: tuple[tuple[Vec2, ...], ...] = ()
+    outer_area: float = 0.0
+    hole_areas: tuple[float, ...] = ()
+    area: float = 0.0
+
+    @staticmethod
+    def _vertices_from_uses(geometry, uses):
+        vertices: list[int] = []
+        expected = None
+        for edge_id, forward in uses:
+            edge = geometry.edges[int(edge_id)]
+            start, end = (edge.start, edge.end) if bool(forward) else (edge.end, edge.start)
+            if expected is not None and int(start) != expected:
+                raise MeshError("parametric boundary loop is not connected")
+            vertices.append(int(start)); expected = int(end)
+        if not vertices or expected != vertices[0] or len(set(vertices)) != len(vertices):
+            raise MeshError("parametric boundary loop is invalid")
+        return tuple(vertices)
+
+    @classmethod
+    def from_geometry(cls, geometry, face_id):
+        from ..charts import FaceChart
+        if int(face_id) not in geometry.faces:
+            raise MeshError(f"unknown parametric face {face_id}")
+        chart = FaceChart(geometry, int(face_id))
+        metric = np.asarray(
+            chart.metric(np.asarray([[0.5, 0.5]], dtype=float), 1.0)[0],
+            dtype=float,
+        )
+        if metric.shape != (2, 2) or not np.all(np.isfinite(metric)):
+            raise MeshError("parametric face metric is invalid")
+        try:
+            transform = np.linalg.cholesky(metric).T
+            inverse = np.linalg.inv(transform)
+        except np.linalg.LinAlgError as exc:
+            raise MeshError("parametric face metric is singular") from exc
+        face = geometry.faces[int(face_id)]
+        edge_uses = tuple((int(item.edge), bool(item.forward)) for item in tuple(face.loop))
+        vertices = cls._vertices_from_uses(geometry, edge_uses)
+
+        def project_positions(ids):
+            xyz = np.asarray([geometry.vertex_position(v) for v in ids], dtype=float)
+            projection = chart.project(xyz)
+            scale = max(float(np.linalg.norm(transform, ord=2)), 1.0)
+            if np.any(projection.distances > 1.0e-9 * scale):
+                raise MeshError("parametric source boundary is not on its owner face")
+            made = np.asarray(projection.uv, dtype=float) @ transform.T
+            return tuple((float(row[0]), float(row[1])) for row in made)
+
+        outer_chart = project_positions(vertices)
+        signed = _signed_chart_area(outer_chart)
+        tol = 1.0e-12 * max(float(np.linalg.norm(transform, ord=2)), 1.0)
+        if abs(signed) <= tol * tol:
+            raise MeshError("parametric quad face has zero chart area")
+        if signed < 0.0:
+            edge_uses = tuple(
+                (edge_id, not forward) for edge_id, forward in reversed(edge_uses)
+            )
+            vertices = cls._vertices_from_uses(geometry, edge_uses)
+            outer_chart = project_positions(vertices)
+            signed = _signed_chart_area(outer_chart)
+        if signed <= tol * tol:
+            raise MeshError("parametric quad outer chart is not positively oriented")
+        hole_vertex_loops = []
+        hole_edge_uses = []
+        hole_charts = []
+        hole_areas = []
+        for index, hole in enumerate(tuple(getattr(face, "holes", ()) or ())):
+            uses = tuple((int(item.edge), bool(item.forward)) for item in tuple(hole))
+            ids = cls._vertices_from_uses(geometry, uses)
+            made = project_positions(ids)
+            hole_area = abs(_signed_chart_area(made))
+            if hole_area <= tol * tol:
+                raise MeshError(f"parametric hole {index} has zero chart area")
+            hole_vertex_loops.append(ids)
+            hole_edge_uses.append(uses)
+            hole_charts.append(made)
+            hole_areas.append(float(hole_area))
+        area = float(signed) - float(sum(hole_areas))
+        if area <= tol * tol:
+            raise MeshError("parametric quad face area is not positive")
+        result = cls(
+            str(geometry.model_id), int(geometry.revision), int(face_id), chart,
+            tuple(tuple(map(float, row)) for row in transform),
+            tuple(tuple(map(float, row)) for row in inverse),
+            vertices, edge_uses, outer_chart,
+            tuple(hole_vertex_loops), tuple(hole_edge_uses), tuple(hole_charts),
+            float(signed), tuple(hole_areas), area,
+        )
+        result.assert_current(geometry)
+        return result
+
+    def assert_current(self, geometry):
+        if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:
+            raise MeshError("source geometry changed after parametric-domain capture")
+
+    def project(self, point):
+        self.assert_current(self.chart.geometry)
+        projection = self.chart.project(
+            np.asarray([tuple(map(float, point))], dtype=float)
+        )
+        scale = max(float(np.linalg.norm(np.asarray(self.transform), ord=2)), 1.0)
+        if float(projection.distances[0]) > 1.0e-9 * scale:
+            raise MeshError("point is not on the owner parametric face")
+        made = np.asarray(self.transform, dtype=float) @ np.asarray(
+            projection.uv[0], dtype=float
+        )
+        return (float(made[0]), float(made[1]))
+
+    def lift(self, point):
+        self.assert_current(self.chart.geometry)
+        uv = np.asarray(self.inverse_transform, dtype=float) @ np.asarray(
+            (float(point[0]), float(point[1])), dtype=float
+        )
+        tol = 1.0e-10
+        if np.any(uv < -tol) or np.any(uv > 1.0 + tol):
+            raise MeshError("parametric chart point lies outside owner UV bounds")
+        uv = np.clip(uv, 0.0, 1.0)
+        xyz = np.asarray(
+            self.chart.evaluate(np.asarray([uv], dtype=float)), dtype=float
+        )
+        if xyz.shape != (1, 3) or not np.all(np.isfinite(xyz)):
+            raise MeshError("parametric chart lift returned an invalid point")
+        return tuple(map(float, xyz[0]))

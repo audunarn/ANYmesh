@@ -518,7 +518,7 @@ def generate_mesh_with_intersections(
     target_size: float,
     overrides: Mapping[int, int] | None = None,
     beam_edges: Iterable[int] = (),
-    beam_offsets: Mapping[int, float] | None = None,
+    beam_offsets: Mapping[int, float | Sequence[float]] | None = None,
     face_ids: Iterable[int] | None = None,
     seeding: Seeding | None = None,
     refinements: Iterable[Refinement] = (),
@@ -544,7 +544,7 @@ def generate_mesh_with_intersections(
         for child in prepared.descendants("edge", edge_id)
     )
     child_offsets = {
-        child: float((beam_offsets or {}).get(edge_id, 0.0))
+        child: (beam_offsets or {}).get(edge_id, 0.0)
         for edge_id in original_beams
         for child in prepared.descendants("edge", edge_id)
     }

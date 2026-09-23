@@ -30,6 +30,7 @@ from anygeometry.model import GeometryModel
 from anygeometry.overlaps import find_coplanar_overlaps
 from anygeometry.policies import ConnectionIntent
 from anygeometry.predicates import IntersectionKind
+from anygeometry.surfaces import Cylinder, Plane
 
 from .errors import MeshError
 
@@ -139,6 +140,7 @@ class StructuralPreparationReport:
     source_to_working_edges: Mapping[int, tuple[int, ...]]
     temporary_sheet_ids: tuple[int, ...] = ()
     temporary_member_ids: tuple[int, ...] = ()
+    declared_face_connection_edges: tuple[int, ...] = ()
     candidate_queries: int = 0
     applications: int = 0
     face_connections: int = 0
@@ -182,6 +184,11 @@ class StructuralPreparationReport:
             "temporary_member_ids",
             tuple(sorted(set(map(int, self.temporary_member_ids)))),
         )
+        object.__setattr__(
+            self,
+            "declared_face_connection_edges",
+            tuple(sorted(set(map(int, self.declared_face_connection_edges)))),
+        )
         for name in (
             "candidate_queries",
             "applications",
@@ -208,6 +215,9 @@ class StructuralPreparationReport:
             },
             "temporary_sheet_ids": list(self.temporary_sheet_ids),
             "temporary_member_ids": list(self.temporary_member_ids),
+            "declared_face_connection_edges": list(
+                self.declared_face_connection_edges
+            ),
             "candidate_queries": self.candidate_queries,
             "applications": self.applications,
             "face_connections": self.face_connections,
@@ -295,16 +305,66 @@ def _share_boundary(geometry: GeometryModel, first: int, second: int) -> bool:
     the already-shared point.
     """
 
+    return bool(_shared_boundary_edges(geometry, first, second))
+
+
+def _shared_boundary_edges(
+    geometry: GeometryModel,
+    first: int,
+    second: int,
+) -> tuple[int, ...]:
     first_loops = (geometry.faces[first].loop,) + geometry.faces[first].holes
     second_loops = (geometry.faces[second].loop,) + geometry.faces[second].holes
-    first_edges = {
-        item.edge
-        for loop in first_loops
-        for item in loop
-    }
-    if any(item.edge in first_edges for loop in second_loops for item in loop):
-        return True
-    return False
+    first_edges = {item.edge for loop in first_loops for item in loop}
+    return tuple(
+        sorted(
+            {
+                item.edge
+                for loop in second_loops
+                for item in loop
+                if item.edge in first_edges
+            }
+        )
+    )
+
+
+def _shared_transverse_plate_edges(
+    geometry: GeometryModel,
+    first: int,
+    second: int,
+    shared_edges: tuple[int, ...],
+) -> tuple[int, ...]:
+    first_surface = geometry.faces[first].surface
+    second_surface = geometry.faces[second].surface
+    if isinstance(first_surface, Plane) and isinstance(second_surface, Plane):
+        first_normal = np.asarray(first_surface.normal, dtype=float)
+        second_normal = np.asarray(second_surface.normal, dtype=float)
+        normal_scale = float(
+            np.linalg.norm(first_normal) * np.linalg.norm(second_normal)
+        )
+        if normal_scale <= 0.0:
+            return ()
+        transverse = float(np.linalg.norm(np.cross(first_normal, second_normal)))
+        return shared_edges if transverse > 1.0e-12 * normal_scale else ()
+
+    plane = (
+        first_surface
+        if isinstance(first_surface, Plane)
+        else second_surface if isinstance(second_surface, Plane) else None
+    )
+    cylinder = (
+        first_surface
+        if isinstance(first_surface, Cylinder)
+        else second_surface if isinstance(second_surface, Cylinder) else None
+    )
+    if plane is None or cylinder is None:
+        return ()
+    # A plane normal parallel to the cylinder axis meets the cylindrical
+    # shell transversely around a ring.  Such a ring may already exist as a
+    # generator boundary and can legitimately carry four shell elements
+    # (two axial cylinder bands plus the two sides of the partitioned plate).
+    alignment = abs(float(np.asarray(plane.normal) @ np.asarray(cylinder.axis)))
+    return shared_edges if abs(alignment - 1.0) <= 1.0e-10 else ()
 
 
 def _is_resolved_shared_vertex_touch(
@@ -564,13 +624,13 @@ def _apply_connection(
     first_id: int,
     second_kind: str,
     second_id: int,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, tuple[int, ...]]:
     first = geometry.handle(first_kind, first_id)
     second = geometry.handle(second_kind, second_id)
     try:
         result = query_intersection(geometry, first, second)
         if result.kind is IntersectionKind.DISJOINT:
-            return False, None
+            return False, None, ()
         if (
             first_kind == "face"
             and second_kind == "face"
@@ -578,7 +638,7 @@ def _apply_connection(
                 geometry, first_id, second_id, result
             )
         ):
-            return False, "exact shared vertex topology"
+            return False, "exact shared vertex topology", ()
         if (
             first_kind == "member"
             and second_kind == "member"
@@ -586,7 +646,7 @@ def _apply_connection(
                 geometry, first_id, second_id, result
             )
         ):
-            return False, "exact shared member vertex topology"
+            return False, "exact shared member vertex topology", ()
         plan = plan_imprint(
             geometry,
             result,
@@ -595,7 +655,7 @@ def _apply_connection(
         if plan.operation is ImprintOperation.NO_TOPOLOGY:
             diagnostics = "; ".join(result.diagnostics)
             if result.kind is IntersectionKind.UNSUPPORTED:
-                return False, diagnostics
+                return False, diagnostics, ()
             raise MeshError(
                 f"unqualified {first_kind}/{second_kind} relationship "
                 f"{first_id}/{second_id}: {diagnostics or result.kind.value}"
@@ -611,7 +671,14 @@ def _apply_connection(
             f"{first_id}/{second_id}: {error}"
         ) from error
     changed = not application.change_set.is_empty
-    return changed, None
+    declared_edges = (
+        tuple(int(item.id) for item in application.face_intersection.edges)
+        if first_kind == "face"
+        and second_kind == "face"
+        and application.face_intersection is not None
+        else ()
+    )
+    return changed, None, declared_edges
 
 
 def _report_hash(report: StructuralPreparationReport) -> str:
@@ -626,6 +693,42 @@ def _report_hash(report: StructuralPreparationReport) -> str:
     return "sha256:" + sha256(encoded).hexdigest()
 
 
+def _restore_collinear_mapped_corners(
+    source: GeometryModel,
+    working: GeometryModel,
+    face_mapping: Mapping[int, tuple[int, ...]],
+) -> None:
+    """Restore mapped corners lost only to collinear imprint side splits."""
+
+    angular_tolerance = 1.0e-7
+    for source_face_id, descendants in face_mapping.items():
+        if len(source.faces[source_face_id].corners) != 4:
+            continue
+        for face_id in descendants:
+            face = working.faces[face_id]
+            if len(face.corners) == 4 or face.holes or len(face.loop) < 4:
+                continue
+            deviations: list[float] = []
+            for index in range(len(face.loop)):
+                incoming = working.oriented_end_tangent(face.loop[index - 1])
+                outgoing = working.oriented_start_tangent(face.loop[index])
+                cosine = float(np.clip(incoming @ outgoing, -1.0, 1.0))
+                deviations.append(float(np.arccos(cosine)))
+            ranked = sorted(
+                range(len(face.loop)),
+                key=lambda index: (-deviations[index], index),
+            )
+            corners = tuple(sorted(ranked[:4]))
+            if min(deviations[index] for index in corners) <= angular_tolerance:
+                continue
+            if any(
+                deviations[index] > angular_tolerance
+                for index in ranked[4:]
+            ):
+                continue
+            working.set_face_corners(face_id, corners)
+
+
 def prepare_structural_closure(
     geometry: GeometryModel,
     *,
@@ -633,12 +736,14 @@ def prepare_structural_closure(
     beam_edges: Iterable[int] = (),
     options: StructuralPreparationOptions | Mapping[str, Any] | bool | None = None,
     cancellation_check: CancellationCheck | None = None,
+    reuse_working_copy: bool = False,
 ) -> tuple[GeometryModel, StructuralPreparationReport | None]:
     """Return an exact, source-bound structural working closure.
 
-    ``False`` disables automatic relationship creation but still returns a
-    detached clone.  Every path therefore gives the mesh job an immutable
-    working document and is resource bounded.
+    ``False`` disables automatic relationship creation. By default every path
+    returns a detached clone. ``reuse_working_copy`` is reserved for callers
+    that already own an isolated mesh-job closure and explicitly permit owner
+    finalization on that closure.
     """
 
     policy = StructuralPreparationOptions.create(options)
@@ -679,6 +784,13 @@ def prepare_structural_closure(
     for position, pair in enumerate(source_face_candidates):
         if position % 16 == 0:
             _cancel(cancellation_check, "structural preparation overlap narrow phase")
+        from ._owner_trim_domains import validated_complementary_trim_domains
+
+        if validated_complementary_trim_domains(
+            geometry, *pair, cancellation_check=cancellation_check,
+        ):
+            continue
+
         overlaps.extend(
             find_coplanar_overlaps(geometry, candidate_pairs=(pair,))
         )
@@ -694,12 +806,17 @@ def prepare_structural_closure(
             f"({detail}); run the previewable Fragment Overlaps geometry command"
         )
 
-    working = geometry.clone(include_features=False)
+    working = (
+        geometry
+        if reuse_working_copy
+        else geometry.clone(include_features=False)
+    )
     temporary_sheets: list[int] = []
     temporary_members: list[int] = []
     diagnostics: list[str] = []
     queries = applications = 0
     face_connections = member_connections = member_sheet_connections = 0
+    declared_face_connection_edges: set[int] = set()
 
     face_sheet_membership = _face_sheet_membership(working)
     if policy.declare_missing_owners:
@@ -756,7 +873,11 @@ def prepare_structural_closure(
             for pair in candidates:
                 if pair in settled or origin[pair[0]] == origin[pair[1]]:
                     continue
-                if _share_boundary(working, *pair):
+                shared_edges = _shared_boundary_edges(working, *pair)
+                if shared_edges:
+                    declared_face_connection_edges.update(
+                        _shared_transverse_plate_edges(working, *pair, shared_edges)
+                    )
                     settled.add(pair)
                     continue
                 queries += 1
@@ -767,9 +888,10 @@ def prepare_structural_closure(
                     )
                 if queries % 64 == 0:
                     _cancel(cancellation_check, "structural face candidate queries")
-                made, note = _apply_connection(
+                made, note, connection_edges = _apply_connection(
                     working, "face", pair[0], "face", pair[1]
                 )
+                declared_face_connection_edges.update(connection_edges)
                 if note:
                     diagnostics.append(f"faces {pair[0]}/{pair[1]}: {note}")
                 if made:
@@ -856,7 +978,7 @@ def prepare_structural_closure(
                         f"structural {group} candidate queries",
                     )
                 if group == "member":
-                    made, note = _apply_connection(
+                    made, note, _connection_edges = _apply_connection(
                         working, "member", first, "member", second
                     )
                 else:
@@ -866,7 +988,7 @@ def prepare_structural_closure(
                         )
                         settled.add((first, second))
                         continue
-                    made, note = _apply_connection(
+                    made, note, _connection_edges = _apply_connection(
                         working, "member", first, "sheet", second
                     )
                 if note:
@@ -899,6 +1021,7 @@ def prepare_structural_closure(
         face_id: _resolved(working, "face", face_id)
         for face_id in geometry.faces
     }
+    _restore_collinear_mapped_corners(geometry, working, face_mapping)
     edge_mapping: dict[int, tuple[int, ...]] = {}
     for position, edge_id in enumerate(geometry.edges):
         if position % 512 == 0:
@@ -913,6 +1036,15 @@ def prepare_structural_closure(
         source_to_working_edges=edge_mapping,
         temporary_sheet_ids=tuple(temporary_sheets),
         temporary_member_ids=tuple(temporary_members),
+        declared_face_connection_edges=tuple(
+            sorted(
+                {
+                    descendant
+                    for edge_id in declared_face_connection_edges
+                    for descendant in _resolved(working, "edge", edge_id)
+                }
+            )
+        ),
         candidate_queries=queries,
         applications=applications,
         face_connections=face_connections,

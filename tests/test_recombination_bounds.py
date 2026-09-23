@@ -58,7 +58,9 @@ def test_local_exchange_avoids_greedy_stranding(
         }
 
     monkeypatch.setattr("anymesher.recombine.quad_candidate_quality", quality)
-    report = recombine_triangles_with_report(MeshCore(points, triangles))
+    report = recombine_triangles_with_report(
+        MeshCore(points, triangles), _use_native=False
+    )
 
     assert report.exchange_count == 1
     assert report.pair_count == 2
@@ -94,7 +96,9 @@ def test_exchange_work_is_hard_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     )
 
-    report = recombine_triangles_with_report(mesh, max_exchange_work=1)
+    report = recombine_triangles_with_report(
+        mesh, max_exchange_work=1, _use_native=False
+    )
 
     assert report.exchange_work == 1
     assert report.exchange_truncated

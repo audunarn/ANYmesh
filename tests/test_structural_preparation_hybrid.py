@@ -3,6 +3,7 @@ from __future__ import annotations
 from anygeometry import EntityRef, GeometryModel
 from anygeometry.serialization import to_dict
 from anygeometry.generators import stiffened_panel
+import numpy as np
 import pytest
 
 from anymesher.hybrid import generate_hybrid_mesh_result
@@ -157,6 +158,33 @@ def test_clone_only_mode_preserves_vertex_bound_refinement() -> None:
     assert to_dict(geometry) == before
 
 
+def test_prepared_working_copy_can_skip_the_second_clone(monkeypatch) -> None:
+    geometry = GeometryModel()
+    face = geometry.add_plate(
+        geometry.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)))
+    )
+    geometry.add_sheet((face,))
+    before = to_dict(geometry)
+
+    def unexpected_clone(*_args, **_kwargs):
+        raise AssertionError("an explicit prepared working copy was cloned")
+
+    monkeypatch.setattr(GeometryModel, "clone", unexpected_clone)
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.5,
+        strategy="mapped",
+        structural_preparation=False,
+        mutation_policy="working_copy",
+    )
+
+    assert result.mesh.elements_of_face[face]
+    assert result.structural_preparation is not None
+    assert result.structural_preparation.applications == 0
+    assert result.mesh.hybrid_diagnostics["reused_prepared_working_copy"] is True
+    assert to_dict(geometry) == before
+
+
 def test_default_coplanar_stiffener_connects_and_retains_eccentricity() -> None:
     geometry = GeometryModel()
     face = geometry.add_plate(
@@ -182,6 +210,38 @@ def test_default_coplanar_stiffener_connects_and_retains_eccentricity() -> None:
     )
     assert result.mesh.couplings
     assert not result.connectivity.issues
+
+
+def test_coplanar_stiffener_accepts_exact_vector_eccentricity() -> None:
+    geometry = GeometryModel()
+    face = geometry.add_plate(
+        geometry.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)))
+    )
+    beam = geometry.add_line(
+        *geometry.add_points(((0, 0.5, 0), (2, 0.5, 0)))
+    )
+    requested = np.asarray((0.0, 0.025, 0.075))
+
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.25,
+        face_ids=(face,),
+        beam_edges=(beam,),
+        beam_offsets={beam: requested},
+    )
+
+    offset_nodes = result.mesh.offset_nodes_of_edge[beam]
+    base_nodes = result.mesh.nodes_of_edge[beam]
+    assert offset_nodes
+    for base, offset in zip(base_nodes, offset_nodes):
+        assert result.mesh.nodes[offset] - result.mesh.nodes[base] == pytest.approx(
+            requested
+        )
+    assert result.mesh.couplings
+    assert all(
+        coupling.eccentricity == pytest.approx(tuple(requested))
+        for coupling in result.mesh.couplings.values()
+    )
 
 
 def test_sheet_attachment_uses_recorded_face_not_same_numbered_face() -> None:

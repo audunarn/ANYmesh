@@ -15,8 +15,10 @@ from anygeometry import (
     query_intersection,
 )
 from anygeometry.serialization import to_dict
+from anygeometry.generators import cylinder
 from anymesher import generate_hybrid_mesh, generate_mesh_with_intersections
 from anymesher.errors import MeshError
+from anymesher.preparation import prepare_structural_closure
 from anymesher.serialize import mesh_from_dict, mesh_to_dict
 
 
@@ -59,6 +61,126 @@ def test_crossing_planar_faces_are_imprinted_and_share_mesh_nodes():
     for node in shared:
         assert any(node in mesh.shells[element] for element in horizontal_elements)
         assert any(node in mesh.shells[element] for element in vertical_elements)
+
+
+def test_structured_crossing_plates_accept_only_declared_junction_edges():
+    geometry = GeometryModel()
+    horizontal = _plate(
+        geometry,
+        ((-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)),
+    )
+    vertical = _plate(
+        geometry,
+        ((0, 0, -1), (0, 2, -1), (0, 2, 1), (0, 0, 1)),
+    )
+
+    mesh = generate_hybrid_mesh(
+        geometry,
+        target_size=0.5,
+        strategy="auto",
+        structured_options={},
+        native_backend="python",
+    )
+
+    assert mesh.automatic_intersections == 1
+    assert mesh.declared_plate_junction_edges
+    assert set(mesh.elements_of_face) == {horizontal, vertical}
+    incidence: dict[tuple[int, int], list[int]] = {}
+    for element_id, connectivity in mesh.shells.items():
+        corners = mesh.corners_of(element_id)
+        for first, second in zip(corners, corners[1:] + corners[:1]):
+            edge = (min(first, second), max(first, second))
+            incidence.setdefault(edge, []).append(element_id)
+    assert all(
+        len(incidence[edge]) == 4
+        for edge in mesh.declared_plate_junction_edges
+    )
+
+    restored = mesh_from_dict(mesh_to_dict(mesh))
+    assert restored.declared_plate_junction_edges == mesh.declared_plate_junction_edges
+
+
+def test_structured_t_junction_accepts_upstream_imprinted_transverse_edge():
+    geometry = GeometryModel()
+    lower_left = geometry.add_point(0.0, 0.0, 0.0)
+    lower_right = geometry.add_point(2.0, 0.0, 0.0)
+    upper_right = geometry.add_point(2.0, 2.0, 0.0)
+    upper_left = geometry.add_point(0.0, 2.0, 0.0)
+    geometry.add_plate((lower_left, lower_right, upper_right, upper_left))
+    diagonal = geometry.add_line(lower_right, upper_left)
+    geometry.extrude((diagonal,), (0.0, 0.0, 1.0))
+
+    prepared, upstream_report = prepare_structural_closure(geometry)
+    assert upstream_report.declared_face_connection_edges == (diagonal,)
+
+    mesh = generate_hybrid_mesh(
+        prepared,
+        target_size=0.25,
+        strategy="auto",
+        structured_options={},
+        native_backend="python",
+    )
+
+    assert mesh.declared_plate_junction_edges
+    incidence: dict[tuple[int, int], list[int]] = {}
+    for element_id in mesh.shells:
+        corners = mesh.corners_of(element_id)
+        for first, second in zip(corners, corners[1:] + corners[:1]):
+            edge = (min(first, second), max(first, second))
+            incidence.setdefault(edge, []).append(element_id)
+    assert all(
+        len(incidence[edge]) == 3
+        for edge in mesh.declared_plate_junction_edges
+    )
+
+
+def test_structured_mesh_accepts_plate_on_existing_cylinder_ring() -> None:
+    geometry = cylinder(
+        0.5,
+        2.0,
+        circumferential_segments=12,
+        longitudinal_spacing=0.5,
+        ring_spacing=1.0,
+    )
+    cylinder_faces = tuple(reference.id for reference in geometry.group("shell"))
+    plate = _plate(
+        geometry,
+        (
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ),
+    )
+
+    mesh = generate_hybrid_mesh(
+        geometry,
+        target_size=0.25,
+        strategy="auto",
+        beam_edges=(),
+        member_ids=(),
+        structured_options={
+            "quality_policy": {
+                "minimum_scaled_jacobian": 0.1,
+                "maximum_aspect_ratio": 5.0,
+                "minimum_angle": 20.0,
+                "maximum_angle": 160.0,
+                "maximum_warpage": 0.1,
+            }
+        },
+        native_backend="python",
+    )
+
+    cylinder_nodes = {
+        node
+        for face_id in cylinder_faces
+        for node in mesh.nodes_on(EntityRef("face", face_id))
+    }
+    plate_nodes = set(mesh.nodes_on(EntityRef("face", plate)))
+    assert len(cylinder_nodes & plate_nodes) == 12
+    assert len(mesh.declared_plate_junction_edges) >= 12
+    assert not mesh.beams
+    assert mesh.hybrid_diagnostics["structured_quality"]["accepted"] is True
 
 
 def test_intersection_diagnostic_survives_mesh_round_trip():
@@ -295,7 +417,12 @@ def test_positive_area_coplanar_overlap_is_blocked_before_double_stiffness():
     with pytest.raises(MeshError, match=r"positive-area.*overlap.*1 m\^2"):
         generate_mesh_with_intersections(geometry, target_size=0.25)
 
-    result = fragment_coplanar_overlaps(geometry, tuple(geometry.faces))
+    from anygeometry import OverlapOwnershipPolicy
+
+    result = fragment_coplanar_overlaps(
+        geometry, tuple(geometry.faces),
+        ownership_policy=OverlapOwnershipPolicy.FIRST_SELECTED,
+    )
     mesh = generate_mesh_with_intersections(geometry, target_size=0.25)
     assert len(result.outputs) == 3
     assert set(mesh.elements_of_face) == set(geometry.faces)

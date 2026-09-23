@@ -336,7 +336,8 @@ class MeshElementBVH:
             ]
         )
         axis = int(np.argmax(np.ptp(centers, axis=0)))
-        ordered = tuple(sorted(identifiers, key=lambda item: (centers[identifiers.index(item), axis], item)))
+        positions = {identifier: position for position, identifier in enumerate(identifiers)}
+        ordered = tuple(sorted(identifiers, key=lambda item: (centers[positions[item], axis], item)))
         middle = len(ordered) // 2
         return _Node(
             lower,

@@ -6,7 +6,7 @@ from anygeometry.surfaces import Plane
 import numpy as np
 import pytest
 
-from anymesher import MeshError
+from anymesher import MeshError, NativeMeshingOptions
 from anymesher.hybrid import generate_hybrid_mesh_result
 from anymesher.seeding import solve_seeding
 
@@ -152,6 +152,33 @@ def test_auto_uses_quality_gated_native_fallback() -> None:
     assert quality["selected_mesh"] == "native_fallback"
     assert quality["rejected_candidate"]["growth_violation_count"] > 0
     assert quality["accepted_fallback"]["growth_violation_count"] == 0
+
+
+def test_recursive_native_fallback_retains_caller_options(monkeypatch) -> None:
+    from anymesher import hybrid
+
+    geometry, face = _plate(
+        ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.2, 1.0, 0.0))
+    )
+    native = NativeMeshingOptions(
+        point_placement="frontal_delaunay", max_insertions=16
+    )
+    original = hybrid.generate_hybrid_mesh_result
+    recursive_options = []
+
+    def traced(*args, **kwargs):
+        recursive_options.append(kwargs.get("native_options"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hybrid, "generate_hybrid_mesh_result", traced)
+    result = original(
+        geometry, target_size=0.25, strategy="auto",
+        structured_options={"max_element_growth": 1.27},
+        native_backend="python", native_options=native,
+    )
+    assert result.strategy_by_face == {face: "native"}
+    assert result.structured_layout.status == "rejected_fallback"
+    assert recursive_options and all(option is native for option in recursive_options)
 
 
 def test_explicit_mapped_rejects_structured_quality_failure() -> None:

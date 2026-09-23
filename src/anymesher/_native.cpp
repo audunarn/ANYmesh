@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "_triangulation_native.hpp"
+#include "_quality_pipeline_native.hpp"
+#include "_native_v2.hpp"
 
 namespace {
 
@@ -310,6 +312,34 @@ PyMethodDef methods[] = {
     {"triangle_adjacency", py_triangle_adjacency, METH_O, "Deterministic edge incidence for triangle connectivity."},
     {"constrained_triangulate", anymesher_native::py_constrained_triangulate, METH_VARARGS,
      "Deterministic constrained triangulation over canonical prepared PSLG buffers."},
+    {"pslg_segment_memberships", anymesher_quality_native::py_pslg_segment_memberships, METH_VARARGS,
+     "Batch deterministic point-on-segment memberships."},
+    {"pslg_domain_classification", anymesher_quality_native::py_pslg_domain_classification, METH_VARARGS,
+     "Batch deterministic PSLG domain classification."},
+    {"validate_triangulation", anymesher_quality_native::py_validate_triangulation, METH_VARARGS,
+     "Validate and canonicalize a compiled triangulation."},
+    {"recombine_decisions", anymesher_quality_native::py_recombine_decisions, METH_VARARGS,
+     "Select deterministic quality-qualified triangle pairs."},
+    {"element_quality", anymesher_quality_native::py_element_quality, METH_VARARGS,
+     "Evaluate triangle or quadrilateral quality in one native batch."},
+    {"native_v2_metric_lengths", anymesher_native_v2::py_metric_lengths, METH_VARARGS,
+     "Evaluate physical metric edge lengths with the GIL released."},
+    {"native_v2_gradation_limit", anymesher_native_v2::py_gradation_limit, METH_VARARGS,
+     "Apply deterministic scalar metric gradation limiting."},
+    {"native_v2_gradation_limit_cancellable", anymesher_native_v2::py_gradation_limit, METH_VARARGS,
+     "Limit metric gradation with bounded host cancellation checkpoints."},
+    {"native_v2_t3_incidence", anymesher_native_v2::py_t3_incidence, METH_VARARGS,
+     "Prepare an immutable persistent T3 incidence snapshot."},
+    {"native_v2_t3_incidence_check", anymesher_native_v2::py_t3_incidence_check, METH_VARARGS,
+     "Require exact connectivity binding for a T3 snapshot."},
+    {"native_v2_mutable_t3_insert", anymesher_native_v2::py_mutable_t3_insert, METH_VARARGS,
+     "Perform one atomic deterministic mutable-T3 cavity insertion."},
+    {"native_v2_mutable_t3_insert_cancellable", anymesher_native_v2::py_mutable_t3_insert, METH_VARARGS,
+     "Perform detached T3 insertion with bounded host cancellation checkpoints."},
+    {"native_v2_local_edge_flip", anymesher_native_v2::py_local_edge_flip, METH_VARARGS,
+     "Perform deterministic metric local-edge flips with the GIL released."},
+    {"native_v2_constrained_smoothing", anymesher_native_v2::py_constrained_smoothing, METH_VARARGS,
+     "Perform deterministic constrained smoothing with the GIL released."},
     {nullptr, nullptr, 0, nullptr},
 };
 

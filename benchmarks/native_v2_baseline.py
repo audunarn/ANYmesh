@@ -1,0 +1,920 @@
+"""Content-addressed native-v2 benchmark and acceptance contract.
+
+Heavy scales are never run by CI. ``check-evidence`` executes a fixed bounded
+native corpus; ``run`` performs one warmup and exactly seven samples.
+"""
+
+from __future__ import annotations
+
+import argparse
+from hashlib import sha256
+from importlib import metadata
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import statistics
+import subprocess
+import sys
+from time import perf_counter
+from typing import Any
+
+import numpy as np
+
+from native_v2_cylinder_cases import CYLINDER_CASES, cylinder_case
+
+
+WARMUPS = 1
+MEASUREMENTS = 7
+SCALES = {"10k": 10_000, "100k": 100_000, "500k": 500_000}
+PERFORMANCE_CASES = (
+    "mapped_zero_use",
+    "planar",
+    "hole",
+    "narrow_ligament",
+    "intersection",
+    "declared_junction",
+    "rotated",
+    *CYLINDER_CASES,
+)
+FROZEN_EVIDENCE_TESTS = (
+    "tests/test_native_backend_defaults.py::test_present_partial_native_v2_abi_fails_hard",
+    "tests/test_native_v2_foundation.py::test_loaded_extension_with_zero_native_v2_symbols_fails_hard",
+    "tests/test_native_v2_foundation.py::test_large_native_metric_and_gradation_kernels_match_python_oracle",
+    "tests/test_native_v2_foundation.py::test_mutable_t3_python_cpp_parity",
+    "tests/test_native_v2_foundation.py::test_native_v2_physical_gradation_matches_python_oracle",
+    "tests/test_native_v2_foundation.py::test_native_v2_uncertain_orientation_and_near_cocircle_use_or_match_oracle",
+    "tests/test_native_v2_foundation.py::test_native_v2_material_loop_honors_python_signal",
+    "tests/test_native_v2_foundation.py::test_mutable_t3_preserves_retained_owners_and_fails_hard_on_native_error",
+)
+QUALIFICATION_CORPUS = {
+    "planar": "tests/test_frontal_delaunay.py",
+    "curved": "tests/test_curved_native_qualification.py",
+    "intersection": "tests/test_intersection_meshing.py",
+    "declared_junction": "tests/test_s3_production.py",
+    "hole": "tests/test_planar_native_qualification.py",
+    "narrow_ligament": "tests/test_planar_native_qualification.py",
+    "mixed_mapped_native": "tests/test_hybrid.py",
+    "activity": "tests/test_mesh_persistence_contract.py",
+    "incremental_component": "tests/test_structural_pipeline.py",
+}
+REQUIRED_CORPUS = frozenset(
+    {
+        "planar",
+        "curved",
+        "intersection",
+        "declared_junction",
+        "hole",
+        "narrow_ligament",
+        "mixed_mapped_native",
+        "activity",
+        "incremental_component",
+    }
+)
+SOURCE_COMMIT_LENGTH = 40
+MAX_COMPARABLE_ELEMENT_RATIO = 1.20
+MIN_REQUESTED_SCALE_RATIO = 0.80
+MAX_REQUESTED_SCALE_RATIO = 1.20
+
+
+class _CancellationProbe(RuntimeError):
+    pass
+
+
+def _case(
+    name: str,
+) -> tuple[np.ndarray, tuple[np.ndarray, ...], tuple[np.ndarray, ...], bool]:
+    outer = np.asarray(((0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)))
+    holes: tuple[np.ndarray, ...] = ()
+    constraints: tuple[np.ndarray, ...] = ()
+    declared = False
+    if name == "hole":
+        holes = (
+            np.asarray(((1.5, 1.5), (2.5, 1.5), (2.5, 2.5), (1.5, 2.5))),
+        )
+    elif name == "narrow_ligament":
+        holes = (
+            np.asarray(((0.4, 0.4), (3.6, 0.4), (3.6, 3.4), (0.4, 3.4))),
+        )
+    elif name in {"intersection", "declared_junction"}:
+        constraints = (np.asarray(((0.0, 2.0), (4.0, 2.0))),)
+        declared = name == "declared_junction"
+    elif name == "rotated":
+        angle = np.deg2rad(31.0)
+        rotation = np.asarray(
+            ((np.cos(angle), -np.sin(angle)), (np.sin(angle), np.cos(angle)))
+        )
+        outer = outer @ rotation.T
+    elif name not in {"planar", "mapped_zero_use"}:
+        raise ValueError(name)
+    return outer, holes, constraints, declared
+
+
+def _ring_area(ring: np.ndarray) -> float:
+    following = np.roll(ring, -1, axis=0)
+    return 0.5 * abs(
+        float(np.sum(ring[:, 0] * following[:, 1] - ring[:, 1] * following[:, 0]))
+    )
+
+
+def _mesh_digest(mesh: Any) -> str:
+    return sha256(
+        b"".join(
+            (
+                mesh.node_coordinates.tobytes(),
+                mesh.triangle_connectivity.tobytes(),
+                mesh.quad_connectivity.tobytes(),
+            )
+        )
+    ).hexdigest()
+
+
+def _canonical_contract_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        contiguous = np.ascontiguousarray(value)
+        return {
+            "dtype": contiguous.dtype.str,
+            "shape": list(contiguous.shape),
+            "sha256": sha256(contiguous.tobytes()).hexdigest(),
+        }
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_contract_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_contract_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        rows = [_canonical_contract_value(item) for item in value]
+        return sorted(rows, key=lambda item: json.dumps(item, sort_keys=True))
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if hasattr(value, "to_dict"):
+        return _canonical_contract_value(value.to_dict())
+    return {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
+
+
+def _digest_contract(value: Any) -> str:
+    encoded = json.dumps(
+        _canonical_contract_value(value), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _semantic_contract(
+    mesh: Any,
+    outer: np.ndarray,
+    holes: tuple[np.ndarray, ...],
+    constraints: tuple[np.ndarray, ...],
+    declared: bool,
+) -> dict[str, str]:
+    state = vars(mesh) if hasattr(mesh, "__dict__") else {}
+
+    def selected(*tokens: str) -> dict[str, Any]:
+        return {
+            name: value
+            for name, value in sorted(state.items())
+            if any(token in name.lower() for token in tokens)
+        }
+
+    protected_input = {
+        "outer": outer,
+        "holes": holes,
+        "constraints": constraints,
+        "declared_junction": declared,
+        "mesh_protected_state": selected("protected", "boundary", "mandatory"),
+    }
+    return {
+        "protected_topology": _digest_contract(protected_input),
+        "associations": _digest_contract(selected("association", "_of_")),
+        "ownership": _digest_contract(selected("owner", "elements_of_", "nodes_of_")),
+        "activity": _digest_contract(selected("active", "activity")),
+    }
+
+
+def _serialization_bytes(mesh: Any) -> int:
+    return sum(
+        value.nbytes
+        for value in (
+            mesh.node_ids,
+            mesh.node_coordinates,
+            mesh.triangle_ids,
+            mesh.triangle_connectivity,
+            mesh.quad_ids,
+            mesh.quad_connectivity,
+        )
+    )
+
+
+def _peak_rss() -> int | None:
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class Counters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                ] + [
+                    (name, ctypes.c_size_t)
+                    for name in (
+                        "PeakWorkingSetSize",
+                        "WorkingSetSize",
+                        "QuotaPeakPagedPoolUsage",
+                        "QuotaPagedPoolUsage",
+                        "QuotaPeakNonPagedPoolUsage",
+                        "QuotaNonPagedPoolUsage",
+                        "PagefileUsage",
+                        "PeakPagefileUsage",
+                    )
+                ]
+
+            counters = Counters()
+            counters.cb = ctypes.sizeof(counters)
+            get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+            get_current_process.argtypes = []
+            get_current_process.restype = wintypes.HANDLE
+            get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(Counters),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            if not get_process_memory_info(
+                get_current_process(),
+                ctypes.byref(counters),
+                counters.cb,
+            ):
+                return None
+            return int(counters.PeakWorkingSetSize)
+        import resource
+
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(value * (1 if sys.platform == "darwin" else 1024))
+    except Exception:
+        return None
+
+
+def _dependency_versions() -> dict[str, str]:
+    result = {}
+    for distribution in ("ANYmesher", "ANYgeometry", "numpy"):
+        try:
+            result[distribution] = metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            result[distribution] = "source-uninstalled"
+    return result
+
+
+def _validate_hex(value: str, length: int, label: str) -> str:
+    lowered = value.lower()
+    if len(lowered) != length or any(
+        character not in "0123456789abcdef" for character in lowered
+    ):
+        raise ValueError(f"{label} must be exactly {length} hexadecimal characters")
+    return lowered
+
+
+
+def _native_work(diagnostics: dict[str, Any], route: str, case: str) -> dict[str, Any]:
+    rows = diagnostics.get("faces") if case in CYLINDER_CASES else {"surface": diagnostics}
+    if not isinstance(rows, dict) or not rows:
+        raise ValueError("missing benchmark face diagnostics")
+    work = {}
+    for face, values in sorted(rows.items(), key=lambda item: str(item[0])):
+        report = values.get("native_v2")
+        if report is None:
+            if route == "frontal" and case != "mapped_zero_use":
+                raise ValueError("Frontal-Delaunay work receipt missing")
+            continue
+        counters = {}
+        for key in ("insertions", "published_insertions", "topology_operations"):
+            value = report.get(key)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"invalid native work counter: {key}")
+            counters[key] = value
+        selected = report.get("selected_route")
+        if not isinstance(selected, str) or not selected.startswith("frontal_delaunay"):
+            raise ValueError("native work receipt has wrong route")
+        if report.get("cancelled") is not False:
+            raise ValueError("refinement completion is not proven")
+        work[str(face)] = dict(counters, selected_route=selected, cancelled=False)
+    result = {"faces": work,
+              "insertions": sum(row["insertions"] for row in work.values()),
+              "published_insertions": sum(row["published_insertions"] for row in work.values()),
+              "topology_operations": sum(row["topology_operations"] for row in work.values())}
+    _require_refinement_work(result, route, case)
+    return result
+
+
+def _require_refinement_work(work: dict[str, Any], route: str, case: str) -> None:
+    rows = work.get("faces")
+    if not isinstance(rows, dict):
+        raise ValueError("missing per-face refinement work")
+    for key in ("insertions", "published_insertions", "topology_operations"):
+        total = work.get(key)
+        if type(total) is not int or total < 0:
+            raise ValueError("invalid refinement work total")
+        values = [row.get(key) for row in rows.values()]
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("invalid per-face refinement work")
+        if total != sum(values):
+            raise ValueError("inconsistent refinement work total")
+    if any(row["published_insertions"] > row["insertions"]
+           or row.get("cancelled") is not False for row in rows.values()):
+        raise ValueError("invalid publication or cancellation evidence")
+    if route == "frontal" and case != "mapped_zero_use":
+        if not rows or work["published_insertions"] <= 0 or work["topology_operations"] <= 0:
+            raise ValueError("seed-only run is not refinement qualification")
+        if any(not isinstance(row.get("selected_route"), str)
+               or not row["selected_route"].startswith("frontal_delaunay")
+               for row in rows.values()):
+            raise ValueError("refinement route is not proven")
+    elif work["insertions"] or work["published_insertions"] or work["topology_operations"]:
+        raise ValueError("legacy/mapped benchmark unexpectedly used refinement")
+
+
+def _measure(generate, args):
+    """Preserve completed samples and first failure, even without a final record."""
+    partial = args.output.with_name(args.output.name + ".partial.jsonl")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.output.exists():
+        raise FileExistsError(f"refusing to overwrite evidence: {args.output}")
+    durations, digests, counts, work_samples = [], [], [], []
+    with partial.open("x", encoding="utf-8", newline="\n") as stream:
+        def emit(row):
+            stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        emit({"event": "start", "case": args.case, "route": args.route,
+              "source_commit": args.source_commit})
+        try:
+            for index in range(WARMUPS + MEASUREMENTS):
+                started = perf_counter()
+                mesh, diagnostics = generate()
+                elapsed = perf_counter() - started
+                work = _native_work(diagnostics, args.route, args.case)
+                digest = _mesh_digest(mesh)
+                count = sum(_active_element_counts(mesh))
+                emit({"event": "warmup" if index < WARMUPS else "measurement",
+                      "index": index, "seconds": elapsed, "elements": count,
+                      "mesh_digest": digest, "native_work": work})
+                if index >= WARMUPS:
+                    durations.append(elapsed)
+                    digests.append(digest)
+                    counts.append(count)
+                    work_samples.append(work)
+            if (len(set(digests)) != 1 or len(set(counts)) != 1
+                    or any(row != work_samples[0] for row in work_samples[1:])):
+                raise RuntimeError("benchmark repetitions are not deterministic")
+        except BaseException as error:
+            emit({"event": "failure", "type": type(error).__name__, "message": str(error)})
+            raise
+    return mesh, diagnostics, durations, digests, counts, work_samples
+
+
+def _target_size(case: str, domain_area: float, requested_elements: int) -> float:
+    # Mapped rectangles produce one quad per size-by-size cell. The native
+    # seed-density estimate is not applicable to this zero-use benchmark.
+    # Recombined cylindrical sectors have a separately measured physical-area
+    # density; keeping it explicit makes the named scales representative.
+    if case == "mapped_zero_use":
+        density_factor = 1.0
+    elif case in CYLINDER_CASES:
+        density_factor = 1.4
+    else:
+        density_factor = 3.5
+    return (density_factor * domain_area / requested_elements) ** 0.5
+
+
+def _active_element_counts(mesh: Any) -> tuple[int, int]:
+    """Count published elements without changing MeshCore's stored-row API."""
+    triangle_active = getattr(mesh, "triangle_active", None)
+    quad_active = getattr(mesh, "quad_active", None)
+    triangles = (
+        int(np.count_nonzero(triangle_active))
+        if triangle_active is not None else int(mesh.num_triangles)
+    )
+    quads = (
+        int(np.count_nonzero(quad_active))
+        if quad_active is not None else int(mesh.num_quads)
+    )
+    return triangles, quads
+
+
+def _run(args: argparse.Namespace) -> int:
+    from anygeometry import GeometryModel, to_dict
+    from anymesher import MetricFieldSpec, NativeMeshingOptions, __version__
+    from anymesher.hybrid import _neutral_shell_core, generate_hybrid_mesh_result
+    from anymesher.quality_v2 import evaluate_quality
+    from anymesher.surface_mesh import SurfaceMeshOptions, mesh_planar_surface
+
+    if args.scale in {"500k", "workstation"} and not args.allow_large:
+        raise ValueError("500k/workstation evidence requires --allow-large")
+    if args.scale == "workstation":
+        if args.workstation_elements is None or args.workstation_elements < 500_000:
+            raise ValueError("workstation-elements must be at least 500000")
+        requested_elements = args.workstation_elements
+    else:
+        requested_elements = SCALES[args.scale]
+    source_commit = _validate_hex(
+        args.source_commit, SOURCE_COMMIT_LENGTH, "source commit"
+    )
+    wheel_sha256 = None
+    if args.install_kind == "wheel":
+        if not args.wheel_sha256:
+            raise ValueError("wheel runs require --wheel-sha256")
+        wheel_sha256 = _validate_hex(args.wheel_sha256, 64, "wheel SHA-256")
+    elif args.wheel_sha256:
+        raise ValueError("source runs must not carry a wheel SHA-256")
+
+    cylinder = cylinder_case(args.case) if args.case in CYLINDER_CASES else None
+    outer, holes, constraints, declared = _case("planar" if cylinder else args.case)
+    domain_area = (cylinder.area if cylinder else
+                   _ring_area(outer) - sum(_ring_area(hole) for hole in holes))
+    target = _target_size(args.case, domain_area, requested_elements)
+    mesher_backend = "native" if args.backend == "compiled" else args.backend
+    native = NativeMeshingOptions()
+    if args.route == "frontal":
+        native = NativeMeshingOptions(
+            point_placement="frontal_delaunay",
+            metric_mode="isotropic_spatial",
+            metric_field=MetricFieldSpec.uniform(target),
+            max_insertions=max(100, requested_elements // 2),
+        )
+    if cylinder is not None:
+        native = cylinder.options(target, args.route, requested_elements)
+    options = SurfaceMeshOptions(
+        target_size=target,
+        backend=mesher_backend,
+        recombine=True,
+        declared_junction=declared,
+        native_options=native,
+    )
+
+    mapped_geometry = None
+    mapped_face = None
+    if args.case == "mapped_zero_use":
+        mapped_geometry = GeometryModel()
+        mapped_points = mapped_geometry.add_points(
+            (
+                (0.0, 0.0, 0.0),
+                (4.0, 0.0, 0.0),
+                (4.0, 4.0, 0.0),
+                (0.0, 4.0, 0.0),
+            )
+        )
+        mapped_face = mapped_geometry.add_plate(mapped_points)
+        mapped_geometry.add_sheet((mapped_face,))
+
+    semantic_mesh = None
+    cylinder_contract = None
+    geometry_digest = _digest_contract(to_dict(cylinder.model)) if cylinder else None
+
+    def generate(cancellation_check=None) -> tuple[Any, dict[str, Any]]:
+        nonlocal semantic_mesh, cylinder_contract
+        if cylinder is not None:
+            result = generate_hybrid_mesh_result(
+                cylinder.model, face_ids=cylinder.face_ids, target_size=target,
+                strategy="native", overrides=cylinder.overrides(target),
+                refinements=cylinder.refinements(target),
+                order="linear", recombine=True, native_backend=mesher_backend,
+                native_options=native, cancellation_check=cancellation_check,
+            )
+            if set(result.strategy_by_face.values()) != {"native"}:
+                raise RuntimeError("cylinder benchmark did not exercise native meshing")
+            if _digest_contract(to_dict(cylinder.model)) != geometry_digest:
+                raise RuntimeError("benchmark geometry was mutated")
+            contract = cylinder.mesh_contract(result.mesh, target)
+            digest = _digest_contract(contract)
+            if cylinder_contract is not None and cylinder_contract != digest:
+                raise RuntimeError("benchmark protected topology changed between repetitions")
+            cylinder_contract = digest
+            semantic_mesh = result.mesh
+            faces = {str(face): dict(row) for face, row in
+                     result.triangulation_backend_by_face.items()}
+            backend_rows = [{key: row.get(key) for key in
+                             ("requested_backend", "selected_backend", "actual_backend")}
+                            for row in faces.values()]
+            if not backend_rows or any(row != backend_rows[0] for row in backend_rows):
+                raise RuntimeError("inconsistent cylinder triangulation backends")
+            return _neutral_shell_core(result.mesh), dict(backend_rows[0], faces=faces)
+        if mapped_geometry is not None and mapped_face is not None:
+            result = generate_hybrid_mesh_result(
+                mapped_geometry,
+                target_size=target,
+                strategy="mapped",
+                recombine=True,
+                native_backend=mesher_backend,
+                native_options=native,
+            )
+            semantic_mesh = result.mesh
+            diagnostics = {
+                "requested_route": "mapped",
+                "selected_route": result.strategy_by_face[mapped_face],
+                "triangulation_backend": result.triangulation_backend_by_face.get(
+                    mapped_face
+                ),
+            }
+            return _neutral_shell_core(result.mesh), diagnostics
+        diagnostics: dict[str, Any] = {}
+        mesh = mesh_planar_surface(
+            outer,
+            holes,
+            constraints,
+            options=options,
+            diagnostics=diagnostics,
+            cancellation_check=cancellation_check,
+        )
+        semantic_mesh = mesh
+        return mesh, diagnostics
+
+    rss_before = _peak_rss()
+    mesh, diagnostics, durations, digests, counts, work_samples = _measure(generate, args)
+    rss_after = _peak_rss()
+    quality = evaluate_quality(mesh)
+    cancellation_phases: list[str] = []
+    cancellation_started = perf_counter()
+
+    def cancel(phase: str) -> None:
+        cancellation_phases.append(phase)
+        if phase == "native surface triangulation start":
+            raise _CancellationProbe("bounded benchmark cancellation")
+
+    cancellation_observed = False
+    try:
+        if cylinder is not None:
+            generate(cancellation_check=cancel)
+        else:
+            mesh_planar_surface(
+                outer, holes, constraints, options=options, cancellation_check=cancel)
+    except _CancellationProbe:
+        cancellation_observed = True
+    if not cancellation_observed:
+        raise RuntimeError("cancellation probe missed the registered safe boundary")
+
+    total_elements = counts[-1]
+    record = {
+        "schema": "anymesher.native-v2-baseline/3",
+        "native_work_samples": work_samples,
+        "partial_sample_journal": str(args.output.with_name(args.output.name + ".partial.jsonl")),
+        "source_commit": source_commit,
+        "package_version": __version__,
+        "case": args.case,
+        "scale": args.scale,
+        "requested_elements": requested_elements,
+        "actual_elements": total_elements,
+        "element_count_ratio": total_elements / requested_elements,
+        "route": args.route,
+        "warmups": WARMUPS,
+        "repetitions": MEASUREMENTS,
+        "durations_seconds": durations,
+        "median_seconds": statistics.median(durations),
+        "peak_rss_before_bytes": rss_before,
+        "peak_rss_bytes": rss_after,
+        "mesh_digest": digests[0],
+        "semantic_contract": ({"cylindrical_protected_topology": cylinder_contract}
+                              if cylinder is not None else _semantic_contract(
+            semantic_mesh if semantic_mesh is not None else mesh,
+            outer,
+            holes,
+            constraints,
+            declared,
+        )),
+        "repetition_digests": digests,
+        "nodes": mesh.num_nodes,
+        "triangles": mesh.num_triangles,
+        "quadrilaterals": mesh.num_quads,
+        "q4_fraction": mesh.num_quads / max(total_elements, 1),
+        "serialization_bytes": _serialization_bytes(mesh),
+        "quality": {
+            "minimum_scaled_jacobian": quality.minimum_scaled_jacobian,
+            "maximum_aspect_ratio": quality.maximum_aspect_ratio,
+            "minimum_angle": quality.minimum_angle,
+            "maximum_angle": max(
+                (
+                    float(np.max(values.maximum_angle))
+                    for values in (quality.triangles, quality.quadrilaterals)
+                    if values.maximum_angle.size
+                ),
+                default=90.0,
+            ),
+            "maximum_warpage": quality.maximum_warpage,
+        },
+        "quality_policy": {
+            "minimum_scaled_jacobian": "no_decrease",
+            "maximum_aspect_ratio": "no_increase",
+            "minimum_angle": "no_decrease",
+            "maximum_angle": "no_increase",
+            "maximum_warpage": "no_increase",
+        },
+        "alignment": {
+            "lattice_alignment": diagnostics.get("lattice_alignment"),
+            "selected_strategy": diagnostics.get("quality_optimization", {}).get(
+                "selected_strategy"
+            ),
+            "boundary_alignment": diagnostics.get("quality_optimization", {}).get(
+                "boundary_alignment"
+            ),
+        },
+        "backend": {
+            "requested": diagnostics.get("requested_backend"),
+            "selected": diagnostics.get("selected_backend"),
+            "actual": diagnostics.get("actual_backend"),
+        },
+        "cancellation": {
+            "observed": cancellation_observed,
+            "latency_seconds": perf_counter() - cancellation_started,
+            "phases": cancellation_phases,
+        },
+        "provenance": {
+            "install_kind": args.install_kind,
+            "wheel_sha256": wheel_sha256,
+            "compiler_id": args.compiler_id,
+            "dependencies": _dependency_versions(),
+            "harness_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+            "cylinder_fixture_sha256": sha256(
+                Path(__file__).with_name("native_v2_cylinder_cases.py").read_bytes()).hexdigest(),
+            "commit_binding": "caller_supplied; clean-tree delivery requires separate attestation",
+            "python": sys.version,
+            "numpy": np.__version__,
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+        },
+        "benchmark_configuration": {
+            "target_size": target,
+            "allow_large": bool(args.allow_large),
+            "fixed_warmups": WARMUPS,
+            "fixed_measurements": MEASUREMENTS,
+            "cylinder_metric": cylinder.metric_spec(target).to_dict() if cylinder else None,
+            "pinned_edge_divisions": cylinder.overrides(target) if cylinder else None,
+        },
+    }
+    if args.output.exists():
+        raise FileExistsError(f"refusing to overwrite evidence: {args.output}")
+    with args.output.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return 0
+
+
+def _load_record(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if value.get("schema") != "anymesher.native-v2-baseline/3":
+        raise ValueError(f"unsupported benchmark evidence: {path}")
+    if value.get("warmups") != WARMUPS or value.get("repetitions") != MEASUREMENTS:
+        raise ValueError(f"non-canonical repetition contract: {path}")
+    if len(value.get("repetition_digests", ())) != MEASUREMENTS or len(
+        set(value["repetition_digests"])
+    ) != 1:
+        raise ValueError(f"non-deterministic benchmark evidence: {path}")
+    route, case = value.get("route"), value.get("case")
+    if route not in {"legacy", "frontal"} or case not in PERFORMANCE_CASES:
+        raise ValueError("invalid benchmark case/route")
+    samples = value.get("native_work_samples")
+    if not isinstance(samples, list) or len(samples) != MEASUREMENTS:
+        raise ValueError("missing measured refinement work")
+    for work in samples:
+        _require_refinement_work(work, route, case)
+    if any(work != samples[0] for work in samples[1:]):
+        raise ValueError("non-deterministic measured refinement work")
+    durations = value.get("durations_seconds")
+    if (not isinstance(durations, list) or len(durations) != MEASUREMENTS
+            or any(type(item) not in (int, float) or not math.isfinite(item)
+                   or item <= 0 for item in durations)):
+        raise ValueError("invalid benchmark durations")
+    median = value.get("median_seconds")
+    if (type(median) not in (int, float) or not math.isfinite(median)
+            or not math.isclose(median, statistics.median(durations), rel_tol=1.e-12)):
+        raise ValueError("inconsistent benchmark median")
+    if type(value.get("peak_rss_bytes")) is not int or value["peak_rss_bytes"] <= 0:
+        raise ValueError("peak memory evidence is unavailable")
+    if any(type(item) not in (int, float) or not math.isfinite(item)
+           for item in value.get("quality", {}).values()):
+        raise ValueError("non-finite quality evidence")
+    scale_ratio = float(value.get("element_count_ratio", float("nan")))
+    scale = str(value.get("scale", ""))
+    requested_elements = int(value.get("requested_elements", 0))
+    actual_elements = int(value.get("actual_elements", -1))
+    if scale == "workstation":
+        if requested_elements < 500_000:
+            raise ValueError(f"workstation benchmark scale is too small: {path}")
+    elif scale not in SCALES or requested_elements != SCALES[scale]:
+        raise ValueError(f"benchmark scale identity is inconsistent: {path}")
+    recomputed_ratio = actual_elements / requested_elements
+    if not math.isclose(scale_ratio, recomputed_ratio, rel_tol=0.0, abs_tol=1.0e-15):
+        raise ValueError(f"benchmark element-count ratio is inconsistent: {path}")
+    if not math.isfinite(scale_ratio) or not (
+        MIN_REQUESTED_SCALE_RATIO <= scale_ratio <= MAX_REQUESTED_SCALE_RATIO
+    ):
+        raise ValueError(
+            f"benchmark missed requested scale: {path} has ratio {scale_ratio!r}"
+        )
+    return value
+
+
+def _rss_ratio_exceeds(candidate: Any, baseline: Any, limit: float) -> bool:
+    return candidate is None or baseline is None or candidate > limit * baseline
+
+
+def _compare(args: argparse.Namespace) -> int:
+    legacy = _load_record(args.legacy)
+    frontal = _load_record(args.frontal)
+    if legacy["route"] != "legacy" or frontal["route"] != "frontal":
+        raise ValueError("comparison requires legacy followed by frontal evidence")
+    for field in (
+        "case",
+        "scale",
+        "source_commit",
+        "requested_elements",
+        "backend",
+        "provenance",
+        "benchmark_configuration",
+        "quality_policy",
+        "semantic_contract",
+    ):
+        if legacy[field] != frontal[field]:
+            raise ValueError(f"benchmark evidence differs in {field}")
+    counts = (legacy["actual_elements"], frontal["actual_elements"])
+    ratio = max(counts) / max(min(counts), 1)
+    failures = []
+    quality_directions = {
+        "minimum_scaled_jacobian": 1,
+        "maximum_aspect_ratio": -1,
+        "minimum_angle": 1,
+        "maximum_angle": -1,
+        "maximum_warpage": -1,
+    }
+    for metric, direction in quality_directions.items():
+        baseline_value = float(legacy["quality"][metric])
+        candidate_value = float(frontal["quality"][metric])
+        tolerance = 1.0e-12 * max(1.0, abs(baseline_value))
+        if direction * (candidate_value - baseline_value) < -tolerance:
+            failures.append(f"quality regression in {metric}")
+    if ratio > MAX_COMPARABLE_ELEMENT_RATIO:
+        failures.append(
+            f"element-count ratio {ratio:.6g} exceeds {MAX_COMPARABLE_ELEMENT_RATIO}"
+        )
+    if (
+        legacy["scale"] == "100k"
+        and frontal["median_seconds"] > 1.25 * legacy["median_seconds"]
+    ):
+        failures.append("100k Frontal-Delaunay median exceeds 1.25x legacy")
+    if legacy["case"] == "mapped_zero_use":
+        if frontal["median_seconds"] > 1.03 * legacy["median_seconds"]:
+            failures.append("mapped zero-use median regression exceeds 3%")
+        if _rss_ratio_exceeds(
+            frontal["peak_rss_bytes"], legacy["peak_rss_bytes"], 1.05
+        ):
+            failures.append("mapped zero-use peak-RSS regression exceeds 5%")
+    if _rss_ratio_exceeds(
+        frontal["peak_rss_bytes"], legacy["peak_rss_bytes"], 2.0
+    ):
+        failures.append("native-v2 peak RSS exceeds 2x legacy")
+    result = {
+        "schema": "anymesher.native-v2-acceptance/1",
+        "legacy": str(args.legacy),
+        "frontal": str(args.frontal),
+        "element_count_ratio": ratio,
+        "accepted": not failures,
+        "failures": failures,
+    }
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0 if not failures else 2
+
+
+def _check_contract() -> int:
+    if frozenset(QUALIFICATION_CORPUS) != REQUIRED_CORPUS:
+        raise RuntimeError("native-v2 qualification corpus drift")
+    if WARMUPS != 1 or MEASUREMENTS != 7 or SCALES != {
+        "10k": 10_000,
+        "100k": 100_000,
+        "500k": 500_000,
+    }:
+        raise RuntimeError("native-v2 benchmark scale/repetition contract drift")
+    print(
+        json.dumps(
+            {
+                "schema": "anymesher.native-v2-contract/1",
+                "corpus": QUALIFICATION_CORPUS,
+                "performance_cases": PERFORMANCE_CASES,
+                "scales": SCALES,
+                "warmups": WARMUPS,
+                "measurements": MEASUREMENTS,
+                "thresholds": {
+                    "frontal_100k_runtime_ratio": 1.25,
+                    "mapped_zero_use_runtime_ratio": 1.03,
+                    "mapped_zero_use_peak_rss_ratio": 1.05,
+                    "native_v2_peak_rss_ratio": 2.0,
+                    "comparable_element_ratio": MAX_COMPARABLE_ELEMENT_RATIO,
+                    "requested_scale_ratio": [
+                        MIN_REQUESTED_SCALE_RATIO,
+                        MAX_REQUESTED_SCALE_RATIO,
+                    ],
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def _check_evidence(evidence_pairs: list[tuple[Path, Path]]) -> int:
+    _check_contract()
+    root = Path(__file__).resolve().parents[1]
+    missing = [
+        f"{label}:{relative}"
+        for label, relative in QUALIFICATION_CORPUS.items()
+        if not (root / relative).is_file()
+    ]
+    if missing:
+        raise RuntimeError(f"native-v2 qualification corpus paths are absent: {missing}")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", *FROZEN_EVIDENCE_TESTS],
+        cwd=root,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"bounded native-v2 evidence corpus failed with exit {completed.returncode}"
+        )
+    outcomes = []
+    for legacy_path, frontal_path in evidence_pairs:
+        status = _compare(
+            argparse.Namespace(legacy=legacy_path, frontal=frontal_path)
+        )
+        outcomes.append(
+            {
+                "legacy": str(legacy_path),
+                "frontal": str(frontal_path),
+                "accepted": status == 0,
+            }
+        )
+        if status != 0:
+            return status
+    print(
+        json.dumps(
+            {
+                "status": "evidence_contract_passed",
+                "corpus_paths": QUALIFICATION_CORPUS,
+                "performance_evidence": outcomes,
+                "performance_evidence_status": (
+                    "accepted" if outcomes else "not_supplied_merge_blocker"
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("check-contract")
+    evidence = subparsers.add_parser("check-evidence")
+    evidence.add_argument(
+        "--evidence-pair",
+        action="append",
+        nargs=2,
+        type=Path,
+        default=[],
+        metavar=("LEGACY_JSON", "FRONTAL_JSON"),
+    )
+    run = subparsers.add_parser("run")
+    run.add_argument("--case", choices=PERFORMANCE_CASES, required=True)
+    run.add_argument("--scale", choices=(*SCALES, "workstation"), required=True)
+    run.add_argument("--workstation-elements", type=int)
+    run.add_argument("--allow-large", action="store_true")
+    run.add_argument("--route", choices=("legacy", "frontal"), required=True)
+    run.add_argument(
+        "--backend", choices=("auto", "python", "compiled"), required=True
+    )
+    run.add_argument("--install-kind", choices=("source", "wheel"), required=True)
+    run.add_argument("--source-commit", required=True)
+    run.add_argument("--wheel-sha256")
+    run.add_argument("--compiler-id", required=True)
+    run.add_argument("--output", type=Path, required=True)
+    compare = subparsers.add_parser("compare")
+    compare.add_argument("--legacy", type=Path, required=True)
+    compare.add_argument("--frontal", type=Path, required=True)
+    args = parser.parse_args(argv)
+    if args.command == "check-contract":
+        return _check_contract()
+    if args.command == "check-evidence":
+        return _check_evidence(args.evidence_pair)
+    if args.command == "compare":
+        return _compare(args)
+    return _run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

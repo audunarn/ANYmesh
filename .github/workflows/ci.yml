@@ -5,6 +5,25 @@ on:
   pull_request:
 
 jobs:
+  native-v2-contract:
+    name: Native-v2 bounded evidence contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]"
+      - run: python benchmarks/native_v2_baseline.py check-evidence
+
   pytest:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -18,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -41,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -68,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -84,7 +103,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libglu1-mesa
       - run: python -c "import gmsh"
-      - run: python -m pytest
+      - name: Qualify the optional Gmsh backend contracts
+        run: >-
+          python -m pytest
+          tests/test_backends.py
+          tests/test_geometry_owner_integration.py
+          tests/test_release_correctness_guards.py::test_gmsh_session_restores_callers_sigint
+          -q
 
   wheel:
     runs-on: ${{ matrix.os }}
@@ -97,7 +122,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: c377c02f857cf8183ab70705cd67e9163b4ea8ca
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -109,10 +134,44 @@ jobs:
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
-            --expect-version 0.2.5 --require-native
+            --expect-version 0.5.0 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4
         with:
           name: anymesher-wheels-${{ runner.os }}
           path: dist/*.whl
+
+  wheel-full-linux:
+    name: Installed Linux native wheel full suite
+    needs: wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 7edbb8b624d3f7d4548d2ec11b2d00c55f1265d2
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: anymesher-wheels-Linux
+          path: dist
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]"
+      - run: python -m pip uninstall --yes anymesher
+      - run: python -m pip install --no-deps dist/anymesher-0.5.0-cp313-cp313-manylinux*.whl
+      - name: Prove installed origin and compiled availability
+        run: >-
+          python -I -B -c "import anymesher, importlib.util, pathlib, sys;
+          assert pathlib.Path(anymesher.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve());
+          assert importlib.util.find_spec('anymesher._native') is not None"
+      - name: Qualify the installed wheel against the full suite
+        run: >-
+          python -I -B -m pytest -p no:cacheprovider -o pythonpath=
+          --confcutdir=tests --import-mode=importlib tests

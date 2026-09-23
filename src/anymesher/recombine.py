@@ -12,6 +12,10 @@ import numpy as np
 from .core import MeshCore, corner_edges
 from .errors import MeshError
 from .quality_v2 import quad_candidate_quality
+from .native_cpp import (
+    COMPILED_QUALITY_PIPELINE_AVAILABLE,
+    native_recombination_decisions,
+)
 
 __all__ = [
     "RecombinationReport",
@@ -130,6 +134,108 @@ def _protected_rows(
     return result
 
 
+def _publish_native_recombination(
+    mesh: MeshCore,
+    selected: Sequence[_Candidate],
+    *,
+    candidate_count: int,
+    rejected_candidate_count: int,
+    exchange_count: int,
+    exchange_work: int,
+    exchange_truncated: bool,
+    cancellation_check: Callable[[str], None] | None,
+) -> RecombinationReport:
+    triangle_active = np.array(mesh.triangle_active, copy=True)
+    for candidate in selected:
+        triangle_active[candidate.first] = False
+        triangle_active[candidate.second] = False
+
+    quadratic = mesh.triangle_connectivity.shape[1] == 6
+    new_connectivity: list[tuple[int, ...]] = []
+    new_owners: list[int] = []
+    for candidate in selected:
+        if quadratic:
+            edge_mid: dict[tuple[int, int], int] = {}
+            for triangle_row in (candidate.first, candidate.second):
+                connectivity = mesh.triangle_connectivity[triangle_row]
+                for index, edge in enumerate(corner_edges(connectivity)):
+                    edge_mid[edge] = int(connectivity[3 + index])
+            mids = [
+                edge_mid[(min(a, b), max(a, b))]
+                for a, b in zip(
+                    candidate.corners,
+                    candidate.corners[1:] + candidate.corners[:1],
+                )
+            ]
+            new_connectivity.append((*candidate.corners, *mids))
+        else:
+            new_connectivity.append(candidate.corners)
+        first_owner = int(mesh.triangle_owner_handles[candidate.first])
+        second_owner = int(mesh.triangle_owner_handles[candidate.second])
+        new_owners.append(first_owner if first_owner == second_owner else -1)
+
+    width = 8 if quadratic else 4
+    appended = np.asarray(new_connectivity, dtype=np.int64).reshape((-1, width))
+    if mesh.num_quads and mesh.quad_connectivity.shape[1] != width:
+        raise MeshError("existing quadrilaterals use a different polynomial order")
+    quad_connectivity = np.vstack((mesh.quad_connectivity, appended))
+    maximum_id = int(np.max(mesh.element_ids)) if mesh.element_ids.size else 0
+    created_ids = np.arange(
+        maximum_id + 1,
+        maximum_id + 1 + len(selected),
+        dtype=np.int64,
+    )
+    quad_ids = np.concatenate((mesh.quad_ids, created_ids))
+    quad_owners = np.concatenate(
+        (mesh.quad_owner_handles, np.asarray(new_owners, dtype=np.int32))
+    )
+    quad_active = np.concatenate(
+        (mesh.quad_active, np.ones(len(selected), dtype=bool))
+    )
+    result = MeshCore(
+        mesh.node_coordinates,
+        mesh.triangle_connectivity,
+        quad_connectivity,
+        node_ids=mesh.node_ids,
+        triangle_ids=mesh.triangle_ids,
+        quad_ids=quad_ids,
+        owner_table=mesh.owner_table,
+        node_owner_handles=mesh.node_owner_handles,
+        triangle_owner_handles=mesh.triangle_owner_handles,
+        quad_owner_handles=quad_owners,
+        node_active=mesh.node_active,
+        triangle_active=triangle_active,
+        quad_active=quad_active,
+    )
+    pairs = np.asarray(
+        [
+            (
+                int(mesh.triangle_ids[item.first]),
+                int(mesh.triangle_ids[item.second]),
+            )
+            for item in selected
+        ],
+        dtype=np.int64,
+    ).reshape((-1, 2))
+    scores = np.asarray([item.score for item in selected], dtype=np.float64)
+    pairs.setflags(write=False)
+    created_ids.setflags(write=False)
+    scores.setflags(write=False)
+    if cancellation_check is not None:
+        cancellation_check("triangle recombination complete")
+    return RecombinationReport(
+        result,
+        pairs,
+        created_ids,
+        scores,
+        candidate_count,
+        rejected_candidate_count,
+        exchange_count,
+        exchange_work,
+        exchange_truncated,
+    )
+
+
 def recombine_triangles_with_report(
     mesh_or_points: MeshCore | Any,
     triangles: Any | None = None,
@@ -144,6 +250,7 @@ def recombine_triangles_with_report(
     max_warpage: float = 0.10,
     cancellation_check: Callable[[str], None] | None = None,
     max_exchange_work: int = 1_000_000,
+    _use_native: bool | None = None,
 ) -> RecombinationReport:
     """Pair adjacent triangles greedily from best quality to worst.
 
@@ -175,6 +282,61 @@ def recombine_triangles_with_report(
         raise MeshError("only T3/T6 triangles can be recombined")
     supplied_edges = protected_edges if constraints is None else constraints
     protected = _protected_rows(mesh, supplied_edges, edges_are_ids)
+    native = None
+    if _use_native is not False:
+        if (
+            COMPILED_QUALITY_PIPELINE_AVAILABLE
+            and cancellation_check is not None
+        ):
+            cancellation_check("triangle recombination candidates")
+        native = native_recombination_decisions(
+            mesh.node_coordinates,
+            np.ascontiguousarray(mesh.triangle_connectivity[:, :3], dtype=np.int64),
+            mesh.triangle_ids,
+            mesh.node_ids,
+            np.ascontiguousarray(np.flatnonzero(mesh.triangle_active), dtype=np.int64),
+            np.asarray(sorted(protected), dtype=np.int64).reshape((-1, 2)),
+            min_scaled_jacobian=min_scaled_jacobian,
+            max_aspect_ratio=max_aspect_ratio,
+            min_angle=min_angle,
+            max_angle=max_angle,
+            max_warpage=max_warpage,
+            max_exchange_work=max_exchange_work,
+        )
+    if native is not None:
+        selected = [
+            _Candidate(
+                int(row[0]),
+                int(row[1]),
+                (int(row[2]), int(row[3])),
+                tuple(int(value) for value in row[4:8]),
+                float(row[8]),
+                dict(
+                    zip(
+                        (
+                            "area",
+                            "aspect_ratio",
+                            "minimum_angle",
+                            "maximum_angle",
+                            "scaled_jacobian",
+                            "warpage",
+                        ),
+                        (float(value) for value in row[9:15]),
+                    )
+                ),
+            )
+            for row in native["selected"]
+        ]
+        return _publish_native_recombination(
+            mesh,
+            selected,
+            candidate_count=int(native["candidate_count"]),
+            rejected_candidate_count=int(native["rejected_candidate_count"]),
+            exchange_count=int(native["exchange_count"]),
+            exchange_work=int(native["exchange_work"]),
+            exchange_truncated=bool(native["exchange_truncated"]),
+            cancellation_check=cancellation_check,
+        )
     incidence = _edge_incidence(mesh)
     candidates: list[_Candidate] = []
     rejected = 0

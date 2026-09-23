@@ -7,7 +7,13 @@ from anymesher.core import MeshCore
 from anymesher.quality_v2 import MeshValidityError, assert_valid_mesh, mesh_quality
 from anymesher.recombine import recombine_triangles
 from anymesher.surface_mesh import insert_midside_nodes, mesh_planar_surface
-from anymesher.triangulation import _validate_ring, triangulate_polygon
+from anymesher.triangulation import (
+    _deduplicate,
+    _proper_intersection,
+    _segment_candidate_pairs,
+    _validate_ring,
+    triangulate_polygon,
+)
 from anymesher.errors import MeshError
 
 
@@ -98,6 +104,53 @@ def test_dense_straight_edge_subdivisions_are_not_self_intersections() -> None:
     _validate_ring(ring, tuple(range(len(ring))), "outer loop")
 
 
+def test_pslg_deduplication_preserves_earliest_match_across_bucket_edges() -> None:
+    points = np.array(
+        (
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (1.05, 0.0),
+        )
+    )
+
+    unique, outer, holes, constraints = _deduplicate(
+        points,
+        (0, 4, 2, 3),
+        (),
+        ((4, 2),),
+        0.1,
+    )
+
+    assert np.array_equal(unique, points[:4])
+    assert outer == [0, 1, 2, 3]
+    assert holes == []
+    assert constraints == [(1, 2)]
+
+
+def test_segment_broad_phase_contains_every_true_crossing() -> None:
+    random = np.random.default_rng(20260904)
+    points = random.uniform(-3.0, 4.0, size=(80, 2))
+    segments = [(index, index + 1) for index in range(0, len(points), 2)]
+
+    candidates = set(_segment_candidate_pairs(points, segments))
+    crossings = {
+        (first, second)
+        for first in range(len(segments))
+        for second in range(first + 1, len(segments))
+        if _proper_intersection(
+            points[segments[first][0]],
+            points[segments[first][1]],
+            points[segments[second][0]],
+            points[segments[second][1]],
+        )
+    }
+
+    assert crossings <= candidates
+    assert len(candidates) < len(segments) * (len(segments) - 1) // 2
+
+
 def test_ring_validator_still_rejects_a_true_self_intersection() -> None:
     bow_tie = np.array(((0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)))
 
@@ -161,6 +214,33 @@ def test_quality_metrics_and_hard_quad_validity() -> None:
     bow_tie = MeshCore(valid.node_coordinates, quad_connectivity=((0, 1, 3, 2),))
     with pytest.raises(MeshValidityError):
         assert_valid_mesh(bow_tie)
+
+
+def test_only_declared_plate_junction_may_have_four_shells_on_one_edge() -> None:
+    mesh = MeshCore(
+        (
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 0.0, 1.0),
+            (-1.0, 0.0, 0.0),
+            (-1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 1.0),
+            (0.0, -1.0, 0.0),
+            (0.0, -1.0, 1.0),
+        ),
+        quad_connectivity=(
+            (0, 2, 3, 1),
+            (0, 1, 5, 4),
+            (0, 1, 7, 6),
+            (0, 8, 9, 1),
+        ),
+    )
+
+    with pytest.raises(MeshValidityError, match="non-manifold edge"):
+        assert_valid_mesh(mesh)
+    assert_valid_mesh(mesh, declared_plate_junction_edges=((0, 1),))
 
 
 def test_surface_slice_builds_a_valid_quadratic_hybrid_mesh() -> None:

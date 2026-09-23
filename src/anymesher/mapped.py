@@ -104,7 +104,7 @@ def generate_mesh(
     target_size: float,
     overrides: Mapping[int, int] | None = None,
     beam_edges: Iterable[int] = (),
-    beam_offsets: Mapping[int, float] | None = None,
+    beam_offsets: Mapping[int, float | Sequence[float]] | None = None,
     face_ids: Iterable[int] | None = None,
     seeding: Seeding | None = None,
     refinements: Iterable[Refinement] = (),
@@ -112,11 +112,10 @@ def generate_mesh(
 ) -> Mesh:
     """Mesh the faces of a geometry model, plus any edges carrying beams.
 
-    ``beam_offsets`` gives a stiffener an eccentricity: its nodes stand off the
-    plating along the plate normal and are coupled back to it, rather than
-    sharing the plate nodes.  That distinction matters -- a stiffener whose
-    neutral axis sits in the plate midsurface is a materially different
-    structure from one that stands proud of it.
+    ``beam_offsets`` gives a stiffener an eccentricity. A scalar stands the
+    nodes off along the attached plate normal (the historical contract); a
+    three-vector gives the exact global offset from the attachment line. Both
+    forms create kinematic couplings back to the plating.
 
     ``refinements`` are local size zones: the seeding integrates the resulting
     size field along each edge, and node placement follows the same field, so
@@ -198,8 +197,15 @@ def generate_mesh(
     offsets = dict(beam_offsets or {})
     offset_registry: dict[tuple[int, tuple[str, str, str]], int] = {}
     for edge_id in beam_edge_ids:
-        offset = float(offsets.get(edge_id, 0.0))
-        if offset:
+        offset = offsets.get(edge_id, 0.0)
+        offset_array = np.asarray(offset, dtype=float)
+        if offset_array.ndim > 1 or offset_array.size not in (1, 3):
+            raise MeshError(
+                f"beam offset for line {edge_id} must be a scalar or 3-vector"
+            )
+        if not np.all(np.isfinite(offset_array)):
+            raise MeshError(f"beam offset for line {edge_id} must be finite")
+        if np.any(offset_array != 0.0):
             _build_offset_nodes(
                 geometry,
                 mesh,
@@ -242,11 +248,24 @@ def _refuse_curved_beams(
         )
 
 
-def nodal_normals(mesh: Mesh) -> Dict[int, np.ndarray]:
-    """A unit normal at every node, averaged over the plates meeting it."""
+def nodal_normals(
+    mesh: Mesh,
+    *,
+    element_owner_normals: Mapping[int, Sequence[float]] | None = None,
+    include_triangles: bool | None = None,
+) -> Dict[int, np.ndarray]:
+    """A unit normal at every shell node, averaged over its incident plates.
+
+    Triangle contributions are opt-in during the additive S3 release. Passing
+    authoritative owner normals enables them by default; callers may also set
+    ``include_triangles=True`` explicitly. The legacy no-argument call keeps
+    its historical quadrilateral-only behavior.
+    """
 
     accumulated: Dict[int, np.ndarray] = {}
-    for element_id, nodes in mesh.quads.items():
+    owners = {} if element_owner_normals is None else element_owner_normals
+    use_triangles = bool(owners) if include_triangles is None else bool(include_triangles)
+    for element_id, nodes in mesh.shells.items():
         # The diagonals come from the corners; a mid-side node would not
         # describe the element's plane. But every node of the element,
         # mid-sides included, gets the normal -- an eccentric stiffener on a
@@ -254,11 +273,31 @@ def nodal_normals(mesh: Mesh) -> Dict[int, np.ndarray]:
         corners = np.array(
             [mesh.nodes[node] for node in mesh.corners_of(element_id)]
         )
-        normal = np.cross(corners[2] - corners[0], corners[3] - corners[1])
+        if len(corners) == 3:
+            if not use_triangles:
+                continue
+            normal = np.cross(corners[1] - corners[0], corners[2] - corners[0])
+        else:
+            normal = np.cross(corners[2] - corners[0], corners[3] - corners[1])
         length = float(np.linalg.norm(normal))
         if length <= 0.0:
             continue
         normal = normal / length
+        owner = owners.get(int(element_id))
+        if owner is not None:
+            made_owner = np.asarray(owner, dtype=float)
+            owner_length = float(np.linalg.norm(made_owner))
+            if made_owner.shape != (3,) or not np.all(np.isfinite(made_owner)) or owner_length <= 0.0:
+                raise MeshError(
+                    f"shell element {int(element_id)} owner normal must be a finite nonzero three-vector"
+                )
+            alignment = float(np.dot(normal, made_owner / owner_length))
+            if abs(alignment) <= 1.0e-8:
+                raise MeshError(
+                    f"shell element {int(element_id)} owner normal is ambiguous or tangential"
+                )
+            if alignment < 0.0:
+                normal = -normal
         for node in nodes:
             accumulated[node] = accumulated.get(node, np.zeros(3)) + normal
 
@@ -339,11 +378,11 @@ def _build_offset_nodes(
     geometry: GeometryModel,
     mesh: Mesh,
     edge_id: int,
-    offset: float,
+    offset: float | Sequence[float],
     next_node: "_Counter",
     registry: dict[tuple[int, tuple[str, str, str]], int],
 ) -> None:
-    """Stand a stiffener off the plating, along the plate normal."""
+    """Stand a stiffener off the plating by a scalar normal or exact vector."""
 
     target_faces = _offset_target_faces(geometry, edge_id)
     if not target_faces:
@@ -353,21 +392,29 @@ def _build_offset_nodes(
             "the member/sheet attachment."
         )
 
-    normals = nodal_normals(mesh)
     sequence = mesh.nodes_of_edge[edge_id]
-    for node in sequence:
-        if node not in normals:
-            normals[node] = _attached_face_normal(
-                geometry,
-                target_faces,
-                mesh.nodes[node],
-                edge_id=edge_id,
-                node_id=node,
-            )
+    raw_offset = np.asarray(offset, dtype=float).reshape(-1)
+    vector_offset = raw_offset if len(raw_offset) == 3 else None
+    normals: Dict[int, np.ndarray] = {}
+    if vector_offset is None:
+        normals = nodal_normals(mesh)
+        for node in sequence:
+            if node not in normals:
+                normals[node] = _attached_face_normal(
+                    geometry,
+                    target_faces,
+                    mesh.nodes[node],
+                    edge_id=edge_id,
+                    node_id=node,
+                )
 
     offset_nodes: List[int] = []
     for node in sequence:
-        displacement = offset * normals[node]
+        displacement = (
+            np.asarray(vector_offset, dtype=float)
+            if vector_offset is not None
+            else float(raw_offset[0]) * normals[node]
+        )
         key = (node, tuple(float(value).hex() for value in displacement))
         node_id = registry.get(key)
         if node_id is None:
@@ -387,6 +434,12 @@ class _Counter:
     def next(self) -> int:
         self._value += 1
         return self._value
+
+    def take(self, count: int) -> range:
+        """Reserve consecutive IDs in exactly the scalar allocation order."""
+        first = self._value + 1
+        self._value += count
+        return range(first, self._value + 1)
 
 
 def _build_vertex_nodes(
@@ -513,6 +566,32 @@ def _build_face(
         np.array([mesh.nodes[node] for node in side_c]),
         np.array([mesh.nodes[node] for node in side_d]),
     )
+    if step == 1:
+        # Keep the original i-then-j numbering and the unchanged Coons values.
+        # Row views avoid copying the full interior coordinate array.
+        interior_ids = next_node.take((u_stations - 1) * (v_stations - 1))
+        grid[1:-1, 1:-1] = np.arange(
+            interior_ids.start, interior_ids.stop, dtype=grid.dtype,
+        ).reshape(u_stations - 1, v_stations - 1)
+        first = interior_ids.start
+        for i in range(1, u_stations):
+            following = first + v_stations - 1
+            mesh.nodes.update(zip(range(first, following), blended[i, 1:-1]))
+            first = following
+        mesh.grid_of_face[face_id] = grid
+        element_ids = list(next_element.take(n_u * n_v))
+        # Bounded conversion batches, rather than a full-mesh connectivity
+        # temporary. Array indexing performs no coordinate arithmetic.
+        for start in range(0, len(element_ids), 2048):
+            stop = min(start + 2048, len(element_ids))
+            i, j = np.divmod(np.arange(start, stop, dtype=np.intp), n_v)
+            corners = np.column_stack((
+                grid[i, j], grid[i + 1, j],
+                grid[i + 1, j + 1], grid[i, j + 1],
+            ))
+            mesh.quads.update(zip(element_ids[start:stop], map(tuple, corners.tolist())))
+        mesh.elements_of_face[face_id] = element_ids
+        return
     for i in range(1, u_stations):
         for j in range(1, v_stations):
             if step == 2 and i % 2 == 1 and j % 2 == 1:
