@@ -25,7 +25,7 @@ from anygeometry.curves import Straight
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
-from anygeometry.surfaces import Cone, Cylinder, Plane
+from anygeometry.surfaces import CoonsSurface, Cone, Cylinder, Plane, RuledSurface
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
@@ -52,7 +52,7 @@ from .metric import (
 )
 from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
-from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, PlanarQuadDomain
+from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
 from .quad.high_order import (
     HighOrderBoundaryMidside,
@@ -2884,6 +2884,13 @@ def _quad_first_execute(
             elif isinstance(surface, Cone):
                 domain = ConicalQuadDomain.from_geometry(geometry, face_id)
                 family = "conical"
+            elif isinstance(surface, (RuledSurface, CoonsSurface)):
+                try:
+                    domain = PlanarQuadDomain.from_geometry(geometry, face_id)
+                    family = "planar"
+                except MeshError:
+                    domain = ParametricQuadDomain.from_geometry(geometry, face_id)
+                    family = "ruled" if isinstance(surface, RuledSurface) else "coons"
             else:
                 domain = PlanarQuadDomain.from_geometry(geometry, face_id)
                 family = "planar"
@@ -3156,12 +3163,16 @@ def _quad_first_execute(
     mesh.hybrid_diagnostics.update(
         {
             "route": (
-                "quad-first-conical"
-                if "conical" in geometry_family_by_face.values()
+                "quad-first-parametric-curved"
+                if any(value in {"ruled", "coons"} for value in geometry_family_by_face.values())
                 else (
-                    "quad-first-cylindrical"
-                    if "cylindrical" in geometry_family_by_face.values()
-                    else "quad-first"
+                    "quad-first-conical"
+                    if "conical" in geometry_family_by_face.values()
+                    else (
+                        "quad-first-cylindrical"
+                        if "cylindrical" in geometry_family_by_face.values()
+                        else "quad-first"
+                    )
                 )
             ),
             "geometry_family_by_face": dict(geometry_family_by_face),
@@ -3363,6 +3374,19 @@ def generate_hybrid_mesh_result(
                 continue
             if isinstance(_surface, Cone):
                 continue
+            if isinstance(_surface, (RuledSurface, CoonsSurface)):
+                try:
+                    PlanarQuadDomain.from_geometry(
+                        source_geometry, int(_quad_scope_face_id)
+                    )
+                except MeshError:
+                    if order != "linear":
+                        raise QuadPublicUnsupported(
+                            "quadratic metric-curved quad-first is not qualified in CH10"
+                        )
+                    continue
+                else:
+                    continue
             _corner_vertices = tuple(
                 source_geometry.face_corner_vertices(int(_quad_scope_face_id))
             )
