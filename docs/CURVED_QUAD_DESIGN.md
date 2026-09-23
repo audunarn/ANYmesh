@@ -356,3 +356,20 @@ The public route labels cone faces `conical`, emits `quad-first-conical`, and ad
 - Independent fresh-review differentiation checks at `(u,v)=(0.37,0.61)` matched chart/world metric derivatives to about `1e-9` relative and chart round-trip error was `3.33e-16`.
 
 Cancellation before publication is atomic, repeat generation is deterministic, complete `nodes_of_edge` chains remain source-oriented, and `elements_of_face` contains every final Q4 and residual T3.
+
+## CH9 implementation record — conical Q8/T6 promotion
+
+CH9 re-opens `order="quadratic"` for the CH8 analytic conical quad-first route. The CH8 linear Q4/T3 topology remains authoritative; CH9 applies the existing staged higher-order promotion without adding a second topology engine.
+
+Boundary midsides remain exact source-edge midpoint-parameter evaluations. For non-boundary shell edges on a conical face, both linear endpoints are projected through that face's revision-bound `ConicalQuadDomain`, averaged in the developed isometric chart, and lifted back to the source cone. One canonical undirected shell edge owns one midside, so Q8/Q8 and Q8/T6 interfaces reuse the same node ID without coordinate welding.
+
+The CH1 strict `certify_mapping_validity` gate remains mandatory for every final Q8/T6 before publication, and the CH5 high-order geometry certificate reports the conical chart/provenance. Element IDs, corner connectivity, face ownership, source boundary stations and source geometry remain unchanged from CH8. Cancellation at the quadratic-promotion-ready checkpoint is atomic.
+
+Conical quadratic output with beam/coupling content remains fail-closed because conical B3 ownership is not qualified. Planar and cylindrical quadratic behavior is unchanged; ruled/Coons surfaces, Q9 and higher orders remain outside CH9.
+
+### CH9 measured qualification points
+
+- Cone h=0.6: CH8 linear `42 nodes / 28 Q4 / 6 T3` -> `117 nodes / 28 Q8 / 6 T6`, exactly `75` unique midsides. Maximum high-order geometry residual is `2.283103467203869e-12`; owner support residual is `3.1401849173675503e-16`.
+- Cone h=0.3: CH8 linear `118 nodes / 89 Q4 / 14 T3` -> `338 nodes / 89 Q8 / 14 T6`, exactly `220` unique midsides. Maximum high-order geometry residual is `2.8219887411506448e-12`; owner support residual is `3.510833468576701e-16`.
+- Original linear node IDs/coordinates, shell IDs and corner connectivity are retained exactly; every expanded source-edge chain contains the CH8 linear chain at even positions.
+- Interior conical midsides equal the developed-chart midpoint lift within `1e-12`, and every final Q8/T6 is `CERTIFIED_POSITIVE`.

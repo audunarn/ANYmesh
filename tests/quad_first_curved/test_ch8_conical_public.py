@@ -206,13 +206,13 @@ def test_ch8_conical_cancellation_before_publication_is_atomic() -> None:
     assert _persistent_state(model) == before
 
 
-def test_ch8_conical_quadratic_is_typed_unsupported() -> None:
+def test_ch8_linear_conical_route_survives_later_quadratic_activation() -> None:
     model, face, _ = _model_face("cone")
     before = _persistent_state(model)
-
-    with pytest.raises(QuadPublicUnsupported):
-        _generate(model, (face,), 0.4, order="quadratic")
-
+    result = _generate(model, (face,), 0.4, order="linear")
+    assert result.mesh.order == "linear"
+    assert result.mesh.hybrid_diagnostics["route"] == "quad-first-conical"
+    assert result.mesh.hybrid_diagnostics["geometry_family_by_face"][face] == "conical"
     assert _persistent_state(model) == before
 
 

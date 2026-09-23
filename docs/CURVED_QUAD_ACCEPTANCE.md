@@ -347,3 +347,26 @@ CH8 acceptance is implemented in `tests/quad_first_curved/test_ch8_conical_publi
 - full `tests/quad_first`: `275 passed in 3.67s`.
 
 Fresh review additionally verifies the developed-map inverse branch, local metric isometry, source/revision binding, exact edge ownership, target-size topology change, cancellation, and that no conical quadratic, ruled/Coons, or Q9 route was activated.
+
+## CH9 acceptance — analytic conical Q8/T6 promotion
+
+CH9 acceptance is implemented in `tests/quad_first_curved/test_ch9_conical_quadratic.py` and re-opens only quadratic promotion on the accepted CH8 analytic Cone topology.
+
+- h=0.6 preserves CH8 `28 Q4 / 6 T3` shell IDs and corner topology as `28 Q8 / 6 T6`, retaining all 42 linear node IDs/coordinates and growing to exactly 117 nodes with 75 unique midsides.
+- h=0.3 preserves `89 Q4 / 14 T3` as `89 Q8 / 14 T6`, retaining all 118 linear nodes and growing to exactly 338 nodes with 220 unique midsides.
+- Every shared final shell edge has exactly one midside ID. Every source-edge chain expands with the CH8 linear chain at even positions.
+- Interior conical midsides are developed-chart midpoint lifts, not raw 3D chord midpoints. Final owner support residual is <= `1e-10` and every Q8/T6 passes CH1 `CERTIFIED_POSITIVE` validity.
+- `high_order_geometry` reports `geometry_family="conical"`, `chart_kind="ConicalQuadDomain"`, `interior_projection="owner-chart-midpoint"`, correct Q8/T6/unique-midside counts, and a bounded owner residual envelope.
+- Repeat generation is deterministic. Cancellation at `quad-first:quadratic-promotion-ready` is atomic and leaves source geometry unchanged.
+- Conical quadratic requests with beam/coupling content remain typed unsupported. Planar/cylindrical behavior is unchanged; ruled/Coons surfaces and Q9+ remain outside CH9.
+
+### CH9 gate evidence
+
+- focused CH9 product: `5 passed in 6.38s`;
+- full `tests/quad_first_curved`: `87 passed in 78.19s`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped in 40.75s` (known unreconstructed native triangulation parity capability skips);
+- full `tests/quad_first`: `275 passed in 5.60s`;
+- curved-native / quality / coupling / quadratic-staging consumers: `41 passed in 8.19s`;
+- `git diff --check`: clean before documentation closeout.
+
+Fresh review must confirm no topology-ID drift, exact owner-chart interior midsides, exact source-edge boundary ownership, strict CH1 validity, CH5 provenance truth, cancellation atomicity, and no accidental conical B3, ruled/Coons or Q9 activation.

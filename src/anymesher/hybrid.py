@@ -2399,7 +2399,11 @@ def _promote_quad_first_quadratic(
     face_domains = dict(domains_by_face or {})
     for face_id in working.elements_of_face:
         if int(face_id) not in face_domains:
-            face_domains[int(face_id)] = PlanarQuadDomain.from_geometry(geometry, int(face_id))
+            surface = geometry.faces[int(face_id)].surface
+            if isinstance(surface, Cone):
+                face_domains[int(face_id)] = ConicalQuadDomain.from_geometry(geometry, int(face_id))
+            else:
+                face_domains[int(face_id)] = PlanarQuadDomain.from_geometry(geometry, int(face_id))
     owner_faces_by_edge: dict[tuple[int, int], set[int]] = {}
     for face_id, element_ids in working.elements_of_face.items():
         for element_id in element_ids:
@@ -2464,17 +2468,17 @@ def _promote_quad_first_quadratic(
         if owned is not None:
             return np.asarray(owned[1], dtype=float)
         owner_faces = tuple(sorted(owner_faces_by_edge.get(key, ())))
-        cylindrical = [
+        chart_owned = [
             face_domains[face]
             for face in owner_faces
-            if isinstance(face_domains.get(face), CylindricalQuadDomain)
+            if isinstance(face_domains.get(face), (CylindricalQuadDomain, ConicalQuadDomain))
         ]
-        if cylindrical:
-            if len(owner_faces) != 1 or len(cylindrical) != 1:
+        if chart_owned:
+            if len(owner_faces) != 1 or len(chart_owned) != 1:
                 raise MeshError(
-                    f"non-boundary cylindrical shell edge {key} has conflicting face ownership"
+                    f"non-boundary curved shell edge {key} has conflicting face ownership"
                 )
-            domain = cylindrical[0]
+            domain = chart_owned[0]
             first_chart = domain.project(working.nodes[first])
             second_chart = domain.project(working.nodes[second])
             midpoint_chart = (
@@ -2760,13 +2764,21 @@ def _promote_quad_first_quadratic(
         max_residual = max(residuals, default=0.0)
         all_residuals.extend(residuals)
         cylindrical = isinstance(domain, CylindricalQuadDomain)
-        chart_origin = tuple(float(value) for value in (domain.lift((0.0, 0.0)) if cylindrical else domain.origin))
+        conical = isinstance(domain, ConicalQuadDomain)
+        chart_owned = cylindrical or conical
+        if cylindrical:
+            chart_origin = tuple(float(value) for value in domain.lift((0.0, 0.0)))
+        elif conical:
+            chart_origin = tuple(float(value) for value in domain.lift(domain.outer_chart[0]))
+        else:
+            chart_origin = tuple(float(value) for value in domain.origin)
+        geometry_family = "conical" if conical else ("cylindrical" if cylindrical else "planar")
         curvature_classes = tuple(sorted({item.curvature_class for item in boundary_records}))
         face_reports.append(HighOrderGeometryReport(
             model_id=str(geometry.model_id), revision=int(geometry.revision), face_id=int(face_id),
-            geometry_family="cylindrical" if cylindrical else "planar", chart_kind=type(domain).__name__,
+            geometry_family=geometry_family, chart_kind=type(domain).__name__,
             chart_origin=chart_origin, boundary_projection="source-edge-parameter-midpoint",
-            interior_projection="owner-chart-midpoint" if cylindrical else "chord-midpoint",
+            interior_projection="owner-chart-midpoint" if chart_owned else "chord-midpoint",
             q8_count=int(q8_count), t6_count=int(t6_count),
             certified_elements=int(q8_count + t6_count), total_elements=int(q8_count + t6_count),
             boundary_midsides=boundary_records, edge_curvature_classes=curvature_classes,
@@ -3178,7 +3190,7 @@ def _quad_first_execute(
         capability_dict = capabilities.to_dict()
     else:
         capability_dict = dict(capabilities)
-    if "cylindrical" in geometry_family_by_face.values():
+    if any(value in {"cylindrical", "conical"} for value in geometry_family_by_face.values()):
         capability_dict["unsupported_scope"] = (
             "unqualified_curved",
             "Q9+",
@@ -3332,6 +3344,13 @@ def generate_hybrid_mesh_result(
             if _quad_face_selector is None
             else tuple(_quad_face_selector)
         )
+        if order == "quadratic" and source_beams and any(
+            isinstance(source_geometry.faces[int(face_id)].surface, Cone)
+            for face_id in _quad_scope_faces
+        ):
+            raise QuadPublicUnsupported(
+                "quadratic conical quad-first with beam/coupling content is not qualified in CH9"
+            )
         for _quad_scope_face_id in _quad_scope_faces:
             _surface = getattr(
                 source_geometry.faces[int(_quad_scope_face_id)],
@@ -3343,10 +3362,6 @@ def generate_hybrid_mesh_result(
             if isinstance(_surface, Cylinder):
                 continue
             if isinstance(_surface, Cone):
-                if order != "linear":
-                    raise QuadPublicUnsupported(
-                        "quadratic conical quad-first is not qualified in CH8"
-                    )
                 continue
             _corner_vertices = tuple(
                 source_geometry.face_corner_vertices(int(_quad_scope_face_id))

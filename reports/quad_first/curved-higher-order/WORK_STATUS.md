@@ -336,3 +336,27 @@ CH8 adds an exact developable `ConicalMetricChart` and `ConicalQuadDomain` for a
 - full quad-first: `275 passed in 3.67s`.
 
 Fresh review confirmed the analytic unroll is locally isometric, inverse angle selection is unique within the owning sector, source/edge identity is unchanged, and CH8 opens no quadratic cone, ruled/Coons or Q9 path.
+
+## CH9 — analytic conical Q8/T6 promotion
+
+**Status: QUALIFIED; ready for the CH9 milestone commit.**
+
+CH9 activates staged Q8/T6 promotion on the CH8 analytic conical linear topology. It reuses the CH1 validity kernel, CH2/CH4 canonical midside ownership and CH5 geometry-provenance certificate. No conical topology engine, coordinate welding or new option schema is introduced.
+
+### Product evidence
+
+- h=0.6: `42 linear nodes / 28 Q4 / 6 T3` -> `117 nodes / 28 Q8 / 6 T6`, `75` unique midsides, high-order geometry residual `2.283103467203869e-12`, owner support residual `3.1401849173675503e-16`;
+- h=0.3: `118 linear nodes / 89 Q4 / 14 T3` -> `338 nodes / 89 Q8 / 14 T6`, `220` unique midsides, high-order geometry residual `2.8219887411506448e-12`, owner support residual `3.510833468576701e-16`;
+- all original linear nodes, shell IDs and corner connectivity are retained exactly;
+- all Q8/T6 mappings are `CERTIFIED_POSITIVE`; shared edges reuse one midside; source-edge chains preserve the CH8 stations at even positions;
+- conical interior midsides use exact developed-chart midpoint lifts; boundary midsides retain source-edge parameter ownership;
+- repeat generation is deterministic, cancellation is atomic and source geometry is unchanged;
+- conical quadratic beam/coupling content remains typed unsupported; ruled/Coons and Q9+ remain closed.
+
+### CH9 gate evidence
+
+- focused CH9: `5 passed in 6.38s`;
+- full curved: `87 passed in 78.19s`;
+- full planar: `63 passed, 3 skipped in 40.75s` for the known native triangulation capability;
+- full quad-first: `275 passed in 5.60s`;
+- curved-native / quality / coupling / quadratic-staging consumers: `41 passed in 8.19s`.
