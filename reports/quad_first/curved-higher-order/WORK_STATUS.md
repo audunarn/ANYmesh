@@ -285,3 +285,28 @@ CH6 removes the obsolete public blanket rejection of planar quadratic quad-first
 - full `tests/quad_first_curved`: `74 passed`;
 - full `tests/quad_first_planar`: `63 passed, 3 skipped` (known compiled-triangulation parity capability skips);
 - full `tests/quad_first`: `275 passed`.
+
+
+## CH7 — cylindrical quadratic B3 ownership
+
+**Status: QUALIFIED; ready for the CH7 milestone commit.**
+
+CH7 qualifies coherent straight B3/member content on the CH4 owner-qualified cylindrical Q8/T6 public route. The existing mapped B3 generator remains authoritative and the structural pipeline keeps target-face ownership exact. A quadratic-only second BVH lookup is permitted when the exact owner-surface attachment lies just outside the polynomial shell map; its tolerance is bounded by the allowed target elements' midside-to-chord deviation.
+
+### Product evidence
+
+- full eight-sector unit-cylinder ring, h=0.5, one radial member: `261 nodes / 64 Q8 / 16 T6 / 2 B3 / 1 coupling`;
+- B3 midsides equal endpoint chord midpoints within `1e-12`;
+- centre member station is the exact owner-cylinder point and the coupling records a small nonzero physical projection eccentricity below `1e-3`;
+- all shell nodes remain on radius 1 within `1e-10`;
+- serialization preserves B3 connectivity and member station chains;
+- repeat execution is deterministic, cancellation is atomic, and source geometry is unchanged.
+
+### CH7 gate evidence
+
+- focused CH6+CH7 plus structural preparation/pipeline, coupling and serialization: `63 passed in 13.15s`;
+- full `tests/quad_first_curved`: `75 passed in 51.84s`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped in 39.22s` (known compiled-triangulation capability skips);
+- full `tests/quad_first`: `275 passed in 5.82s`.
+
+Fresh review confirmed the tolerance expansion is quadratic-only, restricted to the explicitly owned target-face element set, derived from actual midside/chord curvature, and does not change linear attachment behavior. CH7 adds no topology engine, coordinate welding, new option schema, or general curved-surface family.

@@ -3370,18 +3370,6 @@ def generate_hybrid_mesh_result(
                 raise QuadPublicUnsupported(
                     "quad-first public route currently requires a planar face"
                 )
-    if (
-        _quad_normalized is not None
-        and order == "quadratic"
-        and source_beams
-        and any(
-            isinstance(source_geometry.faces[int(face_id)].surface, Cylinder)
-            for face_id in _quad_scope_faces
-        )
-    ):
-        raise QuadPublicUnsupported(
-            "quadratic cylindrical quad-first beam/coupling ownership is not qualified in CH6"
-        )
     if _quad_face_selector is not None and quad_options is None:
         raise MeshError(
             "quad_face_ids requires an explicit quad_options selector"

@@ -137,26 +137,3 @@ def test_quadratic_quad_first_still_rejects_curved_b3_lines():
             order="quadratic",
         )
     assert _source_signature(geometry) == before
-
-
-def test_ch6_does_not_silently_open_cylindrical_b3_coupling_scope():
-    from anymesher.quad.public_integration import QuadPublicUnsupported
-    from quad_first_curved.test_ch3_cylindrical_public import _face_id, _sector_model
-
-    geometry, selected = _sector_model(False)
-    face = _face_id(geometry, selected[0])
-    p0 = geometry.add_point(0.0, 0.0, -0.5)
-    p1 = geometry.add_point(0.0, 0.0, 1.5)
-    beam_edge = geometry.add_line(p0, p1)
-    before = _source_signature(geometry)
-
-    with pytest.raises(QuadPublicUnsupported, match="cylindrical.*beam|beam.*cylindrical"):
-        generate_hybrid_mesh_result(
-            geometry,
-            target_size=0.5,
-            face_ids=(face,),
-            beam_edges=(beam_edge,),
-            quad_options=QuadMeshingOptions(),
-            order="quadratic",
-        )
-    assert _source_signature(geometry) == before

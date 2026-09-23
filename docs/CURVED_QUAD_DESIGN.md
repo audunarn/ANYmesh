@@ -329,3 +329,13 @@ The mapped beam implementation remains authoritative: a quadratic beam spans two
 The old blanket public guard that rejected every quadratic quad-first request containing beam/member content is removed. The private `_promote_quad_first_quadratic` guard for arbitrary pre-existing B2 content remains unchanged: CH6 only re-opens the coherent public mixed route where the beam slice is generated as B3 from the outset.
 
 Structural coupling is still owned by the existing merge/preparation pipeline. No hidden B2 element is published under `mesh.order="quadratic"`; all shell bodies are Q8/T6 and all beam bodies are B3. Source geometry remains read-only and cancellation before quadratic publication remains atomic. Cylindrical quadratic shell/beam ownership remains fail-closed for a later tranche; CH6 does not widen the CH4 cylinder route.
+
+## CH7 implementation record — cylindrical quadratic B3 ownership
+
+CH7 re-opens the final CH6 fail-closed boundary for **straight** B3 member content on the owner-qualified cylindrical quadratic quad-first route. The CH4 Q8/T6 shell topology and the CH6 mapped straight-sided B3 generator remain authoritative; CH7 adds no shell or beam topology engine.
+
+The public blanket rejection of cylindrical quadratic shell/beam combinations is removed only for coherently generated straight member content. Curved quadratic beam edges remain rejected by the existing B3 preflight. Structural attachment resolution continues to search only the explicitly owned target-face elements.
+
+An exact owner-surface attachment point does not generally lie exactly on the polynomial Q8/T6 interior map. CH7 therefore permits a second, quadratic-only BVH lookup when the existing base tolerance misses. The extra tolerance is derived from the largest midside-to-chord deviation of the allowed target-face Q8/T6 elements; linear meshes are unchanged and unrelated faces are never admitted. The resulting coupling retains the physical projection gap explicitly as eccentricity rather than moving the owner point or shell.
+
+The qualified full eight-sector ring with one straight radial member publishes `261 nodes / 64 Q8 / 16 T6 / 2 B3 / 1 coupling`. B3 midsides remain exact endpoint chord midpoints, the centre member station lies exactly on the unit owner cylinder, the shell remains owner-bound, serialization is stable, repeat generation is deterministic, cancellation remains atomic, and source geometry remains read-only.

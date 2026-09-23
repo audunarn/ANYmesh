@@ -314,3 +314,15 @@ Acceptance requires all final shell connectivities to be Q8/T6, every beam conne
 The accepted target-size-1 fixture publishes `13 nodes / 1 Q8 / 0 T6 / 2 B3 / 1 coupling`; the member edge chain has five stations and the coupling uses its centre station. Repeated generation is deterministic and source geometry is unchanged. Cancellation at the quadratic publication checkpoint is atomic.
 
 Curved quadratic beam edges remain rejected by the existing straight-sided B3 rule. Cylindrical quadratic shell/beam requests remain typed unsupported in CH6. The CH2 direct-promotion test for arbitrary supplied B2 beam content remains fail-closed; CH6 only qualifies beams produced coherently by the public mixed generation route.
+
+## CH7 acceptance — cylindrical quadratic B3 ownership
+
+CH7 acceptance is implemented in `tests/quad_first_curved/test_ch7_cylindrical_b3_ownership.py`. It qualifies only straight B3/member content on the already-qualified CH4 cylindrical Q8/T6 route.
+
+The full authored eight-sector ring at target size 0.5 with one radial member must publish exactly `261 nodes / 64 Q8 / 16 T6 / 2 B3 / 1 coupling`. Every beam body has start-mid-end width three and each B3 middle node is the endpoint chord midpoint within `1e-12`. The member station at radius 1 is the exact owner-cylinder attachment point; the shell remains on radius 1 within `1e-10`.
+
+Attachment resolution may widen tolerance only for quadratic target-face elements and only by the mesh-derived midside/chord deviation. The accepted coupling records a nonzero but bounded eccentricity below `1e-3`; no coordinate welding or owner-point movement is permitted. Serialization must preserve B3 connectivity, member station chains and coupling ownership.
+
+Repeated public generation is deterministic, source geometry is unchanged, and cancellation at `quad-first:quadratic-promotion-ready` is atomic. Curved B3 lines remain typed unsupported through the existing CH6 straight-sided preflight.
+
+Qualification evidence: focused CH6+CH7 plus structural/coupling/serialization consumers `63 passed`; full `tests/quad_first_curved` `75 passed`; full `tests/quad_first_planar` `63 passed, 3 skipped` for the known unreconstructed native triangulation capability; full `tests/quad_first` `275 passed`.
