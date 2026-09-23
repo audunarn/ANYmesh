@@ -370,3 +370,25 @@ CH9 acceptance is implemented in `tests/quad_first_curved/test_ch9_conical_quadr
 - `git diff --check`: clean before documentation closeout.
 
 Fresh review must confirm no topology-ID drift, exact owner-chart interior midsides, exact source-edge boundary ownership, strict CH1 validity, CH5 provenance truth, cancellation atomicity, and no accidental conical B3, ruled/Coons or Q9 activation.
+
+
+## CH10 acceptance — metric ruled/Coons linear quad-first
+
+CH10 acceptance is implemented in `tests/quad_first_curved/test_ch10_parametric_curved_linear.py` and opens only explicit linear quad-first meshing for non-planar `RuledSurface` and `CoonsSurface` faces.
+
+- `ParametricQuadDomain` must bind model/revision/face identity, round-trip owner positions through `FaceChart`, expose positive chart area and leave source geometry unchanged.
+- Public h=0.6 and h=0.3 executions must show real physical target-size causality: increasing `N_eq`, decreasing maximum physical shell corner edge, complete source-edge chains, all final elements in `elements_of_face`, real front counters and owner support residual <= `1e-10`.
+- Repeat generation must be deterministic. Cancellation during face seeding must propagate without source mutation or partial publication.
+- Diagnostics must report route `quad-first-parametric-curved` and the exact per-face family (`ruled` or `coons`).
+- Ruled/Coons `order="quadratic"` remains typed unsupported through CH10. Existing Plane, Cylinder and Cone routes remain unchanged; Q9+ is not opened.
+
+### CH10 gate evidence
+
+- focused CH10 product: `8 passed in 0.74s`;
+- chart / physical-quality / serialization / coupling consumers: `47 passed in 0.73s`;
+- accepted PQ3/PQ4a/PQ4b/PQ5/PQ6 + Q6/Q7 public regression bundle: `84 passed, 3 skipped in 31.60s`; skips remain the known unreconstructed native triangulation parity capability checks;
+- full `tests/quad_first_curved`: `95 passed in 60.37s`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped in 38.56s`;
+- full `tests/quad_first`: `275 passed in 5.51s`.
+
+Fresh review must keep the centre-metric normalization truthful as an approximate physical spacing map rather than an exact global isometry, preserve exact geometry-owned boundary station identity, source immutability and cancellation atomicity, retain the single accepted front/driver topology pipeline, and confirm no ruled/Coons quadratic route is activated before CH11.

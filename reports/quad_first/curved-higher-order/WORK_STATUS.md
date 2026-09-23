@@ -360,3 +360,31 @@ CH9 activates staged Q8/T6 promotion on the CH8 analytic conical linear topology
 - full planar: `63 passed, 3 skipped in 40.75s` for the known native triangulation capability;
 - full quad-first: `275 passed in 5.60s`;
 - curved-native / quality / coupling / quadratic-staging consumers: `41 passed in 8.19s`.
+
+
+## CH10 — metric parametric curved linear quad-first
+
+**Status: QUALIFIED; implementation commit `9c97c55` plus this closeout evidence.**
+
+CH10 activates explicit linear quad-first meshing for non-planar ANYgeometry RuledSurface and CoonsSurface faces. `ParametricQuadDomain` remains source model/revision/face bound through `FaceChart`, uses owner UV for topology, and applies a centre `J^T J` Cholesky normalization only to make chart distances approximately physical. Boundary divisions remain exact geometry/SizeField seeding. The established boundary registry, constrained seed, MCF/Q5, front driver, validator and publication path remain authoritative.
+
+### Product evidence
+
+- ruled h=0.6 -> `15 nodes / 8 Q4 / 0 T3`, `N_eq=8`, max physical corner edge `0.6908830462963139`, edge chains `[5,3,5,3]`, 8 attempts;
+- ruled h=0.3 -> `40 nodes / 28 Q4 / 0 T3`, `N_eq=28`, max physical corner edge `0.3247592599913309`, edge chains `[8,5,8,5]`, 28 attempts;
+- coons h=0.6 -> `15 nodes / 8 Q4 / 0 T3`, `N_eq=8`, max physical corner edge `0.6908830462963139`, edge chains `[5,3,5,3]`, 8 attempts;
+- coons h=0.3 -> `40 nodes / 28 Q4 / 0 T3`, `N_eq=28`, max physical corner edge `0.3247592599913309`, edge chains `[8,5,8,5]`, 28 attempts;
+- owner support residuals are `0.0` to `2.24e-16`; repeat generation is deterministic; cancellation is atomic; source geometry is unchanged; diagnostics are `quad-first-parametric-curved` with exact ruled/coons family labels.
+
+Ruled/Coons quadratic output remains typed unsupported for CH11. Plane, Cylinder and Cone routes are unchanged.
+
+### CH10 closeout gate evidence
+
+- focused CH10: `8 passed in 0.74s`;
+- chart/physical-quality/serialization/coupling consumers: `47 passed in 0.73s`;
+- accepted PQ public regressions: `84 passed, 3 skipped in 31.60s`;
+- full curved: `95 passed in 60.37s`;
+- full planar: `63 passed, 3 skipped in 38.56s`;
+- full quad-first: `275 passed in 5.51s`.
+
+Fresh review confirmed metric normalization is reported as approximate rather than globally isometric, source edge/station ownership remains geometry-authoritative, no coordinate welding or topology fork was introduced, cancellation/source immutability remain intact, and CH10 does not activate quadratic ruled/Coons meshing.

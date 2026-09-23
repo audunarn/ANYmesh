@@ -373,3 +373,21 @@ Conical quadratic output with beam/coupling content remains fail-closed because 
 - Cone h=0.3: CH8 linear `118 nodes / 89 Q4 / 14 T3` -> `338 nodes / 89 Q8 / 14 T6`, exactly `220` unique midsides. Maximum high-order geometry residual is `2.8219887411506448e-12`; owner support residual is `3.510833468576701e-16`.
 - Original linear node IDs/coordinates, shell IDs and corner connectivity are retained exactly; every expanded source-edge chain contains the CH8 linear chain at even positions.
 - Interior conical midsides equal the developed-chart midpoint lift within `1e-12`, and every final Q8/T6 is `CERTIFIED_POSITIVE`.
+
+
+## CH10 implementation record — metric parametric curved linear quad-first
+
+CH10 opens explicit linear quad-first meshing for ANYgeometry `RuledSurface` and `CoonsSurface` faces without adding a second topology engine. `ParametricQuadDomain` is bound to source model UUID, revision and face identity through the existing `FaceChart`. It retains the owner UV parameterization as the topological chart and applies one deterministic centre-point physical metric normalization: the Cholesky factor of `J^T J` at `(u,v)=(0.5,0.5)` maps UV coordinates into approximately physical chart metres.
+
+Boundary ownership remains geometry-authoritative. `BoundaryStationRegistry` still derives exact source-edge stations and `SizeField` demands from the geometry; the normalized chart is used for interior seed spacing, front work, MCF/Q5 and validation. Final nodes are lifted through the revision-bound owner chart, and source geometry remains read-only. No coordinate welding or ruled/Coons-specific topology path is introduced.
+
+The public route labels non-planar ruled and Coons faces `ruled` and `coons` under `quad-first-parametric-curved`. Planar instances still take the established `PlanarQuadDomain` route. Plane, Cylinder and Cone dispatch is unchanged. CH10 admits only `order="linear"`; ruled/Coons Q8/T6 promotion remains typed unsupported until CH11.
+
+### CH10 measured qualification points
+
+- Ruled h=0.6: `15 nodes / 8 Q4 / 0 T3`, `N_eq=8`, maximum physical corner edge `0.6908830462963139`, boundary chains `[5,3,5,3]`, 8 front attempts, owner residual `0.0`.
+- Ruled h=0.3: `40 nodes / 28 Q4 / 0 T3`, `N_eq=28`, maximum physical corner edge `0.3247592599913309`, boundary chains `[8,5,8,5]`, 28 front attempts, owner residual `2.2247786310271853e-16`.
+- Coons h=0.6: `15 nodes / 8 Q4 / 0 T3`, `N_eq=8`, maximum physical corner edge `0.6908830462963139`, boundary chains `[5,3,5,3]`, 8 front attempts, owner residual `1.2412670766236366e-16`.
+- Coons h=0.3: `40 nodes / 28 Q4 / 0 T3`, `N_eq=28`, maximum physical corner edge `0.3247592599913309`, boundary chains `[8,5,8,5]`, 28 front attempts, owner residual `2.237726045655905e-16`.
+
+Halving target size therefore changes genuine topology (`N_eq` 8 -> 28) and reduces the maximum physical shell edge by more than a factor of two in the qualified fixtures. Repeat generation is deterministic, source-edge chains and face ownership are complete, cancellation at face seeding is atomic, and source geometry is unchanged.
