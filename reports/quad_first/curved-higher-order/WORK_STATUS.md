@@ -438,3 +438,24 @@ CH12 narrows the CH9 blanket beam prohibition. Independent straight member conte
 - full curved: `111 passed in 68.89s`;
 - full planar: `63 passed, 3 skipped in 38.56s`;
 - full quad-first: `275 passed in 3.67s`.
+
+## CH13 — metric-curved quadratic B3 ownership
+
+**Status: QUALIFIED; ready for the CH13 milestone commit.**
+
+CH13 narrows the CH11 blanket beam prohibition for non-planar `RuledSurface` and `CoonsSurface` faces. Independent straight members now reuse the accepted mapped B3 generator, CH7 quadratic attachment tolerance and structural coupling pipeline alongside CH11 Q8/T6 shells. Source-boundary beam co-ownership remains typed unsupported; curved quadratic beams remain rejected; no topology engine or option schema is added.
+
+### Product evidence
+
+- ruled h=0.6 + straight through-face member: `42 nodes / 8 Q8 / 0 T6 / 2 B3 / 1 coupling`, 5 member stations, eccentricity `4.163336342344337e-16`, shell owner residual `2.2247786310271853e-16`;
+- coons h=0.6 + straight through-face member: `42 nodes / 8 Q8 / 0 T6 / 2 B3 / 1 coupling`, 5 member stations, eccentricity `4.163336342344337e-16`, shell owner residual `3.3335590258932494e-16`;
+- all B3 midsides are exact endpoint chord midpoints; all Q8/T6 are `CERTIFIED_POSITIVE`;
+- serialization, deterministic repeat, cancellation atomicity and source immutability are green.
+
+### CH13 gate evidence
+
+- focused CH13: `6 passed in 1.40s`;
+- ownership/structural/coupling/serialization gate: `77 passed in 28.54s`;
+- full curved: `117 passed in 69.89s`;
+- full planar: `63 passed, 3 skipped in 38.49s`;
+- full quad-first: `275 passed in 3.66s`.

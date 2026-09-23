@@ -435,3 +435,23 @@ CH12 acceptance is implemented in `tests/quad_first_curved/test_ch12_conical_b3_
 - full `tests/quad_first`: `275 passed in 3.67s`.
 
 Fresh review confirms the only production change narrows the former CH9 blanket guard: independent conical straight members are admitted, while source-boundary co-ownership still fails closed. No topology fork, curved B3, ruled/Coons B3, Q9, source mutation or cancellation weakening is introduced.
+
+## CH13 acceptance — ruled/Coons quadratic B3 ownership
+
+CH13 acceptance is implemented in `tests/quad_first_curved/test_ch13_parametric_curved_b3_ownership.py` and re-opens only independent straight B3 member ownership on the accepted CH11 non-planar ruled/Coons Q8/T6 routes.
+
+- The h=0.6 shell must remain exactly `8 Q8 / 0 T6` for each family; no B2 body may appear under `mesh.order="quadratic"`.
+- A real straight through-face member must publish B3 bodies in `start-mid-end` order with exact chord-midpoint midsides, complete `nodes_of_edge`/`elements_of_edge`, and one coherent shell coupling.
+- The exact owner attachment station must remain unchanged; any polynomial shell projection gap is finite coupling eccentricity. Every Q8/T6 must remain CH1 `CERTIFIED_POSITIVE` and shell owner residual must remain <= `1e-10`.
+- Serialization, deterministic repeat, source immutability and cancellation at `quad-first:quadratic-promotion-ready` are mandatory.
+- A source-boundary beam remains typed unsupported on non-planar ruled/Coons faces. Existing curved-quadratic-beam rejection remains in force. Plane, Cylinder, Cone and beam-free metric-curved routes must not regress; Q9 remains deferred.
+
+### CH13 gate evidence
+
+- focused CH13: `6 passed in 1.40s`;
+- CH6/CH7/CH9/CH11/CH12/CH13 plus structural-preparation/pipeline, coupling and serialization consumers: `77 passed in 28.54s`;
+- full `tests/quad_first_curved`: `117 passed in 69.89s`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped in 38.49s` (known unreconstructed native triangulation parity capability skips);
+- full `tests/quad_first`: `275 passed in 3.66s`.
+
+Fresh review confirms the production change only narrows the CH11 blanket guard for independent straight member ownership. Source-boundary co-ownership still fails closed; no topology fork, coordinate welding, curved B3, Q9, source mutation or cancellation weakening is introduced.

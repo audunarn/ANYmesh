@@ -425,3 +425,18 @@ CH12 deliberately does **not** qualify a beam edge that is the same source edge 
 - The member source edge publishes 9 station nodes and 4 B3 elements; every B3 midside is the exact endpoint chord midpoint.
 - The owner attachment point is unchanged. Coupling eccentricity magnitude is `1.9027882047564422e-05`; maximum shell owner-support residual is `3.1401849173675503e-16`.
 - All Q8/T6 remain CH1 `CERTIFIED_POSITIVE`; serialization preserves B3 edge ownership/coupling; repeat generation is deterministic and cancellation at `quad-first:quadratic-promotion-ready` is atomic.
+
+## CH13 implementation record — metric-curved quadratic B3 ownership
+
+CH13 re-opens independent straight B3 member ownership on the accepted CH11 non-planar `RuledSurface` and `CoonsSurface` Q8/T6 routes. The CH11 shell topology, CH6 mapped straight-sided B3 generator, CH7 quadratic attachment-tolerance machinery and the existing structural merge/coupling pipeline remain authoritative; no shell or beam topology engine is added.
+
+The former CH11 blanket rejection is narrowed only for genuinely non-planar ruled/Coons faces. An independent straight member may coexist with the Q8/T6 shell and publishes B3 bodies in frozen `start-mid-end` order with exact endpoint chord midpoints. A beam that is itself one of the curved face's source-boundary edges remains typed unsupported because shell and beam station ownership/subdivision are not unified. Curved quadratic beam edges continue to fail through the existing B3 preflight. Plane, Cylinder, Cone and beam-free ruled/Coons behavior is unchanged; Q9 remains deferred.
+
+Structural attachment ownership is unchanged. The exact owner-surface member station is retained, the shell projection gap is represented by coupling eccentricity, and source geometry remains read-only. Repeat generation is deterministic, serialization retains B3 ownership/coupling, and cancellation at `quad-first:quadratic-promotion-ready` remains atomic.
+
+### CH13 measured qualification points
+
+- Ruled h=0.6 + one straight through-face member: `42 nodes / 8 Q8 / 0 T6 / 2 B3 / 1 coupling`; the member edge has 5 station nodes and every B3 midside is the exact endpoint chord midpoint.
+- Coons h=0.6 + the same ownership pattern: `42 nodes / 8 Q8 / 0 T6 / 2 B3 / 1 coupling`, again with 5 member stations.
+- Coupling eccentricity magnitude is `4.163336342344337e-16` in both fixtures; maximum shell owner-support residual is `2.2247786310271853e-16` for ruled and `3.3335590258932494e-16` for Coons.
+- Every Q8/T6 remains CH1 `CERTIFIED_POSITIVE`; source-boundary beam co-ownership stays typed unsupported.

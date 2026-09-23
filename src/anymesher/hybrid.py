@@ -3393,9 +3393,17 @@ def generate_hybrid_mesh_result(
                     )
                 except MeshError:
                     if order == "quadratic" and source_beams:
-                        raise QuadPublicUnsupported(
-                            "quadratic metric-curved quad-first with beam/coupling content is not qualified in CH11"
+                        _metric_boundary_edges = {
+                            int(use.edge)
+                            for use in source_geometry.faces[int(_quad_scope_face_id)].loop
+                        }
+                        _coowned_metric_beams = sorted(
+                            set(map(int, source_beams)) & _metric_boundary_edges
                         )
+                        if _coowned_metric_beams:
+                            raise QuadPublicUnsupported(
+                                "quadratic metric-curved quad-first does not qualify beam ownership on a source-boundary edge"
+                            )
                     continue
                 else:
                     continue
