@@ -10,7 +10,6 @@ from test_curved_native_qualification import _model_face
 from anymesher.hybrid import generate_hybrid_mesh_result
 from anymesher.quad.domain import ParametricQuadDomain
 from anymesher.quad.options import QuadMeshingOptions
-from anymesher.quad.public_integration import QuadPublicUnsupported
 
 
 def _generate(model, face, h, *, order="linear", cancellation_check=None):
@@ -69,19 +68,16 @@ def test_ch10_public_linear_is_physically_target_size_causal(name):
 
 
 @pytest.mark.parametrize("name", ("ruled", "coons"))
-def test_ch10_repeat_and_quadratic_scope_truth(name):
+def test_ch10_linear_repeat_is_deterministic_and_source_unchanged(name):
     model, face, _ = _model_face(name)
+    before = _persistent_state(model)
     first = _generate(model, face, 0.6)
     repeat_model, repeat_face, _ = _model_face(name)
     repeat = _generate(repeat_model, repeat_face, 0.6)
     assert first.quads == repeat.quads
     assert first.tris == repeat.tris
     assert first.nodes_of_edge == repeat.nodes_of_edge
-    blocked_model, blocked_face, _ = _model_face(name)
-    before = _persistent_state(blocked_model)
-    with pytest.raises(QuadPublicUnsupported):
-        _generate(blocked_model, blocked_face, 0.6, order="quadratic")
-    assert _persistent_state(blocked_model) == before
+    assert _persistent_state(model) == before
 
 
 @pytest.mark.parametrize("name", ("ruled", "coons"))

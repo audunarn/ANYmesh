@@ -2471,7 +2471,7 @@ def _promote_quad_first_quadratic(
         chart_owned = [
             face_domains[face]
             for face in owner_faces
-            if isinstance(face_domains.get(face), (CylindricalQuadDomain, ConicalQuadDomain))
+            if isinstance(face_domains.get(face), (CylindricalQuadDomain, ConicalQuadDomain, ParametricQuadDomain))
         ]
         if chart_owned:
             if len(owner_faces) != 1 or len(chart_owned) != 1:
@@ -2765,14 +2765,19 @@ def _promote_quad_first_quadratic(
         all_residuals.extend(residuals)
         cylindrical = isinstance(domain, CylindricalQuadDomain)
         conical = isinstance(domain, ConicalQuadDomain)
-        chart_owned = cylindrical or conical
+        parametric = isinstance(domain, ParametricQuadDomain)
+        chart_owned = cylindrical or conical or parametric
         if cylindrical:
             chart_origin = tuple(float(value) for value in domain.lift((0.0, 0.0)))
-        elif conical:
+        elif conical or parametric:
             chart_origin = tuple(float(value) for value in domain.lift(domain.outer_chart[0]))
         else:
             chart_origin = tuple(float(value) for value in domain.origin)
-        geometry_family = "conical" if conical else ("cylindrical" if cylindrical else "planar")
+        if parametric:
+            surface = geometry.faces[int(face_id)].surface
+            geometry_family = "ruled" if isinstance(surface, RuledSurface) else "coons"
+        else:
+            geometry_family = "conical" if conical else ("cylindrical" if cylindrical else "planar")
         curvature_classes = tuple(sorted({item.curvature_class for item in boundary_records}))
         face_reports.append(HighOrderGeometryReport(
             model_id=str(geometry.model_id), revision=int(geometry.revision), face_id=int(face_id),
@@ -3380,9 +3385,9 @@ def generate_hybrid_mesh_result(
                         source_geometry, int(_quad_scope_face_id)
                     )
                 except MeshError:
-                    if order != "linear":
+                    if order == "quadratic" and source_beams:
                         raise QuadPublicUnsupported(
-                            "quadratic metric-curved quad-first is not qualified in CH10"
+                            "quadratic metric-curved quad-first with beam/coupling content is not qualified in CH11"
                         )
                     continue
                 else:

@@ -388,3 +388,30 @@ Ruled/Coons quadratic output remains typed unsupported for CH11. Plane, Cylinder
 - full quad-first: `275 passed in 5.51s`.
 
 Fresh review confirmed metric normalization is reported as approximate rather than globally isometric, source edge/station ownership remains geometry-authoritative, no coordinate welding or topology fork was introduced, cancellation/source immutability remain intact, and CH10 does not activate quadratic ruled/Coons meshing.
+
+
+## CH11 — metric curved Q8/T6 promotion
+
+**Status: QUALIFIED; ready for the CH11 milestone commit.**
+
+CH11 activates staged Q8/T6 promotion on the CH10 non-planar ruled and Coons linear routes. The existing higher-order promotion path now treats `ParametricQuadDomain` as owner-chart geometry for interior midsides; boundary midsides remain exact source-edge parameter samples. CH1 strict validity, CH5 provenance, stable shell/corner IDs, atomic publication and the single accepted quad-first topology pipeline remain authoritative.
+
+### Product evidence
+
+- ruled h=0.6: `15 nodes / 8 Q4 / 0 T3` -> `37 nodes / 8 Q8 / 0 T6`, 22 unique midsides, certificate residual `2.5438405243138006e-16`;
+- ruled h=0.3: `40 / 28 Q4 / 0 T3` -> `107 / 28 Q8 / 0 T6`, 67 midsides, residual `2.2887833992611187e-16`;
+- coons h=0.6: `15 / 8 / 0` -> `37 / 8 Q8 / 0 T6`, 22 midsides, residual `5.580527502014626e-16`;
+- coons h=0.3: `40 / 28 / 0` -> `107 / 28 Q8 / 0 T6`, 67 midsides, residual `3.3766115072321297e-16`;
+- locally graded h=0.6 for each family: `35 nodes / 25 Q4 / 4 T3` -> `98 nodes / 25 Q8 / 4 T6`, 63 midsides, 14 exact boundary midsides, zero repairs; all final Q8/T6 certify positive.
+
+Quadratic ruled/Coons beam/coupling content remains typed unsupported. Plane, cylindrical and conical quadratic behavior is unchanged; Q9+ remains deferred.
+
+### CH11 gate evidence
+
+- focused CH11: `11 passed in 5.52s`;
+- full curved: `106 passed in 65.21s`;
+- full planar: `63 passed, 3 skipped in 39.04s`;
+- full quad-first: `275 passed in 5.67s`;
+- chart / physical-quality / serialization / coupling / quadratic-staging consumers: `58 passed in 0.73s`.
+
+Fresh review confirmed exact owner-chart interior midsides, exact source-boundary ownership, stable linear topology IDs, strict validity and provenance truth, atomic cancellation, no topology fork, and no activation of curved B3 or Q9.

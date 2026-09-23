@@ -392,3 +392,25 @@ CH10 acceptance is implemented in `tests/quad_first_curved/test_ch10_parametric_
 - full `tests/quad_first`: `275 passed in 5.51s`.
 
 Fresh review must keep the centre-metric normalization truthful as an approximate physical spacing map rather than an exact global isometry, preserve exact geometry-owned boundary station identity, source immutability and cancellation atomicity, retain the single accepted front/driver topology pipeline, and confirm no ruled/Coons quadratic route is activated before CH11.
+
+
+## CH11 acceptance — ruled/Coons Q8/T6 promotion
+
+CH11 acceptance is implemented in `tests/quad_first_curved/test_ch11_parametric_curved_quadratic.py` and re-opens only quadratic promotion on the accepted CH10 non-planar ruled/Coons topology.
+
+- h=0.6 must preserve `8 Q4 / 0 T3` as `8 Q8 / 0 T6`, retaining all 15 linear nodes and growing to exactly 37 nodes with 22 unique midsides for both ruled and Coons fixtures.
+- h=0.3 must preserve `28 Q4 / 0 T3` as `28 Q8 / 0 T6`, retaining all 40 linear nodes and growing to exactly 107 nodes with 67 unique midsides.
+- A real locally graded residual fixture must preserve `25 Q4 / 4 T3` as `25 Q8 / 4 T6`, growing from 35 to 98 nodes with 63 unique midsides and no topology drift.
+- Every shared final shell edge must have one midside. Every source-edge chain must contain the CH10 linear chain at even positions. Interior midsides must be owner-chart midpoint lifts through `ParametricQuadDomain`, while boundary midsides retain exact source-edge parameter ownership.
+- Every Q8/T6 must pass CH1 `CERTIFIED_POSITIVE`; the CH5 certificate must report the exact `ruled`/`coons` family, `ParametricQuadDomain` chart kind and `owner-chart-midpoint` interior projection with owner residual <= `1e-10`.
+- Repeat generation must be deterministic and cancellation at `quad-first:quadratic-promotion-ready` atomic. Quadratic ruled/Coons with beam/coupling content remains typed unsupported.
+
+### CH11 gate evidence
+
+- focused CH11 product including the graded Q8/T6 fixture: `11 passed in 5.52s`;
+- full `tests/quad_first_curved` after CH11 and the evolved CH10 linear contract: `106 passed in 65.21s`;
+- full `tests/quad_first_planar`: `63 passed, 3 skipped in 39.04s`; skips remain the known unreconstructed native triangulation parity capability checks;
+- full `tests/quad_first`: `275 passed in 5.67s`;
+- chart / physical-quality / serialization / coupling / quadratic-staging consumers: `58 passed in 0.73s`.
+
+Fresh review must confirm no corner/topology-ID drift, owner-chart rather than chord interior midsides, exact source-edge boundary ownership, strict CH1 validity, truthful CH5 provenance, cancellation atomicity, and no accidental curved B3 or Q9 activation.

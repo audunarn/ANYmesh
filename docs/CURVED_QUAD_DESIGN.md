@@ -391,3 +391,22 @@ The public route labels non-planar ruled and Coons faces `ruled` and `coons` und
 - Coons h=0.3: `40 nodes / 28 Q4 / 0 T3`, `N_eq=28`, maximum physical corner edge `0.3247592599913309`, boundary chains `[8,5,8,5]`, 28 front attempts, owner residual `2.237726045655905e-16`.
 
 Halving target size therefore changes genuine topology (`N_eq` 8 -> 28) and reduces the maximum physical shell edge by more than a factor of two in the qualified fixtures. Repeat generation is deterministic, source-edge chains and face ownership are complete, cancellation at face seeding is atomic, and source geometry is unchanged.
+
+
+## CH11 implementation record — metric curved Q8/T6 promotion
+
+CH11 re-opens `order="quadratic"` for the CH10 non-planar `RuledSurface` and `CoonsSurface` quad-first routes. The CH10 linear Q4/T3 topology remains authoritative. Promotion continues to use the single staged CH1/CH2 higher-order path: exact source-edge parameter midsides on geometry-owned boundaries, one canonical midside per unique final shell edge, strict CH1 Q8/T6 certification before publication, and atomic cancellation at the existing promotion-ready checkpoint.
+
+For non-boundary shell edges owned by a `ParametricQuadDomain`, CH11 projects both endpoints to the revision-bound centre-metric-normalized owner chart, averages their chart coordinates, and lifts the midpoint back through `FaceChart`. This replaces the planar raw-chord midpoint only for these accepted parametric curved faces; Plane, Cylinder and Cone behavior is unchanged. High-order geometry provenance now reports `ruled` or `coons`, chart kind `ParametricQuadDomain`, and `owner-chart-midpoint` for interior projection.
+
+Quadratic ruled/Coons output with beam/coupling content remains typed unsupported because curved B3 ownership is not qualified by CH11. No new topology engine, coordinate welding, Q9 route or public option schema is introduced.
+
+### CH11 measured qualification points
+
+- Ruled h=0.6: CH10 linear `15 nodes / 8 Q4 / 0 T3` -> `37 nodes / 8 Q8 / 0 T6`, exactly `22` unique midsides; high-order geometry residual `2.5438405243138006e-16`.
+- Ruled h=0.3: `40 nodes / 28 Q4 / 0 T3` -> `107 nodes / 28 Q8 / 0 T6`, exactly `67` midsides; residual `2.2887833992611187e-16`.
+- Coons h=0.6: `15 / 8 Q4 / 0 T3` -> `37 / 8 Q8 / 0 T6`, `22` midsides; residual `5.580527502014626e-16`.
+- Coons h=0.3: `40 / 28 Q4 / 0 T3` -> `107 / 28 Q8 / 0 T6`, `67` midsides; residual `3.3766115072321297e-16`.
+- A bounded locally graded h=0.6 fixture for each family preserves `35 linear nodes / 25 Q4 / 4 T3` as `98 nodes / 25 Q8 / 4 T6`, with `63` unique midsides, `14` exact boundary midsides and zero corner repairs. Every final Q8/T6 is `CERTIFIED_POSITIVE`.
+
+Original linear node IDs/coordinates, shell IDs, corner connectivity, source-edge station chains and source geometry are retained. Repeat generation is deterministic and cancellation before quadratic publication is atomic.
