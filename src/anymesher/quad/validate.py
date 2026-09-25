@@ -148,11 +148,18 @@ def validate_planar_quad_result(
             raise MeshError(
                 f"final boundary differs from canonical station boundary; missing={missing!r}, extra={extra!r}"
             )
+        expected_interior_features = {
+            edge_key(int(raw[0]), int(raw[1]))
+            for raw in seed.triangulation.mandatory_segments
+        }
         expected_nodes = {int(node) for node in seed.station_to_node.values()}
+        expected_nodes.update(
+            node for edge in expected_interior_features for node in edge
+        )
         if set(state.protected_nodes) != expected_nodes:
-            raise MeshError("protected boundary-node ownership changed during PQ-M1")
-        if set(state.protected_edges) != expected_boundary:
-            raise MeshError("protected boundary-edge ownership changed during PQ-M1")
+            raise MeshError("protected seed-node ownership changed during PQ-M1")
+        if set(state.protected_edges) != expected_boundary | expected_interior_features:
+            raise MeshError("protected seed-edge ownership changed during PQ-M1")
 
     total = quad_area + tri_area
     if total <= EPS:

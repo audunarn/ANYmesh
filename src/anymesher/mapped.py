@@ -176,7 +176,30 @@ def generate_mesh(
             overrides=overrides,
             edge_ids=active_edges,
         )
+    else:
+        # An attachment station may add a division on an independent beam.
+        # Never mutate a caller-owned seeding object to record that addition.
+        seeding = Seeding(dict(seeding.divisions), seeding.sweeps,
+                          dict(seeding.classes), seeding.size_field)
     size_field = seeding.size_field or SizeField(geometry, target_size)
+
+    source_shell_edges = {
+        int(use.edge)
+        for face in geometry.faces.values()
+        for loop in (face.loop, *face.holes)
+        for use in loop
+    }
+    from .boundary import MemberRegistry
+    from .meshing_view import GeometryMeshingView
+    member_registry = MemberRegistry(GeometryMeshingView(geometry))
+    attachment_stations: dict[int, set[float]] = {}
+    for attachment in geometry.attachments.values():
+        if not attachment.member_range.is_point:
+            continue
+        location = member_registry.locate(attachment.member_id, attachment.member_range.start)
+        edge_id, parameter = location.span.edge_id, location.edge_parameter
+        if edge_id in beam_edge_ids and edge_id not in source_shell_edges and 0.0 < parameter < 1.0:
+            attachment_stations.setdefault(edge_id, set()).add(float(parameter))
 
     mesh = Mesh(
         geometry_model_id=geometry.model_id,
@@ -189,7 +212,9 @@ def generate_mesh(
 
     _build_vertex_nodes(geometry, mesh, active_edges, next_node)
     _build_edge_nodes(
-        geometry, mesh, active_edges, seeding, size_field, next_node
+        geometry, mesh, active_edges, seeding, size_field, next_node,
+        midpoint_edges=frozenset(beam_edge_ids) - source_shell_edges,
+        required_corners=attachment_stations,
     )
     for face_id in faces:
         _build_face(geometry, mesh, face_id, next_node, next_element)
@@ -466,6 +491,9 @@ def _build_edge_nodes(
     seeding: Seeding,
     size_field: SizeField,
     next_node: _Counter,
+    *,
+    midpoint_edges: frozenset[int] = frozenset(),
+    required_corners: Mapping[int, set[float]] | None = None,
 ) -> None:
     """Interior nodes along every active edge, in the edge's own direction.
 
@@ -476,14 +504,49 @@ def _build_edge_nodes(
     """
 
     steps_per_division = 2 if mesh.is_quadratic else 1
+    required_corners = {} if required_corners is None else required_corners
     for edge_id in active_edges:
         edge = geometry.edges[edge_id]
         stations = seeding[edge_id] * steps_per_division
         sequence = [mesh.node_of_vertex[edge.start]]
+        anchors = sorted(required_corners.get(edge_id, ()))
+        if anchors:
+            corners = sorted((0.0, *edge_distribution(
+                geometry, edge_id, seeding[edge_id], size_field), 1.0))
+            for anchor in anchors:
+                nearest = min(range(len(corners)), key=lambda index: abs(corners[index]-anchor))
+                if abs(corners[nearest]-anchor) <= 1e-10:
+                    corners[nearest] = anchor
+                else:
+                    corners.append(anchor)
+                    corners.sort()
+            if any(right-left <= 1e-12 for left, right in zip(corners, corners[1:])):
+                raise MeshError("attachment station is indistinguishable from a beam corner")
+            seeding.divisions[edge_id] = len(corners)-1
+            if mesh.is_quadratic:
+                enriched = np.empty(2*len(corners)-1, dtype=float)
+                enriched[::2] = corners
+                enriched[1::2] = .5*(np.asarray(corners[:-1])+np.asarray(corners[1:]))
+                parameters = enriched[1:-1]
+            else:
+                parameters = np.asarray(corners[1:-1], dtype=float)
+            stations = len(parameters) + 1
         if stations > 1:
-            parameters = edge_distribution(
-                geometry, edge_id, stations, size_field
-            )
+            if not anchors:
+                parameters = edge_distribution(
+                    geometry, edge_id, stations, size_field
+                )
+            if mesh.is_quadratic and edge_id in midpoint_edges and not anchors:
+                # Grade element corners, then enrich each straight B3 segment.
+                # Grading all 2n stations independently displaces the middle
+                # node from its chord midpoint, violating the B3 contract.
+                corners = np.concatenate((
+                    [0.0], edge_distribution(geometry, edge_id, seeding[edge_id], size_field), [1.0]
+                ))
+                enriched = np.empty(2 * len(corners) - 1, dtype=float)
+                enriched[::2] = corners
+                enriched[1::2] = 0.5 * (corners[:-1] + corners[1:])
+                parameters = enriched[1:-1]
             points = geometry.sample_edge(edge_id, parameters)
             for point in points:
                 node_id = next_node.next()

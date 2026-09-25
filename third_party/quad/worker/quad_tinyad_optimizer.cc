@@ -411,7 +411,11 @@ inline double clamp_coord(double x, double lo, double hi) {
 
 #if defined(_WIN32) || defined(WIN32)
 #include <windows.h>
-static void worker_crash() { int *p = nullptr; *p = 0; (void)p; }
+static void worker_crash() {
+    SetErrorMode(SEM_NOGPFAULTERRORBOX);
+    volatile int *p = nullptr;
+    *p = 0;
+}
 static void worker_hang()  { Sleep(INFINITE); }
 #else
 #include <csignal>

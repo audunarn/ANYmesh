@@ -243,10 +243,10 @@ def _apply_face_boundary_minimums(
     *,
     desired: Dict[int, int],
     demands: Mapping[int, float],
+    maximum_step_ratio: float = 1.25,
 ) -> None:
     """Prevent short imprint segments from forcing abrupt native transitions."""
 
-    maximum_step_ratio = 1.25
     for face in faces:
         loops = (face.loop,) + face.holes
         edge_ids = tuple(
@@ -279,6 +279,7 @@ def solve_seeding(
     target_size: float | None = None,
     size_field: SizeField | None = None,
     overrides: Mapping[int, int] | None = None,
+    minimum_divisions: Mapping[int, int] | None = None,
     edge_ids: Iterable[int] | None = None,
     max_sweeps: int = 200,
     max_divisions: int = 100_000,
@@ -289,7 +290,8 @@ def solve_seeding(
     instead to seed against local refinement zones.  ``overrides`` pins
     specific edges; pinned edges are never refined, so a pinned edge that
     conflicts with another pinned edge is reported instead of being silently
-    overridden.
+    overridden.  ``minimum_divisions`` raises the unpinned initial demand
+    before opposite-side constraints are solved.
     """
 
     if size_field is None:
@@ -303,6 +305,7 @@ def solve_seeding(
         )
 
     overrides = dict(overrides or {})
+    minimum_divisions = dict(minimum_divisions or {})
     edges = (
         list(geometry.edges)
         if edge_ids is None
@@ -315,13 +318,17 @@ def solve_seeding(
             raise SeedingConflict(
                 f"edge {edge_id} override must be at least 1 division"
             )
+    for edge_id, count in minimum_divisions.items():
+        if edge_id not in geometry.edges or isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise SeedingConflict(f"edge {edge_id} minimum division count is invalid")
 
     demands = {
         edge_id: float(edge_demand(geometry, edge_id, size_field))
         for edge_id in edges
     }
     desired = {
-        edge_id: max(1, int(round(demands[edge_id])))
+        edge_id: max(1, int(round(demands[edge_id])),
+                     minimum_divisions.get(edge_id, 1) if edge_id not in overrides else 1)
         for edge_id in edges
     }
 

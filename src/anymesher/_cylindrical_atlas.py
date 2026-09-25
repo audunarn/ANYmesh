@@ -120,14 +120,6 @@ def prepare_cylindrical_atlas(
         cancellation_check=cancellation_check,
     )
     selected = atlas.requested_face_uses
-    validate_cylinder_atlas_binding(
-        owner,
-        atlas,
-        selected,
-        reference_face_use=reference_face_use,
-        expected_revision=atlas.revision,
-        cancellation_check=cancellation_check,
-    )
     if atlas.status is not CylinderAtlasStatus.QUALIFIED or not atlas.certificate.complete:
         raise CylinderAtlasError(
             CylinderAtlasErrorCode.UNQUALIFIED_RESULT,
@@ -145,7 +137,7 @@ def prepare_cylindrical_atlas(
     )
     if cancellation_check is not None:
         cancellation_check("cylindrical atlas preparation complete")
-    # The last caller callback may mutate the owner or leave a transaction open.
-    # Revalidate authoritatively without invoking caller code again afterward.
+    # One final owner validation checks evidence content and requalifies after
+    # every caller callback, including chart construction callbacks.
     binding.validate()
     return binding

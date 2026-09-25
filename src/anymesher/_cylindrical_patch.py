@@ -72,10 +72,6 @@ def prepare_cylindrical_patch(geometry, face_uses, *, policy=None, cancellation_
         policy=policy, cancellation_check=cancellation_check,
     )
     selected = patch.requested_face_uses
-    validate_cylinder_patch_binding(
-        owner, patch, selected, expected_revision=patch.revision,
-        cancellation_check=cancellation_check,
-    )
     if patch.status is not CylinderPatchStatus.QUALIFIED or not patch.certificate.complete:
         raise CylinderPatchError(
             CylinderPatchErrorCode.UNQUALIFIED_RESULT,
@@ -87,6 +83,6 @@ def prepare_cylindrical_patch(geometry, face_uses, *, policy=None, cancellation_
     binding = CylindricalPatchBinding(geometry, selected, patch, ((patch.face_use, chart),))
     if cancellation_check is not None:
         cancellation_check("cylindrical patch preparation complete")
-    # No caller code can change the owner after this last authoritative check.
+    # This validates content and requalifies after the last caller callback.
     binding.validate()
     return binding

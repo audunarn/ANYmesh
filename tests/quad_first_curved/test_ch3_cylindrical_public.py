@@ -59,6 +59,59 @@ def _n_eq(mesh) -> float:
     return float(len(mesh.quads)) + 0.5 * float(len(mesh.tris))
 
 
+@pytest.mark.parametrize(
+    "sector,target_size,origin,rotation",
+    ((0, .38, (0., 0., 0.), 0.),
+     (3, .38, (0., 0., 0.), 0.),
+     # pi/4 is only 0.025 m beyond two 0.38 m steps. This used to
+     # create the narrow remainder strip seen in RA1.
+     (0, .38, (2., -3., 4.), math.pi/6),
+     (3, .38, (2., -3., 4.), math.pi/6)),
+)
+def test_cylindrical_seed_follows_shared_station_axes(
+    sector: int, target_size: float, origin, rotation: float,
+) -> None:
+    from anymesher.quad.boundary import BoundaryStationRegistry
+    from anymesher.quad.domain import CylindricalQuadDomain
+    from anymesher.quad.seed import build_planar_quad_seed
+
+    model, selected = _sector_model(False, origin=origin, rotation=rotation)
+    face = _face_id(model, selected[sector])
+    binding = prepare_cylindrical_patch(model, (selected[sector],))
+    domain = CylindricalQuadDomain.from_binding(model, face, binding)
+    registry = BoundaryStationRegistry.for_domain(model, domain, target_size)
+    seed = build_planar_quad_seed(model, face, target_size, domain=domain, registry=registry)
+    arc = next(edge_id for edge_id, _ in domain.edge_uses
+               if type(model.edges[edge_id].curve).__name__ == "Arc")
+    assert registry.edge_divisions(arc) == 3
+    boundary = registry.outer_stations(domain)
+    chart = np.asarray([domain.project(station.position) for station in boundary])
+    interior = np.asarray([seed.state.nodes[node] for node in seed.state.nodes
+                           if node not in seed.state.protected_nodes])
+    assert len(interior)
+    for axis in (0, 1):
+        edge_axis = np.unique(np.round(chart[:, axis], 10))
+        assert all(np.min(abs(edge_axis-value)) <= 1e-9
+                   for value in np.unique(np.round(interior[:, axis], 10)))
+
+
+def test_quad_stage_timings_are_a_sidecar() -> None:
+    from anymesher.quad.timing import collect_quad_stage_timings
+
+    model, selected = _sector_model(False)
+    with collect_quad_stage_timings() as timings:
+        mesh = generate_hybrid_mesh_result(
+            model, face_ids=(_face_id(model, selected[0]),), target_size=0.5,
+            strategy="native", native_backend="python", order="quadratic",
+            quad_options=QuadMeshingOptions(quality_model="shape_jacobian"),
+        ).mesh
+    assert timings["qualification"] > 0.0
+    assert timings["seeding"] > 0.0
+    assert timings["repair"] > 0.0
+    assert timings["strict_validation"] > 0.0
+    assert "timings" not in mesh.hybrid_diagnostics
+
+
 def test_ch3_cylindrical_domain_from_owner_patch() -> None:
     model, selected = _sector_model(False)
     before = _persistent_state(model)
@@ -153,6 +206,27 @@ def test_full_ring_periodic_seam_reuses_exact_source_station_ids() -> None:
         len(mesh.nodes), len(mesh.quads), len(mesh.tris)
     )
     assert _persistent_state(repeat_model) == repeat_before
+
+
+def test_adjacent_rotated_patches_share_reversed_quadratic_edge() -> None:
+    model, selected = _sector_model(False, origin=(2., -3., 4.), rotation=math.pi/6)
+    faces = tuple(_face_id(model, use) for use in selected[:2])
+    common = [edge for edge in model.edges
+              if set(model.faces_using_edge(edge)) == set(faces)]
+    assert len(common) == 1
+    edge = common[0]
+    directions = [next(use.forward for use in model.faces[face].loop
+                       if use.edge == edge) for face in faces]
+    assert directions == [not directions[1], directions[1]]
+    mesh = generate_hybrid_mesh_result(
+        model, face_ids=faces, target_size=.38, strategy="native",
+        native_backend="python", order="quadratic",
+        quad_options=QuadMeshingOptions(quality_model="shape_jacobian"),
+    ).mesh
+    chain = mesh.nodes_of_edge[edge]
+    assert len(chain) >= 5 and len(chain) == len(set(chain))
+    assert all(set(chain) <= _face_nodes(mesh, face) for face in faces)
+    assert mesh.hybrid_diagnostics["high_order_geometry"]["status"] == "CERTIFIED_POSITIVE"
 
 
 def test_cylindrical_public_cancellation_has_no_partial_publication() -> None:

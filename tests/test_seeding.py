@@ -93,6 +93,18 @@ def test_explicit_override_is_honoured():
     assert seeding[bottom] == seeding[top] == 7
 
 
+def test_unpinned_minimum_divisions_propagate_but_explicit_override_wins():
+    model = GeometryModel()
+    edges, _ = rectangle(model, 2.0, 1.0)
+    bottom, _, top, _ = edges
+    raised = solve_seeding(model, target_size=0.5,
+                           minimum_divisions={bottom: 5})
+    assert raised[bottom] == raised[top] == 5
+    pinned = solve_seeding(model, target_size=0.5,
+                           minimum_divisions={bottom: 5}, overrides={bottom: 3})
+    assert pinned[bottom] == pinned[top] == 3
+
+
 def test_conflicting_overrides_are_reported_not_resolved():
     model = GeometryModel()
     edges, _ = rectangle(model, 2.0, 1.0)

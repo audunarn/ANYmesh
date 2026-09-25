@@ -75,6 +75,13 @@ from .hybrid import (
     generate_hybrid_mesh,
     generate_hybrid_mesh_result,
 )
+from .recovery import (
+    AUTOMATION_CONTRACT_ID,
+    AutomaticMeshResult,
+    MeshAutomationOptions,
+    MeshRecoveryIncomplete,
+    generate_automatic_mesh_result,
+)
 from .mesh import Coupling, Mesh
 from .preparation import (
     StructuralPreparationOptions,
@@ -287,6 +294,11 @@ __all__ = [
     "generate_mesh",
     "generate_hybrid_mesh",
     "generate_hybrid_mesh_result",
+    "generate_automatic_mesh_result",
+    "MeshAutomationOptions",
+    "MeshRecoveryIncomplete",
+    "AutomaticMeshResult",
+    "AUTOMATION_CONTRACT_ID",
     "load_mesh",
     "locate_shell_element_at_xy",
     "local_edge_flip",

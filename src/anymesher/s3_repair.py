@@ -133,6 +133,7 @@ class S3RepairError(S3QualityError):
         self.attempts = tuple(attempts)
         self.admission = admission
         self.quality_policy = quality_policy
+        self.inspectable_result: object | None = None
 
     def to_diagnostic(self) -> dict[str, object]:
         """Return bounded, JSON-safe evidence for application diagnostics."""

@@ -293,7 +293,13 @@ int json_fail(const char *msg, const std::string &extra = "") {
 
 #if defined(_WIN32) || defined(WIN32)
 #include <windows.h>
-static void worker_crash() { int *p = nullptr; *p = 0; (void)p; }
+static void worker_crash() {
+    // Keep the lifecycle self-test a real process crash without allowing the
+    // Windows fault reporter to hold this noninteractive worker open.
+    SetErrorMode(SEM_NOGPFAULTERRORBOX);
+    volatile int *p = nullptr;
+    *p = 0;
+}
 static void worker_hang()  { Sleep(INFINITE); }
 #else
 #include <csignal>

@@ -52,6 +52,7 @@ from .metric import (
 )
 from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
+from .quad.timing import record_quad_stage, timed_quad_call
 from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
 from .quad.high_order import (
@@ -60,11 +61,12 @@ from .quad.high_order import (
     HighOrderMeshCertificate,
     ValidityStatus,
     certify_mapping_validity,
+    evaluate_mapping,
 )
 from .quad.options import QuadMeshingOptions
 from .quad.mcf_seed import optimize_q4_seed_mcf
 from .quad.optimize import optimize_quad_state
-from .quad.seed import build_planar_quad_seed
+from .quad.seed import build_planar_quad_seed, source_chart_axis_lengths
 from .quad.public_integration import (
     QuadPublicUnsupported,
     publish_atomically,
@@ -73,6 +75,7 @@ from .quad.public_integration import (
 from .quad.state import QuadMeshState
 from .quad.validate import validate_planar_quad_result
 from .s3_production import prepare_qualified_s3_mesh
+from .s3_repair import S3RepairError
 from .seeding import Seeding, edge_distribution, solve_seeding
 from .serialize import mesh_from_dict, mesh_to_dict
 from .structural_pipeline import (
@@ -295,6 +298,19 @@ def _ensure_edge_registry(
         parameters = _station_parameters(
             geometry, edge_id, len(sequence) - 1, size_field
         )
+        if isinstance(geometry.edges[edge_id].curve, Straight):
+            # Existing straight-edge nodes can include canonical B3 chord
+            # midpoints. Register their actual owner parameters rather than
+            # regrading the doubled station count independently.
+            edge = geometry.edges[edge_id]
+            start = np.asarray(geometry.vertex_position(edge.start), dtype=float)
+            chord = np.asarray(geometry.vertex_position(edge.end), dtype=float) - start
+            denominator = float(chord @ chord)
+            if denominator > 0.0:
+                parameters = np.asarray([
+                    float((mesh.nodes[node] - start) @ chord) / denominator
+                    for node in sequence
+                ])
         if len(parameters) != len(sequence):
             raise MeshError(
                 f"edge {edge_id} boundary registry length disagrees with its seeding"
@@ -1967,7 +1983,22 @@ def _merge_quad_first_and_legacy(
     }
 
     quad_node_ids = {int(node) for node in quad_mesh.nodes}
-    next_id = (max(quad_node_ids) + 1) if quad_node_ids else 0
+    # Linear beam stations must keep their IDs when the same shell corners
+    # and member are promoted.  Reserve the linear shell/beam corner namespace
+    # before adding either family's quadratic midsides.
+    stable_beam_promotion = bool(legacy_mesh.beams and not legacy_faces and quad_mesh.order == "quadratic")
+    if stable_beam_promotion:
+        quad_corner_ids = {
+            int(node) for body in quad_mesh.quads.values() for node in body[:4]
+        } | {
+            int(node) for body in quad_mesh.tris.values() for node in body[:3]
+        } | {int(node) for node in quad_mesh.node_of_vertex.values()}
+        if not quad_corner_ids:
+            raise MeshError("quadratic quad-first beam merge has no shell corners")
+        next_id = max(quad_corner_ids) + 1
+    else:
+        quad_corner_ids = quad_node_ids
+        next_id = (max(quad_node_ids) + 1) if quad_node_ids else 0
     new_vertex_to_node: dict[int, int] = {}
     for legacy_vertex in sorted(set(legacy_node_to_vertex.values())):
         if legacy_vertex in vertex_to_node:
@@ -1981,14 +2012,28 @@ def _merge_quad_first_and_legacy(
         else:
             node_map[legacy_node_id] = new_vertex_to_node[legacy_vertex]
     vertex_to_node.update(new_vertex_to_node)
-    for legacy_node_id in sorted(int(node) for node in legacy_mesh.nodes):
+    legacy_corner_ids = (
+        {int(node) for body in legacy_mesh.beams.values() for node in (body[0], body[-1])}
+        if stable_beam_promotion else set()
+    )
+    legacy_order = (
+        sorted(legacy_corner_ids) + sorted(set(map(int, legacy_mesh.nodes)) - legacy_corner_ids)
+        if stable_beam_promotion else sorted(int(node) for node in legacy_mesh.nodes)
+    )
+    for legacy_node_id in legacy_order:
         if legacy_node_id in node_map:
             continue
         node_map[legacy_node_id] = next_id
         next_id += 1
 
+    quad_node_map = {node: node for node in quad_corner_ids}
+    if stable_beam_promotion:
+        for quad_node_id in sorted(quad_node_ids - quad_corner_ids):
+            quad_node_map[quad_node_id] = next_id
+            next_id += 1
+
     merged_nodes: dict[int, np.ndarray] = {
-        int(node): np.asarray(pos, dtype=float)
+        quad_node_map[int(node)]: np.asarray(pos, dtype=float)
         for node, pos in quad_mesh.nodes.items()
     }
     for legacy_node, legacy_pos in legacy_mesh.nodes.items():
@@ -2001,11 +2046,11 @@ def _merge_quad_first_and_legacy(
             merged_nodes[merged] = np.asarray(legacy_pos, dtype=float)
 
     merged_quads: dict[int, tuple[int, ...]] = {
-        int(element_id): tuple(int(node) for node in quad_body)
+        int(element_id): tuple(quad_node_map[int(node)] for node in quad_body)
         for element_id, quad_body in quad_mesh.quads.items()
     }
     merged_tris: dict[int, tuple[int, ...]] = {
-        int(element_id): tuple(int(node) for node in tri_body)
+        int(element_id): tuple(quad_node_map[int(node)] for node in tri_body)
         for element_id, tri_body in quad_mesh.tris.items()
     }
     occupied_quad_shell_ids = set(merged_quads) | set(merged_tris)
@@ -2047,7 +2092,7 @@ def _merge_quad_first_and_legacy(
 
     nodes_of_edge: dict[int, list[int]] = {}
     for edge_id, sequence in quad_mesh.nodes_of_edge.items():
-        nodes_of_edge[int(edge_id)] = [int(node) for node in sequence]
+        nodes_of_edge[int(edge_id)] = [quad_node_map[int(node)] for node in sequence]
     for edge_id, sequence in legacy_mesh.nodes_of_edge.items():
         edge_key = int(edge_id)
         canonical = [
@@ -2108,7 +2153,7 @@ def _merge_quad_first_and_legacy(
         int(edge_id): [node_map[int(node)] for node in sequence]
         for edge_id, sequence in legacy_mesh.offset_nodes_of_edge.items()
     } | {
-        int(edge_id): list(sequence)
+        int(edge_id): [quad_node_map[int(node)] for node in sequence]
         for edge_id, sequence in quad_mesh.offset_nodes_of_edge.items()
     }
 
@@ -2134,6 +2179,28 @@ def _merge_quad_first_and_legacy(
     )
     if legacy_mesh.seeding is not None:
         merged_mesh.seeding = legacy_mesh.seeding
+
+    # The merged beam IDs/nodes have a new namespace. Rebuild member groups
+    # from authoritative source edge uses, not the pre-merge numeric IDs.
+    for member_id, member in geometry.members.items():
+        member_elements: list[int] = []
+        member_nodes: list[int] = []
+        for use_id in member.edge_use_ids:
+            use = geometry.member_edge_uses[use_id]
+            edge_id = int(use.edge_id)
+            elements = list(merged_mesh.elements_of_edge.get(edge_id, ()))
+            nodes = list(merged_mesh.offset_nodes_of_edge.get(edge_id)
+                         or merged_mesh.nodes_of_edge.get(edge_id, ()))
+            if not elements:
+                continue
+            if int(use.orientation) < 0:
+                elements.reverse()
+                nodes.reverse()
+            member_elements.extend(elements)
+            member_nodes.extend(nodes)
+        if member_elements:
+            merged_mesh.elements_of_member[int(member_id)] = list(dict.fromkeys(member_elements))
+            merged_mesh.nodes_of_member[int(member_id)] = list(dict.fromkeys(member_nodes))
 
     merged_mesh.thickness_of_face = {
         int(face_id): float(value)
@@ -2330,7 +2397,14 @@ def _quad_first_apply_qualified_s3(
 ) -> HybridMeshResult:
     """Attach the established qualified-S3 admission to a quad-first result."""
     _check_cancellation(cancellation_check, "quad-first qualified S3 preparation start")
-    prepared_mesh, record = prepare_qualified_s3_mesh(result.mesh, source_geometry)
+    try:
+        prepared_mesh, record = prepare_qualified_s3_mesh(result.mesh, source_geometry)
+    except S3RepairError as error:
+        # The geometry-valid candidate has already passed the quad-first
+        # publication audit. Keep it available to the opt-in recovery caller;
+        # strict callers still receive the same typed failure.
+        error.inspectable_result = result
+        raise
     record["authority_model"].update(
         {
             "source_model_id": str(source_geometry.model_id),
@@ -2360,6 +2434,7 @@ def _promote_quad_first_quadratic(
     target_size: float,
     domains_by_face: Mapping[int, Any] | None = None,
     cancellation_check: Callable[[str], None] | None = None,
+    protected_interior_nodes: Iterable[int] = (),
 ) -> None:
     """Promote final quad-first Q4/T3 cells to strict-valid canonical Q8/T6.
 
@@ -2461,6 +2536,10 @@ def _promote_quad_first_quadratic(
         for node in sequence
     }
     protected_nodes.update(int(node) for node in working.node_of_vertex.values())
+    interior_anchors = tuple(sorted({int(node) for node in protected_interior_nodes}))
+    if any(node not in working.nodes for node in interior_anchors):
+        raise MeshError("quadratic promotion has an unknown protected interior node")
+    protected_nodes.update(interior_anchors)
 
     def _candidate_midpoint(first: int, second: int) -> np.ndarray:
         key = (min(int(first), int(second)), max(int(first), int(second)))
@@ -2645,6 +2724,9 @@ def _promote_quad_first_quadratic(
                 "quadratic promotion could not repair T6 element "
                 f"{element_id} beside an exact curved source edge"
             )
+    if any(not np.array_equal(working.nodes[node], mesh.nodes[node])
+           for node in interior_anchors):
+        raise MeshError("quadratic promotion moved a protected attachment anchor")
     # Allocate exactly one midside per final shell edge after all corner repairs.
     new_nodes = dict(working.nodes)
     next_node = max(new_nodes, default=-1) + 1
@@ -2694,6 +2776,7 @@ def _promote_quad_first_quadratic(
         new_nodes_of_edge[int(edge_id)] = expanded
 
     # Final strict CH1 validity gate on the exact connectivity to be published.
+    strict_started = perf_counter()
     for element_id, body in sorted(new_quads.items()):
         coordinates = np.asarray([new_nodes[node] for node in body], dtype=float)
         report = certify_mapping_validity(coordinates, "Q8")
@@ -2710,6 +2793,7 @@ def _promote_quad_first_quadratic(
                 f"quadratic promotion final T6 element {element_id} is "
                 f"{report.status.value}"
             )
+    record_quad_stage("strict_validation", perf_counter() - strict_started)
 
     boundary_records_by_face: dict[int, list[HighOrderBoundaryMidside]] = {int(fid): [] for fid in working.elements_of_face}
     for shell_edge, (source_edge_id, _exact_midpoint) in sorted(boundary_data.items()):
@@ -2819,6 +2903,482 @@ def _promote_quad_first_quadratic(
     mesh.hybrid_diagnostics = diagnostics
     mesh.order = "quadratic"
 
+_QUAD_FIRST_MIN_NORMALIZED_JACOBIAN = 0.05
+_QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES = 5.0
+
+
+def _repair_quad_first_quality(
+    mesh, geometry, domains_by_face, cancellation_check=None,
+    protected_interior_nodes=(),
+    allow_corner_relocation=False,
+):
+    """Replace a low-quality Q4 by its best certified T3 diagonal.
+
+    Evaluate the would-be Q8/T6 maps on the owner surface before promotion.
+    Both linear and quadratic requests therefore make the same deterministic
+    corner-topology decision; residual triangles remain first-class cells.
+    """
+    quad_samples = np.asarray([(a, b) for a in np.linspace(-1., 1., 9)
+                               for b in np.linspace(-1., 1., 9)], dtype=float)
+    tri_samples = np.asarray([(i/8, j/8) for i in range(9)
+                              for j in range(9-i)], dtype=float)
+    boundary_midpoints = {}
+    for edge_id, chain in mesh.nodes_of_edge.items():
+        for first, second in zip(chain, chain[1:]):
+            key = (min(first, second), max(first, second))
+            _, t0, _ = geometry.closest_edge_point(edge_id, mesh.nodes[first])
+            _, t1, _ = geometry.closest_edge_point(edge_id, mesh.nodes[second])
+            point = np.asarray(geometry.sample_edge(edge_id, np.asarray([(t0+t1)/2]))[0], dtype=float)
+            old = boundary_midpoints.get(key)
+            if old is not None and not np.allclose(old, point, atol=1e-12, rtol=0):
+                raise MeshError("quad-first quality repair has conflicting source midsides")
+            boundary_midpoints[key] = point
+
+    # Quality repair revisits the same corner through many incident cells and
+    # candidate moves.  A chart projection rebuilds the face trim, so cache it
+    # by node and position; a tentative move automatically invalidates its row.
+    chart_positions: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+    def node_chart(face_id: int, node_id: int) -> np.ndarray:
+        key = (int(face_id), int(node_id))
+        position = np.asarray(mesh.nodes[node_id], dtype=float)
+        cached = chart_positions.get(key)
+        if cached is not None and np.array_equal(cached[0], position):
+            return cached[1]
+        chart = np.asarray(domains_by_face[face_id].project(position), dtype=float)
+        chart_positions[key] = (position.copy(), chart)
+        return chart
+
+    def midpoint(face_id, first, second):
+        key = (min(first, second), max(first, second))
+        owned = boundary_midpoints.get(key)
+        if owned is not None:
+            return owned
+        domain = domains_by_face[face_id]
+        a, b = mesh.nodes[first], mesh.nodes[second]
+        if isinstance(domain, (CylindricalQuadDomain, ConicalQuadDomain, ParametricQuadDomain)):
+            chart_a, chart_b = node_chart(face_id, first), node_chart(face_id, second)
+            return np.asarray(domain.lift((.5*(chart_a[0]+chart_b[0]),
+                                           .5*(chart_a[1]+chart_b[1]))), dtype=float)
+        return .5 * (np.asarray(a) + np.asarray(b))
+
+    sampled_by_nodes: dict[int, tuple[np.ndarray, Any]] = {}
+
+    def trial(face_id, corners, family, samples):
+        nodes = np.asarray([mesh.nodes[n] for n in corners] + [
+            midpoint(face_id, corners[i], corners[(i+1) % len(corners)])
+            for i in range(len(corners))], dtype=float)
+        domain = domains_by_face[face_id]
+        if isinstance(domain, PlanarQuadDomain):
+            normal = np.asarray(domain.normal, dtype=float)
+        else:
+            centre = np.mean(nodes[:len(corners)], axis=0)
+            u, v = geometry.face_local_uv(face_id, centre)
+            normal = geometry.face_normal(face_id, u, v)
+        sampled = evaluate_mapping(nodes, family, samples, reference_normal=normal)
+        quality = float(np.min(sampled.normalized_quality))
+        # Keep the exact immutable trial array alive until its normal check.
+        # A moved corner creates a new array, so no old mapping is reused.
+        sampled_by_nodes[id(nodes)] = (nodes, sampled)
+        if len(sampled_by_nodes) > 512:
+            sampled_by_nodes.clear()
+            sampled_by_nodes[id(nodes)] = (nodes, sampled)
+        return quality, nodes, normal
+
+    def normal_error(face_id, nodes, family, samples, reference_normal):
+        entry = sampled_by_nodes.get(id(nodes))
+        sampled = (entry[1] if entry is not None and entry[0] is nodes else
+                   evaluate_mapping(nodes, family, samples,
+                                    reference_normal=reference_normal))
+        jacobians = np.asarray(sampled.jacobian_vector, dtype=float)
+        lengths = np.linalg.norm(jacobians, axis=1)
+        if np.any(lengths <= 0.0):
+            return float("inf")
+        domain = domains_by_face[face_id]
+        if isinstance(domain, PlanarQuadDomain):
+            owner_normals = np.broadcast_to(np.asarray(domain.normal, dtype=float),
+                                            jacobians.shape)
+        else:
+            uv = geometry.face_local_uv_many(face_id, sampled.points)
+            owner_normals = geometry.face_normal_many(face_id, uv)
+        cosines = np.einsum("ij,ij->i", jacobians / lengths[:, None], owner_normals)
+        return float(np.max(np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))))
+
+    repaired = []
+    normal_splits = []
+    unresolved = []
+    relocated_for_split = []
+    relocated_quads = []
+    protected = {int(node) for chain in mesh.nodes_of_edge.values() for node in chain}
+    protected.update(int(node) for node in protected_interior_nodes)
+    face_of_cell = {int(element): int(face) for face, elements in mesh.elements_of_face.items()
+                    for element in elements}
+    next_element = max((*mesh.quads, *mesh.tris), default=-1) + 1
+    for face_id, elements in list(mesh.elements_of_face.items()):
+        replacement = []
+        for element_id in elements:
+            body = mesh.quads.get(element_id)
+            if body is None:
+                replacement.append(element_id)
+                continue
+            if cancellation_check is not None:
+                cancellation_check("quad-first:quality-repair")
+            current, current_nodes, current_normal = trial(face_id, body, "Q8", quad_samples)
+            current_normal_error = normal_error(
+                face_id, current_nodes, "Q8", quad_samples, current_normal)
+            needs_normal_repair = current_normal_error > _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES
+            if current >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and not needs_normal_repair:
+                replacement.append(element_id)
+                continue
+            if allow_corner_relocation and isinstance(domains_by_face[face_id], PlanarQuadDomain):
+                # A boundary-adjacent seed can leave one free quad corner too
+                # close to a source arc or re-entrant corner.  Move only that
+                # corner, and accept the move only when every incident mapping
+                # already meets the full owner-normal and strict certificates.
+                domain = domains_by_face[face_id]
+                for node in body:
+                    if node in protected:
+                        continue
+                    old = np.asarray(mesh.nodes[node], dtype=float).copy()
+                    own_uv = node_chart(face_id, node)
+                    local_length = max(float(np.linalg.norm(old-mesh.nodes[other]))
+                                       for other in body if other != node)
+                    neighborhood = tuple((owner, cell) for owner, cells in
+                                         mesh.elements_of_face.items() for cell in cells
+                                         if node in (mesh.quads.get(cell) or mesh.tris[cell]))
+                    accepted = False
+                    for fraction in (.1, .2, .3, .4, .5, .6):
+                        if accepted:
+                            break
+                        for angle in range(16):
+                            direction = np.asarray((np.cos(angle*np.pi/8),
+                                                    np.sin(angle*np.pi/8)))
+                            try:
+                                candidate = np.asarray(domain.lift(tuple(
+                                    own_uv + fraction*local_length*direction)), dtype=float)
+                            except MeshError:
+                                continue
+                            mesh.nodes[node] = candidate
+                            evidence = [(owner, cell, *trial(
+                                owner, mesh.quads.get(cell) or mesh.tris[cell],
+                                "Q8" if cell in mesh.quads else "T6",
+                                quad_samples if cell in mesh.quads else tri_samples))
+                                for owner, cell in neighborhood]
+                            accepted = all(q >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and
+                                normal_error(owner, nodes,
+                                             "Q8" if cell in mesh.quads else "T6",
+                                             quad_samples if cell in mesh.quads else tri_samples,
+                                             normal) <= _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES and
+                                certify_mapping_validity(
+                                    nodes, "Q8" if cell in mesh.quads else "T6",
+                                    reference_normal=normal).status
+                                is ValidityStatus.CERTIFIED_POSITIVE
+                                for owner, cell, q, nodes, normal in evidence)
+                            if accepted:
+                                relocated_quads.append((face_id, element_id, node,
+                                    float(np.linalg.norm(candidate-old)), current))
+                                break
+                            mesh.nodes[node] = old
+                    if accepted:
+                        replacement.append(element_id)
+                        break
+                if accepted:
+                    continue
+            choices = []
+            for pair in (((body[0], body[1], body[2]), (body[0], body[2], body[3])),
+                         ((body[0], body[1], body[3]), (body[1], body[2], body[3]))):
+                evidence = [trial(face_id, tri, "T6", tri_samples) for tri in pair]
+                score = min(item[0] for item in evidence)
+                if score < _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN:
+                    continue
+                if needs_normal_repair and any(
+                    normal_error(face_id, nodes, "T6", tri_samples, normal)
+                    > _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES
+                    for _, nodes, normal in evidence
+                ):
+                    continue
+                if all(certify_mapping_validity(nodes, "T6", reference_normal=normal).status
+                       is ValidityStatus.CERTIFIED_POSITIVE for _, nodes, normal in evidence):
+                    choices.append((score, pair))
+            if not choices and not needs_normal_repair:
+                # A Q4 can put three consecutive corners nearly on a source
+                # boundary. Its Q8 Jacobian then approaches zero at the middle
+                # corner regardless of where the fourth corner is moved. A
+                # diagonal split is viable only after the free corner moves
+                # far enough into the owner chart. Try that move transactionally
+                # against both proposed T6 cells and every incident neighbor.
+                domain = domains_by_face[face_id]
+                pairs = (((body[0], body[1], body[2]), (body[0], body[2], body[3])),
+                         ((body[0], body[1], body[3]), (body[1], body[2], body[3])))
+                for pair in pairs:
+                    if choices:
+                        break
+                    common = set(pair[0]) & set(pair[1])
+                    for node in sorted(common - protected):
+                        old = np.asarray(mesh.nodes[node], dtype=float).copy()
+                        own_uv = node_chart(face_id, node)
+                        other_uv = np.mean([node_chart(face_id, other)
+                                            for other in body if other != node], axis=0)
+                        direction = own_uv - other_uv
+                        if float(np.linalg.norm(direction)) <= 1e-14:
+                            continue
+                        local_length = max(float(np.linalg.norm(old-mesh.nodes[other]))
+                                           for other in body if other != node)
+                        for alpha in (1.0, 2.0, 4.0, 8.0):
+                            try:
+                                candidate = np.asarray(
+                                    domain.lift(tuple(own_uv + alpha*direction)), dtype=float)
+                            except MeshError:
+                                continue
+                            movement = float(np.linalg.norm(candidate-old))
+                            if movement > .25*local_length:
+                                continue
+                            mesh.nodes[node] = candidate
+                            evidence = [trial(face_id, tri, "T6", tri_samples)
+                                        for tri in pair]
+                            score = min(item[0] for item in evidence)
+                            acceptable = score >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and all(
+                                certify_mapping_validity(nodes, "T6", reference_normal=normal).status
+                                is ValidityStatus.CERTIFIED_POSITIVE and
+                                normal_error(face_id, nodes, "T6", tri_samples, normal)
+                                <= _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES
+                                for _, nodes, normal in evidence)
+                            if acceptable:
+                                for neighbor, neighbor_body in (*mesh.quads.items(), *mesh.tris.items()):
+                                    if neighbor == element_id or node not in neighbor_body:
+                                        continue
+                                    neighbor_face = face_of_cell[neighbor]
+                                    is_quad = neighbor in mesh.quads
+                                    q, nodes, normal = trial(
+                                        neighbor_face, neighbor_body,
+                                        "Q8" if is_quad else "T6",
+                                        quad_samples if is_quad else tri_samples)
+                                    if (q < _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN or
+                                        normal_error(neighbor_face, nodes,
+                                                     "Q8" if is_quad else "T6",
+                                                     quad_samples if is_quad else tri_samples,
+                                                     normal) > _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES or
+                                        certify_mapping_validity(
+                                            nodes, "Q8" if is_quad else "T6",
+                                            reference_normal=normal).status
+                                            is not ValidityStatus.CERTIFIED_POSITIVE):
+                                        acceptable = False
+                                        break
+                            if acceptable:
+                                choices.append((score, pair))
+                                relocated_for_split.append(
+                                    (face_id, element_id, node, movement, score))
+                                break
+                            mesh.nodes[node] = old
+                        if choices:
+                            break
+            if not choices:
+                unresolved.append((face_id, element_id, current))
+                replacement.append(element_id)
+                continue
+            _, pair = max(choices, key=lambda item: item[0])
+            del mesh.quads[element_id]
+            mesh.tris[element_id] = pair[0]
+            mesh.tris[next_element] = pair[1]
+            face_of_cell[next_element] = face_id
+            replacement.extend((element_id, next_element))
+            repaired.append((face_id, element_id, next_element, current))
+            if needs_normal_repair:
+                normal_splits.append((face_id, element_id, current_normal_error))
+            next_element += 1
+        mesh.elements_of_face[face_id] = replacement
+    incident = {}
+    for face_id, elements in mesh.elements_of_face.items():
+        for element_id in elements:
+            body = mesh.quads.get(element_id)
+            if body is None:
+                body = mesh.tris[element_id]
+            for node in body:
+                incident.setdefault(int(node), set()).add((face_id, element_id))
+
+    def quality(face_id, element_id):
+        body = mesh.quads.get(element_id)
+        if body is not None:
+            return trial(face_id, body, "Q8", quad_samples)
+        return trial(face_id, mesh.tris[element_id], "T6", tri_samples)
+
+    gauss, gauss_weights = np.polynomial.legendre.leggauss(8)
+
+    def lengths(nodes, corner_count):
+        values = []
+        for index in range(corner_count):
+            a, b, middle = nodes[index], nodes[(index+1) % corner_count], nodes[corner_count+index]
+            tangent = (gauss-.5)[:, None]*a - 2*gauss[:, None]*middle + (gauss+.5)[:, None]*b
+            values.append(float(gauss_weights @ np.linalg.norm(tangent, axis=1)))
+        return values
+
+    moved = []
+    precert_moved = []
+    for face_id, elements in mesh.elements_of_face.items():
+        domain = domains_by_face[face_id]
+        for element_id in elements:
+            if element_id not in mesh.tris:
+                continue
+            before, initial_nodes, initial_normal = quality(face_id, element_id)
+            strict_ok = (certify_mapping_validity(
+                initial_nodes, "T6", reference_normal=initial_normal).status
+                is ValidityStatus.CERTIFIED_POSITIVE)
+            if before >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and strict_ok:
+                continue
+            body = mesh.tris[element_id]
+            if allow_corner_relocation and isinstance(domain, PlanarQuadDomain) and not strict_ok:
+                # Exact source-arc midsides can invalidate a T6 even when its
+                # sampled quality is acceptable. Resolve that before publishing
+                # linear corners, so quadratic promotion need not move them.
+                precert_done = False
+                for index in range(3):
+                    first, second = body[index], body[(index+1) % 3]
+                    node = body[(index+2) % 3]
+                    key = (min(first, second), max(first, second))
+                    exact = boundary_midpoints.get(key)
+                    if exact is None or node in protected:
+                        continue
+                    chord = .5*(np.asarray(mesh.nodes[first]) + np.asarray(mesh.nodes[second]))
+                    direction = exact-chord
+                    if float(np.linalg.norm(direction)) <= 1e-12:
+                        continue
+                    old = np.asarray(mesh.nodes[node], dtype=float).copy()
+                    neighborhood = tuple(sorted(incident[node]))
+                    local_length = max(float(np.linalg.norm(old-mesh.nodes[other]))
+                                       for other in body if other != node)
+                    for alpha in (.5, 1., 2., 3., 4., 6., 8., 12.):
+                        candidate = old + alpha*direction
+                        movement = float(np.linalg.norm(candidate-old))
+                        if movement > .5*local_length:
+                            continue
+                        mesh.nodes[node] = candidate
+                        evidence = [quality(owner, cell) for owner, cell in neighborhood]
+                        precert_done = all(q >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and
+                            normal_error(owner, nodes, "Q8" if cell in mesh.quads else "T6",
+                                quad_samples if cell in mesh.quads else tri_samples,
+                                normal) <= _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES and
+                            certify_mapping_validity(nodes, "Q8" if cell in mesh.quads else "T6",
+                                reference_normal=normal).status is ValidityStatus.CERTIFIED_POSITIVE
+                            for (owner, cell), (q, nodes, normal) in zip(neighborhood, evidence))
+                        if precert_done:
+                            precert_moved.append((face_id, element_id, node, movement))
+                            break
+                        mesh.nodes[node] = old
+                    if precert_done:
+                        break
+                if precert_done:
+                    continue
+            for index, node in enumerate(body):
+                if node in protected:
+                    continue
+                others = (body[(index+1) % 3], body[(index+2) % 3])
+                old = np.asarray(mesh.nodes[node], dtype=float).copy()
+                own_uv = node_chart(face_id, node)
+                edge_uv = .5 * (node_chart(face_id, others[0])
+                               + node_chart(face_id, others[1]))
+                direction = own_uv - edge_uv
+                local_length = max(float(np.linalg.norm(old-mesh.nodes[other])) for other in others)
+                neighborhood = tuple(sorted(incident[node]))
+                neighbours = sorted({other for owner, cell in neighborhood
+                                     for other in (mesh.quads.get(cell) or mesh.tris[cell]) if other != node})
+                centroid = np.mean([node_chart(face_id, other) for other in neighbours], axis=0)
+                accepted = False
+                for adjustment in (direction, centroid-own_uv):
+                    for alpha in (.1, .25, .5, 1.0):
+                        try:
+                            candidate = np.asarray(domain.lift(tuple(own_uv + alpha*adjustment)), dtype=float)
+                        except MeshError:
+                            continue
+                        if float(np.linalg.norm(candidate-old)) > .25*local_length:
+                            continue
+                        mesh.nodes[node] = candidate
+                        evidence = [quality(owner, cell) for owner, cell in neighborhood]
+                        accepted = all(q >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and
+                            normal_error(owner, nodes, "Q8" if cell in mesh.quads else "T6",
+                                quad_samples if cell in mesh.quads else tri_samples,
+                                normal) <= _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES and
+                            certify_mapping_validity(nodes, "Q8" if cell in mesh.quads else "T6",
+                                reference_normal=normal).status is ValidityStatus.CERTIFIED_POSITIVE
+                            for (owner, cell), (q, nodes, normal) in zip(neighborhood, evidence))
+                        if accepted:
+                            moved.append((face_id, element_id, node, float(np.linalg.norm(candidate-old))))
+                            break
+                        mesh.nodes[node] = old
+                    if accepted:
+                        break
+                else:
+                    continue
+                break
+    aspect_moves = []
+    for _pass in range(2):
+        changed = False
+        for face_id, elements in mesh.elements_of_face.items():
+            domain = domains_by_face[face_id]
+            for element_id in elements:
+                body = mesh.quads.get(element_id)
+                if body is None:
+                    body = mesh.tris[element_id]
+                _, nodes, _ = quality(face_id, element_id)
+                edge_lengths = lengths(nodes, len(body))
+                ratio = max(edge_lengths) / min(edge_lengths)
+                if ratio <= 20.0:
+                    continue
+                shortest = int(np.argmin(edge_lengths))
+                ends = (body[shortest], body[(shortest+1) % len(body)])
+                for node, other in ((ends[0], ends[1]), (ends[1], ends[0])):
+                    if node in protected:
+                        continue
+                    old = np.asarray(mesh.nodes[node], dtype=float).copy()
+                    own_uv = node_chart(face_id, node)
+                    other_uv = node_chart(face_id, other)
+                    direction = own_uv-other_uv
+                    norm = float(np.linalg.norm(direction))
+                    if norm <= 1e-14:
+                        continue
+                    delta = max(edge_lengths)/20.0-min(edge_lengths)
+                    neighborhood = tuple(sorted(incident[node]))
+                    accepted = False
+                    for alpha in (1.0, 1.5, 2.0):
+                        try:
+                            candidate = np.asarray(domain.lift(tuple(own_uv+alpha*delta*direction/norm)), dtype=float)
+                        except MeshError:
+                            continue
+                        if float(np.linalg.norm(candidate-old)) > .25*max(edge_lengths):
+                            continue
+                        mesh.nodes[node] = candidate
+                        evidence = [quality(owner, cell) for owner, cell in neighborhood]
+                        accepted = all(q >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and
+                            normal_error(owner, coords, "Q8" if cell in mesh.quads else "T6",
+                                quad_samples if cell in mesh.quads else tri_samples,
+                                normal) <= _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES and
+                            max(lengths(coords, len(mesh.quads.get(cell) or mesh.tris[cell]))) /
+                            min(lengths(coords, len(mesh.quads.get(cell) or mesh.tris[cell]))) <= 20.0 and
+                            certify_mapping_validity(coords, "Q8" if cell in mesh.quads else "T6",
+                                reference_normal=normal).status is ValidityStatus.CERTIFIED_POSITIVE
+                            for (owner, cell), (q, coords, normal) in zip(neighborhood, evidence))
+                        if accepted:
+                            aspect_moves.append((face_id, element_id, node, float(np.linalg.norm(candidate-old))))
+                            changed = True
+                            break
+                        mesh.nodes[node] = old
+                    if accepted:
+                        break
+        if not changed:
+            break
+    mesh.hybrid_diagnostics["quad_quality_repair"] = {
+        "minimum_normalized_jacobian": _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN,
+        "split_quads": repaired,
+        "normal_splits": normal_splits,
+        "relocated_for_split": relocated_for_split,
+        "relocated_quads": relocated_quads,
+        "unresolved_quads": unresolved,
+        "moved_nodes": moved,
+        "precert_moved": precert_moved,
+        "aspect_moves": aspect_moves,
+        "protected_interior_nodes": tuple(sorted(int(node) for node in protected_interior_nodes)),
+    }
+
+
 def _quad_first_execute(
     geometry: GeometryModel,
     *,
@@ -2829,6 +3389,8 @@ def _quad_first_execute(
     capabilities: "Any",
     order: str = "linear",
     refinements: tuple[Refinement, ...] = (),
+    overrides: Mapping[int, int] | None = None,
+    layout_policy: str = "existing",
     cancellation_check: "Callable[[str], None] | None" = None,
 ) -> "HybridMeshResult":
     """Execute the genuine PQ-M1 target-size planar quad route.
@@ -2860,7 +3422,7 @@ def _quad_first_execute(
         from ._cylindrical_public import prepare_bindings
 
         try:
-            cylindrical_bindings = prepare_bindings(
+            cylindrical_bindings = timed_quad_call("qualification", prepare_bindings,
                 geometry,
                 cylinder_face_ids,
                 NativeMeshingOptions(point_placement="frontal_delaunay"),
@@ -2904,7 +3466,50 @@ def _quad_first_execute(
         domains = tuple(domains_list)
     except MeshError as exc:
         raise QuadPublicUnsupported(str(exc)) from exc
-    registry = BoundaryStationRegistry.for_domains(geometry, domains, h, size_field=quad_size_field)
+    registry = timed_quad_call("boundary_stations", BoundaryStationRegistry.for_domains,
+        geometry, domains, h, size_field=quad_size_field,
+        overrides=overrides,
+        _independent_refined_counts=not quad_size_field.is_uniform,
+        _adaptive_independent_counts=layout_policy == "adaptive",
+    )
+
+    point_seed_cuts: dict[int, tuple[float, float]] = {}
+    point_attachment_face_id: int | None = None
+    if options.quality_model == "shape_jacobian":
+        point_attachments = [
+            item for item in geometry.attachments.values()
+            if str(item.target_kind) == "face"
+            and int(item.target_id) in quad_face_ids
+            and str(item.kind) == "member_through_face"
+            and len(item.target_parameters) == 2
+            and all(parameter.is_point and 0.0 < parameter.start < 1.0
+                    for parameter in item.target_parameters)
+        ]
+        if len(point_attachments) == 1:
+            item = point_attachments[0]
+            owner = next(domain for domain in domains
+                         if domain.face_id == int(item.target_id))
+            if len(owner.edge_uses) != 4 or owner.hole_edge_uses:
+                raise QuadPublicUnsupported(
+                    "interior member attachment point seed requires a four-sided owner face without holes"
+                )
+            owner_edges = {edge for edge, _ in owner.edge_uses}
+            # On sufficiently resolved directly connected patches, the same
+            # source-chart grid keeps both sides of the point load comparable
+            # to the structured Q8 reference. At coarse sizes its mandatory
+            # four-cell star would oversample the short chart direction.
+            for domain in domains:
+                if domain.face_id == owner.face_id or len(domain.edge_uses) != 4 or domain.hole_edge_uses:
+                    continue
+                if not owner_edges.intersection(edge for edge, _ in domain.edge_uses):
+                    continue
+                if min(source_chart_axis_lengths(geometry, domain, shortest=True)) >= 4.0 * h:
+                    point_seed_cuts[domain.face_id] = (.5, .5)
+            point_seed_cuts[int(item.target_id)] = tuple(
+                parameter.start for parameter in item.target_parameters
+            )
+            point_attachment_face_id = int(item.target_id)
+
 
     global_nodes: dict[int, np.ndarray] = {}
     node_of_vertex: dict[int, int] = {}
@@ -2938,15 +3543,18 @@ def _quad_first_execute(
 
     for domain in domains:
         _check_cancellation(cancellation_check, "quad-first:face-seed")
-        seed = build_planar_quad_seed(
+        seed = timed_quad_call("seeding", build_planar_quad_seed,
             geometry,
             domain.face_id,
             h,
             domain=domain,
             registry=registry,
             size_field=quad_size_field,
+            source_aligned_cut=point_seed_cuts.get(domain.face_id),
+            layout_policy=layout_policy,
+            cancellation_check=cancellation_check,
         )
-        q4_report = optimize_q4_seed_mcf(
+        q4_report = timed_quad_call("optimization", optimize_q4_seed_mcf,
             seed.state,
             target_size=h,
             cancellation_check=cancellation_check,
@@ -2954,14 +3562,14 @@ def _quad_first_execute(
             domain=domain,
         )
         face_q4[domain.face_id] = q4_report.to_dict()
-        driven = run_planar_quad_driver(
+        driven = timed_quad_call("front", run_planar_quad_driver,
             seed,
             options,
             allow_recovery=True,
             cancellation_check=cancellation_check,
         )
         state = driven.state
-        q5_report = optimize_quad_state(
+        q5_report = timed_quad_call("optimization", optimize_quad_state,
             state,
             target_size=h,
             max_local_optimizations=q5_budget_remaining,
@@ -2970,10 +3578,16 @@ def _quad_first_execute(
             domain=domain,
         )
         q5_budget_remaining = max(0, q5_budget_remaining - q5_report.worker_calls)
-        validation = validate_planar_quad_result(
+        validation = timed_quad_call("front_validation", validate_planar_quad_result,
             state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed
         )
         face_driver[domain.face_id] = driven.report.to_dict()
+        if layout_policy == "adaptive":
+            face_driver[domain.face_id]["layout_seed"] = {
+                "boundary_stations": len(seed.station_to_node),
+                "interior_points": len(seed.state.nodes) - len(seed.station_to_node),
+                "targeted_reseed_points": seed.targeted_reseed_count,
+            }
         q5_face_report = q5_report.to_dict()
         q5_face_report["resident_moved_node_ids"] = list(q5_face_report["moved_node_ids"])
         face_q5[domain.face_id] = q5_face_report
@@ -3057,6 +3671,29 @@ def _quad_first_execute(
         elements_of_face=elements_of_face,
         order="linear",
     )
+    protected_interior_nodes = ()
+    if options.quality_model == "shape_jacobian":
+        if point_attachment_face_id is not None:
+            anchor_xyz = np.asarray(geometry.face_point(
+                point_attachment_face_id,
+                *point_seed_cuts[point_attachment_face_id],
+            ), dtype=float)
+            owner_elements = mesh.elements_of_face[point_attachment_face_id]
+            owner_corners = {
+                int(node) for element_id in owner_elements
+                for node in mesh.corners_of(element_id)
+            }
+            anchors = tuple(node for node in owner_corners
+                            if float(np.linalg.norm(mesh.nodes[node] - anchor_xyz)) <= 1e-10)
+            if len(anchors) != 1:
+                raise MeshError("quad-first point seed did not publish one exact attachment anchor")
+            protected_interior_nodes = anchors
+        timed_quad_call("repair", _repair_quad_first_quality,
+            mesh, geometry, {domain.face_id: domain for domain in domains},
+            cancellation_check=cancellation_check,
+            protected_interior_nodes=protected_interior_nodes,
+            allow_corner_relocation=layout_policy == "adaptive",
+        )
     for sheet_id, sheet in geometry.sheets.items():
         mesh.elements_of_sheet[int(sheet_id)] = sorted(
             {
@@ -3072,13 +3709,24 @@ def _quad_first_execute(
     )
     mesh.hybrid_diagnostics["high_order_geometry"] = {"status": "NOT_APPLICABLE", "reports": []}
     if order == "quadratic":
-        _promote_quad_first_quadratic(
+        adaptive_corners = ({node: np.asarray(position, dtype=float).copy()
+                             for node, position in mesh.nodes.items()}
+                            if layout_policy == "adaptive" else None)
+        timed_quad_call("promotion_including_validation", _promote_quad_first_quadratic,
             mesh,
             geometry,
             target_size=h,
             domains_by_face={domain.face_id: domain for domain in domains},
             cancellation_check=cancellation_check,
+            protected_interior_nodes=protected_interior_nodes,
         )
+        if adaptive_corners is not None and any(
+            not np.array_equal(mesh.nodes[node], position)
+            for node, position in adaptive_corners.items()
+        ):
+            raise MeshError(
+                "adaptive quad-first quadratic promotion changed linear corner coordinates"
+            )
     q4_reports = tuple(face_q4.values())
     q4_statuses = tuple(str(item["status"]) for item in q4_reports)
     if any(status == "APPLIED" for status in q4_statuses):
@@ -3183,6 +3831,7 @@ def _quad_first_execute(
             "geometry_family_by_face": dict(geometry_family_by_face),
             "quad_first_api": "public/1",
             "seed_mode": options.seed_mode,
+            "layout_policy": layout_policy,
             "orientation": options.orientation,
             "quality_model": options.quality_model,
             "line_search": options.line_search,
@@ -3266,6 +3915,7 @@ def generate_hybrid_mesh_result(
     ) = None,
     qualified_s3: bool = False,
     quad_options: QuadMeshingOptions | Mapping[str, Any] | None = None,
+    layout_policy: str = "existing",
     quad_face_ids: Iterable[int] | None = None,
     overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
@@ -3306,6 +3956,10 @@ def generate_hybrid_mesh_result(
     )
     if type(qualified_s3) is not bool:
         raise MeshError("qualified_s3 must be Boolean")
+    if layout_policy not in ("existing", "adaptive"):
+        raise MeshError("layout_policy must be 'existing' or 'adaptive'")
+    if layout_policy == "adaptive" and quad_options is None:
+        raise MeshError("adaptive layout requires explicit quad_options")
 
     # Quad-first narrow dispatch: explicit ``quad_options`` is the only signal
     # that the quad-first contract applies.  Public integration validates the
@@ -3361,6 +4015,19 @@ def generate_hybrid_mesh_result(
             else tuple(_quad_face_selector)
         )
         if order == "quadratic" and source_beams:
+            _cylindrical_boundary_edges = {
+                int(use.edge)
+                for face_id in _quad_scope_faces
+                if isinstance(source_geometry.faces[int(face_id)].surface, Cylinder)
+                for use in source_geometry.faces[int(face_id)].loop
+            }
+            _coowned_cylindrical_beams = sorted(
+                set(map(int, source_beams)) & _cylindrical_boundary_edges
+            )
+            if _coowned_cylindrical_beams:
+                raise QuadPublicUnsupported(
+                    "quadratic cylindrical quad-first does not qualify beam ownership on a source-boundary edge"
+                )
             _conical_boundary_edges = {
                 int(use.edge)
                 for face_id in _quad_scope_faces
@@ -3466,6 +4133,8 @@ def generate_hybrid_mesh_result(
             capabilities=_quad_capabilities,
             order=order,
             refinements=requested_refinements,
+            overrides=overrides,
+            layout_policy=layout_policy,
             cancellation_check=cancellation_check,
         )
         _check_cancellation(cancellation_check, "quad-mixed:legacy")
@@ -3541,6 +4210,8 @@ def generate_hybrid_mesh_result(
             capabilities=_quad_capabilities,
             order=order,
             refinements=requested_refinements,
+            overrides=overrides,
+            layout_policy=layout_policy,
             cancellation_check=cancellation_check,
         )
         if not source_beams:

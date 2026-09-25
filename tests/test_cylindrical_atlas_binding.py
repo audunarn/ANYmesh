@@ -23,7 +23,7 @@ from anymesher._cylindrical_atlas import prepare_cylindrical_atlas
 from anymesher.errors import MeshError
 
 
-def _sector_model(hole=False):
+def _sector_model(hole=False, *, origin=(0., 0., 0.), rotation=0.):
     """Public owner authoring with a symbolic registry, never coordinate welding."""
     model = GeometryModel()
     vertices, edges = {}, {}
@@ -32,8 +32,10 @@ def _sector_model(hole=False):
     def vertex(angle, z):
         key = (Fraction(angle) % 8, Fraction(z))
         if key not in vertices:
-            theta = float(key[0]) * math.pi / 4
-            vertices[key] = model.add_point(math.cos(theta), math.sin(theta), float(z))
+            theta = float(key[0]) * math.pi / 4 + rotation
+            vertices[key] = model.add_point(origin[0] + math.cos(theta),
+                                            origin[1] + math.sin(theta),
+                                            origin[2] + float(z))
         return vertices[key]
 
     def edge(a, b):
@@ -58,7 +60,8 @@ def _sector_model(hole=False):
             points = tuple((Fraction(index) + Fraction(u), Fraction(z)) for u, z in local)
             loop = tuple(edge(a, b) for a, b in zip(points, points[1:] + points[:1]))
             surface = Cylinder(
-                origin=(0., 0., 0.), axis=(0., 0., 1.), radial_direction=(1., 0., 0.),
+                origin=origin, axis=(0., 0., 1.),
+                radial_direction=(math.cos(rotation), math.sin(rotation), 0.),
                 radius=1., height=2., start_angle=index * math.pi / 4, sweep_angle=math.pi / 4,
             )
             faces.append(model.add_face_from_loop(loop, surface=surface))

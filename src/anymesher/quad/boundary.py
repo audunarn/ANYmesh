@@ -1,13 +1,19 @@
 """Canonical target-size boundary stations for planar quad domains."""
 from __future__ import annotations
 from dataclasses import dataclass
+from math import ceil, floor
+from numbers import Integral
 from types import MappingProxyType
 from typing import Iterable, Mapping
 from anygeometry.model import GeometryModel
+from anygeometry.curves import Arc
 from ..errors import MeshError
 from ..refinement import SizeField
-from ..seeding import edge_distribution, solve_seeding
-from .domain import PlanarQuadDomain, Vec3
+from ..seeding import (
+    _apply_face_boundary_minimums, _apply_face_shape_minimums,
+    edge_demand, edge_distribution, solve_seeding,
+)
+from .domain import CylindricalQuadDomain, PlanarQuadDomain, Vec3
 
 @dataclass(frozen=True, order=True)
 class BoundaryStationKey:
@@ -43,6 +49,9 @@ class BoundaryStationRegistry:
         target_size: float,
         *,
         size_field: SizeField | None = None,
+        overrides: Mapping[int, int] | None = None,
+        _independent_refined_counts: bool = False,
+        _adaptive_independent_counts: bool = False,
     ) -> "BoundaryStationRegistry":
         domains = tuple(domains)
         if not domains:
@@ -53,11 +62,73 @@ class BoundaryStationRegistry:
         field = size_field if size_field is not None else SizeField(geometry, float(target_size))
         if abs(float(field.target_size) - float(target_size)) > 1.0e-12 * max(1.0, abs(float(target_size))):
             raise MeshError("provided size field target_size differs from registry target_size")
-        seeding = solve_seeding(geometry, size_field=field, edge_ids=edge_ids)
+        selected_overrides = {
+            int(edge_id): count for edge_id, count in (overrides or {}).items()
+            if int(edge_id) in edge_ids
+        }
+        for edge_id, count in selected_overrides.items():
+            if isinstance(count, bool) or not isinstance(count, Integral) or count < 1:
+                raise MeshError(f"edge {edge_id} override must be a positive integer division count")
+        curved_edges = {
+            edge_id for domain in domains if isinstance(domain, CylindricalQuadDomain)
+            for loop in (domain.edge_uses, *domain.hole_edge_uses)
+            for edge_id, _ in loop
+            if isinstance(geometry.edges[edge_id].curve, Arc)
+        }
+        # A source arc just longer than one requested interval must advance
+        # to two spans. Rounded edge demand otherwise holds the same Q8 arc
+        # approximation at adjacent resolutions (the RA1 deck plateau).
+        curved_minimums = {}
+        for edge_id in curved_edges:
+            if edge_id in selected_overrides:
+                continue
+            demand = edge_demand(geometry, edge_id, field)
+            if 1e-12 < demand-floor(demand) <= 0.1:
+                curved_minimums[edge_id] = ceil(demand - 1e-12)
+        if _adaptive_independent_counts:
+            # Irregular quad fronts do not require opposite mapped sides to
+            # carry equal counts. Size each source edge in physical units and
+            # retain one canonical chain for every incident face.
+            counts = {
+                edge_id: max(1, ceil(edge_demand(geometry, edge_id, field) - 1e-12),
+                             curved_minimums.get(edge_id, 1))
+                for edge_id in edge_ids
+            }
+            counts.update({edge_id: int(count) for edge_id, count in selected_overrides.items()})
+        elif _independent_refined_counts and not field.is_uniform:
+            # The quad-first seed can transition between unequal opposite
+            # boundary counts. Mapped-face equalities otherwise carry a local
+            # shared-edge refinement all the way to remote exterior edges.
+            counts = {
+                edge_id: max(1, int(round(edge_demand(geometry, edge_id, field))),
+                             curved_minimums.get(edge_id, 1))
+                for edge_id in edge_ids
+            }
+            if curved_minimums:
+                # Match uniform face-local station balance around a newly
+                # split narrow source arc, without propagating a local zone's
+                # counts around the whole connected assembly.
+                affected = [geometry.faces[domain.face_id] for domain in domains
+                            if isinstance(domain, CylindricalQuadDomain)
+                            and any(edge_id in curved_minimums
+                                    for edge_id, _ in domain.edge_uses)]
+                demands = {edge_id: edge_demand(geometry, edge_id, field)
+                           for edge_id in edge_ids}
+                _apply_face_boundary_minimums(
+                    affected, desired=counts, demands=demands,
+                    maximum_step_ratio=1.2,
+                )
+                _apply_face_shape_minimums(affected, desired=counts, demands=demands)
+            counts.update({edge_id: int(count) for edge_id, count in selected_overrides.items()})
+        else:
+            seeding = solve_seeding(geometry, size_field=field, edge_ids=edge_ids,
+                                    overrides=selected_overrides,
+                                    minimum_divisions=curved_minimums)
+            counts = seeding.divisions
         chains: dict[int, tuple[BoundaryStation, ...]] = {}
         for edge_id in edge_ids:
             edge = geometry.edges[edge_id]
-            divisions = int(seeding[edge_id])
+            divisions = int(counts[edge_id])
             interior = tuple(float(v) for v in edge_distribution(geometry, edge_id, divisions, field))
             params = (0.0, *interior, 1.0)
             xyz = geometry.sample_edge(edge_id, params)
@@ -76,7 +147,7 @@ class BoundaryStationRegistry:
             chains[edge_id] = tuple(stations)
         result = cls(
             str(geometry.model_id), int(geometry.revision), float(target_size),
-            {eid: int(seeding[eid]) for eid in edge_ids}, chains,
+            {eid: int(counts[eid]) for eid in edge_ids}, chains,
         )
         for domain in domains:
             domain.assert_current(geometry)

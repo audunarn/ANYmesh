@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from .patch_energy import PatchSpec, energy, is_valid_patch
+from .patch_energy import PatchSpec, energy, is_valid_patch, ObjectiveRegression
 from .quad_tinyad_worker import WorkerNotFoundQ5, find_worker, solve_q5_patch
 from .state import QuadMeshState
+from .validate import validate_planar_quad_result
+from ..errors import MeshError
 
 _BUDGET_CAP = 8
 _ENERGY_EPS = 1.0e-14
@@ -192,7 +194,15 @@ def optimize_quad_state(
             continue
         attempts += 1
         _cancel(cancellation_check, "quad-first:q5-worker")
-        report = solve_q5_patch(spec, worker=worker, timeout=float(timeout))
+        try:
+            report = solve_q5_patch(spec, worker=worker, timeout=float(timeout))
+        except ObjectiveRegression:
+            # A worker regression is a rejected proposal, never a published
+            # state. The resident front result is independently validated by
+            # the caller; keep it and make the rejection visible in Q5 output.
+            calls += 1
+            statuses.append("REJECTED_OBJECTIVE_REGRESSION")
+            continue
         calls += 1
         statuses.append(str(report.status))
         initial_sum += float(report.objective_initial)
@@ -210,6 +220,15 @@ def optimize_quad_state(
         check_spec = _patch_spec(candidate, node, local_h)
         if not is_valid_patch(check_spec.nx, check_spec.ny, check_spec.quads):
             tx.rollback()
+            continue
+        try:
+            validate_planar_quad_result(candidate)
+        except MeshError:
+            # The two-diagonal worker guard permits some concave Q4s. The
+            # public quad route requires every four consecutive orientants
+            # strictly positive, so reject that move before publication.
+            tx.rollback()
+            statuses[-1] = "REJECTED_NON_SIMPLE_Q4"
             continue
         _cancel(cancellation_check, "quad-first:q5-commit")
         tx.commit()

@@ -8,6 +8,7 @@ from anygeometry.surfaces import Cylinder
 
 from ._cylindrical_atlas import prepare_cylindrical_atlas
 from ._cylindrical_patch import prepare_cylindrical_patch
+from ._cylindrical_open import prepare_cylindrical_open
 from ._cylindrical_quadratic_refine import refine_quadratic_component
 from .errors import MeshError
 from .metric import IsotropicMetricControl, MetricFieldSpec
@@ -43,6 +44,10 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
         selected = tuple(selected)
         if len(selected) == 1:
             binding = prepare_cylindrical_patch(
+                geometry, selected, cancellation_check=cancellation_check,
+            )
+        elif len(selected) == 2:
+            binding = prepare_cylindrical_open(
                 geometry, selected, cancellation_check=cancellation_check,
             )
         else:

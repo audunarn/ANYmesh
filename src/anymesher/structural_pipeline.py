@@ -21,7 +21,7 @@ from anygeometry.transactions import ChangeSet
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .errors import MeshError
 from .mesh import Coupling, Mesh
-from .mesh_bvh import MeshElementBVH
+from .mesh_bvh import MeshElementBVH, inverse_interpolate
 from .meshing_view import GeometryMeshingView, StaleMeshingViewError
 
 __all__ = [
@@ -599,6 +599,50 @@ class StructuralMeshingPipeline:
                 tolerance = max(tolerance, float(base) + deviation)
         return tolerance
 
+    def _linear_face_parameter_hit(
+        self, mesh: Mesh, face_id: int, u: float, v: float,
+        point: np.ndarray, element_ids: Iterable[int],
+    ) -> tuple[tuple[int, ...], tuple[float, ...], np.ndarray] | None:
+        """Locate a curved source station on its declared linear host face.
+
+        A linear chord shell generally does not contain the exact owner point.
+        Its source UV, however, must belong to an element on the declared
+        target face.  The resulting physical gap remains in the coupling
+        eccentricity; it is never erased by a proximity weld.
+        """
+        candidates = []
+        target = np.array((float(u), float(v), 0.0))
+        for element_id in sorted(element_ids):
+            body = mesh.quads.get(int(element_id))
+            family = "Q4"
+            if body is None:
+                body = mesh.tris.get(int(element_id))
+                family = "T3"
+            if body is None or len(body) not in (3, 4):
+                continue
+            nodes = tuple(int(node) for node in body)
+            coords = np.asarray([mesh.nodes[node] for node in nodes], dtype=float)
+            uv = np.asarray([self.view.face_local_uv(face_id, xyz) for xyz in coords])
+            parametric = np.column_stack((uv, np.zeros(len(nodes))))
+            hit = inverse_interpolate(family, parametric, target, tolerance=1e-8)
+            if hit is None:
+                continue
+            parameter_projected = np.asarray(hit.weights @ coords, dtype=float)
+            chord_gap = float(np.linalg.norm(point - parameter_projected))
+            physical_hit = inverse_interpolate(
+                family, coords, point,
+                tolerance=max(1e-8, 2.0 * chord_gap),
+            )
+            if physical_hit is None:
+                continue
+            projected = np.asarray(physical_hit.point, dtype=float)
+            candidates.append((float(np.linalg.norm(point - projected)), int(element_id),
+                               nodes, tuple(float(w) for w in physical_hit.weights), projected))
+        if not candidates:
+            return None
+        _, _, nodes, weights, projected = min(candidates, key=lambda item: (item[0], item[1]))
+        return nodes, weights, projected
+
     def _add_attachment_coupling(
         self,
         mesh: Mesh,
@@ -710,14 +754,22 @@ class StructuralMeshingPipeline:
                         element_ids=allowed,
                         tolerance=curved_tolerance,
                     )
-            if hit is None:
+            linear_hit = None
+            if hit is None and not mesh.is_quadratic:
+                linear_hit = self._linear_face_parameter_hit(
+                    mesh, target_face_id, u, v, np.asarray(point, dtype=float), allowed
+                )
+            if hit is None and linear_hit is None:
                 return None, PreflightIssue(
                     "unresolved-attachment",
                     f"attachment {attachment.id} target face point is not meshed",
                     (("attachment", int(attachment.id)),),
                 )
-            plate_nodes, weights = hit.node_ids, hit.weights
-            projected = np.asarray(hit.point, dtype=float)
+            if hit is None:
+                plate_nodes, weights, projected = linear_hit
+            else:
+                plate_nodes, weights = hit.node_ids, hit.weights
+                projected = np.asarray(hit.point, dtype=float)
 
         for record in mesh.couplings.values():
             if int(record.beam_node) == beam_node:

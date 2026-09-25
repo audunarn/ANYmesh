@@ -226,6 +226,14 @@ class GeometryMeshingView:
             dtype=float,
         )
 
+    def face_local_uv(self, face_id: int, point: object) -> tuple[float, float]:
+        """Invert the current owner face for parameter-based mesh queries."""
+        self.assert_current()
+        uv = getattr(self._source, "face_local_uv")(
+            int(face_id), np.asarray(point, dtype=float)
+        )
+        return float(uv[0]), float(uv[1])
+
     def effective_length(self, extent: float = 0.0) -> float:
         return float(self.tolerance.effective_length(float(extent)))
 
@@ -348,4 +356,3 @@ class ChangeSetQueue:
 
     def drain_coalesced(self) -> ChangeSet | None:
         return coalesce_change_sets(self.drain())
-
