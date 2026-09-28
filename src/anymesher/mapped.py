@@ -30,6 +30,7 @@ from anygeometry.entities import OrientedEdge
 from anygeometry.model import GeometryModel
 from anygeometry.structural import AttachmentTargetKind
 
+from ._mapped_fold import grid_folds
 from .errors import MeshError
 from .mesh import Coupling, Mesh
 from .refinement import Refinement, SizeField
@@ -629,6 +630,14 @@ def _build_face(
         np.array([mesh.nodes[node] for node in side_c]),
         np.array([mesh.nodes[node] for node in side_d]),
     )
+    if grid_folds(blended):
+        raise MeshError(
+            f"face {face_id}: the transfinite map of its four declared sides "
+            "folds over, so a mapped mesh would place elements outside the "
+            "face (typically a re-entrant corner inside one mapped side, as on "
+            "an L-shaped plate). Mesh it with the native strategy, or split it "
+            "into four-sided patches."
+        )
     if step == 1:
         # Keep the original i-then-j numbering and the unchanged Coons values.
         # Row views avoid copying the full interior coordinate array.

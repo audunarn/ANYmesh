@@ -30,6 +30,7 @@ from anygeometry.surfaces import CoonsSurface, Cone, Cylinder, Plane, RuledSurfa
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
 from .errors import MeshError
+from ._mapped_fold import mapped_face_folds
 from .mapped import (
     ELEMENT_ORDERS,
     _refuse_curved_beams,
@@ -224,8 +225,60 @@ def _active_structural_owners(
     return tuple(sorted(sheets)), tuple(sorted(members))
 
 
-def _mappable(face: Any) -> bool:
-    return len(face.corners) == 4 and not face.holes
+def _mappable(geometry: GeometryModel, face_id: int) -> bool:
+    """Automatic strategy: a four-sided face whose transfinite map does not fold.
+
+    An L-shaped plate can declare four corners with its re-entrant corner
+    inside one mapped side; blending those sides folds the grid over and would
+    publish elements outside the face, so such faces go to native meshing.
+    """
+    face = geometry.faces[face_id]
+    return (
+        len(face.corners) == 4
+        and not face.holes
+        and not mapped_face_folds(geometry, face_id)
+    )
+
+
+def _refuse_folded_topology_surface(geometry: GeometryModel, face_id: int) -> None:
+    """Fail clearly when a face's only surface is a folded topology blend.
+
+    A face created without a surface gets a topology-derived Coons surface from
+    its four declared sides.  When that blend folds (an L-shaped outline, for
+    example) the owner geometry itself overlaps, so neither the mapped nor the
+    native chart can represent the face; say so instead of reporting a
+    self-intersecting chart loop.
+    """
+    face = geometry.faces[face_id]
+    surface = face.surface
+    if (
+        getattr(face, "parameterization", None) is None
+        and isinstance(surface, CoonsSurface)
+        and not surface.has_boundaries
+        and mapped_face_folds(geometry, face_id)
+    ):
+        raise MeshError(
+            f"face {face_id} has no surface of its own, and the Coons surface "
+            "derived from its four declared sides folds over (a re-entrant "
+            "corner inside one side, as on an L-shaped outline). Attach a Plane "
+            "surface (for example GeometryModel.add_plate) or split the face "
+            "into four-sided patches."
+        )
+
+
+def _native_chart_uv(geometry: GeometryModel, face: Any, face_id: int, point: Any) -> tuple[float, float]:
+    """Chart coordinates of a boundary point for native planar meshing.
+
+    ``face_local_uv`` clips to the unit patch, which for a Plane support
+    spanned by four declared corners collapses every boundary point outside
+    that quadrilateral (e.g. the second arm of an L-shaped plate).  A Plane's
+    own affine coordinates are exact and unbounded, and ``face_point`` lifts
+    them back without clipping; inside the unit patch they are identical.
+    """
+    if getattr(face, "parameterization", None) is None and isinstance(face.surface, Plane):
+        u, v = face.surface.local_uv(point)
+        return float(u), float(v)
+    return geometry.face_local_uv(face_id, point)
 
 
 def _blocked_preflight(states: Sequence[Any]) -> tuple[Any, ...]:
@@ -1151,12 +1204,13 @@ def _loop_boundary(
             segment_specs.extend(None for _ in range(len(edge_corners) - 1))
     if len(corner_nodes) < 3:
         raise MeshError(f"face {face_id} has fewer than three boundary stations")
+    _refuse_folded_topology_surface(geometry, face_id)
     if quadratic and len(midside_nodes) != len(corner_nodes):
         raise MeshError(f"face {face_id} has an inconsistent quadratic boundary")
     try:
         uv = np.asarray(
             [
-                geometry.face_local_uv(face_id, mesh.nodes[node_id])
+                _native_chart_uv(geometry, geometry.faces[face_id], face_id, mesh.nodes[node_id])
                 for node_id in corner_nodes
             ],
             dtype=float,
@@ -4454,7 +4508,7 @@ def generate_hybrid_mesh_result(
                 if strategy is MeshingStrategy.MAPPED
                 or (
                     strategy is MeshingStrategy.AUTO
-                    and _mappable(geometry.faces[face_id])
+                    and _mappable(geometry, face_id)
                 )
                 else "native"
             )

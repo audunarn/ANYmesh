@@ -20,6 +20,8 @@ from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
 from anygeometry.operations import surface_point
 
+from ._mapped_fold import mapped_face_folds
+
 __all__ = [
     "MappabilityReport",
     "check_mappable",
@@ -79,6 +81,14 @@ def check_mappable(geometry: GeometryModel, face_id: int) -> MappabilityReport:
         messages.append(
             "one side is empty; the corner assignment puts two corners in the "
             "same place. Set the corners explicitly."
+        )
+
+    if not face.holes and mapped_face_folds(geometry, face_id):
+        messages.append(
+            "the transfinite map of the four declared sides folds over (a "
+            "re-entrant corner lies inside one side, as on an L-shaped plate), "
+            "so a mapped mesh would place elements outside the face. Split it "
+            "into four-sided patches or mesh it natively."
         )
 
     lengths = geometry.face_side_lengths(face_id)

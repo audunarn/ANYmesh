@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fix mapped meshing of faces whose four declared sides fold under the
+  transfinite map, such as an L-shaped plate with its re-entrant corner inside
+  one mapped side. Through 0.5.0 the automatic strategy published such a mesh
+  with nodes outside the face and overlapping elements, and native meshing of
+  the same Plane face failed. The automatic strategy now meshes these faces
+  natively, the explicit mapped strategy refuses them, and `check_mappable`
+  reports the fold. Native meshing of a Plane face uses the plane's exact
+  chart instead of the clipped four-corner patch. A face without a surface
+  whose derived Coons surface folds now fails with an actionable error.
 - Add an experimental, opt-in quad-first route (`QuadMeshingOptions`,
   `quad_options=` and `layout_policy=` on `generate_hybrid_mesh_result`).
   It covers planar faces with holes and concavity, owner-certified cylinders,
