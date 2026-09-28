@@ -61,15 +61,15 @@ def test_ch9_coarse_cone_promotes_exact_ch8_topology() -> None:
     before = _persistent_state(model)
     quadratic = _generate(model, (face,), 0.6, order="quadratic").mesh
 
-    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (42, 28, 6)
-    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (117, 28, 6)
+    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (37, 23, 6)
+    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (102, 23, 6)
     assert {eid: tuple(body[:4]) for eid, body in quadratic.quads.items()} == linear.quads
     assert {eid: tuple(body[:3]) for eid, body in quadratic.tris.items()} == linear.tris
     for node, point in linear.nodes.items():
         np.testing.assert_allclose(quadratic.nodes[node], point, rtol=0.0, atol=0.0)
 
     midsides = _edge_mid_map(quadratic)
-    assert len(midsides) == 75
+    assert len(midsides) == 65
     assert set(midsides.values()) == set(quadratic.nodes) - set(linear.nodes)
     for edge_id, chain in linear.nodes_of_edge.items():
         assert tuple(quadratic.nodes_of_edge[edge_id][::2]) == tuple(chain)
@@ -84,11 +84,11 @@ def test_ch9_fine_cone_preserves_ch8_corner_topology() -> None:
     model, face, surface = _model_face("cone")
     quadratic = _generate(model, (face,), 0.3, order="quadratic").mesh
 
-    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (118, 89, 14)
-    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (338, 89, 14)
+    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (119, 91, 12)
+    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (340, 91, 12)
     assert {eid: tuple(body[:4]) for eid, body in quadratic.quads.items()} == linear.quads
     assert {eid: tuple(body[:3]) for eid, body in quadratic.tris.items()} == linear.tris
-    assert len(_edge_mid_map(quadratic)) == 220
+    assert len(_edge_mid_map(quadratic)) == 221
     assert _support_residual(quadratic, surface) <= 1.0e-10
     _assert_strict_valid(quadratic)
 
@@ -115,7 +115,7 @@ def test_ch9_interior_midsides_use_developed_chart_midpoints_and_certificate() -
 
     payload = quadratic.hybrid_diagnostics["high_order_geometry"]
     assert payload["status"] == "CERTIFIED_POSITIVE"
-    assert (payload["q8_count"], payload["t6_count"], payload["unique_midside_count"]) == (28, 6, 75)
+    assert (payload["q8_count"], payload["t6_count"], payload["unique_midside_count"]) == (23, 6, 65)
     report = payload["reports"][0]
     assert report["geometry_family"] == "conical"
     assert report["chart_kind"] == "ConicalQuadDomain"

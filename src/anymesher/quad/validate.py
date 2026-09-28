@@ -8,10 +8,15 @@ import numpy as np
 
 from ..errors import MeshError
 from ..triangulation import orient2d
-from .front import EPS, edge_key
+from .front import edge_key
+from .quality_gate import RELATIVE_EPS, corner_metrics, policy_record, quad_violation, triangle_violation
 from .seed import PlanarQuadSeed
 
-__all__ = ["QuadValidationReport", "validate_planar_quad_result"]
+__all__ = ["QuadQualityRejected", "QuadValidationReport", "validate_planar_quad_result"]
+
+
+class QuadQualityRejected(MeshError):
+    """A final quad-first element violates the published shape gates."""
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,9 @@ class QuadValidationReport:
     min_cell_area: float
     boundary_edge_count: int
     interior_edge_count: int
+    min_q4_scaled_jacobian: float | None = None
+    max_q4_angle: float | None = None
+    min_t3_angle: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +53,10 @@ class QuadValidationReport:
             "min_cell_area": self.min_cell_area,
             "boundary_edge_count": self.boundary_edge_count,
             "interior_edge_count": self.interior_edge_count,
+            "min_q4_scaled_jacobian": self.min_q4_scaled_jacobian,
+            "max_q4_angle": self.max_q4_angle,
+            "min_t3_angle": self.min_t3_angle,
+            "quality_gates": policy_record(),
         }
 
 
@@ -69,11 +81,27 @@ def _signed_area(points: Sequence[Tuple[float, float]]) -> float:
     )
 
 
+def _lengths(points: Sequence[Tuple[float, float]]) -> list[float]:
+    count = len(points)
+    return [
+        float(np.hypot(points[(i + 1) % count][0] - points[i][0],
+                       points[(i + 1) % count][1] - points[i][1]))
+        for i in range(count)
+    ]
+
+
+def _positive_area(points: Sequence[Tuple[float, float]]) -> bool:
+    """Scale-free positive-area test (absolute ``EPS`` was unit-dependent)."""
+    return _signed_area(points) > RELATIVE_EPS * max(_lengths(points)) ** 2
+
+
 def _strict_ccw_quad(points: Sequence[Tuple[float, float]]) -> bool:
-    if len(points) != 4 or _signed_area(points) <= EPS:
+    if len(points) != 4 or not _positive_area(points):
         return False
+    lengths = _lengths(points)
     return all(
-        orient2d(points[i], points[(i + 1) % 4], points[(i + 2) % 4]) > EPS
+        orient2d(points[i], points[(i + 1) % 4], points[(i + 2) % 4])
+        > RELATIVE_EPS * lengths[i] * lengths[(i + 1) % 4]
         for i in range(4)
     )
 
@@ -99,6 +127,9 @@ def validate_planar_quad_result(
     quad_count = tri_count = 0
     quad_area = tri_area = 0.0
     cell_areas: list[float] = []
+    worst_jacobian: float | None = None
+    worst_angle: float | None = None
+    thinnest: float | None = None
 
     for cid in sorted(int(item) for item in state.cells):
         body = tuple(int(x) for x in state.cell(cid))
@@ -117,11 +148,22 @@ def validate_planar_quad_result(
         if kind == "Q4":
             if not _strict_ccw_quad(points):
                 raise MeshError(f"Q4 cell {cid} is not a simple strictly-positive quad")
+            reason = quad_violation(points)
+            if reason is not None:
+                raise QuadQualityRejected(f"Q4 cell {cid} {body!r}: {reason}")
+            _min_angle, max_angle, jacobian, _aspect = corner_metrics(points)
+            worst_jacobian = jacobian if worst_jacobian is None else min(worst_jacobian, jacobian)
+            worst_angle = max_angle if worst_angle is None else max(worst_angle, max_angle)
             quad_count += 1
             quad_area += signed
         else:
-            if signed <= EPS:
+            if not _positive_area(points):
                 raise MeshError(f"T3 cell {cid} is not positively oriented")
+            reason = triangle_violation(points)
+            if reason is not None:
+                raise QuadQualityRejected(f"T3 cell {cid} {body!r}: {reason}")
+            min_angle = corner_metrics(points)[0]
+            thinnest = min_angle if thinnest is None else min(thinnest, min_angle)
             tri_count += 1
             tri_area += signed
         cell_areas.append(signed)
@@ -162,7 +204,7 @@ def validate_planar_quad_result(
             raise MeshError("protected seed-edge ownership changed during PQ-M1")
 
     total = quad_area + tri_area
-    if total <= EPS:
+    if total <= 0.0:
         raise MeshError("face has no positive cell area")
     if reference_area is None:
         ratio = float("nan")
@@ -192,4 +234,7 @@ def validate_planar_quad_result(
         min_cell_area=float(min(cell_areas)),
         boundary_edge_count=boundary_count,
         interior_edge_count=len(incidence) - boundary_count,
+        min_q4_scaled_jacobian=worst_jacobian,
+        max_q4_angle=worst_angle,
+        min_t3_angle=thinnest,
     )

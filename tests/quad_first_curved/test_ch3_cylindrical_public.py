@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import anygeometry
 import numpy as np
 import pytest
 
@@ -11,6 +12,7 @@ from test_cylindrical_frontal_integration import _persistent_state
 from anymesher._cylindrical_patch import prepare_cylindrical_patch
 from anymesher.hybrid import generate_hybrid_mesh_result
 from anymesher.quad.options import QuadMeshingOptions
+from anymesher.quad.public_integration import QuadPublicUnsupported
 
 
 def _face_id(model, face_use) -> int:
@@ -218,11 +220,19 @@ def test_adjacent_rotated_patches_share_reversed_quadratic_edge() -> None:
     directions = [next(use.forward for use in model.faces[face].loop
                        if use.edge == edge) for face in faces]
     assert directions == [not directions[1], directions[1]]
-    mesh = generate_hybrid_mesh_result(
-        model, face_ids=faces, target_size=.38, strategy="native",
+    arguments = dict(
+        face_ids=faces, target_size=.38, strategy="native",
         native_backend="python", order="quadratic",
         quad_options=QuadMeshingOptions(quality_model="shape_jacobian"),
-    ).mesh
+    )
+    if not hasattr(anygeometry, "query_cylinder_open_component"):
+        # The pinned ANYgeometry predates the owner API for an open two-face
+        # cylindrical component; the route must refuse explicitly rather than
+        # approximate the missing owner qualification.
+        with pytest.raises(QuadPublicUnsupported, match="owner-qualified"):
+            generate_hybrid_mesh_result(model, **arguments)
+        return
+    mesh = generate_hybrid_mesh_result(model, **arguments).mesh
     chain = mesh.nodes_of_edge[edge]
     assert len(chain) >= 5 and len(chain) == len(set(chain))
     assert all(set(chain) <= _face_nodes(mesh, face) for face in faces)

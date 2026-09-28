@@ -10,6 +10,14 @@
   identity, transactional publication and cancellation. The default
   `quad_options=None` path is unchanged. The quad-first route was not part of
   the 0.5.0 release; its output and diagnostics may still change.
+- Quad-first publishes only shape-admissible elements. Every Q4 needs a corner
+  scaled Jacobian of at least 0.20, corners within 20-160 degrees and an edge
+  ratio of at most 10. Residual triangles need a smallest angle of at least 15
+  degrees. Tolerances are scale-free. Near-degenerate candidates stay
+  triangles, residual triangles are improved by bounded diagonal flips, and a
+  final element that still fails raises `QuadQualityRejected` instead of being
+  published. Validation diagnostics report the worst element metrics and the
+  active gates.
 - Add `tools/build_quad_workers.py`, a cross-platform build for the optional
   quad-first MCF and TinyAD worker executables. The workers are not shipped in
   wheels; without them those stages report `UNAVAILABLE_SKIPPED`. CI builds them

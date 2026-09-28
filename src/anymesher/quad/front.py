@@ -27,12 +27,14 @@ triangles, one ``Q4`` cell and the front state of the touched local boundary.
 
 from __future__ import annotations
 
+from math import hypot
 from typing import Any, Mapping, Sequence
 
 from ..errors import MeshError
 from ..triangulation import orient2d
 from .journal import Transaction  # noqa: F401  (document the writer contract)
 from .options import QuadMeshingOptions
+from .quality_gate import RELATIVE_EPS, quad_violation
 from .state import EdgeKey, QuadMeshState, View
 
 __all__ = [
@@ -95,24 +97,35 @@ def area2(view: View | QuadMeshState, body: Sequence[int]) -> float:
 
 
 def make_quad(view: View | QuadMeshState, raw: Sequence[int]) -> tuple[int, int, int, int]:
-    """Return a canonical CCW-ordered, strictly-convex body for a 4-node walk.
+    """Return a canonical CCW-ordered, strictly-convex, shape-admissible body.
 
     ``raw`` is a closed 4-walk (typically the boundary walk of a candidate
     union).  Rejects with :class:`FrontRejected` if the nodes repeat, the area
-    is degenerate, or the boundary is not strictly convex.
+    is degenerate, the boundary is not strictly convex (scale-free tolerance),
+    or the quad fails the quad-first shape policy
+    (:data:`anymesher.quad.quality_gate.QUAD_FIRST_Q4_POLICY`).
     """
     body = tuple(int(x) for x in raw)
     if len(body) != 4 or len(set(body)) != 4:
         raise FrontRejected(f"quad body {body!r} must have four distinct nodes")
+    points = [view.position(node) for node in body]
+    lengths = [
+        hypot(points[(i + 1) % 4][0] - points[i][0], points[(i + 1) % 4][1] - points[i][1])
+        for i in range(4)
+    ]
     area = area2(view, body)
-    if abs(area) <= EPS:
+    if abs(area) <= RELATIVE_EPS * max(lengths) ** 2:
         raise FrontRejected(f"quad body {body!r} is degenerate (zero area)")
     sgn = 1.0 if area > 0 else -1.0
     for i in range(4):
         o = sgn * _orient(view, body[i], body[(i + 1) % 4], body[(i + 2) % 4])
-        if o <= EPS:
+        if o <= RELATIVE_EPS * lengths[i] * lengths[(i + 1) % 4]:
             raise FrontRejected(f"quad body {body!r} is not strictly convex (turn {o:+g})")
-    return body if area > 0 else (body[0], body[3], body[2], body[1])
+    canonical = body if area > 0 else (body[0], body[3], body[2], body[1])
+    reason = quad_violation([view.position(node) for node in canonical])
+    if reason is not None:
+        raise FrontRejected(f"quad body {canonical!r} fails the quad-first shape gate: {reason}")
+    return canonical
 
 
 def _boundary_nodes(

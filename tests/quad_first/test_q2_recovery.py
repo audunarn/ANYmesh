@@ -403,15 +403,35 @@ def _conforming_recovery_fixture():
     return geometry, face, seed, result.state
 
 
+def _q4_t3_interface_edges(state):
+    """Unprotected Q4/T3 active-front edges, in deterministic order.
+
+    The seed's node numbering depends on the lattice, so the fixture selects
+    recovery candidates by their topology instead of hard-coded node ids.
+    """
+    return [
+        edge for edge in sorted(state.front)
+        if not state.is_protected_edge(edge)
+        and not any(state.is_protected_node(node) for node in edge)
+        and {state.cell_kind(cid) for cid in state.edge_cells(edge)} == {"Q4", "T3"}
+    ]
+
+
 def test_q4_t3_recovery_is_conforming_and_area_preserving():
     from anymesher.quad.front import body_edges, edge_key
     from anymesher.quad.validate import validate_planar_quad_result
 
     _geometry, face, seed, state = _conforming_recovery_fixture()
-    parent = edge_key(29, 33)
-    assert state.is_front_edge(parent)
-    assert {state.cell_kind(cid) for cid in state.edge_cells(parent)} == {"Q4", "T3"}
-    report = recover_then_front_step(state, parent, options=QuadMeshingOptions())
+    candidates = _q4_t3_interface_edges(state)
+    assert candidates
+    report = parent = None
+    for parent in candidates:
+        try:
+            report = recover_then_front_step(state, parent, options=QuadMeshingOptions())
+        except RecoveryExhausted:
+            continue  # typed exhaustion leaves the state unchanged
+        break
+    assert report is not None, "no Q4/T3 interface edge admitted a conforming recovery"
     assert report.midpoint_id in state.nodes
     assert all(parent not in body_edges(state.cell(cid)) for cid in state.cells)
     assert sum(report.midpoint_id in state.cell(cid) for cid in state.cells) >= 3
@@ -422,10 +442,9 @@ def test_q4_t3_recovery_is_conforming_and_area_preserving():
 
 def test_q4_t3_conforming_recovery_failed_retile_rolls_back(monkeypatch):
     import anymesher.quad.recovery as recovery_module
-    from anymesher.quad.front import edge_key
 
     _geometry, _face, _seed, state = _conforming_recovery_fixture()
-    parent = edge_key(29, 33)
+    parent = _q4_t3_interface_edges(state)[0]
     before = state.digest()
     before_generation = state.generation
     before_node_id = state.next_node_id

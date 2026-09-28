@@ -23,6 +23,7 @@ from .front import (
     local_swap,
     make_quad,
 )
+from .validate import QuadQualityRejected
 from .recovery import (
     DEFAULT_RECOVERY_RATIOS,
     AdvanceReport,
@@ -128,6 +129,7 @@ from .quad_tinyad_worker import (
 )
 
 __all__ = [
+    "QuadQualityRejected",
     "QUAD_MESHING_OPTIONS_SCHEMA",
     "QuadMeshingOptions",
     "FrontNoCandidate",

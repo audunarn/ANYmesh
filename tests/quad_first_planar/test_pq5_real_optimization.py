@@ -99,12 +99,6 @@ def _q5_diagnostics(result) -> dict:
     return q5
 
 
-def _q4_diagnostics(result) -> dict:
-    diag = _mesh(result).hybrid_diagnostics
-    assert diag["q4"]["status"] == "NO_ELIGIBLE"
-    return diag["q4"]
-
-
 def _public_result(points: tuple, *, h: float, max_local: int, refinements=()):
     options = QuadMeshingOptions(max_local_optimizations=max_local)
     geometry = GeometryModel()
@@ -172,8 +166,12 @@ def test_causal_graded_mesh_applies_q5_moves() -> None:
     assert set(pos_d) == set(pos_e)
     assert pos_d != pos_e
 
-    # PQ6 MCF is active but this large graded component is intentionally bounded out.
-    _q4_diagnostics(enabled)
+    # PQ6 MCF runs on the same seed in both executions, so Q5 is the only
+    # difference between them (the PQ7 lattice clearance lets MCF solve one
+    # small component here; before PQ7 it was bounded out entirely).
+    q4_enabled = _mesh(enabled).hybrid_diagnostics["q4"]
+    assert q4_enabled["status"] in ("NO_ELIGIBLE", "APPLIED")
+    assert q4_enabled == _mesh(disabled).hybrid_diagnostics["q4"]
 
 
 # ===========================================================================

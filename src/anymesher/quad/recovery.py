@@ -49,6 +49,7 @@ from .front import (
     make_quad,
 )
 from .options import QuadMeshingOptions
+from .quality_gate import triangle_violation
 from .state import EdgeKey, QuadMeshState
 
 __all__ = [
@@ -171,8 +172,8 @@ def _stage_split(tx: Any, source: int, a: int, b: int, third: int,
     """
     m_id = tx.allocate_node(pm)
     tx.remove_cell(source)
-    ca_id = tx.allocate_cell((a, m_id, third), "T3")
-    cb_id = tx.allocate_cell((m_id, b, third), "T3")
+    ca_id = tx.allocate_cell(_ccw_tri(tx.view, (a, m_id, third)), "T3")
+    cb_id = tx.allocate_cell(_ccw_tri(tx.view, (m_id, b, third)), "T3")
     tx.remove_front_edge(a, b)
     tx.add_front_edge(a, m_id)
     tx.add_front_edge(m_id, b)
@@ -186,7 +187,13 @@ def _ccw_tri(view: Any, raw: Sequence[int]) -> tuple[int, int, int]:
     signed = area2(view, body)
     if abs(signed) <= EPS:
         raise RecoveryRejected(f"triangle body {body!r} is degenerate")
-    return body if signed > 0.0 else (body[0], body[2], body[1])
+    body = body if signed > 0.0 else (body[0], body[2], body[1])
+    # A recovery that leaves a sliver behind trades one missing Q4 for an
+    # unpublishable residual triangle; reject it up front.
+    reason = triangle_violation([view.position(node) for node in body])
+    if reason is not None:
+        raise RecoveryRejected(f"triangle body {body!r} fails the residual T3 gate: {reason}")
+    return body
 
 
 def _accepted_q4_neighbor(state: QuadMeshState, fe: EdgeKey, source: int) -> int | None:

@@ -66,6 +66,7 @@ from .quad.high_order import (
 from .quad.options import QuadMeshingOptions
 from .quad.mcf_seed import optimize_q4_seed_mcf
 from .quad.optimize import optimize_quad_state
+from .quad.residual import improve_residual_triangles
 from .quad.seed import build_planar_quad_seed, source_chart_axis_lengths
 from .quad.public_integration import (
     QuadPublicUnsupported,
@@ -73,7 +74,7 @@ from .quad.public_integration import (
     route_quad_first,
 )
 from .quad.state import QuadMeshState
-from .quad.validate import validate_planar_quad_result
+from .quad.validate import QuadQualityRejected, validate_planar_quad_result
 from .s3_production import prepare_qualified_s3_mesh
 from .s3_repair import S3RepairError
 from .seeding import Seeding, edge_distribution, solve_seeding
@@ -3387,6 +3388,14 @@ def _repair_quad_first_quality(
         "aspect_moves": aspect_moves,
         "protected_interior_nodes": tuple(sorted(int(node) for node in protected_interior_nodes)),
     }
+    if unresolved:
+        # Never publish an element the repair itself classified as failing.
+        face_id, element_id, value = unresolved[0]
+        raise QuadQualityRejected(
+            f"quad-first repair left {len(unresolved)} element(s) below the "
+            f"normalized-Jacobian floor {_QUAD_FIRST_MIN_NORMALIZED_JACOBIAN}; "
+            f"first: face {face_id} element {element_id} ({value!r})"
+        )
 
 
 def _quad_first_execute(
@@ -3579,6 +3588,9 @@ def _quad_first_execute(
             cancellation_check=cancellation_check,
         )
         state = driven.state
+        flip_report = timed_quad_call("front", improve_residual_triangles,
+            state, cancellation_check=cancellation_check,
+        )
         q5_report = timed_quad_call("optimization", optimize_quad_state,
             state,
             target_size=h,
@@ -3592,6 +3604,7 @@ def _quad_first_execute(
             state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed
         )
         face_driver[domain.face_id] = driven.report.to_dict()
+        face_driver[domain.face_id]["residual_flips"] = flip_report.to_dict()
         if layout_policy == "adaptive":
             face_driver[domain.face_id]["layout_seed"] = {
                 "boundary_stations": len(seed.station_to_node),

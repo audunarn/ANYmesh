@@ -80,7 +80,7 @@ def test_ch12_conical_quadratic_quad_first_owns_straight_member_as_b3():
     assert set(mesh.elements_of_face) == {face}
     assert all(len(body) == 8 for body in mesh.quads.values())
     assert all(len(body) == 6 for body in mesh.tris.values())
-    assert len(mesh.quads) == 28
+    assert len(mesh.quads) == 23
     assert len(mesh.tris) == 6
     assert mesh.beams, "straight member must be owned as beams"
     # No hidden linear B2 publication inside a quadratic result.

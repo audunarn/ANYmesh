@@ -292,7 +292,9 @@ def test_hole_boundary_quadratic_midsides_lie_on_exact_source_edges():
     assert _source_signature(geometry) == source_before
     promotion = mesh.hybrid_diagnostics["quadratic_promotion"]
     assert promotion["status"] == "APPLIED"
-    assert promotion["repair_count"] >= 1
+    # Before the PQ7 shape gates three interior opposite corners needed a
+    # bounded T6 repair here; the gated linear topology no longer does.
+    assert promotion["repair_count"] == 0
     assert promotion["max_corner_displacement"] <= 0.25 + 1.0e-12
     protected = {node for chain in mesh.nodes_of_edge.values() for node in chain}
     protected.update(mesh.node_of_vertex.values())

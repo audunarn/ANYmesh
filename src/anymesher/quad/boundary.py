@@ -124,7 +124,26 @@ class BoundaryStationRegistry:
             seeding = solve_seeding(geometry, size_field=field, edge_ids=edge_ids,
                                     overrides=selected_overrides,
                                     minimum_divisions=curved_minimums)
-            counts = seeding.divisions
+            counts = dict(seeding.divisions)
+            # Mapped opposite-side equalities only make sense when each mapped
+            # side is a single source edge.  A face whose declared corners
+            # group several edges into one side (e.g. an L-shaped polyline
+            # face) would otherwise force one short edge to carry the whole
+            # opposite chain, fanning thin slivers off it.  Relax that only on
+            # edges owned exclusively by quad-first faces, so any legacy
+            # neighbour keeps its own seeding contract.
+            quad_faces = {int(domain.face_id) for domain in domains}
+            composite = {face_id for face_id in quad_faces
+                         if _has_composite_mapped_side(geometry, face_id)}
+            for edge_id in edge_ids:
+                if edge_id in selected_overrides:
+                    continue
+                users = {int(face) for face in geometry.faces_using_edge(edge_id)}
+                if users and users <= quad_faces and users & composite:
+                    counts[edge_id] = max(
+                        1, int(round(edge_demand(geometry, edge_id, field))),
+                        curved_minimums.get(edge_id, 1),
+                    )
         chains: dict[int, tuple[BoundaryStation, ...]] = {}
         for edge_id in edge_ids:
             edge = geometry.edges[edge_id]
@@ -217,3 +236,11 @@ class BoundaryStationRegistry:
         if len(out) < 3:
             raise MeshError("face boundary has fewer than three stations")
         return tuple(out)
+
+
+def _has_composite_mapped_side(geometry: GeometryModel, face_id: int) -> bool:
+    """True when solve_seeding would equate a side made of several edges."""
+    face = geometry.faces[int(face_id)]
+    if len(face.corners) != 4 or face.holes:
+        return False
+    return any(len(side) != 1 for side in face.sides())

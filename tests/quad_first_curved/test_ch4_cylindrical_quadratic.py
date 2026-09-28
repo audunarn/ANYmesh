@@ -98,8 +98,9 @@ def test_ch4_fine_sector_preserves_ch3_corner_topology() -> None:
     model, selected = _sector_model(False)
     face = _face_id(model, selected[0])
     quadratic = _generate(model, (face,), 0.25, order="quadratic").mesh
-    assert len(quadratic.quads) == len(linear.quads) == 30
-    assert len(quadratic.tris) == len(linear.tris) == 2
+    # PQ7 lattice clearance: the fine sector is now all-quad (was 30 Q4 / 2 T3).
+    assert len(quadratic.quads) == len(linear.quads) == 24
+    assert len(quadratic.tris) == len(linear.tris) == 0
     assert {e: tuple(b[:4]) for e, b in quadratic.quads.items()} == linear.quads
     assert {e: tuple(b[:3]) for e, b in quadratic.tris.items()} == linear.tris
     _assert_strict_valid(quadratic)

@@ -130,6 +130,10 @@ def test_public_recovery_is_causal_on_small_trapezoid():
     on = validate_planar_quad_result(with_recovery.state, face=face_id, reference_area=area)
     off = validate_planar_quad_result(without_recovery.state, face=face_id, reference_area=area)
     assert with_recovery.report.recovery_accepts >= 1
-    assert with_recovery.report.final_t3 < without_recovery.report.final_t3
+    # PQ7: under the shape gates recovery converts residual T3 pairs into
+    # additional admissible Q4 (27 vs 23 Q4, 4 T3 each) rather than removing
+    # the last residual closures.
+    assert with_recovery.report.final_q4 > without_recovery.report.final_q4
+    assert with_recovery.report.final_t3 <= without_recovery.report.final_t3
     assert on.q4_count_fraction > off.q4_count_fraction
     assert on.q4_area_fraction > off.q4_area_fraction

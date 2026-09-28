@@ -50,6 +50,44 @@ class PlanarQuadSeed:
         return area
 
 
+# Lattice points closer than this fraction of the local size to a boundary
+# segment leave a thin strip that the front can only close with slivers.
+_LATTICE_BOUNDARY_CLEARANCE = 0.3
+
+
+class _SegmentGrid:
+    """Uniform-grid bucket of chart segments for bounded distance queries."""
+
+    def __init__(self, rings: Sequence[Sequence[Vec2]], cell: float) -> None:
+        self.cell = float(cell)
+        self.buckets: dict[tuple[int, int], list[tuple[Vec2, Vec2]]] = {}
+        for ring in rings:
+            count = len(ring)
+            for index in range(count):
+                a = (float(ring[index][0]), float(ring[index][1]))
+                b = (float(ring[(index + 1) % count][0]), float(ring[(index + 1) % count][1]))
+                i0, j0 = self._key((min(a[0], b[0]) - cell, min(a[1], b[1]) - cell))
+                i1, j1 = self._key((max(a[0], b[0]) + cell, max(a[1], b[1]) + cell))
+                for i in range(i0, i1 + 1):
+                    for j in range(j0, j1 + 1):
+                        self.buckets.setdefault((i, j), []).append((a, b))
+
+    def _key(self, point: Sequence[float]) -> tuple[int, int]:
+        return floor(point[0] / self.cell), floor(point[1] / self.cell)
+
+    def closer_than(self, point: Sequence[float], distance: float) -> bool:
+        x, y = float(point[0]), float(point[1])
+        limit = distance * distance
+        for a, b in self.buckets.get(self._key((x, y)), ()):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            length2 = dx * dx + dy * dy
+            t = 0.0 if length2 <= 0.0 else max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / length2))
+            ex, ey = x - (a[0] + t * dx), y - (a[1] + t * dy)
+            if ex * ex + ey * ey < limit:
+                return True
+        return False
+
+
 def _on_segment(p: Vec2, a: Vec2, b: Vec2, tol: float) -> bool:
     if p[0] < min(a[0], b[0]) - tol or p[0] > max(a[0], b[0]) + tol:
         return False
@@ -90,19 +128,7 @@ def _interior_lattice(
         min_x = min(p[0] for p in outer); max_x = max(p[0] for p in outer)
         min_y = min(p[1] for p in outer); max_y = max(p[1] for p in outer)
         tol = 1.0e-10 * max(max_x-min_x, max_y-min_y, 1.0)
-        xs = np.arange(min_x+h, max_x-tol, h, dtype=float)
-        ys = np.arange(min_y+h, max_y-tol, h, dtype=float)
-        points: list[tuple[float, float]] = []
-        for y in ys:
-            for x in xs:
-                point = (float(x), float(y))
-                if not _strict_inside(point, outer, tol):
-                    continue
-                if any(_strict_inside(point, hole, tol) for hole in holes):
-                    continue
-                # Cartesian lattice coordinates are unique by construction; avoid an
-                # unnecessary O(N^2) duplicate scan over previously accepted points.
-                points.append(point)
+        points = _uniform_lattice_points(outer, list(holes), h, min_x, max_x, min_y, max_y, tol)
         return np.asarray(points, dtype=float).reshape((-1, 2))
     min_x = min(p[0] for p in outer); max_x = max(p[0] for p in outer)
     min_y = min(p[1] for p in outer); max_y = max(p[1] for p in outer)
@@ -115,6 +141,8 @@ def _interior_lattice(
     if nx * ny > 250000:
         raise MeshError("graded refinement lattice exceeds fine candidate budget")
     accepted: list[np.ndarray] = [np.asarray(p, dtype=float) for p in coarse]
+    fine_segments = (_SegmentGrid((outer, *holes), _LATTICE_BOUNDARY_CLEARANCE * h_min)
+                     if _LATTICE_BOUNDARY_CLEARANCE > 0.0 else None)
     seen = {(float(p[0]), float(p[1])) for p in coarse}
     for j in range(ny):
         y = min_y + (j + 0.5) * h_min
@@ -134,6 +162,10 @@ def _interior_lattice(
                 continue
             h_local = float(size_field.size_at(np.asarray([domain.lift(point)], dtype=float))[0])
             if h_local >= 0.999999 * target_size:
+                continue
+            if fine_segments is not None and fine_segments.closer_than(
+                point, _LATTICE_BOUNDARY_CLEARANCE * h_local,
+            ):
                 continue
             if coarse_points is not None and min(
                 x-min_x, max_x-x, y-min_y, max_y-y,
@@ -297,6 +329,8 @@ def _uniform_lattice_points(
 ) -> list[tuple[float, float]]:
     xs = np.arange(min_x+h, max_x-tol, h, dtype=float)
     ys = np.arange(min_y+h, max_y-tol, h, dtype=float)
+    clearance = _LATTICE_BOUNDARY_CLEARANCE * h
+    segments = _SegmentGrid((outer, *holes), clearance) if clearance > 0.0 else None
     points: list[tuple[float, float]] = []
     for y in ys:
         for x in xs:
@@ -305,6 +339,10 @@ def _uniform_lattice_points(
                 continue
             if any(_strict_inside(point, hole, tol) for hole in holes):
                 continue
+            if segments is not None and segments.closer_than(point, clearance):
+                continue
+            # Cartesian lattice coordinates are unique by construction; avoid an
+            # unnecessary O(N^2) duplicate scan over previously accepted points.
             points.append(point)
     return points
 
