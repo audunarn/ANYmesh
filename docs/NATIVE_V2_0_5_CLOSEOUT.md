@@ -5,6 +5,10 @@ owner-certified cylindrical Frontal-Delaunay implementation. It supersedes
 older remaining-gate prose where that prose treats repeated runtime comparison
 as a 0.5.0 release blocker.
 
+Historical note: the released 0.5.0 artifacts do not contain the quad-first
+route. It landed on `main` afterwards as an experimental opt-in; see
+`CHANGELOG.md`.
+
 ## Frozen scope
 
 - Package version: `0.5.0`, Alpha.

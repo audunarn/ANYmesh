@@ -12,7 +12,8 @@ Design notes
 * **No hidden fallback.**  Every failure mode is typed (see below) and no
   silent fallback to a Python MCF solver is performed.
 * **Worker binary location.**  By default this module locates the worker in
-  ``third_party/quad/worker/out/lemon/quad_mcf_worker.exe|.``  Tests and other
+  ``third_party/quad/worker/out/lemon/quad_mcf_worker[.exe]`` (built by
+  ``tools/build_quad_workers.py``)  Tests and other
   callers may pass ``worker_path`` to point at a custom build (e.g., a
   deliberately crashing stub) for lifecycle tests.
 * **Determinism contract.**  The worker is *deterministic across runs* for a
@@ -140,27 +141,19 @@ _WORKER_RELATIVE = Path("third_party") / "quad" / "worker" / "out"
 
 def _candidate_paths() -> list[Path]:
     """Candidate worker binary locations, in priority order on any platform."""
-    candidates: list[Path] = []
-    # 1) explicit override (envvar first so tests can pin the location)
+    # 1) explicit override (envvar first so tests and installed wheels can pin it)
     env = os.environ.get("ANYMESH_QUAD_MCF_WORKER")
     if env:
-        candidates.append(Path(env))
-        return candidates
-    # 2) repo-relative (the canonical location per the build script)
-    here = Path(__file__).resolve()
-    for parent in here.parents:
+        return [Path(env)] if Path(env).is_file() else []
+    # 2) repo-relative output of ``tools/build_quad_workers.py``
+    candidates: list[Path] = []
+    for parent in Path(__file__).resolve().parents:
         if (parent / "QUAD_FIRST_FULL_PROGRAMME.md").is_file():
-            name = "quad_mcf_worker.exe" if os.name == "nt" else "quad_mcf_worker.out"
-            candidates.append(parent / _WORKER_RELATIVE / "lemon" / name)
+            out = parent / _WORKER_RELATIVE / "lemon"
+            candidates.append(out / ("quad_mcf_worker.exe" if os.name == "nt" else "quad_mcf_worker"))
+            if os.name != "nt":
+                candidates.append(out / "quad_mcf_worker.out")  # legacy POSIX name
             break
-    # 3) adjacent to this module (handy for ad-hoc builds)
-    siblings = [
-        here.parent.parent.parent.parent.parent / "third_party" / "quad" / "worker" / "out" / "lemon" / "quad_mcf_worker.exe",
-    ]
-    siblings += [
-        here.parent.parent.parent.parent.parent / "third_party" / "quad" / "worker" / "out" / "lemon" / "quad_mcf_worker.out",
-    ]
-    candidates.extend(siblings)
     return [c for c in candidates if c.is_file()]
 
 
@@ -170,7 +163,7 @@ def default_worker_path() -> Path:
     if not paths:
         raise WorkerNotFound(
             "quad_mcf_worker binary not found; "
-            "run `third_party\\quad\\worker\\build_quad_mcf_worker.bat` "
+            "run `python tools/build_quad_workers.py mcf` "
             "(or set ANYMESH_QUAD_MCF_WORKER to a pre-built binary)"
         )
     return paths[0]

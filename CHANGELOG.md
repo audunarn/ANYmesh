@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Add an experimental, opt-in quad-first route (`QuadMeshingOptions`,
+  `quad_options=` and `layout_policy=` on `generate_hybrid_mesh_result`).
+  It covers planar faces with holes and concavity, owner-certified cylinders,
+  analytic cones and ruled/Coons surfaces, linear Q4/T3 and quadratic Q8/T6
+  output, and straight B3 members. It preserves exact source-edge station
+  identity, transactional publication and cancellation. The default
+  `quad_options=None` path is unchanged. The quad-first route was not part of
+  the 0.5.0 release; its output and diagnostics may still change.
+- Add `tools/build_quad_workers.py`, a cross-platform build for the optional
+  quad-first MCF and TinyAD worker executables. The workers are not shipped in
+  wheels; without them those stages report `UNAVAILABLE_SKIPPED`. CI builds them
+  and runs the worker-dependent tests with `ANYMESHER_REQUIRE_QUAD_WORKERS=1`.
+
 ## 0.5.0 - 2026-09-04
 
 Alpha preparation: final source, platform, installed-wheel, performance and

@@ -209,6 +209,7 @@ def _mixed_strip_faces(count: int = 8) -> tuple[GeometryModel, tuple[int, ...], 
     return geometry, tuple(quad_faces), tri_face
 
 
+@pytest.mark.quad_workers
 def test_b_meaningful_mixed_q4_s3_route_and_ownership() -> None:
     geometry, quad_faces, tri_face = _mixed_strip_faces()
     selected = quad_faces + (tri_face,)
@@ -330,14 +331,6 @@ def test_d_source_wheel_parity_is_canonical_on_bounded_fixture() -> None:
 # and at least one committed Q4.
 # ---------------------------------------------------------------------------
 
-_MCF_WORKER = os.path.normcase(os.path.realpath(
-    os.path.join(_REPOSITORY_ROOT, "third_party", "quad", "worker", "out",
-                 "lemon", "quad_mcf_worker.exe")
-))
-_TINYAD_WORKER = os.path.normcase(os.path.realpath(
-    os.path.join(_REPOSITORY_ROOT, "third_party", "quad", "worker", "out",
-                 "tinyad", "quad_tinyad_optimizer.exe")
-))
 _REQUIRED_Q_FIRST_PHASES = [
     "quad-first:q3",
     "quad-first:q4",
@@ -346,13 +339,18 @@ _REQUIRED_Q_FIRST_PHASES = [
 ]
 
 
+@pytest.mark.quad_workers
 def test_d2_q6_production_worker_chain_runs_and_is_canonical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert os.path.isfile(_MCF_WORKER), "Q4 LEMON MCF worker exe not found"
-    assert os.path.isfile(_TINYAD_WORKER), "Q5 TinyAD worker exe not found"
-    monkeypatch.setenv("ANYMESH_QUAD_MCF_WORKER", _MCF_WORKER)
-    monkeypatch.setenv("ANYMESH_QUAD_TINYAD_WORKER", _TINYAD_WORKER)
+    from anymesher.quad import quad_mcf_worker, quad_tinyad_worker
+
+    # Pin the exact resolved binaries (platform-specific names) via the
+    # supported env overrides.
+    mcf_worker = str(quad_mcf_worker.default_worker_path().resolve())
+    tinyad_worker = str(quad_tinyad_worker.default_worker_path().resolve())
+    monkeypatch.setenv("ANYMESH_QUAD_MCF_WORKER", mcf_worker)
+    monkeypatch.setenv("ANYMESH_QUAD_TINYAD_WORKER", tinyad_worker)
     geometry, face = _plane_face(size=1.0)
     phases: list[str] = []
     mesh = generate_hybrid_mesh_result(

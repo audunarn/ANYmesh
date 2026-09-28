@@ -45,6 +45,11 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "gui: opt-in test that creates a real desktop window"
     )
+    config.addinivalue_line(
+        "markers",
+        "quad_workers: needs the optional quad-first MCF and TinyAD worker "
+        "executables (python tools/build_quad_workers.py)",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -61,3 +66,40 @@ def pytest_collection_modifyitems(
     for item in items:
         if item.get_closest_marker("gui") is not None:
             item.add_marker(skipped)
+
+
+_REQUIRE_QUAD_WORKERS = os.environ.get("ANYMESHER_REQUIRE_QUAD_WORKERS", "") == "1"
+
+
+def _missing_quad_workers() -> tuple[str, ...]:
+    """Names of the optional quad-first worker executables that are absent."""
+
+    from anymesher.quad import quad_mcf_worker, quad_tinyad_worker
+
+    missing = []
+    for name, module, error in (
+        ("quad_mcf_worker", quad_mcf_worker, quad_mcf_worker.WorkerNotFound),
+        ("quad_tinyad_optimizer", quad_tinyad_worker, quad_tinyad_worker.WorkerNotFoundQ5),
+    ):
+        try:
+            module.default_worker_path()
+        except error:
+            missing.append(name)
+    return tuple(missing)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Skip worker-dependent tests explicitly, or fail when CI requires them."""
+
+    if item.get_closest_marker("quad_workers") is None:
+        return
+    missing = _missing_quad_workers()
+    if not missing:
+        return
+    message = (
+        f"quad-first worker(s) not built: {', '.join(missing)}; "
+        "run `python tools/build_quad_workers.py`"
+    )
+    if _REQUIRE_QUAD_WORKERS:
+        pytest.fail(f"{message} (ANYMESHER_REQUIRE_QUAD_WORKERS=1)", pytrace=False)
+    pytest.skip(message)

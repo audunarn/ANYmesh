@@ -154,6 +154,7 @@ def _plane_face() -> tuple:
     return geometry, geometry.add_plate(vertices)
 
 
+@pytest.mark.quad_workers
 def test_quad_first_exercises_worker_chain_when_explicit() -> None:
     geometry, face = _plane_face()
     phases: list[str] = []
@@ -261,6 +262,7 @@ def test_signature_and_default_are_none() -> None:
     assert "Mapping" in annotation
 
 
+@pytest.mark.quad_workers
 def test_advertise_quad_capabilities_reports_both_workers() -> None:
     report = advertise_quad_capabilities()
     assert report.compiled_native_support is True
@@ -314,6 +316,7 @@ def test_route_quad_first_scope_rejected_before_capability_probe() -> None:
         )
 
 
+@pytest.mark.quad_workers
 def test_route_quad_first_in_scope_returns_options_and_report() -> None:
     options = QuadMeshingOptions(max_front_iterations=2048)
     normalized, report = route_quad_first(options)
@@ -1048,6 +1051,7 @@ def test_pure_all_q4_result_publishes_s3_no_triangle_admission() -> None:
     }
 
 
+@pytest.mark.quad_workers
 def test_mixed_capability_advertised_truthfully(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1126,6 +1130,7 @@ def _beam_through_face_fixture():
     return geometry, face, part, sheet, member, member_edge
 
 
+@pytest.mark.quad_workers
 def test_quad_first_beam_coupling_slice() -> None:
     geometry, face, _part, sheet, member, member_edge = _beam_through_face_fixture()
     result = generate_hybrid_mesh_result(

@@ -269,6 +269,35 @@ mesh = generate_mesh(
 Metric specifications are strict serializable data. Runtime callbacks are
 explicitly experimental and cannot be serialized or passed through automation.
 
+### Experimental: quad-first meshing
+
+An experimental, opt-in quad-first route builds quad-dominant shells on
+selected faces. It is not part of the 0.5.0 release and its output, options and
+diagnostics may change. `quad_options=None` (the default) keeps every existing
+route byte-identical.
+
+```python
+from anymesher import QuadMeshingOptions, generate_hybrid_mesh_result
+
+result = generate_hybrid_mesh_result(
+    geometry,
+    target_size=0.2,
+    face_ids=(face_id,),
+    quad_options=QuadMeshingOptions(),
+    order="linear",  # or "quadratic" for Q8/T6
+)
+mesh = result.mesh  # Q4 plus qualified residual T3
+```
+
+Supported faces are planar faces (including holes and concavity), owner-certified
+cylinders, analytic cones, and ruled/Coons surfaces, with linear or Q8/T6
+output and straight B3 members. Residual triangles are expected wherever
+the layout cannot pair them. Two optional helper executables (an integer
+min-cost-flow count planner and a TinyAD local optimizer) are not shipped in
+wheels; build them from a source checkout with
+`python tools/build_quad_workers.py`. Without them those stages report
+`UNAVAILABLE_SKIPPED` in `mesh.hybrid_diagnostics` and meshing continues.
+
 Starting with version 0.4.0, ANYmesher source code is licensed under the
 Mozilla Public License 2.0. See `LICENSE` for the full terms and `NOTICE` for
 the prospective relicensing statement. Earlier published versions remain

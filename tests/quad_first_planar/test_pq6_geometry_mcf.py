@@ -62,6 +62,7 @@ def _signature(model):
     )
 
 
+@pytest.mark.quad_workers
 def test_real_skew_corridor_is_solved_and_mutated_before_driver():
     _model, face, seed = _seed()
     state = seed.state
@@ -92,6 +93,7 @@ def test_real_skew_corridor_is_solved_and_mutated_before_driver():
     assert validation.area_ratio == 1.0
 
 
+@pytest.mark.quad_workers
 def test_mcf_stage_causally_reduces_real_front_work():
     options = QuadMeshingOptions(max_local_optimizations=0)
     _m0, _f0, baseline = _seed()
@@ -111,6 +113,7 @@ def test_mcf_stage_causally_reduces_real_front_work():
     assert baseline_run.report.final_t3 == staged_run.report.final_t3 == 2
 
 
+@pytest.mark.quad_workers
 def test_public_route_reports_geometry_derived_mcf():
     _model, face, result = _public()
     q4 = result.mesh.hybrid_diagnostics["q4"]
@@ -151,6 +154,7 @@ def test_disabled_worker_is_truthful_and_does_not_mutate(monkeypatch):
     assert report.added_q4_ids == ()
 
 
+@pytest.mark.quad_workers
 def test_mcf_report_is_deterministic():
     _m0, _f0, seed0 = _seed()
     _m1, _f1, seed1 = _seed()
@@ -176,6 +180,7 @@ def test_missing_worker_is_unavailable_without_mutation():
     assert report.added_q4_ids == ()
 
 
+@pytest.mark.quad_workers
 def test_cancellation_before_commit_rolls_back_without_consuming_ids():
     class Cancelled(RuntimeError):
         pass
@@ -195,6 +200,7 @@ def test_cancellation_before_commit_rolls_back_without_consuming_ids():
     assert (state.digest(), state.next_node_id, state.next_cell_id, state.generation) == before
 
 
+@pytest.mark.quad_workers
 def test_count_rejected_propagates_without_mutation(monkeypatch):
     _model, _face, seed = _seed()
     state = seed.state
@@ -209,6 +215,7 @@ def test_count_rejected_propagates_without_mutation(monkeypatch):
     assert (state.digest(), state.next_node_id, state.next_cell_id, state.generation) == before
 
 
+@pytest.mark.quad_workers
 def test_public_enabled_vs_disabled_mcf_is_causal(monkeypatch):
     model_e, face_e = _geometry(SKEW)
     before_e = _signature(model_e)
@@ -313,6 +320,7 @@ def test_geometry_perturbation_changes_real_derived_cost_signature():
     assert signature(SKEW) != signature(perturbed)
 
 
+@pytest.mark.quad_workers
 def test_infeasible_component_is_explicit_skip_without_mutation(monkeypatch):
     _model, _face, seed = _seed()
     state = seed.state

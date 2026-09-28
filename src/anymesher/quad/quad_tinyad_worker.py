@@ -15,7 +15,8 @@ Design notes
 * **No hidden fallback.**  Every failure mode is typed (see below) and no
   silent fallback to a pure-Python optimizer is performed.
 * **Worker binary location.**  By default this module locates the worker in
-  ``third_party/quad/worker/out/tinyad/quad_tinyad_optimizer.exe``.  Tests
+  ``third_party/quad/worker/out/tinyad/quad_tinyad_optimizer[.exe]`` (built by
+  ``tools/build_quad_workers.py``).  Tests
   and other callers may pass ``worker_path`` to point at a custom build
   (e.g., a deliberately crashing / malformed / hanging stub) for lifecycle
   tests.
@@ -170,26 +171,21 @@ _WORKER_RELATIVE = Path("third_party") / "quad" / "worker" / "out" / "tinyad"
 
 def _candidate_paths() -> list[Path]:
     """Candidate worker binary locations, in priority order on any platform."""
-    candidates: list[Path] = []
-    # 1) explicit override (envvar first so tests can pin the location)
+    # 1) explicit override (envvar first so tests and installed wheels can pin it)
     env = os.environ.get("ANYMESH_QUAD_TINYAD_WORKER")
     if env:
-        candidates.append(Path(env))
-        return candidates
-    # 2) repo-relative (the canonical location per the build script)
-    here = Path(__file__).resolve()
-    for parent in here.parents:
+        return [Path(env)] if Path(env).is_file() else []
+    # 2) repo-relative output of ``tools/build_quad_workers.py``
+    candidates: list[Path] = []
+    for parent in Path(__file__).resolve().parents:
         if (parent / "QUAD_FIRST_FULL_PROGRAMME.md").is_file():
-            name = "quad_tinyad_optimizer.exe" if os.name == "nt" else "quad_tinyad_optimizer"
-            candidates.append(parent / _WORKER_RELATIVE / name)
+            candidates.append(parent / _WORKER_RELATIVE / _worker_name())
             break
-    # 3) adjacent to this module (handy for ad-hoc builds)
-    repo = here.parent.parent.parent.parent.parent
-    candidates.extend([
-        repo / _WORKER_RELATIVE / "quad_tinyad_optimizer.exe",
-        repo / _WORKER_RELATIVE / "quad_tinyad_optimizer",
-    ])
     return [c for c in candidates if c.is_file()]
+
+
+def _worker_name() -> str:
+    return "quad_tinyad_optimizer.exe" if os.name == "nt" else "quad_tinyad_optimizer"
 
 
 def default_worker_path() -> Path:
@@ -198,7 +194,7 @@ def default_worker_path() -> Path:
     if not paths:
         raise WorkerNotFoundQ5(
             "quad_tinyad_optimizer binary not found; "
-            "run `third_party\\quad\\worker\\build_quad_tinyad_optimizer.bat` "
+            "run `python tools/build_quad_workers.py tinyad` "
             "(or set ANYMESH_QUAD_TINYAD_WORKER to a pre-built binary)"
         )
     return paths[0]

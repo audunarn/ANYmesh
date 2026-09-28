@@ -34,7 +34,7 @@ Evidence items
    identity matching) and asymmetric blocked corridor (N=2, M=3).
 
 The worker binary is built via
-``third_party/quad/worker/build_quad_mcf_worker.bat``.  Worker-dependent
+``python tools/build_quad_workers.py mcf``.  Worker-dependent
 tests skip when the binary is missing; pure-Python tests (encoding,
 validation, rejection) always run.
 """
@@ -85,11 +85,9 @@ def _has_worker() -> bool:
 
 
 WORKER = _has_worker()
-needs_worker = pytest.mark.skipif(
-    not WORKER,
-    reason="quad_mcf_worker binary not built; run "
-    "third_party\\quad\\worker\\build_quad_mcf_worker.bat first",
-)
+# Skipped with an explicit reason when absent; tests/conftest.py turns the
+# skip into a failure under ANYMESHER_REQUIRE_QUAD_WORKERS=1 (CI).
+needs_worker = pytest.mark.quad_workers
 
 
 def _tiny() -> CountInstance:

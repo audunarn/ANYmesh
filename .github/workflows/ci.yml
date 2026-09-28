@@ -48,7 +48,14 @@ jobs:
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev,planar]"
       - run: python -c "import anygeometry, anymesher; print(anygeometry.__version__, anymesher.__version__)"
+      - name: Enter the MSVC developer environment for the quad workers
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build the optional quad-first MCF and TinyAD workers
+        run: python tools/build_quad_workers.py
       - run: python -m pytest
+        env:
+          ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
 
   native-absent:
     name: Disabled native boundary is absence-only
@@ -171,7 +178,14 @@ jobs:
           python -I -B -c "import anymesher, importlib.util, pathlib, sys;
           assert pathlib.Path(anymesher.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve());
           assert importlib.util.find_spec('anymesher._native') is not None"
+      - name: Build the optional quad-first workers outside the installed package
+        run: python tools/build_quad_workers.py
       - name: Qualify the installed wheel against the full suite
+        env:
+          # The installed package cannot find repository-relative workers.
+          ANYMESH_QUAD_MCF_WORKER: ${{ github.workspace }}/third_party/quad/worker/out/lemon/quad_mcf_worker
+          ANYMESH_QUAD_TINYAD_WORKER: ${{ github.workspace }}/third_party/quad/worker/out/tinyad/quad_tinyad_optimizer
+          ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
         run: >-
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
           --confcutdir=tests --import-mode=importlib tests

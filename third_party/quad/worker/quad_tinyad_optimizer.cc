@@ -73,6 +73,15 @@
 #include <utility>
 #include <vector>
 
+// Platform headers stay at file scope: including them inside the anonymous
+// namespace below breaks libstdc++ (std::fputs/std::fflush lookups).
+#if defined(_WIN32) || defined(WIN32)
+#include <windows.h>
+#else
+#include <csignal>
+#include <unistd.h>
+#endif
+
 #include <Eigen/Dense>
 #include <TinyAD/ScalarFunction.hh>
 
@@ -410,7 +419,6 @@ inline double clamp_coord(double x, double lo, double hi) {
 // ---------------------------------------------------------------------------
 
 #if defined(_WIN32) || defined(WIN32)
-#include <windows.h>
 static void worker_crash() {
     SetErrorMode(SEM_NOGPFAULTERRORBOX);
     volatile int *p = nullptr;
@@ -418,8 +426,6 @@ static void worker_crash() {
 }
 static void worker_hang()  { Sleep(INFINITE); }
 #else
-#include <csignal>
-#include <unistd.h>
 static void worker_crash() {
     std::signal(SIGSEGV, SIG_DFL);
     std::raise(SIGSEGV);

@@ -125,6 +125,7 @@ def _public_result(points: tuple, *, h: float, max_local: int, refinements=()):
 # A. CAUSAL GRADED REAL MESH
 # ===========================================================================
 
+@pytest.mark.quad_workers
 def test_causal_graded_mesh_applies_q5_moves() -> None:
     disabled = _public_result(CAUSAL_GRADED_POINTS, h=1.0, max_local=0, refinements=CAUSAL_REFINEMENTS)
     enabled = _public_result(CAUSAL_GRADED_POINTS, h=1.0, max_local=4, refinements=CAUSAL_REFINEMENTS)
@@ -179,6 +180,7 @@ def test_causal_graded_mesh_applies_q5_moves() -> None:
 # B. PERFECT P01 NO-OP
 # ===========================================================================
 
+@pytest.mark.quad_workers
 def test_perfect_p01_optimizer_noop() -> None:
     disabled = _public_result(P01_POINTS, h=0.5, max_local=0)
     enabled = _public_result(P01_POINTS, h=0.5, max_local=8)
@@ -204,6 +206,7 @@ def test_perfect_p01_optimizer_noop() -> None:
 # C. PROTECTED / BOUNDARY IMMUTABILITY (direct optimizer)
 # ===========================================================================
 
+@pytest.mark.quad_workers
 def test_protected_nodes_never_free_and_never_move() -> None:
     """Direct optimizer on a built real state: protected nodes are immutable."""
     from anymesher.quad.driver import run_planar_quad_driver

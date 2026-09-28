@@ -47,7 +47,7 @@ Evidence items
     :func:`decode_q5_response` is lossless and the schema tag is checked.
 
 The worker binary is built via
-``third_party/quad/worker/build_quad_tinyad_optimizer.bat``.  Worker-
+``python tools/build_quad_workers.py tinyad``.  Worker-
 dependent tests skip when the binary is missing; pure-Python tests
 (energy, gradients, validation, rejection) and stub-based tests always
 run.
@@ -79,11 +79,9 @@ def _has_worker() -> bool:
 
 
 WORKER = _has_worker()
-needs_worker = pytest.mark.skipif(
-    not WORKER,
-    reason="quad_tinyad_optimizer binary not built; run "
-    "third_party\\quad\\worker\\build_quad_tinyad_optimizer.bat first",
-)
+# Skipped with an explicit reason when absent; tests/conftest.py turns the
+# skip into a failure under ANYMESHER_REQUIRE_QUAD_WORKERS=1 (CI).
+needs_worker = pytest.mark.quad_workers
 
 
 # ---------------------------------------------------------------------------
