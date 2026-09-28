@@ -1022,7 +1022,7 @@ def test_mixed_quad_and_qualified_s3_residual_route() -> None:
     record = mesh.structural_preparation["qualified_s3"]
     assert record["status"] == "ADMITTED"
     assert record["legacy_fallback"] == "FORBIDDEN"
-    assert record["contract_id"] == "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V1"
+    assert record["contract_id"] == "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V2"
     assert sorted(record["element_ids"]) == sorted(mesh.tris)
     for value in record["nodal_normals"].values():
         assert float(np.linalg.norm(np.asarray(value, dtype=float))) > 0.0

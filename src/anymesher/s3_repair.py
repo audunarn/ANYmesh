@@ -3,6 +3,11 @@
 Repair is deliberately separate from admission.  Legacy meshes are never
 changed merely because they contain triangles, and exhausting the bounded
 operations raises a typed error instead of selecting a legacy formulation.
+
+With a ``target_policy`` the bounded operations work towards the preferred
+shape, but the request fails only when the result still violates the
+admission ``quality_policy`` (by default the solver floor).  Falling short of
+the target is reported, not raised.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import numpy as np
 from .mesh import Mesh
 from .s3_quality import (
     DEFAULT_S3_QUALITY_POLICY,
+    S3_TARGET_QUALITY_POLICY,
     S3AdmissionReport,
     S3QualityError,
     S3QualityPolicy,
@@ -111,6 +117,13 @@ class S3RepairResult:
     added_nodes: int
     added_elements: int
     contract_id: str = S3_REPAIR_CONTRACT_ID
+    target_admission: S3AdmissionReport | None = None
+
+    @property
+    def target_met(self) -> bool:
+        """Whether the preferred shape was reached (true when none was set)."""
+
+        return self.target_admission is None or self.target_admission.admitted
 
     def owner_normal_map(self) -> dict[int, tuple[float, float, float]]:
         """Return a fresh mapping suitable for admission and nodal normals."""
@@ -553,12 +566,20 @@ def repair_s3_admission(
     element_owner_normals: Mapping[int, Sequence[float]] | None,
     quality_policy: S3QualityPolicy = DEFAULT_S3_QUALITY_POLICY,
     repair_policy: S3RepairPolicy = DEFAULT_S3_REPAIR_POLICY,
+    target_policy: S3QualityPolicy | None = S3_TARGET_QUALITY_POLICY,
 ) -> S3RepairResult:
     """Return a separately copied qualified mesh or raise ``S3RepairError``.
 
     The operation order is fixed: winding, strict-envelope-improving diagonal
     flips, then bounded conforming midpoint bisection.  No operation changes a
     caller-owned mesh, and no exhausted request can return a legacy fallback.
+
+    Flips and bisections are driven by ``target_policy`` when it is given
+    (by default the 30 degree target), and never accepted if they add
+    ``quality_policy`` violations.  The request raises only if the final mesh
+    violates ``quality_policy``; ``S3RepairResult.target_met`` reports whether
+    the target was also reached.  ``target_policy=None`` repairs directly
+    against ``quality_policy``.
     """
 
     if not isinstance(mesh, Mesh):
@@ -631,7 +652,14 @@ def repair_s3_admission(
             detail="swapped the final two T3 nodes to follow the authoritative normal",
         )
 
-    def report_for(current: Mesh, scope: frozenset[int], made_owners: Mapping[int, np.ndarray]) -> S3AdmissionReport:
+    search_policy = quality_policy if target_policy is None else target_policy
+
+    def report_for(
+        current: Mesh,
+        scope: frozenset[int],
+        made_owners: Mapping[int, np.ndarray],
+        policy: S3QualityPolicy = search_policy,
+    ) -> S3AdmissionReport:
         return evaluate_s3_admission(
             current,
             element_ids=tuple(sorted(scope)),
@@ -639,8 +667,19 @@ def repair_s3_admission(
                 element_id: _normal_tuple(made_owners[element_id])
                 for element_id in sorted(scope)
             },
-            policy=quality_policy,
+            policy=policy,
         )
+
+    def adds_floor_violations(
+        current: Mesh,
+        scope: frozenset[int],
+        made_owners: Mapping[int, np.ndarray],
+    ) -> bool:
+        if target_policy is None:
+            return False
+        return _report_score(
+            report_for(current, scope, made_owners, quality_policy)
+        ) > _report_score(report_for(work, selected, owners, quality_policy))
 
     report = report_for(work, selected, owners)
     edge_flips = 0
@@ -829,6 +868,16 @@ def repair_s3_admission(
                     "conforming bisection does not strictly reduce admission violations",
                 )
                 continue
+            if adds_floor_violations(candidate, made_selected, made_owners):
+                _record(
+                    attempts,
+                    "refinement",
+                    "rejected",
+                    attached,
+                    edge,
+                    "conforming bisection would add admission-floor violations",
+                )
+                continue
             work = candidate
             owners = made_owners
             selected = made_selected
@@ -841,6 +890,10 @@ def repair_s3_admission(
             break
         if not accepted:
             break
+
+    target_report = None if target_policy is None else report
+    if target_report is not None:
+        report = report_for(work, selected, owners, quality_policy)
 
     if not report.admitted:
         _record(
@@ -857,12 +910,22 @@ def repair_s3_admission(
             quality_policy=quality_policy,
         )
 
+    if target_report is not None and not target_report.admitted:
+        shortfall = tuple(
+            item.element_id for item in target_report.elements if not item.admitted
+        )
+        detail = (
+            "all selected T3 elements satisfy the qualified-S3 admission "
+            f"contract; {len(shortfall)} remain below the preferred quality target"
+        )
+    else:
+        detail = "all selected T3 elements satisfy the qualified-S3 admission contract"
     _record(
         attempts,
         "adjudication",
         "accepted",
         tuple(sorted(selected)),
-        detail="all selected T3 elements satisfy the qualified-S3 admission contract",
+        detail=detail,
     )
     return S3RepairResult(
         mesh=work,
@@ -880,4 +943,5 @@ def repair_s3_admission(
         refinement_attempts=refinement_attempts,
         added_nodes=added_nodes,
         added_elements=added_elements,
+        target_admission=target_report,
     )

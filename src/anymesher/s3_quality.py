@@ -4,6 +4,14 @@ The existing :mod:`anymesher.quality_v2` metrics remain compatibility-facing
 and deliberately accept a broad set of meshes.  The qualified E4-PL S3 shell
 has a narrower, opt-in geometry contract.  This module keeps that contract
 explicit so callers never silently fall back to a legacy triangle.
+
+Two policies are distinguished.  ``S3_TARGET_QUALITY_POLICY`` is the shape the
+mesher aims for and bounded repair works towards (smallest angle 30 degrees).
+``S3_ADMISSION_FLOOR_POLICY`` is the least shape the solver requires (smallest
+angle 15 degrees, normalized area 0.30) and is what admission enforces by
+default: a mesh is rejected only when it violates the floor.  The floor is
+backed by ANYsolver's reduced-angle qualification of the E4-PL S3 V2D element
+(ANYsolver ``docs/S3_ANGLE_EXTENSION.md``).
 """
 
 from __future__ import annotations
@@ -19,7 +27,9 @@ from .mesh import Mesh
 
 __all__ = [
     "DEFAULT_S3_QUALITY_POLICY",
+    "S3_ADMISSION_FLOOR_POLICY",
     "S3_QUALITY_CONTRACT_ID",
+    "S3_TARGET_QUALITY_POLICY",
     "S3AdmissionReport",
     "S3ElementQuality",
     "S3QualityError",
@@ -31,6 +41,12 @@ __all__ = [
 
 S3_QUALITY_CONTRACT_ID = "ANYMESHER_QUALIFIED_S3_ADMISSION_V1"
 
+# Absolute comparison tolerance for the shape limits (degrees and
+# dimensionless ratios), matching ANYsolver's qualified-S3 comparison.  A
+# triangle constructed exactly on a limit evaluates a rounding error away from
+# it and must not be rejected for that.
+QUALITY_COMPARISON_TOLERANCE = 1.0e-12
+
 
 class S3QualityError(MeshError):
     """A mesh cannot use the qualified S3 formulation as supplied."""
@@ -38,7 +54,12 @@ class S3QualityError(MeshError):
 
 @dataclass(frozen=True)
 class S3QualityPolicy:
-    """Scale-free admission limits for qualified S3 elements."""
+    """Scale-free admission limits for qualified S3 elements.
+
+    The field defaults are the mesher's quality *target*.  Admission uses
+    ``DEFAULT_S3_QUALITY_POLICY`` (the solver floor) unless a caller supplies
+    a policy explicitly.
+    """
 
     minimum_angle_deg: float = 30.0
     maximum_angle_deg: float = 150.0
@@ -80,7 +101,23 @@ class S3QualityPolicy:
             raise ValueError("S3 owner-normal alignment limit must lie in (0, 1)")
 
 
-DEFAULT_S3_QUALITY_POLICY = S3QualityPolicy()
+S3_TARGET_QUALITY_POLICY = S3QualityPolicy()
+"""Preferred S3 shape: bounded repair works towards it but never fails on it."""
+
+S3_ADMISSION_FLOOR_POLICY = S3QualityPolicy(
+    minimum_angle_deg=15.0,
+    minimum_normalized_area=0.30,
+)
+"""Least S3 shape the solver requires.
+
+With the smallest angle >= 15 and the largest <= 150 degrees the normalized
+area is at least that of the (15, 15, 150) triangle (0.3022), the edge ratio of
+any triangle whose smallest angle is 15 degrees is at most 3.86, and the scaled
+Jacobian is at least sin(15 deg) = 0.259.  The unchanged 4.0 and 0.20 limits
+therefore never bind before the angle floor does.
+"""
+
+DEFAULT_S3_QUALITY_POLICY = S3_ADMISSION_FLOOR_POLICY
 
 
 @dataclass(frozen=True)
@@ -368,23 +405,23 @@ def evaluate_s3_admission(
                 f"owner-normal alignment {owner_alignment:.12g} does not exceed "
                 f"{policy.minimum_owner_normal_alignment:.12g}"
             )
-        if minimum_angle < policy.minimum_angle_deg:
+        if minimum_angle < policy.minimum_angle_deg - QUALITY_COMPARISON_TOLERANCE:
             violations.append(
                 f"minimum angle {minimum_angle:.12g} is below {policy.minimum_angle_deg:.12g} degrees"
             )
-        if maximum_angle > policy.maximum_angle_deg:
+        if maximum_angle > policy.maximum_angle_deg + QUALITY_COMPARISON_TOLERANCE:
             violations.append(
                 f"maximum angle {maximum_angle:.12g} exceeds {policy.maximum_angle_deg:.12g} degrees"
             )
-        if edge_ratio > policy.maximum_edge_ratio:
+        if edge_ratio > policy.maximum_edge_ratio + QUALITY_COMPARISON_TOLERANCE:
             violations.append(
                 f"edge ratio {edge_ratio:.12g} exceeds {policy.maximum_edge_ratio:.12g}"
             )
-        if minimum_jacobian < policy.minimum_scaled_jacobian:
+        if minimum_jacobian < policy.minimum_scaled_jacobian - QUALITY_COMPARISON_TOLERANCE:
             violations.append(
                 f"scaled Jacobian {minimum_jacobian:.12g} is below {policy.minimum_scaled_jacobian:.12g}"
             )
-        if normalized_area < policy.minimum_normalized_area:
+        if normalized_area < policy.minimum_normalized_area - QUALITY_COMPARISON_TOLERANCE:
             violations.append(
                 f"normalized area {normalized_area:.12g} is below {policy.minimum_normalized_area:.12g}"
             )

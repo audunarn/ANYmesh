@@ -242,7 +242,7 @@ def test_b_meaningful_mixed_q4_s3_route_and_ownership() -> None:
     record = mesh.structural_preparation["qualified_s3"]
     assert record["status"] == "ADMITTED"
     assert record["legacy_fallback"] == "FORBIDDEN"
-    assert record["contract_id"] == "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V1"
+    assert record["contract_id"] == "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V2"
     assert sorted(record["element_ids"]) == sorted(mesh.tris)
     assert advertise_quad_capabilities().mixed_q4_s3 is True
 

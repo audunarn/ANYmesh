@@ -39,6 +39,18 @@
   quad-first MCF and TinyAD worker executables. The workers are not shipped in
   wheels; without them those stages report `UNAVAILABLE_SKIPPED`. CI builds them
   and runs the worker-dependent tests with `ANYMESHER_REQUIRE_QUAD_WORKERS=1`.
+- Qualified-S3 admission now fails only below the solver's requirement. The
+  new `S3_ADMISSION_FLOOR_POLICY` (smallest angle 15 degrees, normalized area
+  0.30; other limits unchanged) is `DEFAULT_S3_QUALITY_POLICY`, backed by
+  ANYsolver's reduced-angle qualification of the E4-PL S3 V2D element. The
+  previous 30 degree envelope stays as `S3_TARGET_QUALITY_POLICY`: bounded
+  repair and `prepare_qualified_s3_mesh` still work towards it and report any
+  shortfall (`S3RepairResult.target_met`, record `quality_target`) instead of
+  raising. Pass `quality_policy=S3_TARGET_QUALITY_POLICY` to keep the strict
+  behavior. The production record is now
+  `ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V2` and carries both
+  policies. Shape limits are compared with a 1e-12 tolerance, so a triangle
+  built exactly on a limit is no longer rejected by rounding.
 
 ## 0.5.0 - 2026-09-04
 

@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 
 from anymesher import (
+    DEFAULT_S3_QUALITY_POLICY,
+    S3_ADMISSION_FLOOR_POLICY,
+    S3_TARGET_QUALITY_POLICY,
     Mesh,
     MeshError,
     S3QualityError,
@@ -371,3 +374,73 @@ def test_nearly_tangential_owner_normal_fails_the_shared_contract() -> None:
         "owner-normal alignment" in item
         for item in report.elements[0].violations
     )
+
+
+def _triangle_from_angles(alpha: float, beta: float) -> Mesh:
+    from math import cos, radians, sin
+
+    gamma = 180.0 - alpha - beta
+    side = sin(radians(beta)) / sin(radians(gamma))
+    return Mesh(
+        nodes={
+            1: np.array([0.0, 0.0, 0.0]),
+            2: np.array([1.0, 0.0, 0.0]),
+            3: np.array([side * cos(radians(alpha)), side * sin(radians(alpha)), 0.0]),
+        },
+        tris={5: (1, 2, 3)},
+    )
+
+
+@pytest.mark.parametrize(
+    ("alpha", "beta"),
+    [
+        (20.0, 80.0),  # acute isosceles, q = 0.559
+        (20.0, 20.0),  # obtuse isosceles, q = 0.403
+        (15.0, 82.5),  # acute isosceles, edge ratio 3.83
+        (15.0, 90.0),  # right, edge ratio 3.86
+        (15.0, 15.0 + 1e-9),  # obtuse isosceles on the 150 degree limit, q = 0.302
+    ],
+)
+def test_floor_admits_reduced_angle_shapes_the_target_rejects(alpha: float, beta: float) -> None:
+    mesh = _triangle_from_angles(alpha, beta)
+    owners = {5: (0.0, 0.0, 1.0)}
+
+    assert DEFAULT_S3_QUALITY_POLICY is S3_ADMISSION_FLOOR_POLICY
+    assert assert_s3_admissible(mesh, element_owner_normals=owners).admitted
+    target = evaluate_s3_admission(
+        mesh, element_owner_normals=owners, policy=S3_TARGET_QUALITY_POLICY
+    )
+    assert not target.admitted
+    assert any("minimum angle" in item for item in target.violations)
+
+
+@pytest.mark.parametrize(("alpha", "beta"), [(14.0, 83.0), (14.0, 90.0), (14.0, 14.5), (10.0, 85.0)])
+def test_floor_still_rejects_triangles_below_fifteen_degrees(alpha: float, beta: float) -> None:
+    report = evaluate_s3_admission(
+        _triangle_from_angles(alpha, beta), element_owner_normals={5: (0.0, 0.0, 1.0)}
+    )
+    assert not report.admitted
+    assert any("minimum angle" in item and "below 15 degrees" in item for item in report.violations)
+
+
+def test_floor_limits_beyond_the_angle_never_bind_before_it() -> None:
+    """With min angle >= 15 and max <= 150, q, edge ratio and Jacobian pass."""
+
+    floor = S3_ADMISSION_FLOOR_POLICY
+    worst_q = worst_ratio = 1.0
+    worst_jacobian = 1.0
+    for alpha in np.linspace(15.0, 60.0, 91):
+        for beta in np.linspace(15.0, 150.0, 271):
+            gamma = 180.0 - alpha - beta
+            if gamma < 15.0 or max(alpha, beta, gamma) > 150.0:
+                continue
+            item = evaluate_s3_admission(
+                _triangle_from_angles(alpha, beta), element_owner_normals={5: (0.0, 0.0, 1.0)}
+            ).elements[0]
+            worst_q = min(worst_q, item.normalized_area)
+            worst_ratio = max(worst_ratio, item.edge_ratio)
+            worst_jacobian = min(worst_jacobian, item.minimum_scaled_jacobian)
+    assert worst_q >= floor.minimum_normalized_area
+    assert worst_q == pytest.approx(0.302169, abs=1e-6)
+    assert worst_ratio <= floor.maximum_edge_ratio
+    assert worst_jacobian >= floor.minimum_scaled_jacobian

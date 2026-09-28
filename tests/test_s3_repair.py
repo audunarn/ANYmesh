@@ -6,6 +6,9 @@ import numpy as np
 import pytest
 
 from anymesher import (
+    DEFAULT_S3_QUALITY_POLICY,
+    S3_ADMISSION_FLOOR_POLICY,
+    S3_TARGET_QUALITY_POLICY,
     Mesh,
     S3RepairError,
     S3RepairPolicy,
@@ -152,6 +155,7 @@ def test_flip_limit_never_returns_a_legacy_or_partial_mesh() -> None:
                 maximum_edge_flips=0,
                 maximum_refinement_splits=0,
             ),
+            quality_policy=S3_TARGET_QUALITY_POLICY,
         )
 
     assert _signature(original) == _signature(_flippable_patch())
@@ -181,6 +185,7 @@ def test_candidate_attempt_limits_bound_rejected_work() -> None:
                 maximum_edge_flip_attempts=0,
                 maximum_refinement_attempts=0,
             ),
+            quality_policy=S3_TARGET_QUALITY_POLICY,
         )
 
     limits = [item.detail for item in caught.value.attempts if item.status == "limit"]
@@ -197,6 +202,7 @@ def test_local_refinement_refuses_a_nonconforming_scope_with_an_audit() -> None:
             element_ids=(10,),
             element_owner_normals={10: OWNER},
             repair_policy=S3RepairPolicy(maximum_edge_flips=0),
+            quality_policy=S3_TARGET_QUALITY_POLICY,
         )
 
     assert _signature(original) == _signature(_flippable_patch())
@@ -217,6 +223,7 @@ def test_repair_rejects_mismatched_element_scopes_before_a_flip() -> None:
             mesh,
             element_owner_normals={10: OWNER, 20: OWNER},
             repair_policy=S3RepairPolicy(maximum_refinement_splits=0),
+            quality_policy=S3_TARGET_QUALITY_POLICY,
         )
 
     assert any(
@@ -294,3 +301,86 @@ def test_legacy_triangle_behavior_changes_only_on_explicit_repair() -> None:
     )
     assert tuple(legacy.tris[11]) == connectivity
     assert repaired.mesh.tris[11] != connectivity
+
+
+def _sliver_patch(angle_deg: float) -> Mesh:
+    """Two triangles sharing a diagonal; triangle 10 has ``angle_deg`` at node 1."""
+
+    from math import radians, tan
+
+    return Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((1.0, tan(radians(angle_deg)), 0.0)),
+            4: np.asarray((0.0, 1.0, 0.0)),
+        },
+        tris={10: (1, 2, 3), 20: (1, 3, 4)},
+        elements_of_face={7: [10, 20]},
+        elements_of_sheet={8: [10, 20]},
+    )
+
+
+def test_default_admission_is_the_solver_floor_and_repair_aims_for_the_target() -> None:
+    assert DEFAULT_S3_QUALITY_POLICY is S3_ADMISSION_FLOOR_POLICY
+    assert S3_ADMISSION_FLOOR_POLICY.minimum_angle_deg == 15.0
+    assert S3_TARGET_QUALITY_POLICY.minimum_angle_deg == 30.0
+
+    # The flippable patch (smallest angles 26.6 and 18.4 degrees) is admissible
+    # at the floor, yet the default request still improves it to the target.
+    result = repair_s3_admission(
+        _flippable_patch(), element_owner_normals={10: OWNER, 20: OWNER}
+    )
+    assert result.edge_flips == 1
+    assert result.target_met
+    assert result.target_admission is not None and result.target_admission.admitted
+
+
+def test_exhausted_repair_above_the_floor_returns_the_mesh_and_reports_the_shortfall() -> None:
+    original = _flippable_patch()
+
+    result = repair_s3_admission(
+        original,
+        element_owner_normals={10: OWNER, 20: OWNER},
+        repair_policy=S3RepairPolicy(maximum_edge_flips=0, maximum_refinement_splits=0),
+    )
+
+    assert result.admission.admitted
+    assert not result.target_met
+    assert {item.element_id for item in result.target_admission.elements if not item.admitted} == {10, 20}
+    assert _signature(result.mesh) == _signature(_flippable_patch())
+    assert _signature(original) == _signature(_flippable_patch())
+    assert result.attempts[-1].action == "adjudication"
+    assert result.attempts[-1].status == "accepted"
+    assert "below the preferred quality target" in result.attempts[-1].detail
+
+
+def test_exhausted_repair_below_the_floor_is_a_typed_rejection() -> None:
+    original = _sliver_patch(10.0)
+
+    with pytest.raises(S3RepairError) as caught:
+        repair_s3_admission(
+            original,
+            element_owner_normals={10: OWNER, 20: OWNER},
+            repair_policy=S3RepairPolicy(maximum_edge_flips=0, maximum_refinement_splits=0),
+        )
+
+    assert caught.value.attempts[-1].status == "rejected"
+    diagnostic = caught.value.to_diagnostic()
+    assert diagnostic["quality_policy"]["minimum_angle_deg"] == 15.0
+    assert diagnostic["quality_policy"]["minimum_normalized_area"] == 0.30
+    assert [item["element_id"] for item in diagnostic["admission"]["failing_elements"]] == [10]
+    assert _signature(original) == _signature(_sliver_patch(10.0))
+
+
+def test_target_none_repairs_directly_against_the_admission_policy() -> None:
+    result = repair_s3_admission(
+        _flippable_patch(),
+        element_owner_normals={10: OWNER, 20: OWNER},
+        target_policy=None,
+    )
+    # Already admissible at the floor: no operation is attempted.
+    assert result.edge_flips == 0
+    assert result.target_admission is None
+    assert result.target_met
+    assert _signature(result.mesh) == _signature(_flippable_patch())
