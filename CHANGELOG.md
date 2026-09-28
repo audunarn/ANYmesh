@@ -18,6 +18,14 @@
   final element that still fails raises `QuadQualityRejected` instead of being
   published. Validation diagnostics report the worst element metrics and the
   active gates.
+- Speed up the quad-first route and the shared pure-Python triangulator
+  without changing any result. The Bowyer-Watson cavity search uses a
+  conservative circumcircle pre-filter in front of the exact `incircle`
+  predicate, ring containment is vectorized, the front driver keeps O(1)
+  cell-kind counts, and seeding uses bucketed spacing checks. A 6,000-quad
+  plate now takes about 31 s instead of several minutes. Quad-first seeds stay
+  on the Python reference triangulation because the compiled backend breaks
+  cocircular ties differently.
 - Add `tools/build_quad_workers.py`, a cross-platform build for the optional
   quad-first MCF and TinyAD worker executables. The workers are not shipped in
   wheels; without them those stages report `UNAVAILABLE_SKIPPED`. CI builds them

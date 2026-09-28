@@ -253,6 +253,11 @@ class QuadMeshState:
         self._pos = pos
         self._cells = cells_map
         self._kind = kinds
+        # Maintained with every commit so drivers can ask "any residual T3?"
+        # in O(1) instead of scanning all cells per front step.
+        self._kind_count: dict[str, int] = {"T3": 0, "Q4": 0}
+        for kind in kinds.values():
+            self._kind_count[kind] += 1
         self._edge_to_cells: dict[EdgeKey, set[int]] = {}
         self._node_edges: dict[int, set[EdgeKey]] = {n: set() for n in pos}
         self._body_to_cell: dict[tuple[int, int, ...], int] = {}
@@ -355,6 +360,12 @@ class QuadMeshState:
 
     def cell_kind(self, cid: Any) -> str:
         return self._kind[_int_or_err(cid, "cell")]
+
+    def count_kind(self, kind: str) -> int:
+        """Number of resident cells of ``kind`` (``"T3"`` or ``"Q4"``), O(1)."""
+        if kind not in self._kind_count:
+            raise MeshError(f"unknown cell kind {kind!r}")
+        return self._kind_count[kind]
 
     def edge_cells(self, key: Any) -> tuple[int, ...]:
         k = _edge_key(_int_or_err(key[0], "edge[0]"), _int_or_err(key[1], "edge[1]"))
@@ -635,7 +646,9 @@ class QuadMeshState:
                         self._node_edges.get(k[0], set()).discard(k)
                         self._node_edges.get(k[1], set()).discard(k)
             self._cells.pop(cid, None)
-            self._kind.pop(cid, None)
+            removed_kind = self._kind.pop(cid, None)
+            if removed_kind is not None:
+                self._kind_count[removed_kind] -= 1
 
         for cid in sorted(delta.add_cells):
             body = delta.add_cells[cid]
@@ -646,9 +659,11 @@ class QuadMeshState:
                 self._node_edges.setdefault(k[0], set()).add(k)
                 self._node_edges.setdefault(k[1], set()).add(k)
             self._cells[cid] = body
-            self._kind[cid] = delta.add_cell_kinds.get(
+            added_kind = delta.add_cell_kinds.get(
                 cid, "Q4" if len(body) == 4 else "T3"
             )
+            self._kind[cid] = added_kind
+            self._kind_count[added_kind] += 1
 
         self._front.difference_update(delta.remove_front)
         self._front.update(delta.add_front)

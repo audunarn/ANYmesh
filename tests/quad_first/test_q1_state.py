@@ -321,3 +321,23 @@ def test_kind_len_mismatch_rejected_at_construction() -> None:
     # A 2-node body with T3 kind must be rejected.
     with pytest.raises(MeshError):
         QuadMeshState(nodes=nodes, cells={0: (0, 1)}, cell_kinds={0: "T3"})
+
+
+def test_count_kind_tracks_commits_without_scanning():
+    from anymesher.quad.state import QuadMeshState
+
+    nodes = {0: (0.0, 0.0), 1: (1.0, 0.0), 2: (1.0, 1.0), 3: (0.0, 1.0)}
+    state = QuadMeshState(nodes, {0: (0, 1, 3), 1: (1, 2, 3)}, {0: "T3", 1: "T3"},
+                          initial_front=((0, 1), (1, 2), (2, 3), (0, 3)))
+    assert (state.count_kind("T3"), state.count_kind("Q4")) == (2, 0)
+    with state.transaction() as tx:
+        tx.remove_cell(0)
+        tx.remove_cell(1)
+        tx.allocate_cell((0, 1, 2, 3), "Q4")
+        tx.commit()
+    assert (state.count_kind("T3"), state.count_kind("Q4")) == (0, 1)
+    with state.transaction() as tx:  # discarded without commit
+        tx.remove_cell(2)
+    assert (state.count_kind("T3"), state.count_kind("Q4")) == (0, 1)
+    with pytest.raises(MeshError):
+        state.count_kind("Q8")

@@ -3605,6 +3605,9 @@ def _quad_first_execute(
         )
         face_driver[domain.face_id] = driven.report.to_dict()
         face_driver[domain.face_id]["residual_flips"] = flip_report.to_dict()
+        face_driver[domain.face_id]["seed_triangulation_backend"] = (
+            seed.triangulation.actual_backend
+        )
         if layout_policy == "adaptive":
             face_driver[domain.face_id]["layout_seed"] = {
                 "boundary_stations": len(seed.station_to_node),

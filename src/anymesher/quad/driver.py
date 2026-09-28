@@ -56,6 +56,9 @@ def _state_cells(state: QuadMeshState) -> Mapping:
 
 
 def _count_kind(state: QuadMeshState, kind: str) -> int:
+    counter = getattr(state, "count_kind", None)
+    if counter is not None:
+        return counter(kind)
     return sum(1 for cid in _state_cells(state) if state.cell_kind(int(cid)) == kind)
 
 

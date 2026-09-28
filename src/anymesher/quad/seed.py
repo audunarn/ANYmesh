@@ -1,6 +1,7 @@
 """Target-size-driven constrained T3 seed for the planar quad advancing front."""
 from __future__ import annotations
 from dataclasses import dataclass
+from itertools import product
 from math import ceil, floor
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
@@ -50,6 +51,13 @@ class PlanarQuadSeed:
         return area
 
 
+# Seeds stay on the deterministic Python reference triangulation.  The
+# compiled triangulator breaks exactly cocircular ties (every rectangular
+# lattice cell) differently, so its seeds are valid but not byte-identical
+# outside the planar PQ4b parity corpus (e.g. the CH9 h=0.3 cone), which would
+# make quad-first output depend on how ANYmesher was installed.
+_SEED_TRIANGULATION_BACKEND = "python"
+
 # Lattice points closer than this fraction of the local size to a boundary
 # segment leave a thin strip that the front can only close with slivers.
 _LATTICE_BOUNDARY_CLEARANCE = 0.3
@@ -76,16 +84,60 @@ class _SegmentGrid:
         return floor(point[0] / self.cell), floor(point[1] / self.cell)
 
     def closer_than(self, point: Sequence[float], distance: float) -> bool:
+        """True when some segment is strictly closer than ``distance``.
+
+        A segment within ``distance`` has its closest point inside the query
+        square, and every segment is bucketed in each cell its bounding box
+        touches, so scanning the cells covering that square is exact for any
+        ``distance``.
+        """
         x, y = float(point[0]), float(point[1])
         limit = distance * distance
-        for a, b in self.buckets.get(self._key((x, y)), ()):
-            dx, dy = b[0] - a[0], b[1] - a[1]
-            length2 = dx * dx + dy * dy
-            t = 0.0 if length2 <= 0.0 else max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / length2))
-            ex, ey = x - (a[0] + t * dx), y - (a[1] + t * dy)
-            if ex * ex + ey * ey < limit:
-                return True
+        i0, j0 = self._key((x - distance, y - distance))
+        i1, j1 = self._key((x + distance, y + distance))
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                for a, b in self.buckets.get((i, j), ()):
+                    dx, dy = b[0] - a[0], b[1] - a[1]
+                    length2 = dx * dx + dy * dy
+                    t = 0.0 if length2 <= 0.0 else max(
+                        0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / length2)
+                    )
+                    ex, ey = x - (a[0] + t * dx), y - (a[1] + t * dy)
+                    if ex * ex + ey * ey < limit:
+                        return True
         return False
+
+
+class _Buckets:
+    """Uniform-grid buckets of items with axis-aligned bounds (2D or 3D).
+
+    ``near(center, radius)`` yields every item whose bounds meet the query box,
+    so any item within ``radius`` of ``center`` is returned (possibly with
+    others and duplicates).  Callers apply their exact predicate to the result,
+    which keeps accepted seeds identical to a full scan.
+    """
+
+    def __init__(self, cell: float) -> None:
+        if not (np.isfinite(cell) and cell > 0.0):
+            raise MeshError("bucket cell size must be positive and finite")
+        self.cell = float(cell)
+        self.items: dict[tuple[int, ...], list[int]] = {}
+
+    def _range(self, lower: Sequence[float], upper: Sequence[float]):
+        low = [floor(float(v) / self.cell) for v in lower]
+        high = [floor(float(v) / self.cell) for v in upper]
+        return product(*(range(a, b + 1) for a, b in zip(low, high)))
+
+    def insert(self, item: int, lower: Sequence[float], upper: Sequence[float]) -> None:
+        for key in self._range(lower, upper):
+            self.items.setdefault(key, []).append(item)
+
+    def near(self, center: Sequence[float], radius: float):
+        lower = [float(v) - radius for v in center]
+        upper = [float(v) + radius for v in center]
+        for key in self._range(lower, upper):
+            yield from self.items.get(key, ())
 
 
 def _on_segment(p: Vec2, a: Vec2, b: Vec2, tol: float) -> bool:
@@ -141,7 +193,10 @@ def _interior_lattice(
     if nx * ny > 250000:
         raise MeshError("graded refinement lattice exceeds fine candidate budget")
     accepted: list[np.ndarray] = [np.asarray(p, dtype=float) for p in coarse]
-    fine_segments = (_SegmentGrid((outer, *holes), _LATTICE_BOUNDARY_CLEARANCE * h_min)
+    accepted_grid = _Buckets(0.75 * h)
+    for index, p in enumerate(accepted):
+        accepted_grid.insert(index, p, p)
+    fine_segments = (_SegmentGrid((outer, *holes), _LATTICE_BOUNDARY_CLEARANCE * h)
                      if _LATTICE_BOUNDARY_CLEARANCE > 0.0 else None)
     seen = {(float(p[0]), float(p[1])) for p in coarse}
     for j in range(ny):
@@ -173,8 +228,10 @@ def _interior_lattice(
                 # A centred fine sample needs half a local interval before
                 # the source boundary; otherwise it creates a thin last strip.
                 continue
-            if any(float(np.linalg.norm(np.asarray(p, dtype=float) - np.asarray(point, dtype=float))) < 0.75 * h_local for p in accepted):
+            if any(float(np.linalg.norm(accepted[index] - np.asarray(point, dtype=float))) < 0.75 * h_local
+                   for index in accepted_grid.near(point, 0.75 * h_local)):
                 continue
+            accepted_grid.insert(len(accepted), point, point)
             accepted.append(np.asarray(point, dtype=float))
             seen.add(key)
     return np.asarray(accepted, dtype=float).reshape((-1, 2))
@@ -384,6 +441,12 @@ def _adaptive_interior_points(
     accepted_uv: list[tuple[float, float]] = []
     accepted_xyz: list[tuple[np.ndarray, float]] = []
     boundary_clearance = 0.45 if isinstance(domain, PlanarQuadDomain) else 0.28
+    # Physical-space buckets for the spacing and clearance checks (identical
+    # decisions to a full scan; see _Buckets).
+    accepted_grid = _Buckets(0.85 * float(target_size))
+    boundary_grid = _Buckets(boundary_clearance * float(target_size))
+    for index, (start, end) in enumerate(boundary):
+        boundary_grid.insert(index, np.minimum(start, end), np.maximum(start, end))
 
     def offer(point: tuple[float, float], *, coarse: bool) -> None:
         if not _strict_inside(point, outer, tol):
@@ -403,7 +466,8 @@ def _adaptive_interior_points(
             if size_field is not None else float(target_size)
         )
         clearance = float("inf")
-        for start, end in boundary:
+        for index in boundary_grid.near(xyz, boundary_clearance * h_local):
+            start, end = boundary[index]
             direction = end - start
             length_squared = float(direction @ direction)
             at = (max(0.0, min(1.0, float((xyz-start) @ direction) / length_squared))
@@ -412,9 +476,11 @@ def _adaptive_interior_points(
         if clearance < boundary_clearance * h_local:
             return
         separation = 0.85 if not coarse and h_local >= 0.999999 * target_size else 0.65
-        if any(float(np.linalg.norm(xyz - old)) < separation * min(h_local, old_h)
-               for old, old_h in accepted_xyz):
+        if any(float(np.linalg.norm(xyz - accepted_xyz[index][0]))
+               < separation * min(h_local, accepted_xyz[index][1])
+               for index in accepted_grid.near(xyz, separation * h_local)):
             return
+        accepted_grid.insert(len(accepted_xyz), xyz, xyz)
         accepted_uv.append(point)
         accepted_xyz.append((xyz, h_local))
 
@@ -570,7 +636,8 @@ def build_planar_quad_seed(
         holes=hole_polys,
         constraints=constraints,
         interior_points=interior,
-        backend="python",
+        backend=_SEED_TRIANGULATION_BACKEND,
+        cancellation_check=cancellation_check,
     )
     targeted_reseed_count = 0
     if layout_policy == "adaptive" and source_aligned_cut is None:
@@ -582,7 +649,8 @@ def build_planar_quad_seed(
             triangulation = triangulate_polygon(
                 np.asarray(outer, dtype=float), holes=hole_polys,
                 constraints=constraints, interior_points=interior,
-                backend="python",
+                backend=_SEED_TRIANGULATION_BACKEND,
+                cancellation_check=cancellation_check,
             )
     if len(triangulation.points) < len(outer) + sum(len(p) for p in hole_polys):
         raise MeshError("triangulation lost canonical boundary stations")

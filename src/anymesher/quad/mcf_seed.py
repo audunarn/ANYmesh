@@ -77,7 +77,7 @@ class Q4MCFReport:
 
 
 def _count_kind(state: QuadMeshState, kind: str) -> int:
-    return sum(1 for cid in state.cells if state.cell_kind(cid) == kind)
+    return state.count_kind(kind)
 
 
 def _cancel(check: Callable[[str], None] | None, stage: str) -> None:

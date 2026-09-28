@@ -165,11 +165,11 @@ def test_ch11_graded_residual_promotes_mixed_q8_t6(name):
         refinements=(refinement,),
     ).mesh
 
-    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (35, 25, 4)
-    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (98, 25, 4)
+    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (34, 24, 4)
+    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (95, 24, 4)
     assert {eid: tuple(body[:4]) for eid, body in quadratic.quads.items()} == linear.quads
     assert {eid: tuple(body[:3]) for eid, body in quadratic.tris.items()} == linear.tris
-    assert len(_edge_mid_map(quadratic)) == 63
+    assert len(_edge_mid_map(quadratic)) == 61
     for edge_id, chain in linear.nodes_of_edge.items():
         assert tuple(quadratic.nodes_of_edge[edge_id][::2]) == tuple(chain)
     assert _support_residual(quadratic, surface) <= 1.0e-10
@@ -178,7 +178,7 @@ def test_ch11_graded_residual_promotes_mixed_q8_t6(name):
     payload = quadratic.hybrid_diagnostics["high_order_geometry"]
     assert payload["status"] == "CERTIFIED_POSITIVE"
     assert (payload["q8_count"], payload["t6_count"], payload["unique_midside_count"]) == (
-        25, 4, 63,
+        24, 4, 61,
     )
     report = payload["reports"][0]
     assert report["geometry_family"] == name

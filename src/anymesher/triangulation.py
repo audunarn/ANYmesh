@@ -125,20 +125,62 @@ def _point_on_segment(point: np.ndarray, first: np.ndarray, second: np.ndarray, 
     return abs(orient2d(first, second, point)) <= tolerance * max(1.0, length)
 
 
-def _point_in_ring(point: np.ndarray, points: np.ndarray, ring: Sequence[int], tolerance: float) -> bool:
-    inside = False
+def _ring_arrays(points: np.ndarray, ring: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+    ids = np.asarray(ring, dtype=np.int64)
+    coordinates = np.asarray(points, dtype=np.float64)
+    return coordinates[ids], coordinates[np.roll(ids, -1)]
+
+
+def _near_ring_edges(point: np.ndarray, first: np.ndarray, second: np.ndarray, tolerance: float) -> list[int]:
+    """Edges whose tolerance-expanded bounding box holds ``point``.
+
+    Uses exactly the comparisons ``_point_on_segment`` starts with, so every
+    edge it could accept is returned.
+    """
     x, y = float(point[0]), float(point[1])
-    for index, first_id in enumerate(ring):
-        second_id = ring[(index + 1) % len(ring)]
-        first, second = points[first_id], points[second_id]
-        if _point_on_segment(point, first, second, tolerance):
-            return True
-        y1, y2 = float(first[1]), float(second[1])
-        if (y1 > y) != (y2 > y):
-            crossing = float(first[0]) + (y - y1) * float(second[0] - first[0]) / (y2 - y1)
-            if crossing > x:
-                inside = not inside
-    return inside
+    fx, fy, sx, sy = first[:, 0], first[:, 1], second[:, 0], second[:, 1]
+    near = (
+        (np.minimum(fx, sx) - tolerance <= x) & (x <= np.maximum(fx, sx) + tolerance)
+        & (np.minimum(fy, sy) - tolerance <= y) & (y <= np.maximum(fy, sy) + tolerance)
+    )
+    return np.flatnonzero(near).tolist()
+
+
+def _point_on_ring(point: np.ndarray, points: np.ndarray, ring: Sequence[int], tolerance: float) -> bool:
+    """``any(_point_on_segment(...))`` over the ring edges, bbox-prefiltered."""
+    if len(ring) == 0:
+        return False
+    first, second = _ring_arrays(points, ring)
+    return any(
+        _point_on_segment(point, first[index], second[index], tolerance)
+        for index in _near_ring_edges(point, first, second, tolerance)
+    )
+
+
+def _point_in_ring(point: np.ndarray, points: np.ndarray, ring: Sequence[int], tolerance: float) -> bool:
+    """Even-odd containment, ``True`` on the ring within ``tolerance``.
+
+    Vectorized but decision-identical to the original scalar loop: on-ring
+    detection keeps the exact ``_point_on_segment`` test behind the same
+    bounding-box comparisons, and each crossing abscissa is evaluated with the
+    same operation order.
+    """
+    if len(ring) == 0:
+        return False
+    first, second = _ring_arrays(points, ring)
+    if any(
+        _point_on_segment(point, first[index], second[index], tolerance)
+        for index in _near_ring_edges(point, first, second, tolerance)
+    ):
+        return True
+    x, y = float(point[0]), float(point[1])
+    fx, fy, sx, sy = first[:, 0], first[:, 1], second[:, 0], second[:, 1]
+    straddle = (fy > y) != (sy > y)
+    if not straddle.any():
+        return False
+    fx, fy, sx, sy = fx[straddle], fy[straddle], sx[straddle], sy[straddle]
+    crossing = fx + (y - fy) * (sx - fx) / (sy - fy)
+    return bool(np.count_nonzero(crossing > x) % 2)
 
 
 def _proper_intersection(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> bool:
@@ -435,11 +477,11 @@ def _prepare_pslg(
         )
     for row, point in enumerate(points):
         if compiled_domain is None:
-            on_outer = any(_point_on_segment(point, points[a], points[b], epsilon) for a, b in _ring_segments(outer))
+            on_outer = _point_on_ring(point, points, outer, epsilon)
             inside = _point_in_ring(point, points, outer, epsilon)
             in_hole = any(
                 _point_in_ring(point, points, ring, epsilon)
-                and not any(_point_on_segment(point, points[a], points[b], epsilon) for a, b in _ring_segments(ring))
+                and not _point_on_ring(point, points, ring, epsilon)
                 for ring in holes
             )
         else:
@@ -465,6 +507,71 @@ def _prepare_pslg(
     )
 
 
+def _circumcircle(work: np.ndarray, triangle: tuple[int, int, int]) -> tuple[float, float, float, float, float, float]:
+    """``(ax, ay, ux, uy, r2, delta)`` for the Bowyer-Watson pre-filter.
+
+    ``u`` is the circumcentre offset from vertex ``a`` and ``delta`` a
+    generous forward bound on the rounding error of ``u``.  Needle triangles
+    (e.g. two close points and a far super-triangle vertex) cancel badly in the
+    denominator; their large ``delta`` widens the filter instead of risking a
+    false exclusion.  Degenerate triangles get an infinite radius.
+    """
+    ax, ay = float(work[triangle[0]][0]), float(work[triangle[0]][1])
+    bx, by = float(work[triangle[1]][0]) - ax, float(work[triangle[1]][1]) - ay
+    cx, cy = float(work[triangle[2]][0]) - ax, float(work[triangle[2]][1]) - ay
+    denominator = 2.0 * (bx * cy - by * cx)
+    denominator_error = 16.0 * _FLOAT_EPSILON * (abs(bx * cy) + abs(by * cx))
+    if abs(denominator) <= 2.0 * denominator_error:
+        return ax, ay, 0.0, 0.0, float("inf"), 0.0
+    blift = bx * bx + by * by
+    clift = cx * cx + cy * cy
+    numerator_x = cy * blift - by * clift
+    numerator_y = bx * clift - cx * blift
+    ux = numerator_x / denominator
+    uy = numerator_y / denominator
+    error_x = 16.0 * _FLOAT_EPSILON * (abs(cy * blift) + abs(by * clift))
+    error_y = 16.0 * _FLOAT_EPSILON * (abs(bx * clift) + abs(cx * blift))
+    delta = 16.0 * (
+        (error_x + abs(ux) * denominator_error) + (error_y + abs(uy) * denominator_error)
+    ) / abs(denominator)
+    radius2 = ux * ux + uy * uy
+    if not (np.isfinite(radius2) and np.isfinite(delta)):
+        return ax, ay, 0.0, 0.0, float("inf"), 0.0
+    return ax, ay, ux, uy, radius2, delta
+
+
+# Relative slack for rounding in the distance evaluation itself.
+_CIRCLE_FILTER_SLACK = 1.0e-8
+
+
+def _incircle_candidates(data: np.ndarray, point: np.ndarray) -> np.ndarray:
+    """Rows (ascending) whose circumcircle may strictly contain ``point``.
+
+    ``data`` holds one ``_circumcircle`` row per live triangle.  A row is
+    excluded only when the point is outside the circle by more than the
+    propagated circumcentre error plus a relative slack.
+    """
+
+    px = float(point[0]) - data[:, 0]
+    py = float(point[1]) - data[:, 1]
+    dx = px - data[:, 2]
+    dy = py - data[:, 3]
+    distance2 = dx * dx + dy * dy
+    radius2 = data[:, 4]
+    delta = data[:, 5]
+    with np.errstate(invalid="ignore", over="ignore"):
+        bound = (
+            radius2
+            + 2.0 * delta * (np.sqrt(distance2) + np.sqrt(radius2))
+            + 2.0 * delta * delta
+            + _CIRCLE_FILTER_SLACK * (radius2 + px * px + py * py)
+            + 1.0e-300
+        )
+        outside = distance2 > bound
+    # NaN or infinite bounds compare False and therefore stay candidates.
+    return np.flatnonzero(~outside)
+
+
 def _bowyer_watson(points: np.ndarray) -> list[tuple[int, int, int]]:
     count = len(points)
     minimum = np.min(points, axis=0)
@@ -480,12 +587,21 @@ def _bowyer_watson(points: np.ndarray) -> list[tuple[int, int, int]]:
     )
     work = np.vstack((points, super_points))
     triangles: list[tuple[int, int, int]] = [(count, count + 1, count + 2)]
+    # One circumcircle row per entry of ``triangles``, kept aligned.
+    circles = np.asarray([_circumcircle(work, triangles[0])], dtype=np.float64)
     insertion_order = sorted(range(count), key=lambda row: (float(points[row, 0]), float(points[row, 1]), row))
     for point_id in insertion_order:
+        # Exactly the triangles a full scan with the adaptive ``incircle``
+        # predicate would select: the conservative circumcircle pre-filter only
+        # skips triangles the point is clearly outside of, and every remaining
+        # candidate is still decided by ``incircle``.  The cavity is a set, so
+        # neither the row order nor the triangle list order affects the result.
         bad = [
             row
-            for row, triangle in enumerate(triangles)
-            if incircle(work[triangle[0]], work[triangle[1]], work[triangle[2]], work[point_id]) > 0.0
+            for row in _incircle_candidates(circles, work[point_id]).tolist()
+            if incircle(
+                work[triangles[row][0]], work[triangles[row][1]], work[triangles[row][2]], work[point_id]
+            ) > 0.0
         ]
         if not bad:
             bad = [
@@ -504,15 +620,21 @@ def _bowyer_watson(points: np.ndarray) -> list[tuple[int, int, int]]:
             for index in range(3):
                 edge = _normal_edge(triangle[index], triangle[(index + 1) % 3])
                 edge_counts[edge] = edge_counts.get(edge, 0) + 1
-        bad_set = set(bad)
-        triangles = [triangle for row, triangle in enumerate(triangles) if row not in bad_set]
+        keep = np.ones(len(triangles), dtype=bool)
+        keep[bad] = False
+        triangles = [triangle for triangle, alive in zip(triangles, keep.tolist()) if alive]
+        added: list[tuple[int, int, int]] = []
         for first, second in sorted(edge for edge, frequency in edge_counts.items() if frequency == 1):
             determinant = orient2d(work[first], work[second], work[point_id])
             if determinant > 0.0:
-                triangles.append((first, second, point_id))
+                added.append((first, second, point_id))
             elif determinant < 0.0:
-                triangles.append((second, first, point_id))
-        triangles.sort()
+                added.append((second, first, point_id))
+        triangles.extend(added)
+        circles = np.vstack((
+            circles[keep],
+            np.asarray([_circumcircle(work, triangle) for triangle in added], dtype=np.float64).reshape((-1, 6)),
+        ))
     result = {
         _canonical_triangle(triangle, work)
         for triangle in triangles

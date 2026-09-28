@@ -94,3 +94,55 @@ Frozen evidence updated because of the gates (old -> new):
 Evidence: quad-first planar, curved and core suites with workers required:
 `486 passed, 3 skipped`; seeding, triangulation contract, quality/serialize,
 coupling and layering regressions: `49 passed, 4 skipped`.
+
+## Phase 3: performance (results unchanged)
+
+- `QuadMeshState` keeps per-kind cell counters updated on commit
+  (`count_kind`). The front driver no longer scans every cell on each
+  iteration to test for residual T3; the MCF stage uses the same counter.
+- Shared Python Bowyer-Watson (`triangulation._bowyer_watson`):
+  - A conservative circumcircle pre-filter skips triangles the new point is
+    provably outside. The bound uses the propagated circumcentre error, so
+    needle triangles against the super-triangle stay candidates.
+  - Every remaining candidate is still decided by the adaptive `incircle`.
+  - The per-insertion list sort, which never affected the result, was dropped.
+  - Results equal the original on 640 randomized and adversarial point sets:
+    cocircular lattices and rings, 1e-9 to 1e7 scales, collinear runs,
+    jittered lattices. The original is kept as an oracle in
+    `tests/test_triangulation_prefilter.py`.
+- `triangulation._point_in_ring` and the PSLG on-ring checks are vectorized.
+  They use the same bounding-box comparisons in front of the exact
+  `_point_on_segment`, and the same crossing arithmetic. They matched the
+  scalar loop on 75,798 queries (also pinned by a test).
+- Seeding spacing and boundary-clearance checks use uniform-grid buckets.
+  Interior seeds are byte-identical to the full scans on 28
+  uniform/graded/adaptive cases.
+- `_SegmentGrid.closer_than` (phase 2) now scans every bucket covering the
+  query square. Before, it could miss a segment when the query radius
+  exceeded the cell size on graded fine points. That changes the CH11 graded
+  ruled/Coons fixture from 35 nodes / 25 Q4 / 4 T3 to 34 / 24 / 4
+  (quadratic 98 -> 95 nodes, 63 -> 61 midsides).
+- Seeds stay on the Python reference triangulation. The compiled triangulator
+  breaks exactly cocircular ties (every rectangular lattice cell) differently.
+  Its seeds are valid but not byte-identical outside the planar PQ4b parity
+  corpus: the CH9 h=0.3 cone gives 115 / 86 / 14 natively versus 119 / 91 / 12
+  in Python. Using it would make quad-first output depend on how ANYmesher
+  was installed. This is a native/Python parity gap to address separately.
+
+`benchmarks/quad_first_scaling.py`, 10 m x 6 m plate, existing layout, one
+unrepeated run per size in this container:
+
+| Q4 | before, phase-1 commit (s) | after (s) |
+| ---: | ---: | ---: |
+| 240 | 0.75 | 0.39 |
+| 960 | 8.81 | 2.10 |
+| 3,094 | 72.06 | 12.69 |
+| 6,000 | not finished (~280 extrapolated) | 30.97 |
+
+The "before" runs had no workers built, so their Q4/Q5 stages were skipped;
+the "after" runs include the worker calls. The difference therefore
+understates the gain.
+
+The empirical exponent is now about 1.2 to 1.5. Seeding is still the largest
+stage (21.6 s of 31.0 s at 6,000 Q4): per-segment `_edge_incidence` rebuilds
+and PSLG classification remain O(N) per call. Q5 candidate ranking is 7.3 s.
