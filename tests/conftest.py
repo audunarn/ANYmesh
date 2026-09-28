@@ -26,6 +26,13 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 os.chdir(_REPOSITORY_ROOT)
 if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
+# Benchmark fixtures (``benchmarks.is1``, ``benchmarks.sg1``) are imported as a
+# package from the repository root.  The installed-wheel job runs pytest in
+# isolated mode without the root on sys.path; append it at the lowest
+# priority.  The root holds no ``anymesher`` package, so the installed
+# distribution is still the one imported.
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.append(str(_REPOSITORY_ROOT))
 
 
 _RUN_GUI_TESTS = os.environ.get("ANYMESHER_RUN_GUI_TESTS", "").casefold() in {

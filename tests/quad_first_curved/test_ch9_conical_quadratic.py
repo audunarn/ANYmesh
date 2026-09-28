@@ -84,11 +84,27 @@ def test_ch9_fine_cone_preserves_ch8_corner_topology() -> None:
     model, face, surface = _model_face("cone")
     quadratic = _generate(model, (face,), 0.3, order="quadratic").mesh
 
-    assert (len(linear.nodes), len(linear.quads), len(linear.tris)) == (119, 91, 12)
-    assert (len(quadratic.nodes), len(quadratic.quads), len(quadratic.tris)) == (340, 91, 12)
+    # This fixture's exact counts are platform dependent: the cross-field
+    # ranking sorts candidate quads by a float score, and exactly tied
+    # candidates are separated by last-bit differences in math.hypot between
+    # C libraries (Linux/Windows 119/91/12, macOS 117/89/12; a one-ulp hypot
+    # perturbation gives 118/90/12).  Assert what holds on every platform:
+    # promotion keeps the linear topology exactly, and the linear result stays
+    # within a narrow, quad-dominant band.
+    nodes, quads, tris = len(linear.nodes), len(linear.quads), len(linear.tris)
+    assert 112 <= nodes <= 124 and 86 <= quads <= 95 and tris <= 16
+    assert quads / (quads + tris) >= 0.85
+    assert (len(quadratic.quads), len(quadratic.tris)) == (quads, tris)
     assert {eid: tuple(body[:4]) for eid, body in quadratic.quads.items()} == linear.quads
     assert {eid: tuple(body[:3]) for eid, body in quadratic.tris.items()} == linear.tris
-    assert len(_edge_mid_map(quadratic)) == 221
+    linear_edges = {
+        tuple(sorted((body[i], body[(i + 1) % len(body)])))
+        for body in (*linear.quads.values(), *linear.tris.values())
+        for i in range(len(body))
+    }
+    midsides = _edge_mid_map(quadratic)
+    assert len(midsides) == len(linear_edges)
+    assert len(quadratic.nodes) == nodes + len(midsides)
     assert _support_residual(quadratic, surface) <= 1.0e-10
     _assert_strict_valid(quadratic)
 

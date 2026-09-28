@@ -146,3 +146,36 @@ understates the gain.
 The empirical exponent is now about 1.2 to 1.5. Seeding is still the largest
 stage (21.6 s of 31.0 s at 6,000 Q4): per-segment `_edge_incidence` rebuilds
 and PSLG classification remain O(N) per call. Q5 candidate ranking is 7.3 s.
+
+## CI follow-up (run 94)
+
+Run 94 on `041ccaa` passed all 4 Windows and all 4 Linux pytest cells, the
+wheel builds, Gmsh, native-v2 contract and native-absent jobs. The worker
+build step passed on all 12 pytest cells. Two failures remained:
+
+- **Installed-wheel full suite:** collection stopped at the IS1 test because
+  the isolated job (`python -I`, `-o pythonpath=`) had no repository root on
+  `sys.path`, so `benchmarks.is1` and `benchmarks.sg1` could not be imported.
+  `tests/conftest.py` now appends the root at the lowest priority. The root
+  has no `anymesher` package, so the installed distribution is still the one
+  tested. Reproduced and verified locally with the job's isolated invocation.
+  `MANIFEST.in` also ships `benchmarks/is1` and `benchmarks/sg1`, so the
+  sdist's own tests collect.
+- **macOS (4 cells), CH9 h=0.3 cone:** macOS gives 117 / 89 / 12 where Linux
+  and Windows give 119 / 91 / 12. Diagnosis:
+  - No shape gate, clearance, MCF or Q5 decision is near its threshold; the
+    smallest gate margin is 0.15%.
+  - One-ulp noise in the chart projection or in edge sampling does not change
+    the result.
+  - One-ulp noise in `math.hypot` inside the cross-field guidance does: 5 of 6
+    perturbed runs give 118 / 90 / 12.
+  - `guidance.rank_bodies` sorts candidate quads by float score, and
+    theoretically tied candidates are separated by last-bit libm
+    differences.
+  - The test now asserts platform-independent invariants instead: exact
+    linear-to-quadratic topology, midsides equal to unique linear edges,
+    quadratic nodes equal to linear nodes plus midsides, and a narrow
+    quad-dominant count band.
+  - The mesher is unchanged. Follow-up option: quantise the ranking score
+    before the deterministic body tie-break, so exact-in-theory ties no
+    longer depend on the platform's libm.
