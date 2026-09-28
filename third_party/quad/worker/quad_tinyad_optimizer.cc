@@ -76,6 +76,14 @@
 // Platform headers stay at file scope: including them inside the anonymous
 // namespace below breaks libstdc++ (std::fputs/std::fflush lookups).
 #if defined(_WIN32) || defined(WIN32)
+// windows.h otherwise defines min/max macros that break Eigen, TinyAD and
+// std::max/std::min below.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #include <csignal>
