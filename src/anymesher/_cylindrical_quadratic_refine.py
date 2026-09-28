@@ -9,7 +9,10 @@ import numpy as np
 
 from ._cylindrical_atlas import CylindricalAtlasBinding
 from ._cylindrical_patch import CylindricalPatchBinding
-from ._cylindrical_open import CylindricalOpenBinding
+try:
+    from ._cylindrical_open import CylindricalOpenBinding
+except ImportError:  # ANYgeometry 0.4.3 predates open-component ownership.
+    CylindricalOpenBinding = None
 from ._cylindrical_quadratic import QuadraticComponentStage
 from ._shared_triangle_split import propagate_triangle_split
 from .core import MeshCore, corner_edges
@@ -38,7 +41,10 @@ def refine_quadratic_component(geometry, seed, binding, station_entries, setting
     requested quality gate returns the original whole component, never a mixed
     split/unsplit mesh. Operational failures and cancellation propagate.
     """
-    if not isinstance(binding, (CylindricalAtlasBinding, CylindricalPatchBinding, CylindricalOpenBinding)):
+    binding_types = (CylindricalAtlasBinding, CylindricalPatchBinding)
+    if CylindricalOpenBinding is not None:
+        binding_types += (CylindricalOpenBinding,)
+    if not isinstance(binding, binding_types):
         raise MeshError("quadratic refinement requires an owner-certified cylinder binding")
     binding.validate()
     faces = tuple(sorted(sector.face.id for sector in binding.face_records))

@@ -8,8 +8,6 @@ from anygeometry.surfaces import Cylinder
 
 from ._cylindrical_atlas import prepare_cylindrical_atlas
 from ._cylindrical_patch import prepare_cylindrical_patch
-from ._cylindrical_open import prepare_cylindrical_open
-from ._cylindrical_quadratic_refine import refine_quadratic_component
 from .errors import MeshError
 from .metric import IsotropicMetricControl, MetricFieldSpec
 from .surface_mesh import SurfaceMeshOptions
@@ -47,6 +45,13 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
                 geometry, selected, cancellation_check=cancellation_check,
             )
         elif len(selected) == 2:
+            try:
+                from ._cylindrical_open import prepare_cylindrical_open
+            except ImportError as error:
+                raise MeshError(
+                    "an open two-face cylinder component needs an ANYgeometry "
+                    "installation with the cylinder-open-component owner API"
+                ) from error
             binding = prepare_cylindrical_open(
                 geometry, selected, cancellation_check=cancellation_check,
             )
@@ -127,6 +132,7 @@ def finish_quadratic_components(geometry, mesh, bindings, boundary_registry, *,
                                 metric_model_uuid=None, metric_geometry_revision=None,
                                 face_diagnostics, cancellation_check=None):
     """Qualify detached components, then merge using fresh global element IDs."""
+    from ._cylindrical_quadratic_refine import refine_quadratic_component
     if not bindings:
         return mesh
     settings = _quadratic_settings(size_field, native_options, quality_options, recombine, backend)

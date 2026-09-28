@@ -2999,7 +2999,17 @@ def _repair_quad_first_quality(
             owner_normals = np.broadcast_to(np.asarray(domain.normal, dtype=float),
                                             jacobians.shape)
         else:
-            uv = geometry.face_local_uv_many(face_id, sampled.points)
+            batch_uv = getattr(geometry, "face_local_uv_many", None)
+            if batch_uv is None:
+                # ANYgeometry 0.4.3 did not yet expose this optional batch
+                # API. Preserve the scalar owner result on that supported
+                # dependency line.
+                uv = np.asarray(
+                    [geometry.face_local_uv(face_id, point) for point in sampled.points],
+                    dtype=float,
+                ).reshape((-1, 2))
+            else:
+                uv = batch_uv(face_id, sampled.points)
             owner_normals = geometry.face_normal_many(face_id, uv)
         cosines = np.einsum("ij,ij->i", jacobians / lengths[:, None], owner_normals)
         return float(np.max(np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))))
