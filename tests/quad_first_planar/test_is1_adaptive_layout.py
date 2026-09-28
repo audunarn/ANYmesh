@@ -102,7 +102,12 @@ def test_adaptive_planar_boundary_quality_precedes_promotion(case: str, h: float
     if case == "planar_opening" and h == .8:
         assert repair["precert_moved"]
     else:
-        assert repair["relocated_quads"]
+        # Since the quad-first shape gates (PQ7) no admitted element reaches
+        # the post-publication repair here; before them these cases needed
+        # quad relocation.
+        assert not repair["relocated_quads"]
+        assert not repair["split_quads"]
+    assert not repair["unresolved_quads"]
 
 
 def test_irregular_independent_audit_detects_duplicated_internal_node() -> None:
