@@ -129,7 +129,9 @@ from .primitives import (
 from .quality import ASPECT_RATIO_LIMIT, WARP_LIMIT, MeshQuality, verify_mesh_quality
 from .s3_quality import (
     DEFAULT_S3_QUALITY_POLICY,
+    S3_ADMISSION_FLOOR_POLICY,
     S3_QUALITY_CONTRACT_ID,
+    S3_TARGET_QUALITY_POLICY,
     S3AdmissionReport,
     S3ElementQuality,
     S3QualityError,
@@ -245,8 +247,10 @@ __all__ = [
     "S3OwnerAuthorityError",
     "S3QualityError",
     "S3QualityPolicy",
+    "S3_ADMISSION_FLOOR_POLICY",
     "S3_QUALITY_CONTRACT_ID",
     "S3_REPAIR_CONTRACT_ID",
+    "S3_TARGET_QUALITY_POLICY",
     "S3RepairAttempt",
     "S3RepairError",
     "S3RepairPolicy",

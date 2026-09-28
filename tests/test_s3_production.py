@@ -82,6 +82,15 @@ def test_production_preparation_binds_deterministic_owner_and_nodal_normals() ->
         np.testing.assert_allclose(value, (0.0, 0.0, 1.0))
     restored = mesh_from_dict(mesh_to_dict(first.mesh))
     assert restored.structural_preparation["qualified_s3"] == first_record
+    assert first_record["contract_id"] == (
+        "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V2"
+    )
+    assert first_record["quality_policy"]["minimum_angle_deg"] == 15.0
+    assert first_record["quality_policy"]["minimum_normalized_area"] == 0.30
+    assert first_record["quality_target"]["policy"]["minimum_angle_deg"] == 30.0
+    assert first_record["quality_target"]["met"] is (
+        not first_record["quality_target"]["shortfall_element_ids"]
+    )
 
 
 def test_reversed_sheet_orientation_repairs_winding_to_physical_director() -> None:
@@ -237,3 +246,35 @@ def test_qualified_s3_controls_reject_non_boolean_values() -> None:
 
     with pytest.raises(MeshError, match="qualified_s3 must be Boolean"):
         _native(geometry, qualified_s3="yes")
+
+
+def test_production_admits_a_triangle_between_floor_and_target_and_reports_it() -> None:
+    """A 20 degree sliver the bounded repair cannot lift to 30 is admitted."""
+
+    from math import radians, tan
+
+    geometry, face_id = _square()
+    mesh = Mesh(
+        nodes={
+            1: np.asarray((0.0, 0.0, 0.0)),
+            2: np.asarray((1.0, 0.0, 0.0)),
+            3: np.asarray((1.0, tan(radians(20.0)), 0.0)),
+        },
+        tris={10: (1, 2, 3)},
+        elements_of_face={face_id: [10]},
+    )
+
+    prepared, record = prepare_qualified_s3_mesh(mesh, geometry)
+
+    assert record["status"] == "ADMITTED"
+    assert record["quality_target"]["met"] is False
+    assert record["quality_target"]["shortfall_element_ids"] == [10]
+    assert record["admission"]["elements"][0]["violations"] == []
+    assert record["admission"]["elements"][0]["minimum_angle_deg"] == pytest.approx(20.0)
+    assert set(prepared.tris) == {10}
+
+    strict = pytest.raises(S3RepairError)
+    from anymesher import S3_TARGET_QUALITY_POLICY
+
+    with strict:
+        prepare_qualified_s3_mesh(mesh, geometry, quality_policy=S3_TARGET_QUALITY_POLICY)

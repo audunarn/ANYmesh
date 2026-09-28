@@ -23,8 +23,11 @@ from .errors import MeshError
 from .mapped import nodal_normals
 from .mesh import Mesh
 from .s3_quality import (
+    DEFAULT_S3_QUALITY_POLICY,
     S3_QUALITY_CONTRACT_ID,
+    S3_TARGET_QUALITY_POLICY,
     S3QualityError,
+    S3QualityPolicy,
     assert_s3_admissible,
 )
 from .s3_repair import (
@@ -43,7 +46,9 @@ __all__ = [
 
 
 QUALIFIED_S3_PRODUCTION_CONTRACT_ID = (
-    "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V1"
+    # V2: repair works towards the preferred target and admission enforces the
+    # solver floor; the record carries both policies and target attainment.
+    "ANYMESHER_QUALIFIED_S3_PRODUCTION_PREPARATION_V2"
 )
 # Exact formulation identity qualified by ANYsolver's accepted V6W record.
 # The mesher binds this identity but does not import solver mechanics.
@@ -225,17 +230,33 @@ def _attempt_record(item: Any) -> dict[str, Any]:
     }
 
 
+def _policy_record(policy: S3QualityPolicy) -> dict[str, Any]:
+    return {
+        "maximum_angle_deg": float(policy.maximum_angle_deg),
+        "maximum_edge_ratio": float(policy.maximum_edge_ratio),
+        "minimum_angle_deg": float(policy.minimum_angle_deg),
+        "minimum_normalized_area": float(policy.minimum_normalized_area),
+        "minimum_scaled_jacobian": float(policy.minimum_scaled_jacobian),
+    }
+
+
 def prepare_qualified_s3_mesh(
     mesh: Mesh,
     geometry: GeometryModel,
     *,
     repair_policy: S3RepairPolicy = DEFAULT_S3_REPAIR_POLICY,
+    quality_policy: S3QualityPolicy = DEFAULT_S3_QUALITY_POLICY,
+    target_policy: S3QualityPolicy | None = S3_TARGET_QUALITY_POLICY,
 ) -> tuple[Mesh, dict[str, Any]]:
     """Return a fully admitted copied mesh plus deterministic authority data.
 
     The function is called only when the production qualified-S3 control is
     selected.  It performs one bounded repair request.  It never retries and
     never returns the caller's mesh after a failed qualification.
+
+    Repair works towards ``target_policy`` (the preferred 30 degree shape);
+    the mesh is rejected only if it violates ``quality_policy`` (the solver
+    floor, 15 degrees by default).  The record reports target attainment.
     """
 
     if not isinstance(mesh, Mesh):
@@ -260,7 +281,7 @@ def prepare_qualified_s3_mesh(
             "legacy_fallback": "FORBIDDEN",
             "quality_contract_id": S3_QUALITY_CONTRACT_ID,
             "repair_contract_id": S3_REPAIR_CONTRACT_ID,
-            "schema": "anymesher.qualified-s3-production-preparation-v1",
+            "schema": "anymesher.qualified-s3-production-preparation-v2",
             "status": "NOT_APPLICABLE_NO_TRIANGLES",
         }
 
@@ -271,7 +292,9 @@ def prepare_qualified_s3_mesh(
         element_owner_normals={
             element_id: shell_owners[element_id] for element_id in triangle_ids
         },
+        quality_policy=quality_policy,
         repair_policy=repair_policy,
+        target_policy=target_policy,
     )
     made = repair.mesh
     shell_owners, owner_sources = _shell_owner_authority(geometry, made)
@@ -282,6 +305,16 @@ def prepare_qualified_s3_mesh(
             element_id: shell_owners[element_id]
             for element_id in repair.element_ids
         },
+        policy=quality_policy,
+    )
+    target_shortfall = (
+        []
+        if repair.target_admission is None
+        else [
+            int(item.element_id)
+            for item in repair.target_admission.elements
+            if not item.admitted
+        ]
     )
     try:
         mixed_normals = nodal_normals(
@@ -336,6 +369,14 @@ def prepare_qualified_s3_mesh(
             for node_id in sorted(mixed_normals)
         },
         "quality_contract_id": S3_QUALITY_CONTRACT_ID,
+        "quality_policy": _policy_record(quality_policy),
+        "quality_target": {
+            "met": not target_shortfall,
+            "policy": (
+                None if target_policy is None else _policy_record(target_policy)
+            ),
+            "shortfall_element_ids": target_shortfall,
+        },
         "repair": {
             "added_elements": int(repair.added_elements),
             "added_nodes": int(repair.added_nodes),
@@ -347,7 +388,7 @@ def prepare_qualified_s3_mesh(
             "winding_repairs": int(repair.winding_repairs),
         },
         "repair_contract_id": S3_REPAIR_CONTRACT_ID,
-        "schema": "anymesher.qualified-s3-production-preparation-v1",
+        "schema": "anymesher.qualified-s3-production-preparation-v2",
         "status": "ADMITTED",
     }
     return made, record
