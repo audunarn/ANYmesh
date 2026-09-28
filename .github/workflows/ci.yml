@@ -141,7 +141,7 @@ jobs:
             python -m pip install --no-deps {project}/.ecosystem/ANYgeometry
           CIBW_TEST_COMMAND: >-
             python {project}/tools/release_wheel_smoke.py
-            --expect-version 0.5.0 --require-native
+            --expect-version 0.5.1 --require-native
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4
@@ -172,7 +172,7 @@ jobs:
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev,planar]"
       - run: python -m pip uninstall --yes anymesher
-      - run: python -m pip install --no-deps dist/anymesher-0.5.0-cp313-cp313-manylinux*.whl
+      - run: python -m pip install --no-deps dist/anymesher-0.5.1-cp313-cp313-manylinux*.whl
       - name: Prove installed origin and compiled availability
         run: >-
           python -I -B -c "import anymesher, importlib.util, pathlib, sys;

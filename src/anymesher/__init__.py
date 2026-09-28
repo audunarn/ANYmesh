@@ -187,7 +187,7 @@ from .automation import (
     MeshPlan,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     "ASPECT_RATIO_LIMIT",

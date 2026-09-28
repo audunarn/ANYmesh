@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-09-28
+
 - Fix mapped meshing of faces whose four declared sides fold under the
   transfinite map, such as an L-shaped plate with its re-entrant corner inside
   one mapped side. Through 0.5.0 the automatic strategy published such a mesh

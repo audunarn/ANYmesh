@@ -52,7 +52,7 @@ def test_version_matches_pyproject() -> None:
 
 def test_release_metadata_is_0_5_0_alpha_and_mpl_2_0() -> None:
     project = _pyproject()["project"]
-    assert project["version"] == "0.5.0"
+    assert project["version"] == "0.5.1"
     assert project["requires-python"] == ">=3.11"
     assert project["license"] == "MPL-2.0"
     assert "Development Status :: 3 - Alpha" in project["classifiers"]
@@ -166,7 +166,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     ) == 1
     assert 'python -m pip install -e ".[dev,gmsh]"' not in ci
     assert ci.count("tools/release_wheel_smoke.py") == 1
-    assert ci.count("--expect-version 0.5.0 --require-native") == 1
+    assert ci.count("--expect-version 0.5.1 --require-native") == 1
     assert ci.count("name: Install Ubuntu Gmsh runtime") == 1
     assert ci.count("if: runner.os == 'Linux'") == 1
     assert ci.count("sudo apt-get update") == 1
@@ -199,7 +199,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "skip-existing:" not in publish
     assert "name: pypi" in publish
     assert "url: https://pypi.org/p/ANYmesher" in publish
-    assert "name: ANYmesher-0.5.0-pypi-distributions" in publish
+    assert "name: ANYmesher-0.5.1-pypi-distributions" in publish
     assert "dist/*.whl" in publish
     assert "dist/*.tar.gz" in publish
     assert "permissions:\n  contents: read" in publish
@@ -212,12 +212,12 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert publish.count('CIBW_ENVIRONMENT: "ANYMESHER_REQUIRE_NATIVE=1"') == 1
     assert "expected 12 wheels" in publish
     assert 'expected_pythons = {"cp311", "cp312", "cp313", "cp314"}' in publish
-    assert 'name: ANYmesher-0.5.0-release-bundle' in publish
-    assert 'sdist = root / "anymesher-0.5.0.tar.gz"' in publish
-    assert 'root.glob("anymesher-0.5.0-*.whl")' in publish
-    assert '"version": "0.5.0"' in publish
-    assert "ANYmesher-0.5.0-SHA256SUMS.txt" in publish
-    assert "ANYmesher-0.5.0-release-manifest.json" in publish
+    assert 'name: ANYmesher-0.5.1-release-bundle' in publish
+    assert 'sdist = root / "anymesher-0.5.1.tar.gz"' in publish
+    assert 'root.glob("anymesher-0.5.1-*.whl")' in publish
+    assert '"version": "0.5.1"' in publish
+    assert "ANYmesher-0.5.1-SHA256SUMS.txt" in publish
+    assert "ANYmesher-0.5.1-release-manifest.json" in publish
     assert 'metadata["License-Expression"] != "MPL-2.0"' in publish
     assert "sdist missing license files" in publish
     assert "license file set mismatch" in publish
@@ -226,7 +226,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     assert "RECORD self-row must be blank" in publish
     assert "RECORD integrity mismatch" in publish
     assert publish.count("tools/release_wheel_smoke.py") == 1
-    assert publish.count("--expect-version 0.5.0 --require-native") == 1
+    assert publish.count("--expect-version 0.5.1 --require-native") == 1
 
 
 def test_sdist_contains_the_installed_wheel_smoke_and_cylinder_fixture(
@@ -246,11 +246,11 @@ def test_sdist_contains_the_installed_wheel_smoke_and_cylinder_fixture(
         check=True,
         cwd=REPOSITORY_ROOT,
     )
-    archives = list(output.glob("anymesher-0.5.0.tar.gz"))
+    archives = list(output.glob("anymesher-0.5.1.tar.gz"))
     assert len(archives) == 1
     with tarfile.open(archives[0], mode="r:gz") as archive:
         members = set(archive.getnames())
-    root = "anymesher-0.5.0"
+    root = "anymesher-0.5.1"
     assert f"{root}/tools/release_wheel_smoke.py" in members
     assert f"{root}/benchmarks/native_v2_cylinder_cases.py" in members
 

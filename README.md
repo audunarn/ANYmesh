@@ -272,8 +272,8 @@ explicitly experimental and cannot be serialized or passed through automation.
 ### Experimental: quad-first meshing
 
 An experimental, opt-in quad-first route builds quad-dominant shells on
-selected faces. It is not part of the 0.5.0 release and its output, options and
-diagnostics may change. `quad_options=None` (the default) keeps every existing
+selected faces. It was added in 0.5.1; its output, options and diagnostics may
+still change. `quad_options=None` (the default) keeps every existing
 route byte-identical.
 
 ```python

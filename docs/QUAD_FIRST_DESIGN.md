@@ -4,8 +4,8 @@ Status: **Q0 — contracts and reuse freeze.** This document records the Q0
 design decisions and the exact invariants the later milestones must preserve.
 It is not a runbook; the milestone scope lives in `QUAD_FIRST_FULL_PROGRAMME.md`.
 
-> **Current status (post-0.5.0):** the route described here is public as an
-> **experimental opt-in** on `main` (see `CHANGELOG.md`, *Unreleased*). It was
+> **Current status (0.5.1):** the route described here is public as an
+> **experimental opt-in**, first released in 0.5.1 (see `CHANGELOG.md`). It was
 > not part of the 0.5.0 release. The planar and curved qualification records
 > are `docs/PLANAR_QUAD_DESIGN.md`, `docs/CURVED_QUAD_DESIGN.md` and
 > `reports/quad_first/*/WORK_STATUS.md`. The optional workers are built with

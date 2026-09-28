@@ -6,7 +6,7 @@ older remaining-gate prose where that prose treats repeated runtime comparison
 as a 0.5.0 release blocker.
 
 Historical note: the released 0.5.0 artifacts do not contain the quad-first
-route. It landed on `main` afterwards as an experimental opt-in; see
+route. It was first released in 0.5.1 as an experimental opt-in; see
 `CHANGELOG.md`.
 
 ## Frozen scope
