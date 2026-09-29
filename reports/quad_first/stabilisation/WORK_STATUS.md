@@ -259,3 +259,69 @@ Remaining limits and follow-ups:
   none.
 - MCF `_pair_graph` / `make_quad` and the front step are linear, but with
   high constant factors (`_int_or_err`/`position` per access).
+
+## Phase 5: curved paths and owner geometry (results unchanged)
+
+Question: after phase 4, what makes small curved and refined meshes slow (for
+example ~10 s for 184 cells on a refined Coons face)? The phase-4 note
+attributed it to ANYgeometry projection. The user authorized changes in
+ANYgeometry for this release. Profiling the whole IS1 corpus and the slowest
+real-workflow tests found these costs. Every replacement is exact and keeps
+the replaced code as a bit-for-bit oracle in tests.
+
+| Owner | Cost | Replacement |
+| --- | --- | --- |
+| ANYmesher `charts.FaceChart` | `import_module("anygeometry.meshing")` failed and rescanned the filesystem on every chart call (~196k calls); `inspect.signature` was rebuilt per call | import resolved once per process; signatures cached per function |
+| ANYmesher `high_order` | the validity Jacobian built `shape_gradients` via column stacking plus `np.cross` for every point, and the root patch twice | the same element-wise expressions into the same array layout, a multiply-then-subtract cross, and a per-certification memo (signed zeros distinct) |
+| ANYgeometry surfaces | Coons/ruled `_sample` called `np.clip` on scalars; `closest_uv` ran point by point from `face_local_uv_many` and `face_trim_loops_uv` | scalar clamp (identical for signed zeros, infinities and NaN); a batched Gauss-Newton with the scalar element-wise order and per-point `lstsq` |
+| ANYgeometry cylinders/cones | `circumferential_direction` recomputed `np.cross` per access | computed once as a non-field attribute; callers get a copy |
+| ANYgeometry trims | `face_trim_loops_uv` re-projected every trim vertex on every `project_to_face` | reused for the same committed revision and `Face` object; never inside a transaction; cleared on clone and deserialization; copies returned |
+| ANYgeometry topology Coons | 8 boundary-chain evaluations per point, 4 of them the constant corners; per-call length arrays, id validation and ~40 tiny NumPy operations | corners and resolved chain data cached under the trim-loop rule (a miss keeps the original evaluation and error order); length arrays keyed by the exact lengths; blending per component in the former order |
+| ANYgeometry atlas proof | `Fraction` products and roundings; `atan_series`, `atan2`, `sincos` and `cross` recomputed repeatedly within one proof | exact integer rounding for `add`/`mul`, with the original code whenever a bit budget could bind; per-proof memo that replays the recorded work charges (π-dependent operations only after π exists). Queries and binding validation still requalify from scratch. |
+| ANYgeometry trim membership | edge loop of 1-element NumPy operations per point | points × edges evaluated at once for small finite inputs |
+
+Evidence (same environment as phase 4; ANYgeometry from
+`claude/projection-perf` at `C:/Github/ANYgeometry-perf-045`, based on
+`origin/main` `c0f1d80`, source-identical to 0.4.4):
+
+- ANYmesher fingerprints: 86/86 identical to `main` with ANYgeometry 0.4.4.
+- Hole-punched 2 x 2 plate (`test_operations` butterfly, h = 0.15): full
+  `mesh_to_dict` identical apart from `preparation_hash` and
+  `structural_preparation_hash`, which already differ between two runs of the
+  same code because they hash the random model ID.
+- Cylinder atlas: complete `CylinderAtlasResult` content (sectors,
+  occurrences, intervals, certificates with work counts) identical to 0.4.4
+  on 10 queries plus validations. In ANYgeometry tests, the memoized proof
+  matches recomputation in results, work counts, callback sequences and
+  budget refusals.
+- ANYgeometry suite: 987 passed. 3 release-authority tests failed on a local
+  `git push` to a temporary origin; the unmodified checkout fails 6 of those
+  7 in this environment.
+- ANYmesher full suite with the new ANYgeometry and
+  `ANYMESHER_REQUIRE_QUAD_WORKERS=1`: 1925 passed, 29 skipped, in 20 min.
+  The phase-4 run with 0.4.4 took 50 min.
+
+Timings (same machine, sequential runs):
+
+| Case | main + 0.4.4 (s) | this branch + candidate (s) |
+| --- | ---: | ---: |
+| IS1 corpus, 72 meshes | 104.3 | 31.9 |
+| - Coons cases | 29.7 | 6.1 |
+| - ruled cases | 16.4 | 5.1 |
+| - cylinder cases | 40.3 | 13.9 |
+| - cone cases | 14.5 | 4.6 |
+| hole-punched plate, one `generate_mesh` (under load) | 646 | 165 |
+| `test_punching_a_hole_leaves_a_meshable_ring` (under load) | 1302 | 437 |
+
+Remaining limits:
+
+- Structural-closure preparation (`find_coplanar_overlaps` -> curved
+  face-face qualification) still dominates hole-punched and stripped-cylinder
+  models. Its scalar `closest_uv` on topology surfaces always runs all 30
+  finite-difference Gauss-Newton iterations. Reducing that changes the
+  numerical path and needs a qualified ANYgeometry change, not an exact
+  refactor.
+- The atlas proof and IS1 repair still use per-point `np.linalg.lstsq`.
+  Batching it would change the last bits.
+- The ANYgeometry changes need that owner's review and release (0.4.5).
+  ANYmesher does not require them.

@@ -20,6 +20,19 @@
   about 6,000 Q4, with or without a hole, drops from 19-24 s to 5-6 s.
   Scaling is now close to linear. The quad-first output is identical to 0.5.1
   on 86 planar, curved, refined, quadratic and adaptive cases.
+- Speed up curved quad-first repair and quadratic promotion without changing
+  results:
+  - Face-chart dispatch resolves the optional `anygeometry.meshing` import
+    and method signatures once per process, instead of a failed import
+    search on every chart call.
+  - High-order validity certification evaluates its Jacobian from exact
+    single-point shape gradients and reuses repeated parameters.
+- ANYmesher gains more from the next ANYgeometry release (0.4.5 candidate,
+  `claude/projection-perf`), which makes projection, topology Coons
+  evaluation and cylinder-atlas qualification faster with bit-identical
+  results. No dependency change is needed; meshes are identical with 0.4.4.
+  With both, the 72-case IS1 curved corpus drops from 104 s to 32 s, and
+  meshing a hole-punched plate drops from 646 s to 165 s.
 
 ## 0.5.1 - 2026-09-28
 
