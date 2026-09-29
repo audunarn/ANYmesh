@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
-from math import floor, fsum, hypot
+from math import floor, fsum, hypot, isfinite, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -146,28 +146,44 @@ def _near_ring_edges(point: np.ndarray, first: np.ndarray, second: np.ndarray, t
     return np.flatnonzero(near).tolist()
 
 
-def _point_on_ring(point: np.ndarray, points: np.ndarray, ring: Sequence[int], tolerance: float) -> bool:
-    """``any(_point_on_segment(...))`` over the ring edges, bbox-prefiltered."""
+def _point_on_ring(
+    point: np.ndarray,
+    points: np.ndarray,
+    ring: Sequence[int],
+    tolerance: float,
+    edges: tuple[np.ndarray, np.ndarray] | None = None,
+) -> bool:
+    """``any(_point_on_segment(...))`` over the ring edges, bbox-prefiltered.
+
+    ``edges`` may carry ``_ring_arrays(points, ring)`` precomputed by a caller
+    that queries the same ring many times.
+    """
     if len(ring) == 0:
         return False
-    first, second = _ring_arrays(points, ring)
+    first, second = _ring_arrays(points, ring) if edges is None else edges
     return any(
         _point_on_segment(point, first[index], second[index], tolerance)
         for index in _near_ring_edges(point, first, second, tolerance)
     )
 
 
-def _point_in_ring(point: np.ndarray, points: np.ndarray, ring: Sequence[int], tolerance: float) -> bool:
+def _point_in_ring(
+    point: np.ndarray,
+    points: np.ndarray,
+    ring: Sequence[int],
+    tolerance: float,
+    edges: tuple[np.ndarray, np.ndarray] | None = None,
+) -> bool:
     """Even-odd containment, ``True`` on the ring within ``tolerance``.
 
     Vectorized but decision-identical to the original scalar loop: on-ring
     detection keeps the exact ``_point_on_segment`` test behind the same
     bounding-box comparisons, and each crossing abscissa is evaluated with the
-    same operation order.
+    same operation order.  ``edges`` is as for ``_point_on_ring``.
     """
     if len(ring) == 0:
         return False
-    first, second = _ring_arrays(points, ring)
+    first, second = _ring_arrays(points, ring) if edges is None else edges
     if any(
         _point_on_segment(point, first[index], second[index], tolerance)
         for index in _near_ring_edges(point, first, second, tolerance)
@@ -442,13 +458,26 @@ def _prepare_pslg(
             epsilon,
         )
     split_records: list[tuple[int, int, str]] = []
+    point_x, point_y = points[:, 0], points[:, 1]
     for record_index, (first, second, kind) in enumerate(records):
         start, end = points[first], points[second]
         direction = end - start
         denominator = float(np.dot(direction, direction))
         if compiled_memberships is None:
             members: list[tuple[float, int]] = []
-            for row, point in enumerate(points):
+            # The same bounding-box comparisons ``_point_on_segment`` starts
+            # with, vectorized; every row it could accept stays a candidate
+            # and is still decided by the scalar test, in ascending row order.
+            start_x, start_y = float(start[0]), float(start[1])
+            end_x, end_y = float(end[0]), float(end[1])
+            near = (
+                (min(start_x, end_x) - epsilon <= point_x)
+                & (point_x <= max(start_x, end_x) + epsilon)
+                & (min(start_y, end_y) - epsilon <= point_y)
+                & (point_y <= max(start_y, end_y) + epsilon)
+            )
+            for row in np.flatnonzero(near).tolist():
+                point = points[row]
                 if _point_on_segment(point, start, end, epsilon):
                     parameter = float(np.dot(point - start, direction) / denominator)
                     if -epsilon <= parameter <= 1.0 + epsilon:
@@ -475,14 +504,16 @@ def _prepare_pslg(
             tuple(np.asarray(ring, dtype=np.int64) for ring in holes),
             epsilon,
         )
+    outer_edges = _ring_arrays(points, outer) if outer else None
+    hole_edges = [_ring_arrays(points, ring) if ring else None for ring in holes]
     for row, point in enumerate(points):
         if compiled_domain is None:
-            on_outer = _point_on_ring(point, points, outer, epsilon)
-            inside = _point_in_ring(point, points, outer, epsilon)
+            on_outer = _point_on_ring(point, points, outer, epsilon, outer_edges)
+            inside = _point_in_ring(point, points, outer, epsilon, outer_edges)
             in_hole = any(
-                _point_in_ring(point, points, ring, epsilon)
-                and not _point_on_ring(point, points, ring, epsilon)
-                for ring in holes
+                _point_in_ring(point, points, ring, epsilon, edges)
+                and not _point_on_ring(point, points, ring, epsilon, edges)
+                for ring, edges in zip(holes, hole_edges)
             )
         else:
             on_outer, inside, in_hole = map(bool, compiled_domain[row])
@@ -543,6 +574,14 @@ def _circumcircle(work: np.ndarray, triangle: tuple[int, int, int]) -> tuple[flo
 # Relative slack for rounding in the distance evaluation itself.
 _CIRCLE_FILTER_SLACK = 1.0e-8
 
+# Cavity-search grid margins (``_bowyer_watson``).  The registered disk must
+# contain every point the pre-filter keeps; these margins exceed the filter's
+# own slack by orders of magnitude and only cost a few extra candidates.
+_GRID_RADIUS_MARGIN = 1.0e-6
+_GRID_ABSOLUTE_MARGIN = 1.0e-9
+# Disks covering more cells than this are checked on every insertion instead.
+_GRID_GLOBAL_CELLS = 64
+
 
 def _incircle_candidates(data: np.ndarray, point: np.ndarray) -> np.ndarray:
     """Rows (ascending) whose circumcircle may strictly contain ``point``.
@@ -586,29 +625,134 @@ def _bowyer_watson(points: np.ndarray) -> list[tuple[int, int, int]]:
         ]
     )
     work = np.vstack((points, super_points))
-    triangles: list[tuple[int, int, int]] = [(count, count + 1, count + 2)]
-    # One circumcircle row per entry of ``triangles``, kept aligned.
-    circles = np.asarray([_circumcircle(work, triangles[0])], dtype=np.float64)
+    # Plain float tuples: the scalar predicates read the same values, faster
+    # than indexing numpy rows.
+    coords = [tuple(row) for row in work.tolist()]
+    # Triangles live in reusable slots so an insertion costs O(cavity) work
+    # instead of rebuilding every list and array.  ``slots[row]`` and
+    # ``circles[row]`` stay aligned; ``alive`` marks occupied rows.  The live
+    # triangles form a set: which slot a triangle occupies never affects which
+    # triangles exist.
+    capacity = 2 * count + 16
+    slots: list[tuple[int, int, int] | None] = [None] * capacity
+    circles = np.zeros((capacity, 6), dtype=np.float64)
+    alive = np.zeros(capacity, dtype=bool)
+    free: list[int] = list(range(capacity - 1, -1, -1))
+
+    # Every query point is an input point, so a uniform grid over the input
+    # bounding box locates candidates.  Each triangle is registered in the
+    # cells met by the bounding box of a disk that contains every point the
+    # circumcircle pre-filter would keep: the computed radius widened by a
+    # relative margin (far above the filter's 1e-8 slack), twice the
+    # circumcentre error bound and an absolute rounding margin.  Unbounded or
+    # very large disks (super-triangle fans, needles) stay on a short global
+    # list that every query also checks.  Candidates therefore remain a
+    # superset of the full-scan pre-filter's, and ``incircle`` decides each.
+    low_x, low_y = float(minimum[0]), float(minimum[1])
+    extent_x = float(maximum[0]) - low_x
+    extent_y = float(maximum[1]) - low_y
+    per_axis = max(1, int(np.ceil(np.sqrt(count))))
+    cell_size = max(extent_x, extent_y) / per_axis
+    if not (np.isfinite(cell_size) and cell_size > 0.0):
+        cell_size = 1.0
+    columns = int(extent_x / cell_size) + 1
+    grid_rows = int(extent_y / cell_size) + 1
+    buckets: dict[int, set[int]] = {}
+    registered: dict[int, list[int]] = {}
+    global_rows: set[int] = set()
+
+    def column_of(x: float) -> int:
+        return min(columns - 1, max(0, floor((x - low_x) / cell_size)))
+
+    def row_of(y: float) -> int:
+        return min(grid_rows - 1, max(0, floor((y - low_y) / cell_size)))
+
+    def register(
+        row: int,
+        triangle: tuple[int, int, int],
+        circle: tuple[float, float, float, float, float, float],
+    ) -> None:
+        if triangle[0] >= count or triangle[1] >= count or triangle[2] >= count:
+            # Super-triangle fans have enormous disks; skip the arithmetic.
+            global_rows.add(row)
+            return
+        ax, ay, ux, uy, radius2, delta = circle
+        radius = (
+            sqrt(radius2) * (1.0 + _GRID_RADIUS_MARGIN)
+            + 4.0 * delta
+            + _GRID_ABSOLUTE_MARGIN * (abs(ax) + abs(ay) + abs(ux) + abs(uy) + span)
+        )
+        center_x, center_y = ax + ux, ay + uy
+        if not (isfinite(radius) and isfinite(center_x) and isfinite(center_y)):
+            global_rows.add(row)
+            return
+        first_column, last_column = column_of(center_x - radius), column_of(center_x + radius)
+        first_row, last_row = row_of(center_y - radius), row_of(center_y + radius)
+        if (last_column - first_column + 1) * (last_row - first_row + 1) > _GRID_GLOBAL_CELLS:
+            global_rows.add(row)
+            return
+        keys = [
+            grid_row * columns + column
+            for grid_row in range(first_row, last_row + 1)
+            for column in range(first_column, last_column + 1)
+        ]
+        for key in keys:
+            buckets.setdefault(key, set()).add(row)
+        registered[row] = keys
+
+    def release(row: int) -> None:
+        keys = registered.pop(row, None)
+        if keys is None:
+            global_rows.discard(row)
+        else:
+            for key in keys:
+                buckets[key].discard(row)
+        slots[row] = None
+        alive[row] = False
+        free.append(row)
+
+    def store(triangle: tuple[int, int, int]) -> None:
+        nonlocal capacity, circles, alive
+        if not free:
+            slots.extend([None] * capacity)
+            circles = np.vstack((circles, np.zeros((capacity, 6), dtype=np.float64)))
+            alive = np.concatenate((alive, np.zeros(capacity, dtype=bool)))
+            free.extend(range(2 * capacity - 1, capacity - 1, -1))
+            capacity *= 2
+        row = free.pop()
+        slots[row] = triangle
+        circle = _circumcircle(coords, triangle)
+        circles[row] = circle
+        alive[row] = True
+        register(row, triangle, circle)
+
+    store((count, count + 1, count + 2))
     insertion_order = sorted(range(count), key=lambda row: (float(points[row, 0]), float(points[row, 1]), row))
     for point_id in insertion_order:
         # Exactly the triangles a full scan with the adaptive ``incircle``
-        # predicate would select: the conservative circumcircle pre-filter only
-        # skips triangles the point is clearly outside of, and every remaining
-        # candidate is still decided by ``incircle``.  The cavity is a set, so
-        # neither the row order nor the triangle list order affects the result.
+        # predicate would select: the grid and the conservative circumcircle
+        # pre-filter only skip triangles the point is clearly outside of, and
+        # every remaining candidate is still decided by ``incircle``.  The
+        # cavity is a set, so neither the row order nor the triangle list order
+        # affects the result.
+        point = coords[point_id]
+        nearby = buckets.get(row_of(float(point[1])) * columns + column_of(float(point[0])))
+        rows = np.asarray(
+            sorted(global_rows.union(nearby) if nearby else global_rows), dtype=np.int64
+        )
         bad = [
             row
-            for row in _incircle_candidates(circles, work[point_id]).tolist()
+            for row in rows[_incircle_candidates(circles[rows], point)].tolist()
             if incircle(
-                work[triangles[row][0]], work[triangles[row][1]], work[triangles[row][2]], work[point_id]
+                coords[slots[row][0]], coords[slots[row][1]], coords[slots[row][2]], point
             ) > 0.0
         ]
         if not bad:
             bad = [
                 row
-                for row, triangle in enumerate(triangles)
+                for row in np.flatnonzero(alive).tolist()
                 if all(
-                    orient2d(work[triangle[index]], work[triangle[(index + 1) % 3]], work[point_id]) >= 0.0
+                    orient2d(coords[slots[row][index]], coords[slots[row][(index + 1) % 3]], point) >= 0.0
                     for index in range(3)
                 )
             ]
@@ -616,30 +760,24 @@ def _bowyer_watson(points: np.ndarray) -> list[tuple[int, int, int]]:
             raise MeshError("Delaunay insertion could not locate a point")
         edge_counts: dict[tuple[int, int], int] = {}
         for row in bad:
-            triangle = triangles[row]
+            triangle = slots[row]
             for index in range(3):
                 edge = _normal_edge(triangle[index], triangle[(index + 1) % 3])
                 edge_counts[edge] = edge_counts.get(edge, 0) + 1
-        keep = np.ones(len(triangles), dtype=bool)
-        keep[bad] = False
-        triangles = [triangle for triangle, alive in zip(triangles, keep.tolist()) if alive]
-        added: list[tuple[int, int, int]] = []
+        for row in bad:
+            release(row)
         for first, second in sorted(edge for edge, frequency in edge_counts.items() if frequency == 1):
-            determinant = orient2d(work[first], work[second], work[point_id])
+            determinant = orient2d(coords[first], coords[second], point)
             if determinant > 0.0:
-                added.append((first, second, point_id))
+                store((first, second, point_id))
             elif determinant < 0.0:
-                added.append((second, first, point_id))
-        triangles.extend(added)
-        circles = np.vstack((
-            circles[keep],
-            np.asarray([_circumcircle(work, triangle) for triangle in added], dtype=np.float64).reshape((-1, 6)),
-        ))
+                store((second, first, point_id))
+    triangles = [triangle for triangle in slots if triangle is not None]
     result = {
         _canonical_triangle(triangle, work)
         for triangle in triangles
         if all(node < count for node in triangle)
-        and orient2d(work[triangle[0]], work[triangle[1]], work[triangle[2]]) != 0.0
+        and orient2d(coords[triangle[0]], coords[triangle[1]], coords[triangle[2]]) != 0.0
     }
     return sorted(result)
 
@@ -848,12 +986,29 @@ def _recover_segment(
     return _recover_segment_by_cavity(points, triangles, target, protected)
 
 
-def _inside_domain(point: np.ndarray, prepared: _PreparedPSLG) -> bool:
-    if not _point_in_ring(point, prepared.points, prepared.outer, prepared.tolerance):
+def _domain_ring_edges(
+    prepared: _PreparedPSLG,
+) -> tuple[tuple[np.ndarray, np.ndarray] | None, ...]:
+    """``_ring_arrays`` of the outer ring and each hole, for ``_inside_domain``."""
+    return tuple(
+        _ring_arrays(prepared.points, ring) if len(ring) else None
+        for ring in (prepared.outer, *prepared.holes)
+    )
+
+
+def _inside_domain(
+    point: np.ndarray,
+    prepared: _PreparedPSLG,
+    ring_edges: tuple[tuple[np.ndarray, np.ndarray] | None, ...] | None = None,
+) -> bool:
+    """``ring_edges`` may carry ``_domain_ring_edges(prepared)``."""
+    if ring_edges is None:
+        ring_edges = (None,) * (1 + len(prepared.holes))
+    if not _point_in_ring(point, prepared.points, prepared.outer, prepared.tolerance, ring_edges[0]):
         return False
     return not any(
-        _point_in_ring(point, prepared.points, ring, prepared.tolerance)
-        for ring in prepared.holes
+        _point_in_ring(point, prepared.points, ring, prepared.tolerance, edges)
+        for ring, edges in zip(prepared.holes, ring_edges[1:])
     )
 
 
@@ -866,6 +1021,7 @@ def _finish_triangles(
     if raw.ndim != 2 or raw.shape[1] != 3:
         raise MeshError("triangulation must contain three-node triangles")
     canonical: set[tuple[int, int, int]] = set()
+    ring_edges = _domain_ring_edges(prepared)
     for triangle in raw:
         if np.any(triangle < 0) or np.any(triangle >= len(points)) or len(set(map(int, triangle))) != 3:
             raise MeshError("triangulation contains invalid connectivity")
@@ -873,7 +1029,7 @@ def _finish_triangles(
         if orient2d(points[candidate[0]], points[candidate[1]], points[candidate[2]]) <= 0.0:
             raise MeshError("triangulation contains a zero-area triangle")
         centroid = np.mean(points[np.asarray(candidate)], axis=0)
-        if _inside_domain(centroid, prepared):
+        if _inside_domain(centroid, prepared, ring_edges):
             canonical.add(candidate)
     result = np.asarray(sorted(canonical), dtype=np.int64).reshape((-1, 3))
     edges = set(_edge_incidence([tuple(map(int, row)) for row in result]).keys())
@@ -961,6 +1117,7 @@ def _strict_native_triangles(
     if not len(triangles):
         raise MeshError("native triangulation returned no cells")
 
+    ring_edges = _domain_ring_edges(prepared)
     canonical: list[tuple[int, int, int]] = []
     seen: set[tuple[int, int, int]] = set()
     incidence: dict[tuple[int, int], list[int]] = {}
@@ -981,7 +1138,7 @@ def _strict_native_triangles(
             raise MeshError("native triangulation returned duplicate cells")
         seen.add(candidate)
         centroid = np.mean(result_points[np.asarray(candidate)], axis=0)
-        if not _inside_domain(centroid, prepared):
+        if not _inside_domain(centroid, prepared, ring_edges):
             raise MeshError("native triangulation returned a cell outside the domain")
         canonical.append(candidate)
         area += 0.5 * determinant
@@ -1183,9 +1340,16 @@ def constrained_planar_triangulation(
             cancellation_check("python triangulation insertion start")
         triangles = _bowyer_watson(prepared.points)
         protected: set[tuple[int, int]] = set()
+        # ``_recover_segment`` returns the triangles unchanged when the segment
+        # is already an edge; test that against one edge set, rebuilt only
+        # after a recovery changed the triangulation, instead of rebuilding
+        # the full incidence map for every segment.
+        present = set(_edge_incidence(triangles))
         for raw_segment in prepared.segments:
             segment = tuple(map(int, raw_segment))
-            triangles = _recover_segment(prepared.points, triangles, segment, protected)
+            if _normal_edge(*segment) not in present:
+                triangles = _recover_segment(prepared.points, triangles, segment, protected)
+                present = set(_edge_incidence(triangles))
             protected.add(_normal_edge(*segment))
         result_triangles = _finish_triangles(prepared.points, triangles, prepared)
         if cancellation_check is not None:

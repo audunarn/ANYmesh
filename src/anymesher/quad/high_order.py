@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from math import comb
+from math import comb, copysign
 from typing import Callable, Iterable
 
 import numpy as np
@@ -532,12 +532,64 @@ def _split_triangle(tri: np.ndarray) -> tuple[np.ndarray,np.ndarray,np.ndarray,n
     ab,bc,ca = 0.5*(a+b),0.5*(b+c),0.5*(c+a)
     return (np.array([a,ab,ca]), np.array([ab,b,bc]), np.array([ca,bc,c]), np.array([ab,bc,ca]))
 
+def _point_gradients(fam: ElementFamily, x: float, y: float) -> np.ndarray:
+    """``shape_gradients(fam, (x, y))`` for one point, bit for bit.
+
+    The same element-wise expressions in the same order as the vectorized
+    function, returned as the same C-contiguous ``(nnode, 2)`` array, without
+    the per-call ``column_stack``/``stack`` overhead.
+    """
+    if fam is ElementFamily.Q4:
+        rows = (
+            (0.25*(-(1-y)), 0.25*(-(1-x))), (0.25*(1-y), 0.25*(-(1+x))),
+            (0.25*(1+y), 0.25*(1+x)), (0.25*(-(1+y)), 0.25*(1-x)),
+        )
+    elif fam is ElementFamily.Q8:
+        rows = (
+            (0.25*(1-y)*(2*x+y), 0.25*(1-x)*(x+2*y)),
+            (0.25*(1-y)*(2*x-y), 0.25*(1+x)*(-x+2*y)),
+            (0.25*(1+y)*(2*x+y), 0.25*(1+x)*(x+2*y)),
+            (0.25*(1+y)*(2*x-y), 0.25*(1-x)*(-x+2*y)),
+            (-x*(1-y), -0.5*(1-x*x)),
+            (0.5*(1-y*y), -(1+x)*y),
+            (-x*(1+y), 0.5*(1-x*x)),
+            (-0.5*(1-y*y), -(1-x)*y),
+        )
+    elif fam is ElementFamily.T3:
+        rows = ((-1., -1.), (1., 0.), (0., 1.))
+    else:
+        l0, l1, l2 = 1.0-x-y, x, y
+        dl = ((-1., -1.), (1., 0.), (0., 1.))
+        rows = tuple(
+            ((4*li-1)*dl[i][0], (4*li-1)*dl[i][1]) for i, li in enumerate((l0, l1, l2))
+        ) + (
+            (4*(l0*dl[1][0] + l1*dl[0][0]), 4*(l0*dl[1][1] + l1*dl[0][1])),
+            (4*(l1*dl[2][0] + l2*dl[1][0]), 4*(l1*dl[2][1] + l2*dl[1][1])),
+            (4*(l2*dl[0][0] + l0*dl[2][0]), 4*(l2*dl[0][1] + l0*dl[2][1])),
+        )
+    return np.array(rows, dtype=np.float64)
+
+
 def _jacobian_function(xyz: np.ndarray, fam: ElementFamily, nref: np.ndarray):
+    # Subdivision revisits parameters (the root patch is expanded twice and
+    # neighbouring patches share nodes); the value is a pure function of them.
+    memo: dict[tuple[float, float, float, float], float] = {}
+
     def evaluate(a: float, b: float) -> float:
-        g = np.asarray(shape_gradients(fam, np.array([a,b], dtype=np.float64)))
+        key = (a, b, copysign(1.0, a), copysign(1.0, b))  # keep -0.0 distinct
+        value = memo.get(key)
+        if value is not None:
+            return value
+        g = _point_gradients(fam, float(a), float(b))
         dxi = g[:,0] @ xyz
         deta = g[:,1] @ xyz
-        return float(np.dot(np.cross(dxi,deta), nref))
+        # ``np.cross`` of two 3-vectors: the same multiply-then-subtract.
+        x0, x1, x2 = float(dxi[0]), float(dxi[1]), float(dxi[2])
+        y0, y1, y2 = float(deta[0]), float(deta[1]), float(deta[2])
+        cross = np.array((x1*y2 - x2*y1, x2*y0 - x0*y2, x0*y1 - x1*y0), dtype=np.float64)
+        value = float(np.dot(cross, nref))
+        memo[key] = value
+        return value
     return evaluate
 
 

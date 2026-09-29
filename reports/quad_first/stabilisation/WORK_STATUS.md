@@ -179,3 +179,149 @@ build step passed on all 12 pytest cells. Two failures remained:
   - The mesher is unchanged. Follow-up option: quantise the ranking score
     before the deterministic body tie-break, so exact-in-theory ties no
     longer depend on the platform's libm.
+
+## Phase 4: remaining whole-mesh scans (results unchanged)
+
+Branch `claude/quad-first-perf-0.5.1`, based on `main` at `1baa6c5` (0.5.1).
+
+Question: the 0.5.1 note left 6,000 Q4 at ~31 s (container) with seeding
+dominant and an empirical exponent of 1.2-1.5. Is the remaining cost
+superlinear scans or intrinsic work? Profiling at 6,000 and 12,298 Q4 showed
+whole-mesh scans. Each one was replaced by an exact local equivalent, and the
+replaced loop is kept as a test oracle:
+
+| Stage | Scan removed | Replacement |
+| --- | --- | --- |
+| CDT | full `_edge_incidence` rebuild per segment, even when the segment already was an edge | one edge set, rebuilt only after an actual recovery |
+| CDT | `_bowyer_watson` list and array rebuild plus an O(T) circumcircle filter per insertion | reusable slots, and a uniform grid of conservatively enlarged circumdisks; unbounded or huge disks (super-triangle fans, needles) stay on a global list |
+| CDT | PSLG splitting scalar `_point_on_segment` over every point for every segment | the same bbox comparisons, vectorized, in front of the scalar test |
+| CDT | ring arrays rebuilt per point query in `_prepare_pslg` and `_finish_triangles` | computed once per ring |
+| Q5 | `QuadMeshState.cells_at` scanned every cell (called for every node by `_eligible`) | union of `_edge_to_cells` over `_node_edges[node]` |
+| Seed | scalar `_strict_inside` per lattice candidate (uniform, graded, adaptive) | `_strict_inside_mask`, same float operations over the whole grid |
+
+Grid soundness: a triangle is registered by the bbox of radius
+`sqrt(r2)*(1+1e-6) + 4*delta + 1e-9*(|a|+|u|+span)`. That radius contains the
+exact circumcircle and every point the existing pre-filter keeps (its slack is
+1e-8 relative). Any triangle may be global, so the super-triangle fan is
+global without that arithmetic. The cavity is still decided by the exact
+`incircle`, and the insertion order is unchanged. The order matters: on
+cocircular lattices it selects the triangulation. The remaining
+Bowyer-Watson cost is the ~27 triangles created per insertion. They come from
+the fan churn of x-sorted insertion, and changing the order would change the
+output.
+
+Evidence (Windows, Python 3.11.9, ANYgeometry 0.4.4, workers built):
+
+- Fingerprints: SHA-256 of `mesh_to_dict` plus `hybrid_diagnostics`, with
+  volatile keys removed (model UUID, timings, paths). Result identical to
+  `main` on 86/86 cases. The 72 IS1 cases cover all six fixtures x two sizes
+  x existing/adaptive x uniform/refined, linear plus quadratic on uniform.
+  The 14 plate cases cover the benchmark plate with and without the hole,
+  both layouts, up to 6,000 Q4.
+- `tests/test_scan_free_equivalence.py`: `cells_at` against a full scan
+  through 60 random commits (and on staged views); `_strict_inside_mask` and
+  `_uniform_lattice_points` against the scalar loops; segment-recovery skip
+  against recovering every segment (the cases do need recovery); grid
+  Bowyer-Watson against the original full scan on six larger sets (lattice,
+  jittered 1e5 lattice, random strip, clustered with outliers, concentric
+  cocircular rings). Shrinking the grid disks by 50% makes 30 of 42 oracle
+  cases fail, so the oracle detects an unsound grid.
+- `tests/test_triangulation_prefilter.py` (121 adversarial sets) still passes.
+- Full suite with `ANYMESHER_REQUIRE_QUAD_WORKERS=1` (before the final
+  adaptive-seed change): 1901 passed, 29 skipped. One failure: the sdist
+  packaging test, because the fresh venv lacked `build`; it passes once
+  `build` is installed. Rerun on the final commit (quad-first suites plus
+  every seeding, triangulation and layout test): 1093 passed, 6 skipped.
+
+`benchmarks/quad_first_scaling.py`, one unrepeated run per size. Timings
+varied by about 30% between runs on this shared machine; "before" is `main`
+at `1baa6c5` on the same machine and day:
+
+| Case | Q4 | before (s) | after (s) |
+| --- | ---: | ---: | ---: |
+| plate, existing | 960 | 0.87-0.91 | 0.52-0.60 |
+| plate, existing | 3,094 | 4.8-5.9 | 2.5-2.6 |
+| plate, existing | 6,000 | 11.9-16.3 | 3.8-5.2 |
+| plate, existing | 12,298 | 51.7 | 7.7-9.9 |
+| plate, adaptive | 6,157 | 19.3-19.8 | 4.7-5.2 |
+| plate with hole, adaptive | 5,734 | 19.4-23.7 | 6.0-6.4 |
+
+The empirical exponent from 6,000 to 12,298 Q4 is 0.9-1.3, down from 1.6.
+
+Remaining limits and follow-ups:
+
+- Small refined curved cases (for example IS1 Coons h=0.3, adaptive,
+  refined: ~10 s for 184 cells) spend ~80% in `_repair_quad_first_quality`
+  normal checks. That time is in ANYgeometry `closest_uv` point projection
+  (~14.5k calls). ANYgeometry owns it; not changed here.
+- `_recover_segment` still rebuilds incidence once per flip. That only
+  matters for many long constraints that need recovery; the benchmarks have
+  none.
+- MCF `_pair_graph` / `make_quad` and the front step are linear, but with
+  high constant factors (`_int_or_err`/`position` per access).
+
+## Phase 5: curved paths and owner geometry (results unchanged)
+
+Question: after phase 4, what makes small curved and refined meshes slow (for
+example ~10 s for 184 cells on a refined Coons face)? The phase-4 note
+attributed it to ANYgeometry projection. The user authorized changes in
+ANYgeometry for this release. Profiling the whole IS1 corpus and the slowest
+real-workflow tests found these costs. Every replacement is exact and keeps
+the replaced code as a bit-for-bit oracle in tests.
+
+| Owner | Cost | Replacement |
+| --- | --- | --- |
+| ANYmesher `charts.FaceChart` | `import_module("anygeometry.meshing")` failed and rescanned the filesystem on every chart call (~196k calls); `inspect.signature` was rebuilt per call | import resolved once per process; signatures cached per function |
+| ANYmesher `high_order` | the validity Jacobian built `shape_gradients` via column stacking plus `np.cross` for every point, and the root patch twice | the same element-wise expressions into the same array layout, a multiply-then-subtract cross, and a per-certification memo (signed zeros distinct) |
+| ANYgeometry surfaces | Coons/ruled `_sample` called `np.clip` on scalars; `closest_uv` ran point by point from `face_local_uv_many` and `face_trim_loops_uv` | scalar clamp (identical for signed zeros, infinities and NaN); a batched Gauss-Newton with the scalar element-wise order and per-point `lstsq` |
+| ANYgeometry cylinders/cones | `circumferential_direction` recomputed `np.cross` per access | computed once as a non-field attribute; callers get a copy |
+| ANYgeometry trims | `face_trim_loops_uv` re-projected every trim vertex on every `project_to_face` | reused for the same committed revision and `Face` object; never inside a transaction; cleared on clone and deserialization; copies returned |
+| ANYgeometry topology Coons | 8 boundary-chain evaluations per point, 4 of them the constant corners; per-call length arrays, id validation and ~40 tiny NumPy operations | corners and resolved chain data cached under the trim-loop rule (a miss keeps the original evaluation and error order); length arrays keyed by the exact lengths; blending per component in the former order |
+| ANYgeometry atlas proof | `Fraction` products and roundings; `atan_series`, `atan2`, `sincos` and `cross` recomputed repeatedly within one proof | exact integer rounding for `add`/`mul`, with the original code whenever a bit budget could bind; per-proof memo that replays the recorded work charges (π-dependent operations only after π exists). Queries and binding validation still requalify from scratch. |
+| ANYgeometry trim membership | edge loop of 1-element NumPy operations per point | points × edges evaluated at once for small finite inputs |
+
+Evidence (same environment as phase 4; ANYgeometry from
+`claude/projection-perf` at `C:/Github/ANYgeometry-perf-045`, based on
+`origin/main` `c0f1d80`, source-identical to 0.4.4):
+
+- ANYmesher fingerprints: 86/86 identical to `main` with ANYgeometry 0.4.4.
+- Hole-punched 2 x 2 plate (`test_operations` butterfly, h = 0.15): full
+  `mesh_to_dict` identical apart from `preparation_hash` and
+  `structural_preparation_hash`, which already differ between two runs of the
+  same code because they hash the random model ID.
+- Cylinder atlas: complete `CylinderAtlasResult` content (sectors,
+  occurrences, intervals, certificates with work counts) identical to 0.4.4
+  on 10 queries plus validations. In ANYgeometry tests, the memoized proof
+  matches recomputation in results, work counts, callback sequences and
+  budget refusals.
+- ANYgeometry suite: 987 passed. 3 release-authority tests failed on a local
+  `git push` to a temporary origin; the unmodified checkout fails 6 of those
+  7 in this environment.
+- ANYmesher full suite with the new ANYgeometry and
+  `ANYMESHER_REQUIRE_QUAD_WORKERS=1`: 1925 passed, 29 skipped, in 20 min.
+  The phase-4 run with 0.4.4 took 50 min.
+
+Timings (same machine, sequential runs):
+
+| Case | main + 0.4.4 (s) | this branch + candidate (s) |
+| --- | ---: | ---: |
+| IS1 corpus, 72 meshes | 104.3 | 31.9 |
+| - Coons cases | 29.7 | 6.1 |
+| - ruled cases | 16.4 | 5.1 |
+| - cylinder cases | 40.3 | 13.9 |
+| - cone cases | 14.5 | 4.6 |
+| hole-punched plate, one `generate_mesh` (under load) | 646 | 165 |
+| `test_punching_a_hole_leaves_a_meshable_ring` (under load) | 1302 | 437 |
+
+Remaining limits:
+
+- Structural-closure preparation (`find_coplanar_overlaps` -> curved
+  face-face qualification) still dominates hole-punched and stripped-cylinder
+  models. Its scalar `closest_uv` on topology surfaces always runs all 30
+  finite-difference Gauss-Newton iterations. Reducing that changes the
+  numerical path and needs a qualified ANYgeometry change, not an exact
+  refactor.
+- The atlas proof and IS1 repair still use per-point `np.linalg.lstsq`.
+  Batching it would change the last bits.
+- The ANYgeometry changes need that owner's review and release (0.4.5).
+  ANYmesher does not require them.

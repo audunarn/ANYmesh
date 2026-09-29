@@ -52,9 +52,53 @@ def _uv_rows(value: Any) -> np.ndarray:
     return made
 
 
+_SIGNATURES: dict[tuple[Any, bool], Any] = {}
+
+
+def _signature(function: Callable[..., Any]) -> Any:
+    """``inspect.signature``, cached per underlying function.
+
+    Chart calls resolve the same owner methods thousands of times; a bound
+    method's signature depends only on its function and on being bound.
+    Errors are not cached and propagate as from ``signature``.
+    """
+    underlying = getattr(function, "__func__", function)
+    key = (underlying, hasattr(function, "__self__"))
+    try:
+        return _SIGNATURES[key]
+    except KeyError:
+        pass
+    except TypeError:  # unhashable callable
+        return signature(function)
+    made = signature(function)
+    _SIGNATURES[key] = made
+    return made
+
+
+_GEOMETRY_MODULES: tuple[object, ...] | None = None
+
+
+def _geometry_modules() -> tuple[object, ...]:
+    """Owner modules offering module-level batch APIs, imported once.
+
+    A failed optional import is not retried on every chart call; a
+    ``ModuleNotFoundError`` search costs a filesystem scan each time.
+    """
+    global _GEOMETRY_MODULES
+    if _GEOMETRY_MODULES is None:
+        modules: list[object] = []
+        try:
+            modules.append(import_module("anygeometry"))
+            modules.append(import_module("anygeometry.meshing"))
+        except ModuleNotFoundError:
+            pass
+        _GEOMETRY_MODULES = tuple(modules)
+    return _GEOMETRY_MODULES
+
+
 def _can_bind(function: Callable[..., Any], arguments: tuple[Any, ...]) -> bool:
     try:
-        made = signature(function)
+        made = _signature(function)
     except (TypeError, ValueError):
         return True
     try:
@@ -141,13 +185,7 @@ class FaceChart:
         for value in (self.geometry, owner):
             if all(value is not existing for existing, _ in targets):
                 targets.append((value, False))
-        modules: list[object] = []
-        try:
-            modules.append(import_module("anygeometry"))
-            modules.append(import_module("anygeometry.meshing"))
-        except ModuleNotFoundError:
-            pass
-        for module in modules:
+        for module in _geometry_modules():
             if all(module is not existing for existing, _ in targets):
                 targets.append((module, True))
         return tuple(targets)
@@ -157,7 +195,7 @@ class FaceChart:
         function: Callable[..., Any], name: str, module_function: bool
     ) -> bool:
         try:
-            parameters = tuple(signature(function).parameters.values())
+            parameters = tuple(_signature(function).parameters.values())
         except (TypeError, ValueError):
             parameters = ()
         offset = 1 if module_function else 0
