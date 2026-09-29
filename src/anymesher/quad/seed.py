@@ -162,6 +162,32 @@ def _strict_inside(p: Vec2, polygon: Sequence[Vec2], tol: float) -> bool:
     return inside
 
 
+def _strict_inside_mask(xs: np.ndarray, ys: np.ndarray, polygon: Sequence[Vec2], tol: float) -> np.ndarray:
+    """``_strict_inside`` for many points at once, decision-identical.
+
+    A point is rejected when any edge passes ``_on_segment`` (the scalar loop
+    returns early, so edge order does not matter) and is otherwise inside on
+    odd crossing parity.  Every comparison and crossing abscissa uses the
+    scalar version's float operations in the same order.
+    """
+    on_edge = np.zeros(xs.shape, dtype=bool)
+    inside = np.zeros(xs.shape, dtype=bool)
+    count = len(polygon)
+    for i in range(count):
+        a = polygon[i]
+        b = polygon[(i+1) % count]
+        ax, ay, bx, by = float(a[0]), float(a[1]), float(b[0]), float(b[1])
+        near = ((xs >= min(ax, bx) - tol) & (xs <= max(ax, bx) + tol)
+                & (ys >= min(ay, by) - tol) & (ys <= max(ay, by) + tol))
+        if near.any():
+            on_edge[near] |= np.abs((bx-ax)*(ys[near]-ay) - (by-ay)*(xs[near]-ax)) <= tol
+        straddle = (ay > ys) != (by > ys)
+        if straddle.any():
+            crossing = ax + (ys[straddle]-ay)*(bx-ax)/(by-ay)
+            inside[straddle] ^= crossing > xs[straddle]
+    return inside & ~on_edge
+
+
 def _interior_lattice(
     domain: PlanarQuadDomain,
     outer: Sequence[Vec2],
@@ -199,6 +225,13 @@ def _interior_lattice(
     fine_segments = (_SegmentGrid((outer, *holes), _LATTICE_BOUNDARY_CLEARANCE * h)
                      if _LATTICE_BOUNDARY_CLEARANCE > 0.0 else None)
     seen = {(float(p[0]), float(p[1])) for p in coarse}
+    # Domain containment for the whole candidate grid at once; the loop
+    # below still computes each coordinate with the same scalar arithmetic.
+    grid_x = np.tile(min_x + (np.arange(nx, dtype=float) + 0.5) * h_min, ny)
+    grid_y = np.repeat(min_y + (np.arange(ny, dtype=float) + 0.5) * h_min, nx)
+    contained = _strict_inside_mask(grid_x, grid_y, outer, tol)
+    for hole in holes:
+        contained &= ~_strict_inside_mask(grid_x, grid_y, hole, tol)
     for j in range(ny):
         y = min_y + (j + 0.5) * h_min
         if y > max_y - tol:
@@ -208,9 +241,7 @@ def _interior_lattice(
             if x > max_x - tol:
                 continue
             point = (float(x), float(y))
-            if not _strict_inside(point, outer, tol):
-                continue
-            if any(_strict_inside(point, hole, tol) for hole in holes):
+            if not contained[j * nx + i]:
                 continue
             key = point
             if key in seen:
@@ -389,18 +420,19 @@ def _uniform_lattice_points(
     clearance = _LATTICE_BOUNDARY_CLEARANCE * h
     segments = _SegmentGrid((outer, *holes), clearance) if clearance > 0.0 else None
     points: list[tuple[float, float]] = []
-    for y in ys:
-        for x in xs:
-            point = (float(x), float(y))
-            if not _strict_inside(point, outer, tol):
-                continue
-            if any(_strict_inside(point, hole, tol) for hole in holes):
-                continue
-            if segments is not None and segments.closer_than(point, clearance):
-                continue
-            # Cartesian lattice coordinates are unique by construction; avoid an
-            # unnecessary O(N^2) duplicate scan over previously accepted points.
-            points.append(point)
+    # Row-major (y outer, x inner), the order of the former nested loop.
+    grid_x = np.tile(xs, len(ys))
+    grid_y = np.repeat(ys, len(xs))
+    keep = _strict_inside_mask(grid_x, grid_y, outer, tol)
+    for hole in holes:
+        keep &= ~_strict_inside_mask(grid_x, grid_y, hole, tol)
+    for row in np.flatnonzero(keep).tolist():
+        point = (float(grid_x[row]), float(grid_y[row]))
+        if segments is not None and segments.closer_than(point, clearance):
+            continue
+        # Cartesian lattice coordinates are unique by construction; avoid an
+        # unnecessary O(N^2) duplicate scan over previously accepted points.
+        points.append(point)
     return points
 
 
@@ -449,10 +481,7 @@ def _adaptive_interior_points(
         boundary_grid.insert(index, np.minimum(start, end), np.maximum(start, end))
 
     def offer(point: tuple[float, float], *, coarse: bool) -> None:
-        if not _strict_inside(point, outer, tol):
-            return
-        if any(_strict_inside(point, hole, tol) for hole in holes):
-            return
+        # Domain containment was decided for the whole grid (``candidates``).
         try:
             xyz = np.asarray(domain.lift(point), dtype=float)
         except MeshError as exc:
@@ -484,21 +513,33 @@ def _adaptive_interior_points(
         accepted_uv.append(point)
         accepted_xyz.append((xyz, h_local))
 
+    def candidates(counts) -> list[list[tuple[tuple[float, float], bool]]]:
+        """Grid rows of ``(point, strictly inside the domain)``."""
+        rows = [[(float(lower[0] + (i + .5) * extent[0] / counts[0]),
+                  float(lower[1] + (j + .5) * extent[1] / counts[1]))
+                 for i in range(int(counts[0]))]
+                for j in range(int(counts[1]))]
+        xs = np.asarray([point[0] for row in rows for point in row], dtype=float)
+        ys = np.asarray([point[1] for row in rows for point in row], dtype=float)
+        inside = _strict_inside_mask(xs, ys, outer, tol)
+        for hole in holes:
+            inside &= ~_strict_inside_mask(xs, ys, hole, tol)
+        flags = iter(inside.tolist())
+        return [[(point, next(flags)) for point in row] for row in rows]
+
     coarse_counts = np.maximum(1, np.ceil(extent / float(target_size)).astype(int))
-    for j in range(int(coarse_counts[1])):
+    for row in candidates(coarse_counts):
         if cancellation_check is not None:
             cancellation_check("quad-first:adaptive-coarse-seed")
-        for i in range(int(coarse_counts[0])):
-            offer((float(lower[0] + (i + .5) * extent[0] / coarse_counts[0]),
-                   float(lower[1] + (j + .5) * extent[1] / coarse_counts[1])),
-                  coarse=True)
-    for j in range(int(fine_counts[1])):
+        for point, inside in row:
+            if inside:
+                offer(point, coarse=True)
+    for row in candidates(fine_counts):
         if cancellation_check is not None:
             cancellation_check("quad-first:adaptive-fine-seed")
-        for i in range(int(fine_counts[0])):
-            offer((float(lower[0] + (i + .5) * extent[0] / fine_counts[0]),
-                   float(lower[1] + (j + .5) * extent[1] / fine_counts[1])),
-                  coarse=False)
+        for point, inside in row:
+            if inside:
+                offer(point, coarse=False)
     return np.asarray(accepted_uv, dtype=float).reshape((-1, 2))
 
 

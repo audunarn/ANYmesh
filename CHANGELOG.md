@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Speed up the experimental quad-first route and the shared pure-Python
+  triangulator. Results are unchanged. Five whole-mesh scans are gone:
+  - Bowyer-Watson now finds cavity candidates through a uniform grid instead
+    of scanning every live triangle per inserted point, and it keeps
+    triangles in reusable slots.
+  - Constrained triangulation no longer rebuilds the full edge incidence for
+    every segment that already is an edge.
+  - PSLG segment splitting prefilters points by bounding box.
+  - `QuadMeshState.cells_at` reads the node/edge maps instead of scanning
+    every cell.
+  - Seed-lattice containment (uniform, graded and adaptive) is decided for
+    the whole candidate grid at once.
+
+  On the 10 m x 6 m plate benchmark, 6,000 Q4 now take 4-5 s instead of
+  12-16 s, and 12,298 Q4 take 10 s instead of 52 s. The adaptive layout at
+  about 6,000 Q4, with or without a hole, drops from 19-24 s to 5-6 s.
+  Scaling is now close to linear. The quad-first output is identical to 0.5.1
+  on 86 planar, curved, refined, quadratic and adaptive cases.
+
 ## 0.5.1 - 2026-09-28
 
 - Fix mapped meshing of faces whose four declared sides fold under the

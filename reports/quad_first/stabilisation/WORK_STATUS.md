@@ -179,3 +179,83 @@ build step passed on all 12 pytest cells. Two failures remained:
   - The mesher is unchanged. Follow-up option: quantise the ranking score
     before the deterministic body tie-break, so exact-in-theory ties no
     longer depend on the platform's libm.
+
+## Phase 4: remaining whole-mesh scans (results unchanged)
+
+Branch `claude/quad-first-perf-0.5.1`, based on `main` at `1baa6c5` (0.5.1).
+
+Question: the 0.5.1 note left 6,000 Q4 at ~31 s (container) with seeding
+dominant and an empirical exponent of 1.2-1.5. Is the remaining cost
+superlinear scans or intrinsic work? Profiling at 6,000 and 12,298 Q4 showed
+whole-mesh scans. Each one was replaced by an exact local equivalent, and the
+replaced loop is kept as a test oracle:
+
+| Stage | Scan removed | Replacement |
+| --- | --- | --- |
+| CDT | full `_edge_incidence` rebuild per segment, even when the segment already was an edge | one edge set, rebuilt only after an actual recovery |
+| CDT | `_bowyer_watson` list and array rebuild plus an O(T) circumcircle filter per insertion | reusable slots, and a uniform grid of conservatively enlarged circumdisks; unbounded or huge disks (super-triangle fans, needles) stay on a global list |
+| CDT | PSLG splitting scalar `_point_on_segment` over every point for every segment | the same bbox comparisons, vectorized, in front of the scalar test |
+| CDT | ring arrays rebuilt per point query in `_prepare_pslg` and `_finish_triangles` | computed once per ring |
+| Q5 | `QuadMeshState.cells_at` scanned every cell (called for every node by `_eligible`) | union of `_edge_to_cells` over `_node_edges[node]` |
+| Seed | scalar `_strict_inside` per lattice candidate (uniform, graded, adaptive) | `_strict_inside_mask`, same float operations over the whole grid |
+
+Grid soundness: a triangle is registered by the bbox of radius
+`sqrt(r2)*(1+1e-6) + 4*delta + 1e-9*(|a|+|u|+span)`. That radius contains the
+exact circumcircle and every point the existing pre-filter keeps (its slack is
+1e-8 relative). Any triangle may be global, so the super-triangle fan is
+global without that arithmetic. The cavity is still decided by the exact
+`incircle`, and the insertion order is unchanged. The order matters: on
+cocircular lattices it selects the triangulation. The remaining
+Bowyer-Watson cost is the ~27 triangles created per insertion. They come from
+the fan churn of x-sorted insertion, and changing the order would change the
+output.
+
+Evidence (Windows, Python 3.11.9, ANYgeometry 0.4.4, workers built):
+
+- Fingerprints: SHA-256 of `mesh_to_dict` plus `hybrid_diagnostics`, with
+  volatile keys removed (model UUID, timings, paths). Result identical to
+  `main` on 86/86 cases. The 72 IS1 cases cover all six fixtures x two sizes
+  x existing/adaptive x uniform/refined, linear plus quadratic on uniform.
+  The 14 plate cases cover the benchmark plate with and without the hole,
+  both layouts, up to 6,000 Q4.
+- `tests/test_scan_free_equivalence.py`: `cells_at` against a full scan
+  through 60 random commits (and on staged views); `_strict_inside_mask` and
+  `_uniform_lattice_points` against the scalar loops; segment-recovery skip
+  against recovering every segment (the cases do need recovery); grid
+  Bowyer-Watson against the original full scan on six larger sets (lattice,
+  jittered 1e5 lattice, random strip, clustered with outliers, concentric
+  cocircular rings). Shrinking the grid disks by 50% makes 30 of 42 oracle
+  cases fail, so the oracle detects an unsound grid.
+- `tests/test_triangulation_prefilter.py` (121 adversarial sets) still passes.
+- Full suite with `ANYMESHER_REQUIRE_QUAD_WORKERS=1` (before the final
+  adaptive-seed change): 1901 passed, 29 skipped. One failure: the sdist
+  packaging test, because the fresh venv lacked `build`; it passes once
+  `build` is installed. Rerun on the final commit (quad-first suites plus
+  every seeding, triangulation and layout test): 1093 passed, 6 skipped.
+
+`benchmarks/quad_first_scaling.py`, one unrepeated run per size. Timings
+varied by about 30% between runs on this shared machine; "before" is `main`
+at `1baa6c5` on the same machine and day:
+
+| Case | Q4 | before (s) | after (s) |
+| --- | ---: | ---: | ---: |
+| plate, existing | 960 | 0.87-0.91 | 0.52-0.60 |
+| plate, existing | 3,094 | 4.8-5.9 | 2.5-2.6 |
+| plate, existing | 6,000 | 11.9-16.3 | 3.8-5.2 |
+| plate, existing | 12,298 | 51.7 | 7.7-9.9 |
+| plate, adaptive | 6,157 | 19.3-19.8 | 4.7-5.2 |
+| plate with hole, adaptive | 5,734 | 19.4-23.7 | 6.0-6.4 |
+
+The empirical exponent from 6,000 to 12,298 Q4 is 0.9-1.3, down from 1.6.
+
+Remaining limits and follow-ups:
+
+- Small refined curved cases (for example IS1 Coons h=0.3, adaptive,
+  refined: ~10 s for 184 cells) spend ~80% in `_repair_quad_first_quality`
+  normal checks. That time is in ANYgeometry `closest_uv` point projection
+  (~14.5k calls). ANYgeometry owns it; not changed here.
+- `_recover_segment` still rebuilds incidence once per flip. That only
+  matters for many long constraints that need recovery; the benchmarks have
+  none.
+- MCF `_pair_graph` / `make_quad` and the front step are linear, but with
+  high constant factors (`_int_or_err`/`position` per access).

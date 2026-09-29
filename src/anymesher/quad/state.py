@@ -387,7 +387,13 @@ class QuadMeshState:
         nid = _int_or_err(n, "node")
         if nid not in self._pos:
             raise StaleHandleError(f"node {nid} is not a live node in this state")
-        return tuple(sorted(c for c, b in self._cells.items() if nid in b))
+        # Every cell holding ``nid`` has its two cell edges at ``nid`` in
+        # ``_edge_to_cells``, and each such edge is in ``_node_edges[nid]``;
+        # both maps are kept exact on every commit.  O(degree), not O(cells).
+        found: set[int] = set()
+        for k in self._node_edges.get(nid, ()):
+            found.update(self._edge_to_cells.get(k, ()))
+        return tuple(sorted(found))
 
     def cells_at_edge(self, key: Any) -> tuple[int, ...]:
         return self.edge_cells(key)
