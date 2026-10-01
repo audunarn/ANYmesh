@@ -422,3 +422,33 @@ def test_target_none_repairs_directly_against_the_admission_policy() -> None:
     assert result.target_admission is None
     assert result.target_met
     assert _signature(result.mesh) == _signature(_flippable_patch())
+
+
+@pytest.mark.parametrize("fixture", (_flippable_patch, lambda: _sliver_patch(20.0),
+                                     lambda: _sliver_patch(10.0)))
+def test_patch_rejection_filter_preserves_complete_admission_evidence(fixture, monkeypatch):
+    from anymesher import s3_repair
+
+    original = fixture()
+    before = _signature(original)
+    owners = {element: OWNER for element in original.tris}
+
+    def outcome():
+        try:
+            result = repair_s3_admission(original, element_owner_normals=owners)
+        except S3RepairError as error:
+            return ("rejected", error.admission, error.attempts)
+        assert_s3_admissible(result.mesh, element_owner_normals=result.owner_normal_map())
+        return ("admitted", _signature(result.mesh), result.admission,
+                result.target_admission, result.attempts)
+
+    filtered = outcome()
+    evaluate = s3_repair._evaluate_s3_admission
+
+    def full_check(*args, **kwargs):
+        kwargs.pop("_check_topology", None)
+        return evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(s3_repair, "_evaluate_s3_admission", full_check)
+    assert outcome() == filtered
+    assert _signature(original) == before

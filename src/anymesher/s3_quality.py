@@ -291,6 +291,7 @@ def _evaluate_s3_admission(
     element_owner_normals: Mapping[int, Sequence[float]] | None = None,
     policy: S3QualityPolicy = DEFAULT_S3_QUALITY_POLICY,
     _element_cache: dict | None = None,
+    _check_topology: bool = True,
 ) -> S3AdmissionReport:
     """Evaluate the opt-in qualified-S3 geometry contract.
 
@@ -460,8 +461,9 @@ def _evaluate_s3_admission(
         if cache_key is not None:
             _element_cache[cache_key] = records[-1]
 
-    directed_violations, qualified_junction_edges = _directed_edge_violations(
-        mesh, frozenset(selected)
+    directed_violations, qualified_junction_edges = (
+        _directed_edge_violations(mesh, frozenset(selected))
+        if _check_topology else ((), ())
     )
     topology_violations.extend(directed_violations)
     return S3AdmissionReport(

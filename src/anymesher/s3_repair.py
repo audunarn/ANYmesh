@@ -686,6 +686,15 @@ def repair_s3_admission(
             report_for(current, scope, made_owners, quality_policy)
         ) > _report_score(report_for(work, selected, owners, quality_policy))
 
+    def patch_report(current, scope, made_owners):
+        # Rejection-only filter. Every potentially improving candidate still
+        # receives the full selected-scope quality and topology checks.
+        return _evaluate_s3_admission(
+            current, element_ids=tuple(sorted(scope)),
+            element_owner_normals=made_owners, policy=search_policy,
+            _element_cache=element_quality_cache, _check_topology=False,
+        )
+
     edge_flips = 0
     edge_flip_attempts = 0
     visited_flips: set[tuple[tuple[int, int], tuple[tuple[int, tuple[int, ...]], ...]]] = set()
@@ -750,6 +759,12 @@ def repair_s3_admission(
                     continue
                 candidate = deepcopy(work)
                 candidate.tris.update(replacement)
+                if not report.topology_violations:
+                    local_report = patch_report(candidate, ids, owners)
+                    if not local_report.admitted:
+                        _record(attempts, "edge_flip", "rejected", ids, edge,
+                                "replacement diagonal does not strictly reduce admission violations")
+                        continue
                 candidate_report = report_for(candidate, selected, owners)
                 candidate_elements = {
                     item.element_id: item for item in candidate_report.elements
@@ -866,6 +881,15 @@ def repair_s3_admission(
                         detail,
                     )
                     continue
+                if not report.topology_violations:
+                    changed = set(attached) | (set(made_selected) - set(selected))
+                    local_report = patch_report(candidate, changed, made_owners)
+                    old_score = sum(len(item.violations) for item in report.elements
+                                    if item.element_id in attached)
+                    if _report_score(local_report) >= old_score:
+                        _record(attempts, "refinement", "rejected", attached, edge,
+                                "conforming bisection does not strictly reduce admission violations")
+                        continue
                 candidate_report = report_for(candidate, made_selected, made_owners)
                 if _report_score(candidate_report) >= _report_score(report):
                     _record(

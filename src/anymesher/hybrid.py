@@ -1670,9 +1670,23 @@ def _mesh_native_face(
                 _component_seed_registry=component_seed_registry,
                 _supplemental_metric_field=supplemental_metric_field,
             )
-            if parameter_diagnostics.get("quality_policy", {}).get(
-                "accepted", False
-            ):
+            # The parameter chart may scale/shear lengths and angles. Its
+            # apparent quality cannot replace a physically better candidate.
+            from .surface_mesh import _quality_threshold_report, _quality_not_worse
+            uv = parameter_core.node_coordinates[:, :2]
+            physical_core = MeshCore(
+                metric_origin[None, :] + uv[:, 0, None]*metric_u[None, :]
+                + uv[:, 1, None]*metric_v[None, :],
+                parameter_core.triangle_connectivity,
+                parameter_core.quad_connectivity,
+                node_active=parameter_core.node_active,
+                triangle_active=parameter_core.triangle_active,
+                quad_active=parameter_core.quad_active,
+            )
+            physical_policy = _quality_threshold_report(evaluate_quality(physical_core), surface_options)
+            parameter_diagnostics["physical_quality_policy"] = physical_policy
+            if (parameter_diagnostics.get("quality_policy", {}).get("accepted", False)
+                    and _quality_not_worse(physical_policy, surface_diagnostics["quality_policy"])):
                 parameter_diagnostics["chart_fallback"] = {
                     "from": "physical_metric",
                     "to": "parameter",
