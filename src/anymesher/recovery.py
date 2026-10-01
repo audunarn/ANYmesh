@@ -12,7 +12,7 @@ from math import isfinite
 from time import monotonic
 from typing import Any, Mapping
 
-from anygeometry import GeometryModel
+from anygeometry import GeometryModel, clone_prepared_geometry
 
 from .errors import MeshError, StructuredQualityRejected
 from .quad.validate import QuadQualityRejected
@@ -204,7 +204,7 @@ def generate_automatic_mesh_result(
         check_budget(f"automatic meshing: {method}")
         recipe["cancellation_check"] = check_budget
         try:
-            result = generate_hybrid_mesh_result(geometry.clone(), **recipe)
+            result = generate_hybrid_mesh_result(clone_prepared_geometry(geometry), **recipe)
         except MeshError as error:
             mapped_rejection = (
                 method == "mapped"
@@ -257,7 +257,7 @@ def generate_automatic_mesh_result(
             check_budget("inspection candidate")
             try:
                 candidate = generate_hybrid_mesh_result(
-                    geometry.clone(), **candidate_options
+                    clone_prepared_geometry(geometry), **candidate_options
                 )
             except _RECOVERABLE:
                 candidate = None

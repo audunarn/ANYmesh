@@ -711,6 +711,11 @@ def prepare_structural_closure(
     # and callers disabling that batch retain the independent overlap audit.
     def audit_overlaps():
         _cancel(cancellation_check, "structural preparation overlap broad phase")
+        from anygeometry import has_current_intersection_preparation
+        if has_current_intersection_preparation(geometry, face_ids=source_faces):
+            # Reuse only the geometry owner's complete, unchanged batch proof.
+            # A disabled-auto caller with arbitrary topology has no exemption.
+            return
         if all(isinstance(geometry.faces[face].surface, (Plane, Cylinder))
                for face in source_faces):
             # Classify the complete original set once through its exact owner.

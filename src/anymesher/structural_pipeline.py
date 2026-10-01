@@ -659,6 +659,14 @@ class StructuralMeshingPipeline:
             target_parameter = self._mapped_parameter(
                 member_parameter, attachment.member_range, attachment.target_parameters[0]
             )
+            # A canonical shell edge can also be this Member's axis span.
+            # Its owner orientation, rather than interval ordering, maps the
+            # parent station to that exact edge (including shared endpoints).
+            spans = [span for span in self.members.spans(attachment.member_id)
+                     if span.edge_id == attachment.target_id
+                     and span.contains(member_parameter, tolerance=self.view.tolerance.parameter)]
+            if len(spans) == 1:
+                target_parameter = spans[0].edge_parameter(member_parameter)
             point = self.view.edge_point(attachment.target_id, target_parameter)
             master = self._edge_node(
                 mesh,
