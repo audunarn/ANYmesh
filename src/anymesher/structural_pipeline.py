@@ -199,6 +199,8 @@ def build_structural_components(
     nodes = [*(('sheet', key) for key in view.sheets), *(('member', key) for key in view.members)]
     union = _UnionFind(nodes)
     for attachment in view.attachments.values():
+        if attachment.member_id is None:
+            continue
         member_node = ("member", int(attachment.member_id))
         if member_node not in union.parent:
             continue
@@ -739,6 +741,13 @@ class StructuralMeshingPipeline:
             )
             extent = 0.0 if not len(face_points) else float(np.max(np.ptp(face_points, axis=0)))
             base_tolerance = self.view.effective_length(extent)
+            if (any(beam_node in mesh.quads.get(element,mesh.tris.get(element,())) for element in allowed)
+                    and float(np.linalg.norm(actual-point)) <= base_tolerance):
+                # Exact prepared topology already supplies this shell station.
+                # Shape-function roundoff at a corner must not create a
+                # redundant MPC that constrains the same node to itself.
+                return (ConnectivityAction('shared-node',
+                    ('member',int(attachment.member_id)),('face',target_face_id)),None)
             hit = bvh.locate(
                 point,
                 element_ids=allowed,
@@ -949,6 +958,8 @@ class StructuralMeshingPipeline:
         }
         for identifier in sorted(attachment_ids):
             attachment = self.view.attachments[identifier]
+            if attachment.member_id is None:
+                continue
             if attachment.member_range.is_point:
                 node = self._member_node(
                     mesh, attachment.member_id, attachment.member_range.start

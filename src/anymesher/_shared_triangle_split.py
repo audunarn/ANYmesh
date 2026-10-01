@@ -73,6 +73,7 @@ def repair_triangle_face(
     """Repair a detached neighbour, keeping every protected point and edge exact."""
     from .optimization import constrained_smoothing, local_edge_flip
     from .quality_v2 import triangle_quality
+    from .s3_quality import DEFAULT_S3_QUALITY_POLICY,QUALITY_COMPARISON_TOLERANCE
 
     element_ids = tuple(sorted(mesh.elements_of_face[face_id]))
     if any(element not in mesh.tris or len(mesh.tris[element]) != 3 for element in element_ids):
@@ -132,9 +133,23 @@ def repair_triangle_face(
         quality = triangle_quality(coordinates, triangles)
         if not all(np.all(np.isfinite(values)) for values in (quality.area, quality.aspect_ratio, quality.scaled_jacobian)):
             raise MeshError("shared refinement repair returned non-finite physical quality")
+        corners=coordinates[triangles]
+        differences=corners[:,(1,2,0)]-corners
+        squared_lengths=np.einsum('nij,nij->ni',differences,differences)
+        denominator=squared_lengths.sum(axis=1)
+        normalized_area=np.divide(4*np.sqrt(3.)*quality.area,denominator,
+                                  out=np.zeros_like(quality.area),where=denominator>0)
+        policy=DEFAULT_S3_QUALITY_POLICY
+        tolerance=QUALITY_COMPARISON_TOLERANCE
+        shape_failures=(
+            (quality.minimum_angle<policy.minimum_angle_deg-tolerance)
+            | (quality.maximum_angle>policy.maximum_angle_deg+tolerance)
+            | (quality.aspect_ratio>policy.maximum_edge_ratio+tolerance)
+            | (quality.scaled_jacobian<policy.minimum_scaled_jacobian-tolerance)
+            | (normalized_area<policy.minimum_normalized_area-tolerance))
         return (
             int(np.count_nonzero((quality.area <= 0) | (quality.scaled_jacobian <= 0))),
-            int(np.count_nonzero(quality.aspect_ratio > 5.0)),
+            int(np.count_nonzero(shape_failures)),
             float(np.max(quality.aspect_ratio)),
             -float(np.min(quality.scaled_jacobian)),
         )
@@ -214,7 +229,8 @@ def repair_triangle_face(
     selected = candidate_score < initial_score
     if selected:
         replacements = {element: tuple(node_ids[index] for index in row) for element, row in zip(element_ids, after)}
-        replacement_nodes = {node_ids[index]: tuple(map(float, final_physical[index])) for index in moved_nodes}
+        replacement_nodes = {node_ids[index]: np.asarray(final_physical[index],dtype=float).copy()
+                             for index in moved_nodes}
         replacement_index = {}
         for element, nodes in replacements.items():
             for edge in _edges(nodes):
@@ -239,7 +255,8 @@ def repair_triangle_face(
     }
 
 
-def repair_completed_cylindrical_neighbours(mesh, geometry, binding, registry, *, cancellation_check):
+def repair_completed_cylindrical_neighbours(mesh, geometry, binding, registry, *, cancellation_check,
+                                           refinement_options=None):
     """Run once all certified faces exist and no shared splits are pending."""
     cache = getattr(registry, "_published_triangle_incidence", {})
     sectors = binding.face_records
@@ -269,7 +286,31 @@ def repair_completed_cylindrical_neighbours(mesh, geometry, binding, registry, *
             mesh, face_id, uv * scale, protected_edges=protected, cache=cache,
             physical_evaluator=chart.evaluate, cancellation_check=cancellation_check,
         )
+        if refinement_options is not None and reports[str(face_id)]['final_score'][1]:
+            from ._chart_triangle_refine import refine_triangle_face
+            reports[str(face_id)]['interior_refinement']=refine_triangle_face(
+                mesh,geometry,face_id,chart,protected_edges=protected,cache=cache,
+                max_insertions=refinement_options.max_insertions,
+                max_work=refinement_options.max_topology_operations,
+                cancellation_check=cancellation_check)
     if cancellation_check is not None:
         cancellation_check("cylindrical shared-boundary repair complete")
     binding.validate()
+    return reports
+
+
+def repair_all_completed_cylindrical_neighbours(mesh,geometry,bindings,registry,*,cancellation_check,
+                                               refinement_options=None):
+    """Finish every owner component after cross-component station propagation.
+
+    A later intersecting cylinder can refine a previously completed component.
+    The final pass must visit the earlier binding as well as the current one.
+    """
+    reports={}
+    seen=set()
+    for face_id,binding in sorted(bindings.items()):
+        if id(binding) in seen:continue
+        seen.add(id(binding))
+        reports.update(repair_completed_cylindrical_neighbours(mesh,geometry,binding,registry,
+            cancellation_check=cancellation_check,refinement_options=refinement_options))
     return reports

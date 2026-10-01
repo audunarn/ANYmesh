@@ -144,6 +144,44 @@ def test_diagonal_flip_is_deterministic_and_preserves_stable_scopes() -> None:
     assert _signature(original) == _signature(_flippable_patch())
 
 
+def test_repair_workspace_is_identical_to_full_uncached_admission(monkeypatch):
+    import anymesher.s3_repair as implementation
+    mesh=_flippable_patch()
+    owners={10:OWNER,20:OWNER}
+    cached=repair_s3_admission(mesh,element_owner_normals=owners)
+    original=implementation._evaluate_s3_admission
+    def uncached(*args,**kwargs):
+        kwargs['_element_cache']=None
+        return original(*args,**kwargs)
+    monkeypatch.setattr(implementation,'_evaluate_s3_admission',uncached)
+    reference=repair_s3_admission(mesh,element_owner_normals=owners)
+    assert _signature(cached.mesh)==_signature(reference.mesh)
+    assert cached.admission==reference.admission
+    assert cached.target_admission==reference.target_admission
+    assert cached.attempts==reference.attempts
+    assert cached.owner_normals==reference.owner_normals
+
+
+def test_mandatory_repairs_precede_preferred_target_with_one_shared_budget():
+    mesh=_flippable_patch()  # Early IDs already meet the floor, not the target.
+    offset=100
+    corners=((5.,0.,0.),(6.,0.,0.),(8.,1.,0.),(5.,1.,0.))
+    mesh.nodes.update({offset+i:np.asarray(point) for i,point in enumerate(corners,1)})
+    mesh.tris.update({110:(101,102,103),120:(101,103,104)})
+    mesh.elements_of_face[9]=[110,120]
+    mesh.elements_of_sheet[10]=[110,120]
+    before=_signature(mesh)
+    result=repair_s3_admission(mesh,element_owner_normals={i:OWNER for i in mesh.tris},
+        repair_policy=S3RepairPolicy(maximum_edge_flips=1,maximum_edge_flip_attempts=1,
+                                     maximum_refinement_splits=0,maximum_refinement_attempts=0))
+    assert result.admission.admitted
+    assert result.edge_flips==result.edge_flip_attempts==1
+    flips=[attempt for attempt in result.attempts if attempt.action=='edge_flip' and attempt.status=='accepted']
+    assert flips[0].element_ids==(110,120)
+    assert result.target_admission is not None and not result.target_admission.admitted
+    assert _signature(mesh)==before
+
+
 def test_flip_limit_never_returns_a_legacy_or_partial_mesh() -> None:
     original = _flippable_patch()
 

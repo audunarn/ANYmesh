@@ -41,6 +41,27 @@ def test_compiled_callback_path_matches_python_oracle(monkeypatch):
     assert np.all(actual <= values)
 
 
+@pytest.mark.parametrize('count',(64,257,1025))
+def test_small_frontal_face_batches_retain_reference_sweeps(monkeypatch,count):
+    require_kernel()
+    x=np.arange(count+1,dtype=float)*.003
+    points=np.column_stack((x,.01*np.sin(x)))
+    edges=np.column_stack((np.arange(count),np.arange(1,count+1))).astype(np.int64)
+    targets=np.ones(count+1)
+    targets[0]=.05
+    phases=[]
+    actual,iterations=metric.limit_metric_gradation(points,edges,targets,1.5,
+                                                    cancellation_check=phases.append)
+    assert 'native-v2 compiled gradation work' in phases
+    with monkeypatch.context() as patch:
+        patch.setattr(metric,'_native_v2_available',lambda:False)
+        expected,expected_iterations=metric.limit_metric_gradation(points,edges,targets,1.5,
+                                                                  cancellation_check=lambda phase:None)
+    np.testing.assert_allclose(actual,expected,rtol=1e-14,atol=1e-14)
+    np.testing.assert_array_equal(targets,np.r_[.05,np.ones(count)])
+    assert iterations==expected_iterations
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("limit", [1, 4])
 def test_order_and_iteration_limit_match_reference(monkeypatch, reverse, limit):

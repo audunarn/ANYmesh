@@ -182,8 +182,9 @@ def _angles(corners: np.ndarray) -> np.ndarray:
 def _directed_edge_violations(
     mesh: Mesh, selected_triangles: frozenset[int]
 ) -> tuple[tuple[str, ...], tuple[tuple[int, int], ...]]:
+    shells = mesh.shells
     incidence: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
-    for element_id, connectivity in sorted(mesh.shells.items()):
+    for element_id, connectivity in sorted(shells.items()):
         corners = mesh.corners_of(element_id)
         for index, start in enumerate(corners):
             end = int(corners[(index + 1) % len(corners)])
@@ -197,15 +198,18 @@ def _directed_edge_violations(
         tuple(sorted((int(first), int(second))))
         for first, second in mesh.declared_plate_junction_edges
     }
-    sheet_owners: dict[int, tuple[int, ...]] = {
-        element_id: tuple(
-            sorted(
-                int(sheet_id)
-                for sheet_id, element_ids in mesh.elements_of_sheet.items()
-                if element_id in element_ids
-            )
-        )
-        for element_id in mesh.shells
+    # Association values are lists in production meshes. Searching each list
+    # once per shell makes the admission gate quadratic even for one Sheet.
+    # Invert the declared associations once; retain every owner and the same
+    # sorted owner tuples (duplicate IDs within one Sheet remain membership).
+    owners_by_element: dict[int, list[int]] = {}
+    for sheet_id, element_ids in mesh.elements_of_sheet.items():
+        for element_id in set(element_ids):
+            if element_id in shells:
+                owners_by_element.setdefault(element_id, []).append(int(sheet_id))
+    sheet_owners = {
+        element_id: tuple(sorted(owners_by_element.get(element_id, ())))
+        for element_id in shells
     }
     for edge, attached in sorted(incidence.items()):
         if not any(item[0] in selected_triangles for item in attached):
@@ -280,12 +284,13 @@ def _directed_edge_violations(
     return tuple(violations), tuple(qualified_junction_edges)
 
 
-def evaluate_s3_admission(
+def _evaluate_s3_admission(
     mesh: Mesh,
     *,
     element_ids: Sequence[int] | None = None,
     element_owner_normals: Mapping[int, Sequence[float]] | None = None,
     policy: S3QualityPolicy = DEFAULT_S3_QUALITY_POLICY,
+    _element_cache: dict | None = None,
 ) -> S3AdmissionReport:
     """Evaluate the opt-in qualified-S3 geometry contract.
 
@@ -355,6 +360,19 @@ def evaluate_s3_admission(
             authoritative = _unit(normals[element_id], label=f"triangle {element_id} owner normal")
         elif policy.require_authoritative_normals:
             violations.append("authoritative owner normal is missing")
+
+        cache_key = None
+        if _element_cache is not None:
+            # Invocation-local repair workspace. Identity alone is insufficient:
+            # candidate flips, refinement, direct coordinate edits and changed
+            # normal/policy authority must all invalidate a shape result.
+            cache_key = (element_id, policy, corners_ids,
+                         tuple(float(value) for value in corners.flat),
+                         None if authoritative is None else tuple(authoritative))
+            cached = _element_cache.get(cache_key)
+            if cached is not None:
+                records.append(cached)
+                continue
 
         lengths = np.asarray(
             [np.linalg.norm(corners[(i + 1) % 3] - corners[i]) for i in range(3)],
@@ -439,6 +457,8 @@ def evaluate_s3_admission(
                 violations=tuple(violations),
             )
         )
+        if cache_key is not None:
+            _element_cache[cache_key] = records[-1]
 
     directed_violations, qualified_junction_edges = _directed_edge_violations(
         mesh, frozenset(selected)
@@ -449,6 +469,22 @@ def evaluate_s3_admission(
         tuple(topology_violations),
         qualified_junction_edges,
     )
+
+
+def evaluate_s3_admission(
+    mesh: Mesh,
+    *,
+    element_ids: Sequence[int] | None = None,
+    element_owner_normals: Mapping[int, Sequence[float]] | None = None,
+    policy: S3QualityPolicy = DEFAULT_S3_QUALITY_POLICY,
+) -> S3AdmissionReport:
+    """Evaluate qualified-S3 shape and topology with explicit normal authority.
+
+    A triangle's self-derived normal cannot distinguish valid ordering from
+    complete winding reversal. Normal authority must come from the caller.
+    """
+    return _evaluate_s3_admission(mesh,element_ids=element_ids,
+        element_owner_normals=element_owner_normals,policy=policy)
 
 
 def assert_s3_admissible(

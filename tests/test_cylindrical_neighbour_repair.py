@@ -85,6 +85,36 @@ def test_smoothing_repairs_only_interior_and_reports_committed_work():
     assert {node: mesh.nodes[node] for node in range(1, 5)} == protected
 
 
+def test_repaired_node_coordinates_remain_usable_by_mesh_quality_consumers():
+    from anymesher.mesh import Mesh
+    from anymesher.hybrid import _element_growth
+    fixture,points=_interior_case()
+    mesh=Mesh(nodes={node:np.asarray(point,dtype=float) for node,point in fixture.nodes.items()},
+              tris=fixture.tris,elements_of_face=fixture.elements_of_face)
+    report=repair_triangle_face(mesh,1,points,cache={},physical_evaluator=_lift)
+    assert report['selected'] and report['moved_nodes']==1
+    assert all(isinstance(point,np.ndarray) and point.shape==(3,) for point in mesh.nodes.values())
+    growth,violations=_element_growth(mesh,limit=1.5)
+    assert np.isfinite(growth) and isinstance(violations,tuple)
+
+
+def test_interior_repair_detects_S3_failures_below_the_old_aspect_trigger():
+    from anymesher import Mesh,evaluate_s3_admission,assert_s3_admissible
+    points=np.asarray(((0.,0.),(1.,0.),(1.,1.),(0.,1.),(.2,.04)))
+    mesh=Mesh(nodes={i+1:np.asarray((*point,0.)) for i,point in enumerate(points)},
+              tris={i+1:(i+1,(i+1)%4+1,5) for i in range(4)},elements_of_face={1:[1,2,3,4]})
+    normals={i:(0.,0.,1.) for i in mesh.tris}
+    initial=evaluate_s3_admission(mesh,element_owner_normals=normals)
+    assert not initial.admitted
+    assert max(item.edge_ratio for item in initial.elements)<5.
+    protected={node:mesh.nodes[node].tobytes() for node in range(1,5)}
+    report=repair_triangle_face(mesh,1,points,cache={},physical_evaluator=_lift)
+    assert report['selected'] and report['moved_nodes']==1
+    assert report['initial_score'][1]>0 and report['final_score'][1]==0
+    assert_s3_admissible(mesh,element_owner_normals=normals)
+    assert {node:mesh.nodes[node].tobytes() for node in range(1,5)}==protected
+
+
 def test_smoothing_cancellation_before_commit_preserves_mesh_and_cache():
     mesh, points = _interior_case()
     nodes, triangles = dict(mesh.nodes), dict(mesh.tris)

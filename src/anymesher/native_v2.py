@@ -1021,9 +1021,10 @@ def frontal_delaunay_refine(
     )
 
     metric_cache = None
-    if (isinstance(provider, SpatialMetricField)
-            and metric_spec is not None and metric_spec.spatial_dimension == 3
-            and (callable(metric_jacobian) or np.shape(metric_jacobian) == (3, 2))):
+    if isinstance(provider, SpatialMetricField) and metric_spec is not None:
+        # Uniform and 2D controls are also immutable within this invocation.
+        # Cache the exact raw evaluation, never topology-dependent gradation.
+        # Experimental providers retain their observable uncached calls.
         from ._point_metric_cache import PointMetricCache
         metric_cache = PointMetricCache(
             lambda rows: evaluate_spec(metric_spec, provider, rows),

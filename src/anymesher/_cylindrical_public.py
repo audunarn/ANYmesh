@@ -5,20 +5,33 @@ from dataclasses import replace
 import numpy as np
 from anygeometry.curves import Straight
 from anygeometry.surfaces import Cylinder
+from anygeometry import EllipticArc, CylinderIntersectionCurve, query_joint_edge
 
 from ._cylindrical_atlas import prepare_cylindrical_atlas
 from ._cylindrical_patch import prepare_cylindrical_patch
+from ._trimmed_cylinder_binding import prepare_trimmed_cylinders, _owner
 from .errors import MeshError
 from .metric import IsotropicMetricControl, MetricFieldSpec
 from .surface_mesh import SurfaceMeshOptions
 
 
 def prepare_bindings(geometry, native_faces, native_options, cancellation_check=None):
-    """Require an owner patch for one face or an owner atlas for a component."""
-    if native_options.point_placement != "frontal_delaunay":
-        return {}
+    """Bind general analytic trims in physical charts for either point filler.
+
+    Legacy cylinders without physical joints keep their original route. Exact
+    curves and qualified joints need physical chart lengths with either filler.
+    """
     remaining = {int(face) for face in native_faces
                  if isinstance(geometry.faces[face].surface, Cylinder)}
+    owner=_owner(geometry)
+    activated = remaining if native_options.point_placement == "frontal_delaunay" else {
+        face for face in remaining
+        if any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+               or query_joint_edge(owner,use.edge).declared
+               for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
+               for use in loop)}
+    if not activated:
+        return {}
     bindings = {}
     while remaining:
         component = set()
@@ -32,6 +45,9 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
             neighbours = {int(other) for loop in (owner.loop, *owner.holes)
                           for use in loop for other in geometry.faces_using_edge(use.edge)}
             pending.extend(sorted((neighbours & remaining) - component - set(pending)))
+        if not component.intersection(activated):
+            remaining.difference_update(component)
+            continue
         selected = []
         for face in sorted(component):
             uses = sorted(identifier for identifier, use in geometry.face_uses.items()
@@ -40,27 +56,9 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
                 raise MeshError("cylindrical native face requires one qualified FaceUse")
             selected.append(geometry.handle("face_use", uses[0]))
         selected = tuple(selected)
-        if len(selected) == 1:
-            binding = prepare_cylindrical_patch(
-                geometry, selected, cancellation_check=cancellation_check,
-            )
-        elif len(selected) == 2:
-            try:
-                from ._cylindrical_open import prepare_cylindrical_open
-            except ImportError as error:
-                raise MeshError(
-                    "an open two-face cylinder component needs an ANYgeometry "
-                    "installation with the cylinder-open-component owner API"
-                ) from error
-            binding = prepare_cylindrical_open(
-                geometry, selected, cancellation_check=cancellation_check,
-            )
-        else:
-            # An incomplete periodic family must not be disguised as patches.
-            binding = prepare_cylindrical_atlas(
-                geometry, selected, reference_face_use=selected[0],
-                cancellation_check=cancellation_check,
-            )
+        binding = prepare_trimmed_cylinders(
+            geometry, selected, cancellation_check=cancellation_check,
+        )
         for face in component:
             bindings[face] = binding
         remaining.difference_update(component)

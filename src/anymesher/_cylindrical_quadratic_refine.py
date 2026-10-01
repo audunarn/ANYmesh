@@ -9,6 +9,7 @@ import numpy as np
 
 from ._cylindrical_atlas import CylindricalAtlasBinding
 from ._cylindrical_patch import CylindricalPatchBinding
+from ._trimmed_cylinder_binding import TrimmedCylinderBinding
 try:
     from ._cylindrical_open import CylindricalOpenBinding
 except ImportError:  # ANYgeometry 0.4.3 predates open-component ownership.
@@ -41,7 +42,7 @@ def refine_quadratic_component(geometry, seed, binding, station_entries, setting
     requested quality gate returns the original whole component, never a mixed
     split/unsplit mesh. Operational failures and cancellation propagate.
     """
-    binding_types = (CylindricalAtlasBinding, CylindricalPatchBinding)
+    binding_types = (CylindricalAtlasBinding, CylindricalPatchBinding, TrimmedCylinderBinding)
     if CylindricalOpenBinding is not None:
         binding_types += (CylindricalOpenBinding,)
     if not isinstance(binding, binding_types):

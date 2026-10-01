@@ -2174,6 +2174,7 @@ def mesh_planar_surface(
     _component_seed_registry: Any | None = None,
     _supplemental_metric_field: MetricFieldSpec | None = None,
     _preserve_spatial_refinement: bool = False,
+    _boundary_is_seeded: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -2234,9 +2235,10 @@ def mesh_planar_surface(
     )
     if settings.target_size is not None:
         densification_started = perf_counter()
-        planar_outer = _densify_loop(planar_outer, settings.target_size)
-        planar_holes = [_densify_loop(hole, settings.target_size) for hole in planar_holes]
-        planar_constraints = [_densify_open(segment, settings.target_size)[[0, -1]] for segment in planar_constraints]
+        if not _boundary_is_seeded:
+            planar_outer = _densify_loop(planar_outer, settings.target_size)
+            planar_holes = [_densify_loop(hole, settings.target_size) for hole in planar_holes]
+            planar_constraints = [_densify_open(segment, settings.target_size)[[0, -1]] for segment in planar_constraints]
         phase_seconds["boundary_densification"] = (
             perf_counter() - densification_started
         )

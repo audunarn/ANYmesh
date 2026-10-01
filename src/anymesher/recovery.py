@@ -7,14 +7,15 @@ change the source or the next attempt's boundary identities.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isfinite
 from time import monotonic
 from typing import Any, Mapping
 
 from anygeometry import GeometryModel
 
-from .errors import MeshError
+from .errors import MeshError, StructuredQualityRejected
+from .quad.validate import QuadQualityRejected
 from .hybrid import HybridMeshResult, generate_hybrid_mesh_result
 from .quality import verify_mesh_quality
 from .quad.front import FrontNoCandidate, FrontRejected
@@ -88,6 +89,8 @@ class AutomaticMeshResult:
 
 _RECOVERABLE = (
     S3QualityError,
+    QuadQualityRejected,
+    StructuredQualityRejected,
     FrontNoCandidate,
     FrontRejected,
     QuadPublicUnsupported,
@@ -118,11 +121,39 @@ def _attempt_options(
         native = dict(base)
         native.update(
             strategy="native", quad_options=None, layout_policy="existing",
-            structured_options=None,
+            structured_options=None, recombine=False,
         )
         if all(route != "native" or options.get("quad_options") is not None for route, options in routes):
             routes.append(("native", native))
     return tuple(routes[:3])
+
+
+def _prefer_analytic_trim_recipe(geometry, first, recipes):
+    """Select an existing native recipe for automatic analytic material cuts.
+
+    This selects discretization only. Hybrid generation must still obtain the
+    owner's revision-bound material charts and pass unchanged admission gates.
+    Explicit native/mapped requests, spatial controls and strict requests retain
+    their route. Historical circular cylinder patches retain their route too.
+    """
+    if (_route_name(first) not in {'auto','quad_first'}
+            or first.get('order','linear')!='linear'):
+        return recipes
+    import anygeometry as owner
+    types=tuple(kind for name in ('EllipticArc','CylinderIntersectionCurve')
+                if isinstance((kind:=getattr(owner,name,None)),type))
+    if not types or not any(isinstance(edge.curve,types) for edge in geometry.edges.values()):
+        return recipes
+    from .native_v2 import NativeMeshingOptions
+    options=NativeMeshingOptions.coerce(first.get('native_options'))
+    if options.point_placement!='legacy_lattice':
+        return recipes
+    native=next((dict(recipe) for method,recipe in recipes if method=='native'),None)
+    if native is None:
+        return recipes
+    native['native_options']=replace(options,point_placement='frontal_delaunay',
+                                     metric_mode='isotropic_spatial')
+    return (('native',native),*(item for item in recipes if item[0]!='native'))
 
 
 def generate_automatic_mesh_result(
@@ -162,6 +193,8 @@ def generate_automatic_mesh_result(
     recipes = _attempt_options(first, fallback_structured_options)
     if policy.strict_method:
         recipes = recipes[:1]
+    else:
+        recipes = _prefer_analytic_trim_recipe(geometry, first, recipes)
     attempts: list[Mapping[str, object]] = []
     first_recoverable: Exception | None = None
     admission_error: S3QualityError | None = None

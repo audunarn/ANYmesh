@@ -135,11 +135,11 @@ def test_certified_full_sector_cylinder_uses_real_native_path(metric_mode, monke
 def test_public_cylindrical_owner_failure_prevents_publication(monkeypatch):
     from anymesher import _cylindrical_public
     def unavailable(*args, **kwargs):
-        raise MeshError("owner atlas binding unavailable")
-    monkeypatch.setattr(_cylindrical_public, "prepare_cylindrical_atlas", unavailable)
+        raise MeshError("owner material chart binding unavailable")
+    monkeypatch.setattr(_cylindrical_public, "prepare_trimmed_cylinders", unavailable)
     model, _ = _sector_model()
     before = _persistent_state(model)
-    with pytest.raises(MeshError, match="owner atlas binding"):
+    with pytest.raises(MeshError, match="owner material chart binding"):
         hybrid.generate_hybrid_mesh_result(
             model, target_size=.4, strategy="native", native_backend="python",
             recombine=False,

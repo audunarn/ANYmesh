@@ -26,7 +26,7 @@ from .s3_quality import (
     S3AdmissionReport,
     S3QualityError,
     S3QualityPolicy,
-    evaluate_s3_admission,
+    _evaluate_s3_admission,
 )
 
 __all__ = [
@@ -653,21 +653,26 @@ def repair_s3_admission(
         )
 
     search_policy = quality_policy if target_policy is None else target_policy
+    # Candidate repairs change a few triangles. Preserve their exact scalar
+    # quality evaluation while reusing unchanged shape records; topology is
+    # still recomputed for the complete requested scope on every candidate.
+    element_quality_cache = {}
 
     def report_for(
         current: Mesh,
         scope: frozenset[int],
         made_owners: Mapping[int, np.ndarray],
-        policy: S3QualityPolicy = search_policy,
+        policy: S3QualityPolicy | None = None,
     ) -> S3AdmissionReport:
-        return evaluate_s3_admission(
+        return _evaluate_s3_admission(
             current,
             element_ids=tuple(sorted(scope)),
             element_owner_normals={
                 element_id: _normal_tuple(made_owners[element_id])
                 for element_id in sorted(scope)
             },
-            policy=policy,
+            policy=search_policy if policy is None else policy,
+            _element_cache=element_quality_cache,
         )
 
     def adds_floor_violations(
@@ -681,219 +686,226 @@ def repair_s3_admission(
             report_for(current, scope, made_owners, quality_policy)
         ) > _report_score(report_for(work, selected, owners, quality_policy))
 
-    report = report_for(work, selected, owners)
     edge_flips = 0
     edge_flip_attempts = 0
     visited_flips: set[tuple[tuple[int, int], tuple[tuple[int, tuple[int, ...]], ...]]] = set()
-    while not report.admitted:
-        incidence = _shell_incidence(work)
-        failing = {
-            item.element_id for item in report.elements if not item.admitted
-        }
-        accepted = False
-        for edge, attached in sorted(incidence.items()):
-            if len(attached) != 2 or any(kind != "tri" for kind, _ in attached):
-                continue
-            ids = tuple(sorted(element_id for _, element_id in attached))
-            if len(ids) != 2 or any(element_id not in selected for element_id in ids):
-                continue
-            if not failing.intersection(ids):
-                continue
-            state = (edge, tuple((element_id, tuple(work.tris[element_id])) for element_id in ids))
-            if state in visited_flips:
-                continue
-            visited_flips.add(state)
-            if edge_flip_attempts >= repair_policy.maximum_edge_flip_attempts:
-                _record(
-                    attempts,
-                    "edge_flip",
-                    "limit",
-                    ids,
-                    edge,
-                    "maximum_edge_flip_attempts exhausted",
-                )
-                break
-            edge_flip_attempts += 1
-            if edge_flips >= repair_policy.maximum_edge_flips:
-                _record(
-                    attempts,
-                    "edge_flip",
-                    "limit",
-                    ids,
-                    edge,
-                    "maximum_edge_flips exhausted",
-                )
-                break
-            replacement, detail = _candidate_flip(
-                work,
-                edge,
-                ids,  # type: ignore[arg-type]
-                owners,
-                repair_policy.minimum_flip_owner_alignment,
-            )
-            if replacement is None:
-                _record(attempts, "edge_flip", "rejected", ids, edge, detail)
-                continue
-            candidate = deepcopy(work)
-            candidate.tris.update(replacement)
-            candidate_report = report_for(candidate, selected, owners)
-            candidate_elements = {
-                item.element_id: item for item in candidate_report.elements
-            }
-            if (
-                any(not candidate_elements[element_id].admitted for element_id in ids)
-                or _report_score(candidate_report) >= _report_score(report)
-            ):
-                _record(
-                    attempts,
-                    "edge_flip",
-                    "rejected",
-                    ids,
-                    edge,
-                    "replacement diagonal does not strictly reduce admission violations",
-                )
-                continue
-            work = candidate
-            report = candidate_report
-            edge_flips += 1
-            _record(attempts, "edge_flip", "accepted", ids, edge, detail)
-            accepted = True
-            break
-        if not accepted:
-            break
-
     refinement_splits = 0
     refinement_attempts = 0
     added_nodes = 0
     added_elements = 0
     visited_splits: set[tuple[int, tuple[int, int], tuple[int, ...]]] = set()
-    while not report.admitted:
-        failing = tuple(item.element_id for item in report.elements if not item.admitted)
-        accepted = False
-        incidence = _shell_incidence(work)
-        candidates: list[tuple[float, tuple[int, int], int, tuple[int, ...]]] = []
-        for element_id in sorted(failing):
-            connectivity = tuple(int(value) for value in work.tris[element_id])
-            for edge in _triangle_edges(connectivity):
-                length = float(
-                    np.linalg.norm(
-                        np.asarray(work.nodes[edge[1]], dtype=float)
-                        - np.asarray(work.nodes[edge[0]], dtype=float)
+    # Repair mandatory admission before optional target quality. Both phases
+    # share one operation budget and visited-candidate history.
+    phases = (quality_policy,) if target_policy is None else (quality_policy, target_policy)
+    for search_policy in phases:
+        report = report_for(work, selected, owners)
+        while not report.admitted:
+            incidence = _shell_incidence(work)
+            failing = {
+                item.element_id for item in report.elements if not item.admitted
+            }
+            accepted = False
+            for edge, attached in sorted(incidence.items()):
+                if len(attached) != 2 or any(kind != "tri" for kind, _ in attached):
+                    continue
+                ids = tuple(sorted(element_id for _, element_id in attached))
+                if len(ids) != 2 or any(element_id not in selected for element_id in ids):
+                    continue
+                if not failing.intersection(ids):
+                    continue
+                state = (edge, tuple((element_id, tuple(work.tris[element_id])) for element_id in ids))
+                if state in visited_flips:
+                    continue
+                visited_flips.add(state)
+                if edge_flip_attempts >= repair_policy.maximum_edge_flip_attempts:
+                    _record(
+                        attempts,
+                        "edge_flip",
+                        "limit",
+                        ids,
+                        edge,
+                        "maximum_edge_flip_attempts exhausted",
                     )
-                )
-                attached = tuple(
-                    sorted(
-                        owner_id
-                        for kind, owner_id in incidence.get(edge, ())
-                        if kind == "tri"
+                    break
+                edge_flip_attempts += 1
+                if edge_flips >= repair_policy.maximum_edge_flips:
+                    _record(
+                        attempts,
+                        "edge_flip",
+                        "limit",
+                        ids,
+                        edge,
+                        "maximum_edge_flips exhausted",
                     )
-                )
-                candidates.append((-length, edge, element_id, attached))
-        for _, edge, element_id, attached in sorted(candidates):
-            state = (element_id, edge, attached)
-            if state in visited_splits:
-                continue
-            visited_splits.add(state)
-            if refinement_attempts >= repair_policy.maximum_refinement_attempts:
-                _record(
-                    attempts,
-                    "refinement",
-                    "limit",
-                    attached or (element_id,),
+                    break
+                replacement, detail = _candidate_flip(
+                    work,
                     edge,
-                    "maximum_refinement_attempts exhausted",
+                    ids,  # type: ignore[arg-type]
+                    owners,
+                    repair_policy.minimum_flip_owner_alignment,
                 )
+                if replacement is None:
+                    _record(attempts, "edge_flip", "rejected", ids, edge, detail)
+                    continue
+                candidate = deepcopy(work)
+                candidate.tris.update(replacement)
+                candidate_report = report_for(candidate, selected, owners)
+                candidate_elements = {
+                    item.element_id: item for item in candidate_report.elements
+                }
+                if (
+                    any(not candidate_elements[element_id].admitted for element_id in ids)
+                    or _report_score(candidate_report) >= _report_score(report)
+                ):
+                    _record(
+                        attempts,
+                        "edge_flip",
+                        "rejected",
+                        ids,
+                        edge,
+                        "replacement diagonal does not strictly reduce admission violations",
+                    )
+                    continue
+                work = candidate
+                report = candidate_report
+                edge_flips += 1
+                _record(attempts, "edge_flip", "accepted", ids, edge, detail)
+                accepted = True
                 break
-            refinement_attempts += 1
-            if refinement_splits >= repair_policy.maximum_refinement_splits:
-                _record(
-                    attempts,
-                    "refinement",
-                    "limit",
-                    attached or (element_id,),
-                    edge,
-                    "maximum_refinement_splits exhausted",
-                )
+            if not accepted:
                 break
-            if added_nodes >= repair_policy.maximum_added_nodes:
-                _record(
-                    attempts,
-                    "refinement",
-                    "limit",
-                    attached or (element_id,),
+
+        while not report.admitted:
+            failing = tuple(item.element_id for item in report.elements if not item.admitted)
+            accepted = False
+            incidence = _shell_incidence(work)
+            candidates: list[tuple[float, tuple[int, int], int, tuple[int, ...]]] = []
+            for element_id in sorted(failing):
+                connectivity = tuple(int(value) for value in work.tris[element_id])
+                for edge in _triangle_edges(connectivity):
+                    length = float(
+                        np.linalg.norm(
+                            np.asarray(work.nodes[edge[1]], dtype=float)
+                            - np.asarray(work.nodes[edge[0]], dtype=float)
+                        )
+                    )
+                    attached = tuple(
+                        sorted(
+                            owner_id
+                            for kind, owner_id in incidence.get(edge, ())
+                            if kind == "tri"
+                        )
+                    )
+                    candidates.append((-length, edge, element_id, attached))
+            for _, edge, element_id, attached in sorted(candidates):
+                state = (element_id, edge, attached)
+                if state in visited_splits:
+                    continue
+                visited_splits.add(state)
+                if refinement_attempts >= repair_policy.maximum_refinement_attempts:
+                    _record(
+                        attempts,
+                        "refinement",
+                        "limit",
+                        attached or (element_id,),
+                        edge,
+                        "maximum_refinement_attempts exhausted",
+                    )
+                    break
+                refinement_attempts += 1
+                if refinement_splits >= repair_policy.maximum_refinement_splits:
+                    _record(
+                        attempts,
+                        "refinement",
+                        "limit",
+                        attached or (element_id,),
+                        edge,
+                        "maximum_refinement_splits exhausted",
+                    )
+                    break
+                if added_nodes >= repair_policy.maximum_added_nodes:
+                    _record(
+                        attempts,
+                        "refinement",
+                        "limit",
+                        attached or (element_id,),
+                        edge,
+                        "maximum_added_nodes exhausted",
+                    )
+                    break
+                if added_elements + len(attached) > repair_policy.maximum_added_elements:
+                    _record(
+                        attempts,
+                        "refinement",
+                        "limit",
+                        attached or (element_id,),
+                        edge,
+                        "maximum_added_elements would be exceeded",
+                    )
+                    continue
+                all_element_ids = set(work.quads) | set(work.tris) | set(work.beams) | set(work.couplings)
+                next_node_id = max(work.nodes, default=0) + 1
+                next_element_id = max(all_element_ids, default=0) + 1
+                candidate, made_owners, made_selected, new_elements, detail = _candidate_bisection(
+                    work,
                     edge,
-                    "maximum_added_nodes exhausted",
-                )
-                break
-            if added_elements + len(attached) > repair_policy.maximum_added_elements:
-                _record(
-                    attempts,
-                    "refinement",
-                    "limit",
-                    attached or (element_id,),
-                    edge,
-                    "maximum_added_elements would be exceeded",
-                )
-                continue
-            all_element_ids = set(work.quads) | set(work.tris) | set(work.beams) | set(work.couplings)
-            next_node_id = max(work.nodes, default=0) + 1
-            next_element_id = max(all_element_ids, default=0) + 1
-            candidate, made_owners, made_selected, new_elements, detail = _candidate_bisection(
-                work,
-                edge,
-                attached,
-                owners,
-                selected,
-                next_node_id=next_node_id,
-                next_element_id=next_element_id,
-            )
-            if candidate is None or made_owners is None or made_selected is None:
-                _record(
-                    attempts,
-                    "refinement",
-                    "rejected",
-                    attached or (element_id,),
-                    edge,
-                    detail,
-                )
-                continue
-            candidate_report = report_for(candidate, made_selected, made_owners)
-            if _report_score(candidate_report) >= _report_score(report):
-                _record(
-                    attempts,
-                    "refinement",
-                    "rejected",
                     attached,
-                    edge,
-                    "conforming bisection does not strictly reduce admission violations",
+                    owners,
+                    selected,
+                    next_node_id=next_node_id,
+                    next_element_id=next_element_id,
                 )
-                continue
-            if adds_floor_violations(candidate, made_selected, made_owners):
-                _record(
-                    attempts,
-                    "refinement",
-                    "rejected",
-                    attached,
-                    edge,
-                    "conforming bisection would add admission-floor violations",
-                )
-                continue
-            work = candidate
-            owners = made_owners
-            selected = made_selected
-            report = candidate_report
-            refinement_splits += 1
-            added_nodes += 1
-            added_elements += new_elements
-            _record(attempts, "refinement", "accepted", attached, edge, detail)
-            accepted = True
-            break
-        if not accepted:
+                if candidate is None or made_owners is None or made_selected is None:
+                    _record(
+                        attempts,
+                        "refinement",
+                        "rejected",
+                        attached or (element_id,),
+                        edge,
+                        detail,
+                    )
+                    continue
+                candidate_report = report_for(candidate, made_selected, made_owners)
+                if _report_score(candidate_report) >= _report_score(report):
+                    _record(
+                        attempts,
+                        "refinement",
+                        "rejected",
+                        attached,
+                        edge,
+                        "conforming bisection does not strictly reduce admission violations",
+                    )
+                    continue
+                if adds_floor_violations(candidate, made_selected, made_owners):
+                    _record(
+                        attempts,
+                        "refinement",
+                        "rejected",
+                        attached,
+                        edge,
+                        "conforming bisection would add admission-floor violations",
+                    )
+                    continue
+                work = candidate
+                owners = made_owners
+                selected = made_selected
+                report = candidate_report
+                refinement_splits += 1
+                added_nodes += 1
+                added_elements += new_elements
+                _record(attempts, "refinement", "accepted", attached, edge, detail)
+                accepted = True
+                break
+            if not accepted:
+                break
+
+        if search_policy is quality_policy and not report.admitted:
             break
 
-    target_report = None if target_policy is None else report
-    if target_report is not None:
-        report = report_for(work, selected, owners, quality_policy)
+    target_report = (None if target_policy is None else
+                     report_for(work, selected, owners, target_policy))
+    report = report_for(work, selected, owners, quality_policy)
 
     if not report.admitted:
         _record(

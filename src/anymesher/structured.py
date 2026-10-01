@@ -769,6 +769,10 @@ def plan_structured_layout(
     protected = {int(item) for item in protected_edge_ids}
     protected.update(normalized_overrides)
     allowed_non_manifold = {int(item) for item in allowed_non_manifold_edge_ids}
+    from anygeometry import query_joint_edge
+    owner=getattr(geometry,"source",geometry)
+    allowed_non_manifold.update(edge for edge in geometry.edges
+        if len(geometry.faces_using_edge(edge))>2 and query_joint_edge(owner,edge).declared)
     unknown = sorted((protected | allowed_non_manifold).difference(geometry.edges))
     if unknown:
         raise MeshError(f"protected/overridden edge {unknown[0]} does not exist")
@@ -1129,13 +1133,17 @@ def _actual_evidence(
     edge_ids = tuple(sorted({
         item.edge for block in blocks
         for item in working.faces[int(block.working_face_id)].loop
-    }))
+    } | {item.edge for decision in plan.faces if decision.structured
+         for face_id in face_mapping[decision.source_face_id]
+         for item in working.faces[face_id].loop}))
     _cancel(cancellation_check, "structured global seeding start")
     try:
         seeding = solve_seeding(
             working, target_size=plan.target_size, edge_ids=edge_ids,
             overrides=dict(plan.seed_overrides),
             max_divisions=plan.options.maximum_divisions_per_edge,
+            maximum_adjacent_growth=plan.options.max_element_growth,
+            cancellation_check=cancellation_check,
         )
     except (SeedingConflict, ValueError) as error:
         raise MeshError(f"global structured seeding failed: {error}") from error
