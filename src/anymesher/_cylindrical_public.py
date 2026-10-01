@@ -26,7 +26,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
     owner=_owner(geometry)
     activated = remaining if native_options.point_placement == "frontal_delaunay" else {
         face for face in remaining
-        if any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        if geometry.faces[face].holes or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
                or query_joint_edge(owner,use.edge).declared
                for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
                for use in loop)}
@@ -56,7 +56,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
                 raise MeshError("cylindrical native face requires one qualified FaceUse")
             selected.append(geometry.handle("face_use", uses[0]))
         selected = tuple(selected)
-        generalized=any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        generalized=any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
             for face in component for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
             for use in loop)
         generalized=generalized or any(
