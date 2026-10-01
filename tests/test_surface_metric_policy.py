@@ -17,6 +17,17 @@ def _sorted_rows(values: np.ndarray) -> np.ndarray:
     return rounded[order]
 
 
+def test_authoritative_boundary_station_sequences_are_not_densified_for_interior_size():
+    outer=np.asarray(((0.,0.),(1.,0.),(1.,1.),(0.,1.)))
+    diagnostics={}
+    mesh=mesh_planar_surface(outer,target_size=.5,recombine=False,backend='python',
+                             _boundary_is_seeded=True,diagnostics=diagnostics)
+    positions=mesh.node_coordinates[:,:2]
+    boundary=positions[np.any(np.isclose(positions,0.)|np.isclose(positions,1.),axis=1)]
+    np.testing.assert_allclose(_sorted_rows(boundary),_sorted_rows(outer),rtol=0.,atol=1e-12)
+    assert len(positions)>len(outer)
+
+
 def test_public_native_quality_defaults_remain_0_2_3_compatible() -> None:
     settings = SurfaceMeshOptions()
 

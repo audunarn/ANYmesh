@@ -30,6 +30,7 @@ __all__ = [
 ]
 
 _NATIVE_BATCH_THRESHOLD = 4096
+_NATIVE_GRADATION_BATCH_THRESHOLD = 64
 _METRIC_QUERY_CHUNK_SIZE = 256
 _METRIC_SOURCE_CHUNK_SIZE = 256
 
@@ -614,8 +615,9 @@ def limit_metric_gradation(
         raise MeshError("gradation edge index is out of range")
     if (
         coordinates.shape[1] == 2
-        and len(connections) >= _NATIVE_BATCH_THRESHOLD
+        and len(connections) >= min(_NATIVE_GRADATION_BATCH_THRESHOLD,_NATIVE_BATCH_THRESHOLD)
         and cancellation_check is not None
+        and cancellation_interval>=4096
         and _native_v2_available()
     ):
         from ._cancellable_gradation import native_cancellable_gradation
@@ -628,7 +630,7 @@ def limit_metric_gradation(
             return native
     if (
         coordinates.shape[1] == 2
-        and len(connections) >= _NATIVE_BATCH_THRESHOLD
+        and len(connections) >= min(_NATIVE_GRADATION_BATCH_THRESHOLD,_NATIVE_BATCH_THRESHOLD)
         and cancellation_check is None
         and _native_v2_available()
     ):

@@ -42,6 +42,57 @@ def test_qualified_s3_admits_an_oriented_equilateral_triangle() -> None:
     assert report.elements[0].minimum_scaled_jacobian == pytest.approx(sqrt(3.0) / 2.0)
 
 
+@pytest.mark.parametrize('count',(1,127,1025))
+def test_growing_sheet_admission_indexes_associations_without_per_shell_search(count):
+    class DeclaredElements(list):
+        def __contains__(self,value):
+            raise AssertionError('admission must not repeatedly search complete Sheet lists')
+    class InspectedMesh(Mesh):
+        shell_reads=0
+        @property
+        def shells(self):
+            self.shell_reads+=1
+            return super().shells
+    mesh=InspectedMesh()
+    for index in range(count):
+        start=3*index+1
+        mesh.nodes.update({start:np.asarray((2.*index,0.,0.)),
+                           start+1:np.asarray((2.*index+1.,0.,0.)),
+                           start+2:np.asarray((2.*index+.5,sqrt(3.)/2.,0.))})
+        mesh.tris[index+1]=(start,start+1,start+2)
+    # Repeated references within one Sheet have membership semantics, and an
+    # association to an absent element contributes no owner to a live shell.
+    declared=DeclaredElements([*range(1,count+1),1,count+2])
+    mesh.elements_of_sheet={17:declared}
+    report=assert_s3_admissible(mesh,element_owner_normals={i:(0.,0.,1.) for i in mesh.tris})
+    assert report.admitted and len(report.elements)==count
+    assert mesh.elements_of_sheet[17] is declared
+    assert declared[-2:]==[1,count+2]
+    assert mesh.shell_reads==1
+
+
+def test_repair_shape_workspace_invalidates_coordinates_connectivity_normals_and_policy():
+    from anymesher.s3_quality import _evaluate_s3_admission
+    mesh=_equilateral()
+    normals={11:(0.,0.,1.)}
+    cache={}
+    def compare(policy=DEFAULT_S3_QUALITY_POLICY):
+        cached=_evaluate_s3_admission(mesh,element_owner_normals=normals,policy=policy,_element_cache=cache)
+        full=evaluate_s3_admission(mesh,element_owner_normals=normals,policy=policy)
+        assert cached==full
+        return full
+    first=compare()
+    assert compare()==first
+    mesh.nodes[3][:]=(.05,.01,0.)
+    assert not compare().admitted
+    mesh.nodes[3][:]=(.5,sqrt(3.)/2.,0.)
+    mesh.tris[11]=(1,3,2)
+    assert not compare().admitted
+    normals[11]=(0.,0.,-1.)
+    assert compare().admitted
+    assert not compare(S3QualityPolicy(minimum_angle_deg=61.)).admitted
+
+
 def test_qualified_s3_rejects_missing_authority_and_complete_reversal() -> None:
     with pytest.raises(S3QualityError, match="authoritative owner normal is missing"):
         assert_s3_admissible(_equilateral())

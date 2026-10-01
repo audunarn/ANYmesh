@@ -96,7 +96,14 @@ def test_hybrid_automatically_declares_beam_to_shell_attachment() -> None:
 
     assert result.structural_preparation is not None
     assert result.structural_preparation.member_sheet_connections == 1
-    assert result.mesh.couplings
+    beam_nodes = {node for element in result.mesh.elements_of_edge[edge]
+                  for node in result.mesh.beams[element]}
+    shell_nodes = {node for element in result.mesh.elements_of_face[face]
+                   for node in result.mesh.corners_of(element)}
+    shared = beam_nodes & shell_nodes
+    assert len(shared) == 1
+    assert np.allclose(result.mesh.nodes[next(iter(shared))], (0, 0, 0))
+    assert not result.mesh.couplings
     assert not result.connectivity.issues
 
 
@@ -239,7 +246,14 @@ def test_sheet_attachment_uses_recorded_face_not_same_numbered_face() -> None:
 
     assert result.structural_preparation is not None
     assert result.structural_preparation.member_sheet_connections == 1
-    assert result.mesh.couplings
+    beam_nodes = {node for element in result.mesh.elements_of_edge[beam]
+                  for node in result.mesh.beams[element]}
+    shell_nodes = {node for element in result.mesh.elements_of_face[target]
+                   for node in result.mesh.corners_of(element)}
+    assert beam_nodes <= shell_nodes
+    assert all(np.allclose(result.mesh.nodes[node][1:], (.5, 0)) for node in beam_nodes)
+    assert unrelated not in result.mesh.elements_of_face
+    assert not result.mesh.couplings
     assert not result.connectivity.issues
 
 

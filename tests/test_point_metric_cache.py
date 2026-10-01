@@ -134,7 +134,10 @@ def test_real_position_dependent_pullback_matches_uncached_bytes():
     assert cache.evaluated_rows == len(points)
 
 
-def test_cylindrical_public_mesh_is_byte_exact_without_cache(monkeypatch):
+@pytest.mark.parametrize('uniform', [False,True])
+def test_cylindrical_public_mesh_is_byte_exact_without_cache(monkeypatch,uniform):
+    from dataclasses import replace
+    from anymesher import MetricFieldSpec
     from anymesher import _point_metric_cache
     from anymesher.hybrid import generate_hybrid_mesh_result, _neutral_shell_core
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
@@ -148,10 +151,13 @@ def test_cylindrical_public_mesh_is_byte_exact_without_cache(monkeypatch):
         return result
     monkeypatch.setattr(_point_metric_cache.PointMetricCache, "evaluate", observed)
     def generate():
+        options=fixture.options(.4, "frontal", 128)
+        if uniform:
+            options=replace(options,metric_field=MetricFieldSpec.uniform(.4))
         return generate_hybrid_mesh_result(
             fixture.model, face_ids=fixture.face_ids, target_size=.4, strategy="native",
             overrides=fixture.overrides(.4), refinements=fixture.refinements(.4),
-            native_backend="python", native_options=fixture.options(.4, "frontal", 128),
+            native_backend="python", native_options=options,
             recombine=True,
         )
     cached = generate()

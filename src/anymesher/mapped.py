@@ -195,7 +195,7 @@ def generate_mesh(
     member_registry = MemberRegistry(GeometryMeshingView(geometry))
     attachment_stations: dict[int, set[float]] = {}
     for attachment in geometry.attachments.values():
-        if not attachment.member_range.is_point:
+        if attachment.member_id is None or not attachment.member_range.is_point:
             continue
         location = member_registry.locate(attachment.member_id, attachment.member_range.start)
         edge_id, parameter = location.span.edge_id, location.edge_parameter
@@ -342,7 +342,7 @@ def _offset_target_faces(
     faces = set(map(int, geometry.faces_using_edge(edge_id)))
     member_ids = set(map(int, geometry.members_using_edge(edge_id)))
     for attachment in geometry.attachments.values():
-        if int(attachment.member_id) not in member_ids:
+        if attachment.member_id is None or int(attachment.member_id) not in member_ids:
             continue
         if attachment.target_kind is AttachmentTargetKind.FACE:
             faces.add(int(attachment.target_id))

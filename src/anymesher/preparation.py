@@ -27,10 +27,11 @@ from anygeometry.intersections import (
     query_intersection,
 )
 from anygeometry.model import GeometryModel
-from anygeometry.overlaps import find_coplanar_overlaps
+from anygeometry import IntersectionBatchPolicy, plan_intersections, apply_intersections
+from anygeometry.overlaps import find_coplanar_overlaps, OverlapQualificationError
 from anygeometry.policies import ConnectionIntent
 from anygeometry.predicates import IntersectionKind
-from anygeometry.surfaces import Cylinder, Plane
+from anygeometry.surfaces import Cylinder, Plane, CoonsSurface, Cone, RuledSurface
 
 from .errors import MeshError
 
@@ -66,10 +67,10 @@ class StructuralPreparationOptions:
     automatic_member_connections: bool = True
     automatic_member_sheet_connections: bool = True
     declare_missing_owners: bool = True
-    maximum_candidate_pairs: int = 100_000
-    maximum_applications: int = 100_000
-    maximum_face_records: int = 100_000
-    maximum_edge_records: int = 200_000
+    maximum_candidate_pairs: int | None = None
+    maximum_applications: int | None = None
+    maximum_face_records: int | None = None
+    maximum_edge_records: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -86,6 +87,8 @@ class StructuralPreparationOptions:
             "maximum_edge_records",
         ):
             value = getattr(self, name)
+            if value is None:
+                continue
             if isinstance(value, bool) or int(value) < 1:
                 raise MeshError(f"{name} must be a positive integer")
             object.__setattr__(self, name, int(value))
@@ -399,7 +402,7 @@ def _face_pairs(
     geometry: GeometryModel,
     faces: Sequence[int],
     *,
-    maximum_candidates: int,
+    maximum_candidates: int | None,
     cancellation_check: CancellationCheck | None,
 ) -> tuple[tuple[int, int], ...]:
     selected = set(map(int, faces))
@@ -416,7 +419,7 @@ def _face_pairs(
             if kind != "face" or candidate not in selected or candidate <= face_id:
                 continue
             pairs.add((face_id, int(candidate)))
-            if len(pairs) > maximum_candidates:
+            if maximum_candidates is not None and len(pairs) > maximum_candidates:
                 raise MeshError(
                     "structural preparation broad phase exceeded "
                     f"maximum_candidate_pairs={maximum_candidates}"
@@ -452,7 +455,7 @@ def _member_pairs(
     geometry: GeometryModel,
     member_ids: Sequence[int],
     *,
-    maximum_candidates: int,
+    maximum_candidates: int | None,
     cancellation_check: CancellationCheck | None,
 ) -> tuple[tuple[int, int], ...]:
     selected = set(map(int, member_ids))
@@ -472,7 +475,7 @@ def _member_pairs(
                 for candidate_member in geometry.members_using_edge(candidate_edge):
                     if candidate_member in selected and candidate_member != member_id:
                         pairs.add(tuple(sorted((member_id, candidate_member))))
-                        if len(pairs) > maximum_candidates:
+                        if maximum_candidates is not None and len(pairs) > maximum_candidates:
                             raise MeshError(
                                 "structural preparation broad phase exceeded "
                                 f"maximum_candidate_pairs={maximum_candidates}"
@@ -484,7 +487,7 @@ def _member_pairs(
             if other == member_id:
                 continue
             pairs.add(tuple(sorted((member_id, other))))
-            if len(pairs) > maximum_candidates:
+            if maximum_candidates is not None and len(pairs) > maximum_candidates:
                 raise MeshError(
                     "structural preparation broad phase exceeded "
                     f"maximum_candidate_pairs={maximum_candidates}"
@@ -500,7 +503,7 @@ def _member_sheet_pairs(
     sheet_ids: Sequence[int],
     face_sheet_membership: Mapping[int, Sequence[int]],
     *,
-    maximum_candidates: int,
+    maximum_candidates: int | None,
     cancellation_check: CancellationCheck | None,
 ) -> tuple[tuple[int, int], ...]:
     selected_sheets = set(map(int, sheet_ids))
@@ -521,7 +524,7 @@ def _member_sheet_pairs(
                     if sheet_id not in selected_sheets:
                         continue
                     pairs.add((member_id, sheet_id))
-                    if len(pairs) > maximum_candidates:
+                    if maximum_candidates is not None and len(pairs) > maximum_candidates:
                         raise MeshError(
                             "structural preparation broad phase exceeded "
                             f"maximum_candidate_pairs={maximum_candidates}"
@@ -534,7 +537,7 @@ def _member_sheet_pairs(
         if unbounded:
             for sheet_id in selected_sheets:
                 pairs.add((member_id, sheet_id))
-                if len(pairs) > maximum_candidates:
+                if maximum_candidates is not None and len(pairs) > maximum_candidates:
                     raise MeshError(
                         "structural preparation broad phase exceeded "
                         f"maximum_candidate_pairs={maximum_candidates}"
@@ -699,54 +702,78 @@ def prepare_structural_closure(
             f"structural preparation references missing "
             f"face/edge {missing_faces[:1] or missing_edges[:1]}"
         )
-    if len(geometry.faces) > policy.maximum_face_records:
-        raise MeshError(
-            f"model has {len(geometry.faces)} face records; structural preparation "
-            f"is bounded to {policy.maximum_face_records}"
-        )
-    if len(geometry.edges) > policy.maximum_edge_records:
-        raise MeshError(
-            f"model has {len(geometry.edges)} edge records; structural preparation "
-            f"is bounded to {policy.maximum_edge_records}"
-        )
-    _cancel(cancellation_check, "structural preparation overlap broad phase")
-    source_face_candidates = _face_pairs(
-        geometry,
-        source_faces,
-        maximum_candidates=policy.maximum_candidate_pairs,
-        cancellation_check=cancellation_check,
-    )
-    overlaps = []
-    for position, pair in enumerate(source_face_candidates):
-        if position % 16 == 0:
+    for name, count in (("maximum_face_records",len(geometry.faces)),
+                        ("maximum_edge_records",len(geometry.edges))):
+        limit=getattr(policy,name)
+        if limit is not None and count>limit:
+            raise MeshError(f"structural preparation exceeds explicit {name}={limit}")
+    # Classification belongs to the atomic owner batch. Legacy discretization
+    # and callers disabling that batch retain the independent overlap audit.
+    def audit_overlaps():
+        _cancel(cancellation_check, "structural preparation overlap broad phase")
+        from anygeometry import has_current_intersection_preparation
+        if has_current_intersection_preparation(geometry, face_ids=source_faces):
+            # Reuse only the geometry owner's complete, unchanged batch proof.
+            # A disabled-auto caller with arbitrary topology has no exemption.
+            return
+        if all(isinstance(geometry.faces[face].surface, (Plane, Cylinder))
+               for face in source_faces):
+            # Classify the complete original set once through its exact owner.
+            # Repeated historical curved-overlap sampling is unnecessary for
+            # already prepared Plane/Cylinder topology.
+            def audit_cancelled():
+                _cancel(cancellation_check, "structural preparation overlap narrow phase")
+                return False
+            try:
+                plan_intersections(geometry,
+                    tuple(geometry.handle("face", face) for face in source_faces),
+                    policy=IntersectionBatchPolicy(
+                        intent=ConnectionIntent.IMPRINT,
+                        max_candidate_pairs=policy.maximum_candidate_pairs,
+                        cancellation_check=audit_cancelled))
+            except GeometryError as error:
+                if "positive-area overlap" in str(error):
+                    raise MeshError("positive-area overlap requires Fragment Overlaps "
+                                    "to select ownership before meshing: " + str(error)) from error
+                raise MeshError("structural overlap owner classification failed: " + str(error)) from error
+            return
+        for pair in _face_pairs(geometry, source_faces,
+                            maximum_candidates=policy.maximum_candidate_pairs,
+                            cancellation_check=cancellation_check):
+            from ._owner_trim_domains import validated_complementary_trim_domains
             _cancel(cancellation_check, "structural preparation overlap narrow phase")
-        from ._owner_trim_domains import validated_complementary_trim_domains
-
-        if validated_complementary_trim_domains(
-            geometry, *pair, cancellation_check=cancellation_check,
-        ):
-            continue
-
-        overlaps.extend(
-            find_coplanar_overlaps(geometry, candidate_pairs=(pair,))
-        )
-        if len(overlaps) >= 8:
-            break
-    if overlaps:
-        detail = ", ".join(
-            f"faces {item.first}/{item.second}: {item.area:.7g} m^2"
-            for item in overlaps[:8]
-        )
-        raise MeshError(
-            "positive-area coplanar overlap is not assigned implicitly "
-            f"({detail}); run the previewable Fragment Overlaps geometry command"
-        )
-
-    working = (
-        geometry
-        if reuse_working_copy
-        else geometry.clone(include_features=False)
-    )
+            if validated_complementary_trim_domains(geometry, *pair,
+                                                cancellation_check=cancellation_check):
+                continue
+            try:
+                overlaps = find_coplanar_overlaps(geometry, candidate_pairs=(pair,))
+            except OverlapQualificationError:
+                # Historical curved overlap qualification can leave an exact
+                # bilinear boundary contact unresolved. The new owner batch
+                # may certify that pair; its positive-area/interior/unknown
+                # refusals still propagate. Planning is read-only.
+                plan_intersections(geometry,
+                    tuple(geometry.handle("face", face) for face in pair),
+                    policy=IntersectionBatchPolicy(
+                        intent=ConnectionIntent.IMPRINT,
+                        max_candidate_pairs=policy.maximum_candidate_pairs,
+                        cancellation_check=lambda: (_cancel(cancellation_check,
+                            "structural preparation overlap qualification") or False)))
+                overlaps = ()
+            if overlaps:
+                item = overlaps[0]
+                raise MeshError("positive-area coplanar overlap is not assigned implicitly "
+                            f"(faces {item.first}/{item.second}, area={item.area:.7g}); "
+                            "run the previewable Fragment Overlaps geometry command")
+    if not policy.automatic_face_connections:
+        audit_overlaps()
+    no_automatic=not (policy.automatic_face_connections or policy.automatic_member_connections
+                      or policy.automatic_member_sheet_connections)
+    owned=(not policy.declare_missing_owners or (
+        all(geometry._face_structural_uses.get(face) for face in source_faces)
+        and all(geometry.members_using_edge(edge) for edge in source_edges)))
+    working = (geometry if reuse_working_copy and no_automatic and owned else
+               geometry.clone(include_features=False, preserve_identity=reuse_working_copy))
     temporary_sheets: list[int] = []
     temporary_members: list[int] = []
     diagnostics: list[str] = []
@@ -787,170 +814,111 @@ def prepare_structural_closure(
     ):
         raise MeshError("automatic member preparation requires declared Member owners")
 
-    if policy.automatic_face_connections:
-        settled: set[tuple[int, int]] = set()
-        while True:
-            changed = False
-            descendants = _selected_descendant_faces(
-                working,
-                source_faces,
-            )
-            origin = {
-                child: source
-                for source in source_faces
-                for child in _resolved(working, "face", source)
-            }
-            candidates = _face_pairs(
-                working,
-                descendants,
-                maximum_candidates=policy.maximum_candidate_pairs,
-                cancellation_check=cancellation_check,
-            )
-            for pair in candidates:
-                if pair in settled or origin[pair[0]] == origin[pair[1]]:
-                    continue
-                shared_edges = _shared_boundary_edges(working, *pair)
-                if shared_edges:
-                    declared_face_connection_edges.update(
-                        _shared_transverse_plate_edges(working, *pair, shared_edges)
-                    )
-                    settled.add(pair)
-                    continue
-                queries += 1
-                if queries > policy.maximum_candidate_pairs:
-                    raise MeshError(
-                        "structural preparation exceeded "
-                        f"maximum_candidate_pairs={policy.maximum_candidate_pairs}"
-                    )
-                if queries % 64 == 0:
-                    _cancel(cancellation_check, "structural face candidate queries")
-                made, note, connection_edges = _apply_connection(
-                    working, "face", pair[0], "face", pair[1]
-                )
-                declared_face_connection_edges.update(connection_edges)
-                if note:
-                    diagnostics.append(f"faces {pair[0]}/{pair[1]}: {note}")
-                if made:
-                    applications += 1
-                    face_connections += 1
-                    if applications > policy.maximum_applications:
-                        raise MeshError(
-                            "structural preparation exceeded "
-                            f"maximum_applications={policy.maximum_applications}"
-                        )
-                    if len(working.edges) > policy.maximum_edge_records:
-                        raise MeshError(
-                            "structural preparation topology exceeded "
-                            f"maximum_edge_records={policy.maximum_edge_records}"
-                        )
-                    changed = True
-                    break
-                settled.add(pair)
-            if not changed:
-                break
-
-    def selected_members() -> tuple[int, ...]:
-        return tuple(
-            sorted(
-                {
-                    member_id
-                    for source_edge in source_edges
-                    for edge_id in _resolved(working, "edge", source_edge)
-                    for member_id in working.members_using_edge(edge_id)
-                }
-            )
-        )
-
-    def selected_sheets() -> tuple[int, ...]:
-        membership = _face_sheet_membership(working)
-        return tuple(
-            sorted(
-                {
-                    sheet_id
-                    for source_face in source_faces
-                    for face_id in _resolved(working, "face", source_face)
-                    for sheet_id in membership.get(face_id, ())
-                }
-            )
-        )
-
-    for group in ("member", "member_sheet"):
-        if group == "member" and not policy.automatic_member_connections:
-            continue
-        if group == "member_sheet" and not policy.automatic_member_sheet_connections:
-            continue
-        settled: set[tuple[int, int]] = set()
-        while True:
-            pairs = (
-                _member_pairs(
-                    working,
-                    selected_members(),
-                    maximum_candidates=policy.maximum_candidate_pairs,
-                    cancellation_check=cancellation_check,
-                )
-                if group == "member"
-                else _member_sheet_pairs(
-                    working,
-                    selected_members(),
-                    selected_sheets(),
-                    _face_sheet_membership(working),
-                    maximum_candidates=policy.maximum_candidate_pairs,
-                    cancellation_check=cancellation_check,
-                )
-            )
-            changed = False
-            for first, second in pairs:
-                if (first, second) in settled:
-                    continue
-                queries += 1
-                if queries > policy.maximum_candidate_pairs:
-                    raise MeshError(
-                        "structural preparation exceeded "
-                        f"maximum_candidate_pairs={policy.maximum_candidate_pairs}"
-                    )
-                if queries % 64 == 0:
-                    _cancel(
-                        cancellation_check,
-                        f"structural {group} candidate queries",
-                    )
-                if group == "member":
-                    made, note, _connection_edges = _apply_connection(
-                        working, "member", first, "member", second
-                    )
-                else:
-                    if _member_is_sheet_boundary(working, first, second):
-                        diagnostics.append(
-                            f"member_sheet {first}/{second}: exact shared boundary topology"
-                        )
-                        settled.add((first, second))
+    if (policy.automatic_face_connections or policy.automatic_member_connections
+            or policy.automatic_member_sheet_connections):
+        members = sorted({member for source in source_edges
+                          for edge in _resolved(working,"edge",source)
+                          for member in working.members_using_edge(edge)})
+        faces = _selected_descendant_faces(working,source_faces)
+        operands = (*[working.handle("face",face) for face in faces],
+                    *[working.handle("member",member) for member in members])
+        legacy_curved_only = False
+        if not members and len(faces)>1 and all(isinstance(working.faces[face].surface,
+                (CoonsSurface, Cone, RuledSurface)) for face in faces):
+            from anygeometry import query_trimmed_surface_charts
+            unavailable = set()
+            for face in faces:
+                try:
+                    query_trimmed_surface_charts(working, (working.handle("face", face),))
+                except GeometryError as error:
+                    if str(error) not in (f"face {face} has curved Coons boundaries",
+                            f"face {face} is not planar", f"face {face} has an unsupported intersection surface"):
+                        raise
+                    unavailable.add(face)
+            legacy_curved_only = len(unavailable) == len(faces)
+        if legacy_curved_only:
+            if policy.automatic_face_connections:
+                audit_overlaps()
+            # Existing Coons/Cone/Ruled authoring and trim operations keep their
+            # explicit boundary topology and established discretization route.
+            # They are outside the general Plane/Cylinder interior-joint contract.
+            operands = ()
+            diagnostics.append("legacy curved topology discretization; no automatic interior joints")
+        elif len(faces)==1 and not members:
+            # One isolated surface has no operand pair to prepare. Preserve
+            # native Cone/Ruled meshing without claiming their intersections
+            # are part of the Plane/Cylinder batch contract.
+            operands=()
+        elif not members:
+            # Existing curved-boundary welds remain a supported compatibility
+            # path. General interior Coons intersections are not inferred.
+            from anygeometry import query_trimmed_surface_charts,query_intersection
+            retained=[]
+            for face_id in faces:
+                try:
+                    query_trimmed_surface_charts(working,(working.handle('face',face_id),))
+                except GeometryError as error:
+                    if str(error) not in (f'face {face_id} has curved Coons boundaries',
+                                          f'face {face_id} is not planar'):
+                        raise
+                    compatible=True
+                    for other in faces:
+                        if other==face_id:continue
+                        result=query_intersection(working,face_id,other)
+                        shared=_shared_boundary_edges(working,face_id,other)
+                        if (not result.classified or (result.components and
+                                ('existing_shared_boundary_curve' not in result.diagnostics or not shared))):
+                            compatible=False
+                            break
+                    if compatible:
+                        diagnostics.append(f'face:{face_id} retains existing qualified curved-boundary joints')
                         continue
-                    made, note, _connection_edges = _apply_connection(
-                        working, "member", first, "sheet", second
-                    )
-                if note:
-                    diagnostics.append(f"{group} {first}/{second}: {note}")
-                if not made:
-                    settled.add((first, second))
-                    continue
-                applications += 1
-                if group == "member":
-                    member_connections += 1
-                else:
-                    member_sheet_connections += 1
-                if applications > policy.maximum_applications:
-                    raise MeshError(
-                        "structural preparation exceeded "
-                        f"maximum_applications={policy.maximum_applications}"
-                    )
-                if len(working.edges) > policy.maximum_edge_records:
-                    raise MeshError(
-                        "structural preparation topology exceeded "
-                        f"maximum_edge_records={policy.maximum_edge_records}"
-                    )
-                changed = True
-                break
-            if not changed:
-                break
+                retained.append(working.handle('face',face_id))
+            operands=tuple(retained)
+        def cancelled():
+            _cancel(cancellation_check,"structural intersection batch")
+            return False
+        batch_policy = IntersectionBatchPolicy(ConnectionIntent.CONNECT,
+            max_candidate_pairs=policy.maximum_candidate_pairs, cancellation_check=cancelled,
+            face_connections=policy.automatic_face_connections,
+            member_connections=policy.automatic_member_connections,
+            member_face_connections=policy.automatic_member_sheet_connections)
+        try:
+            if policy.automatic_face_connections and len(faces)>1:
+                _cancel(cancellation_check,'structural preparation overlap narrow phase')
+            plan=plan_intersections(working,operands,policy=batch_policy)
+            face_pairs=set()
+            member_face_pairs=set()
+            member_pairs=set()
+            for arrangement in plan.arrangements:
+                for path in arrangement.paths:
+                    face_pairs.update(tuple(sorted((first,second))) for index,first in enumerate(path.owners)
+                                      for second in path.owners[index+1:])
+                    member_face_pairs.update((member,arrangement.face_id) for member in path.member_ids)
+            for contact in plan.contacts:
+                selected=sorted({member for member,_parameter in contact.member_parameters})
+                member_pairs.update((first,second) for index,first in enumerate(selected)
+                                    for second in selected[index+1:])
+                if contact.face_id is not None:
+                    member_face_pairs.update((member,contact.face_id) for member in selected)
+            application=apply_intersections(working,plan,policy=batch_policy)
+            declared_face_connection_edges.update(handle.id for handle in application.joint_edges
+                                                  if len(working.faces_using_edge(handle.id))>1)
+            applications=int(not application.reused)
+            face_connections=len(face_pairs)*applications
+            member_connections=len(member_pairs)*applications
+            member_sheet_connections=len(member_face_pairs)*applications
+            queries=len(face_pairs)+len(member_pairs)+len(member_face_pairs)
+        except GeometryError as error:
+            if 'positive-area overlap' in str(error):
+                raise MeshError('positive-area overlap requires Fragment Overlaps to select ownership before meshing: '
+                                +str(error)) from error
+            raise MeshError(f"automatic intersection batch preparation failed: {error}") from error
+        for name,count in (("maximum_face_records",len(working.faces)),
+                           ("maximum_edge_records",len(working.edges))):
+            limit=getattr(policy,name)
+            if limit is not None and count>limit:
+                raise MeshError(f"structural batch exceeds explicit {name}={limit}")
 
     _cancel(cancellation_check, "structural preparation exact lineage")
     face_mapping = {
@@ -990,4 +958,9 @@ def prepare_structural_closure(
     )
     report = replace(report, preparation_hash=_report_hash(report))
     _cancel(cancellation_check, "structural preparation complete")
+    if reuse_working_copy:
+        geometry.restore_topology(working.topology_snapshot())
+        working=geometry
+        report=replace(report,working_revision=working.revision)
+        report=replace(report,preparation_hash=_report_hash(report))
     return working, report

@@ -283,6 +283,8 @@ def solve_seeding(
     edge_ids: Iterable[int] | None = None,
     max_sweeps: int = 200,
     max_divisions: int = 100_000,
+    maximum_adjacent_growth: float | None = None,
+    cancellation_check=None,
 ) -> Seeding:
     """Resolve division counts for every edge.
 
@@ -306,6 +308,9 @@ def solve_seeding(
 
     overrides = dict(overrides or {})
     minimum_divisions = dict(minimum_divisions or {})
+    if maximum_adjacent_growth is not None and (
+            not np.isfinite(maximum_adjacent_growth) or maximum_adjacent_growth <= 1.):
+        raise SeedingConflict("adjacent growth must be finite and greater than one")
     edges = (
         list(geometry.edges)
         if edge_ids is None
@@ -396,6 +401,8 @@ def solve_seeding(
     # ordering -- and therefore the resulting mesh -- is unchanged.
     sweeps = 0
     for sweeps in range(1, max_sweeps + 1):
+        if cancellation_check is not None:
+            cancellation_check("global seed compatibility and growth")
         changed = False
         for face in faces:
             sides = face.sides()
@@ -411,6 +418,9 @@ def solve_seeding(
                     max_divisions=max_divisions,
                 ):
                     changed = True
+        if maximum_adjacent_growth is not None:
+            changed |= _repair_growth(geometry, faces, union, counts, locked,
+                                      maximum_adjacent_growth, max_divisions)
         if not changed:
             break
     else:
@@ -428,6 +438,64 @@ def solve_seeding(
         classes={edge_id: union.find(edge_id) for edge_id in edges},
         size_field=size_field,
     )
+
+
+def _repair_growth(geometry, faces, union, counts, locked, limit, maximum):
+    """Coordinate transverse station widths across shared mapped boundaries.
+
+    This is a seeding estimate, not a quality certificate. Curved and warped
+    cells remain subject to the unchanged generated-mesh quality gates.
+    """
+    incidence = {}
+    statistics = {}
+    for face in faces:
+        sides = face.sides()
+        steps = []
+        for axis in (0, 1):
+            steps.append(max(
+                sum(geometry.edge_length(item.edge) for item in sides[index]) /
+                sum(counts[union.find(item.edge)] for item in sides[index])
+                for index in (axis, axis+2)))
+        statistics[face.id] = (sides, steps)
+        for index, side in enumerate(sides):
+            for item in side:
+                incidence.setdefault(item.edge, []).append((face.id, index % 2))
+    changed = False
+    for edge, owners in sorted(incidence.items()):
+        for position, (first, along) in enumerate(owners):
+            for second, other_along in owners[position+1:]:
+                if first == second:
+                    continue
+                first_sides, a = statistics[first]
+                second_sides, b = statistics[second]
+                if sum(a) <= limit * sum(b) and sum(b) <= limit * sum(a):
+                    continue
+                sides, large, axis, small = (first_sides, a, along, b) if sum(a)>sum(b) else (
+                    second_sides, b, other_along, a)
+                # Shared-edge counts fix the along-boundary spacing. Refine
+                # only the transverse direction, never an explicit pin.
+                transverse = 1-axis
+                wanted_step = limit*sum(small)-large[axis]
+                if wanted_step <= 0.:
+                    continue  # actual gate will report an unresolved transition
+                for index in (transverse, transverse+2):
+                    side = sides[index]
+                    length = sum(geometry.edge_length(item.edge) for item in side)
+                    wanted = int(np.ceil(length/wanted_step))
+                    total = sum(counts[union.find(item.edge)] for item in side)
+                    while total < wanted:
+                        roots = sorted({union.find(item.edge) for item in side
+                                        if not locked[union.find(item.edge)]})
+                        if not roots:
+                            raise SeedingConflict(
+                                f"shared edge {edge} growth requires refinement of pinned transverse sides")
+                        chosen = min(roots, key=lambda root: (counts[root], root))
+                        counts[chosen] += 1
+                        if counts[chosen] > maximum:
+                            raise SeedingConflict(f"growth seeding exceeded {maximum} divisions per edge")
+                        total = sum(counts[union.find(item.edge)] for item in side)
+                        changed = True
+    return changed
 
 
 def _repair_axis(

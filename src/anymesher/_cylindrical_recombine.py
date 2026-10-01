@@ -33,8 +33,9 @@ def register_face(geometry, mesh, face_id, binding, registry, settings, *,
                   effective_metric_field, supplemental_metric_field=None):
     from ._cylindrical_atlas import CylindricalAtlasBinding
     from ._cylindrical_patch import CylindricalPatchBinding
+    from ._trimmed_cylinder_binding import TrimmedCylinderBinding
 
-    if not isinstance(binding, (CylindricalAtlasBinding, CylindricalPatchBinding)):
+    if not isinstance(binding, (CylindricalAtlasBinding, CylindricalPatchBinding, TrimmedCylinderBinding)):
         raise MeshError("deferred recombination requires an owner-certified cylinder binding")
     binding.validate()
     if settings.quadratic or not settings.recombine or settings.native_options.point_placement != "frontal_delaunay":
@@ -53,7 +54,7 @@ def register_face(geometry, mesh, face_id, binding, registry, settings, *,
         face = geometry.faces[member]
         for loop in (face.loop, *face.holes):
             for edge in loop:
-                if (not isinstance(binding, CylindricalPatchBinding)
+                if (not isinstance(binding, (CylindricalPatchBinding, TrimmedCylinderBinding))
                         and set(geometry.faces_using_edge(edge.edge)).difference(faces)):
                     raise MeshError("deferred cylindrical component has incompatible external neighbours")
     states = getattr(registry, "_deferred_cylindrical_components", None)

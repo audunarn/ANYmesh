@@ -156,3 +156,44 @@ def test_target_size_must_be_positive():
     rectangle(model, 1.0, 1.0)
     with pytest.raises(ValueError, match="positive"):
         solve_seeding(model, target_size=0.0)
+
+
+def _shared_unequal_rectangles():
+    model=GeometryModel()
+    edges,first=rectangle(model,1.,1.)
+    shared=model.edges[edges[1]]
+    lower,upper=model.add_points(((11.,0.,0.),(11.,1.,0.)))
+    sides=(model.add_line(shared.start,lower),model.add_line(lower,upper),
+           model.add_line(upper,shared.end),edges[1])
+    second=model.add_face(sides)
+    return model,(first,second),sides
+
+
+def test_shared_boundary_growth_refines_transverse_steps_and_preserves_source():
+    from anygeometry import to_dict
+    model,faces,_sides=_shared_unequal_rectangles()
+    before=to_dict(model)
+    seeding=solve_seeding(model,target_size=100.,maximum_adjacent_growth=1.05)
+    scales=[]
+    for face_id in faces:
+        sides=model.faces[face_id].sides()
+        scales.append(sum(max(sum(model.edge_length(item.edge) for item in sides[index]) /
+                              sum(seeding[item.edge] for item in sides[index])
+                              for index in (axis,axis+2)) for axis in (0,1)))
+    assert max(scales)<=1.05*min(scales)
+    assert to_dict(model)==before
+
+
+def test_growth_never_overrides_pins_and_cancellation_has_no_source_effect():
+    from anygeometry import to_dict
+    model,_faces,sides=_shared_unequal_rectangles()
+    before=to_dict(model)
+    with pytest.raises(SeedingConflict,match='pinned transverse'):
+        solve_seeding(model,target_size=100.,maximum_adjacent_growth=1.5,
+                      overrides={sides[0]:1,sides[2]:1})
+    assert to_dict(model)==before
+    def cancel(_phase):
+        raise RuntimeError('cancel growth fixture')
+    with pytest.raises(RuntimeError,match='cancel growth'):
+        solve_seeding(model,target_size=100.,maximum_adjacent_growth=1.5,cancellation_check=cancel)
+    assert to_dict(model)==before

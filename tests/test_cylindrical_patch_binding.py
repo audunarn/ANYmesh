@@ -70,14 +70,22 @@ def test_patch_staleness_and_cancellation_propagate():
         binding.chart_for(selected[0])
 
 
-def test_atlas_failure_is_not_relabelled_as_partial_patch(monkeypatch):
+def test_open_component_selects_complete_general_contract_before_qualification(monkeypatch):
     model, selected = _sector_model()
     faces = tuple(model.face_uses[item.id].face_id for item in selected[:4])
+    before = _persistent_state(model)
     def forbidden(*args, **kwargs):
-        pytest.fail("incomplete atlas cannot silently fall back to per-face patches")
+        pytest.fail("general open-component qualification cannot use a legacy fallback")
     monkeypatch.setattr("anymesher._cylindrical_public.prepare_cylindrical_patch", forbidden)
-    with pytest.raises(CylinderAtlasError):
-        prepare_bindings(model, faces, NativeMeshingOptions(point_placement="frontal_delaunay"))
+    monkeypatch.setattr("anymesher._cylindrical_public.prepare_cylindrical_atlas", forbidden)
+    bindings = prepare_bindings(model, faces, NativeMeshingOptions(point_placement="frontal_delaunay"))
+    assert set(bindings) == set(faces)
+    binding = bindings[faces[0]]
+    assert all(value is binding for value in bindings.values())
+    assert binding.certification_kind == "general_analytic_trimmed_material_charts"
+    binding.validate()
+    assert sum(chart.material_area for chart in binding.face_records) == pytest.approx(2*np.pi,abs=1e-10)
+    assert _persistent_state(model) == before
 
 
 def test_external_shared_edges_are_frozen_for_every_incident_face():

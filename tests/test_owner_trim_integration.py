@@ -180,14 +180,11 @@ def test_every_positive_condition_is_required(recovered_pair, monkeypatch, defec
 
 
 def test_unexempted_owner_overlap_is_never_filtered(recovered_pair, monkeypatch):
-    from anymesher import _owner_trim_domains as adapter
-
     model, parents = recovered_pair
     before = snapshot(model)
-    overlap = SimpleNamespace(first=parents[0], second=parents[1], area=.125)
-    monkeypatch.setattr(preparation, "_face_pairs", lambda *args, **kwargs: (parents,))
-    monkeypatch.setattr(adapter, "validated_complementary_trim_domains", lambda *args, **kwargs: False)
-    monkeypatch.setattr(preparation, "find_coplanar_overlaps", lambda *args, **kwargs: [overlap])
-    with pytest.raises(MeshError, match="positive-area coplanar overlap"):
+    def owner_refusal(*args, **kwargs):
+        raise owner.GeometryError("positive-area overlap requires ownership")
+    monkeypatch.setattr(preparation, "plan_intersections", owner_refusal)
+    with pytest.raises(MeshError, match="positive-area overlap requires Fragment Overlaps"):
         preparation.prepare_structural_closure(model, face_ids=parents, options=False)
     assert snapshot(model) == before

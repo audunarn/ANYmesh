@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from anygeometry import GeometryModel
+from anygeometry.entities import OrientedEdge
 from anygeometry.structural import (
     AttachmentKind,
     AttachmentTargetKind,
@@ -17,6 +18,31 @@ from anymesher.damage import ElementActivity
 from anymesher.errors import MeshError
 from anymesher.mesh import Mesh
 from anymesher.mesh_bvh import ElementType, MeshElementBVH, inverse_interpolate
+
+
+def test_reversed_member_boundary_stations_do_not_create_false_eccentric_couplings():
+    geometry = GeometryModel()
+    vertices = geometry.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)))
+    face = geometry.add_plate(vertices)
+    geometry.add_sheet((face,))
+    edge = geometry.faces[face].loop[0].edge
+    member = geometry.add_member((OrientedEdge(edge, False),))
+    geometry.add_attachment(member, AttachmentKind.MEMBER_ON_FACE_BOUNDARY,
+                            AttachmentTargetKind.EDGE, edge, ParameterRange(0., 1.), (ParameterRange(0., 1.),))
+    mesh = Mesh()
+    for node, vertex in enumerate(vertices, start=1):
+        mesh.nodes[node] = geometry.vertex_position(vertex)
+    mesh.quads[10] = (1, 2, 3, 4)
+    mesh.beams[11] = (1, 2)
+    mesh.elements_of_face[face] = [10]
+    mesh.elements_of_edge[edge] = [11]
+    mesh.nodes_of_edge[edge] = [1, 2]
+    pipeline = StructuralMeshingPipeline(GeometryMeshingView(geometry),
+        overlap_policy="connect_declared", mutation_policy="working_copy")
+    result = pipeline.apply_connectivity(mesh)
+    assert not result.issues
+    assert mesh.couplings == {}
+    assert mesh.beams[11] == (1, 2)
 from anymesher.meshing_view import (
     ChangeSetQueue,
     GeometryMeshingView,
@@ -149,7 +175,8 @@ def test_mesh_bvh_inverse_interpolates_all_shell_families(
     assert np.asarray(inverse.weights) @ coordinates == pytest.approx(point)
 
 
-def test_pipeline_preflight_is_local_and_connectivity_is_declared_only() -> None:
+@pytest.mark.parametrize("target_kind", [AttachmentTargetKind.FACE, AttachmentTargetKind.SHEET])
+def test_pipeline_preflight_is_local_and_connectivity_is_declared_only(target_kind) -> None:
     geometry = GeometryModel()
     face, plate_vertices = _plate(geometry)
     second_face, _ = _plate(geometry, (3.0, 0.0, 0.0))
@@ -161,11 +188,13 @@ def test_pipeline_preflight_is_local_and_connectivity_is_declared_only() -> None
     member = geometry.add_member((member_edge,), part_id=part)
     geometry.add_attachment(
         member,
-        AttachmentKind.MEMBER_THROUGH_FACE,
-        AttachmentTargetKind.FACE,
-        face,
+        AttachmentKind.MEMBER_THROUGH_FACE if target_kind is AttachmentTargetKind.FACE
+        else AttachmentKind.MEMBER_CROSS_SHEET,
+        target_kind,
+        face if target_kind is AttachmentTargetKind.FACE else first_sheet,
         ParameterRange.point(0.5),
         (ParameterRange.point(0.5), ParameterRange.point(0.5)),
+        metadata={"face_sequence": [face]},
     )
     view = GeometryMeshingView(geometry)
     with pytest.raises(TypeError):
