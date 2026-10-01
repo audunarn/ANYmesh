@@ -762,6 +762,37 @@ def prepare_structural_closure(
         faces = _selected_descendant_faces(working,source_faces)
         operands = (*[working.handle("face",face) for face in faces],
                     *[working.handle("member",member) for member in members])
+        if len(faces)==1 and not members:
+            # One isolated surface has no operand pair to prepare. Preserve
+            # native Cone/Ruled meshing without claiming their intersections
+            # are part of the Plane/Cylinder batch contract.
+            operands=()
+        elif not members:
+            # Existing curved-boundary welds remain a supported compatibility
+            # path. General interior Coons intersections are not inferred.
+            from anygeometry import query_trimmed_surface_charts,query_intersection
+            retained=[]
+            for face_id in faces:
+                try:
+                    query_trimmed_surface_charts(working,(working.handle('face',face_id),))
+                except GeometryError as error:
+                    if str(error) not in (f'face {face_id} has curved Coons boundaries',
+                                          f'face {face_id} is not planar'):
+                        raise
+                    compatible=True
+                    for other in faces:
+                        if other==face_id:continue
+                        result=query_intersection(working,face_id,other)
+                        shared=_shared_boundary_edges(working,face_id,other)
+                        if (not result.classified or (result.components and
+                                ('existing_shared_boundary_curve' not in result.diagnostics or not shared))):
+                            compatible=False
+                            break
+                    if compatible:
+                        diagnostics.append(f'face:{face_id} retains existing qualified curved-boundary joints')
+                        continue
+                retained.append(working.handle('face',face_id))
+            operands=tuple(retained)
         def cancelled():
             _cancel(cancellation_check,"structural intersection batch")
             return False

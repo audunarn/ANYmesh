@@ -1568,6 +1568,7 @@ def _mesh_native_face(
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
             _preserve_spatial_refinement=cylindrical_chart is not None,
+            _polish_quality_candidates=isinstance(face.surface, Plane),
             _boundary_is_seeded=seeded_general_chart,
             options=(
                 SurfaceMeshOptions(
@@ -1636,6 +1637,7 @@ def _mesh_native_face(
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
             _preserve_spatial_refinement=cylindrical_chart is not None,
+            _polish_quality_candidates=isinstance(face.surface, Plane),
             _boundary_is_seeded=seeded_general_chart,
         )
         if (

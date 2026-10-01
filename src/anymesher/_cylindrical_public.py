@@ -56,9 +56,33 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
                 raise MeshError("cylindrical native face requires one qualified FaceUse")
             selected.append(geometry.handle("face_use", uses[0]))
         selected = tuple(selected)
-        binding = prepare_trimmed_cylinders(
-            geometry, selected, cancellation_check=cancellation_check,
-        )
+        generalized=any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+            for face in component for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
+            for use in loop)
+        generalized=generalized or any(
+            any(other not in component and not isinstance(geometry.faces[other].surface,Cylinder)
+                for other in geometry.faces_using_edge(use.edge))
+            for face in component for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
+            for use in loop)
+        # An open connected sector set is a general trimmed component, even
+        # when every trace is straight/circular. Full-period legacy atlases
+        # have no exterior straight generator edges. This selects a contract
+        # before qualification; failed legacy certificates never trigger a fallback.
+        generalized = generalized or (len(selected) > 1 and any(
+            isinstance(geometry.edges[use.edge].curve, Straight)
+            and len(set(geometry.faces_using_edge(use.edge)) & component) == 1
+            for face in component for loop in (geometry.faces[face].loop, *geometry.faces[face].holes)
+            for use in loop
+        ))
+        if generalized:
+            binding = prepare_trimmed_cylinders(
+                geometry, selected, cancellation_check=cancellation_check,
+            )
+        elif len(selected)==1:
+            binding=prepare_cylindrical_patch(geometry,selected,cancellation_check=cancellation_check)
+        else:
+            binding=prepare_cylindrical_atlas(geometry,selected,reference_face_use=selected[0],
+                                              cancellation_check=cancellation_check)
         for face in component:
             bindings[face] = binding
         remaining.difference_update(component)

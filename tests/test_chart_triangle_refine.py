@@ -13,11 +13,12 @@ from anymesher.errors import MeshError
 
 
 @pytest.fixture(autouse=True)
-def request_one_interior_refinement(monkeypatch):
+def request_one_interior_refinement(monkeypatch,request):
     # Exercise staging on a square whose admissible interior diagonal can be
     # bisected safely. This checks the publication contract, not convergence
     # of a quality-repair algorithm; the application fixtures check the latter.
     import anymesher._chart_triangle_refine as implementation
+    if 'actual_star' in request.fixturenames:return
     original=implementation._shape_failures
     def classify(coordinates,rows):
         return np.ones(len(rows),dtype=bool) if len(rows)==2 else original(coordinates,rows)
@@ -105,3 +106,43 @@ def test_invalid_flip_never_publishes_staged_nodes(monkeypatch):
     with pytest.raises(MeshError,match='invalid topology'):
         run(owner,face,chart,mesh,cache)
     assert mesh_to_dict(mesh)==before and cache=={}
+
+
+@pytest.fixture
+def actual_star():
+    """Reduced physical patch from the oblique-cut admission failure."""
+    owner=cylinder(.75,2.,circumferential_segments=12)
+    face=tuple(owner.group('shell'))[0].id
+    chart=CylindricalMetricChart.from_geometry(owner,face)
+    uv=np.asarray(((0.,.8125),(0.,.7109375),(0.,.66015625),
+        (.05326003093279552,.642134114217898),
+        (.07393077198368703,.6979702728631181),
+        (.02665676773887804,.7037693552558224)))
+    mesh=Mesh(nodes={i+1:p.copy() for i,p in enumerate(chart.evaluate(uv))},
+        tris={1:(1,2,6),2:(1,6,5),3:(2,3,6),4:(3,4,6),5:(5,6,4)},
+        elements_of_face={face:[1,2,3,4,5]})
+    return owner,face,chart,mesh
+
+
+def test_actual_boundary_star_relocation_meets_unchanged_floors(actual_star):
+    from anymesher._chart_triangle_refine import _shape_failures
+    owner,face,chart,mesh=actual_star
+    before=mesh_to_dict(mesh);source=to_dict(owner);cache={}
+    rows=np.asarray(list(mesh.tris.values()))-1
+    assert _shape_failures(np.asarray(list(mesh.nodes.values())),rows).sum()==1
+    report=run(owner,face,chart,mesh,cache)
+    assert report['insertions']==0 and report['relocated_nodes']==1
+    assert not _shape_failures(np.asarray(list(mesh.nodes.values())),rows).any()
+    assert mesh_to_dict(mesh)['tris']==before['tris']
+    assert all(np.asarray(mesh.nodes[n]).tolist()==before['nodes'][str(n)] for n in range(1,6))
+    assert to_dict(owner)==source
+
+
+def test_actual_relocation_cancellation_is_atomic(actual_star):
+    owner,face,chart,mesh=actual_star
+    before=mesh_to_dict(mesh);source=to_dict(owner);cache={}
+    def cancel(stage):
+        if stage.endswith('before publish'):raise RuntimeError('cancelled relocated patch')
+    with pytest.raises(RuntimeError,match='cancelled relocated'):
+        run(owner,face,chart,mesh,cache,cancellation_check=cancel)
+    assert mesh_to_dict(mesh)==before and to_dict(owner)==source and cache=={}

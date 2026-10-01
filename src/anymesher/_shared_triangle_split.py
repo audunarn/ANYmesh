@@ -260,7 +260,7 @@ def repair_completed_cylindrical_neighbours(mesh, geometry, binding, registry, *
     """Run once all certified faces exist and no shared splits are pending."""
     cache = getattr(registry, "_published_triangle_incidence", {})
     sectors = binding.face_records
-    if not cache or any(not mesh.elements_of_face.get(sector.face.id) for sector in sectors):
+    if any(not mesh.elements_of_face.get(sector.face.id) for sector in sectors):
         return {}
     protected = tuple(
         tuple(sorted((a, b)))
@@ -270,15 +270,25 @@ def repair_completed_cylindrical_neighbours(mesh, geometry, binding, registry, *
     reports = {}
     for sector in sorted(sectors, key=lambda value: value.face.id):
         face_id = sector.face.id
-        if face_id not in cache:
+        if any(element not in mesh.tris or len(mesh.tris[element])!=3
+               for element in mesh.elements_of_face[face_id]):
+            # Quadratic and recombined faces keep their existing preparation
+            # and admission route; this repair operates only on linear T3s.
             continue
+        if face_id not in cache:
+            cache[face_id]={}
         if cancellation_check is not None:
             cancellation_check(f"cylindrical shared-boundary repair face {face_id}")
         chart = binding.chart_for(sector.face_use)
         nodes = sorted({node for element in mesh.elements_of_face[face_id] for node in mesh.tris[element]})
         physical = np.asarray([mesh.nodes[node] for node in nodes], dtype=np.float64)
-        _, uv, distances = geometry.project_to_face_many(face_id, physical)
+        uv = geometry.face_local_uv_many(face_id, physical)
         scale = np.asarray((chart.circumferential_length, chart.axial_length))
+        # These are existing owner-evaluated nodes, not arbitrary projection
+        # queries. Verify the inverse against the exact support. Projecting to
+        # a sampled trim polygon can misclassify a true boundary station and
+        # unnecessarily invoke nearest-curve searches on unrelated branches.
+        distances=np.linalg.norm(chart.evaluate(uv*scale)-physical,axis=1)
         tolerance = geometry.tolerance.effective_length(float(np.max(scale)))
         if not np.all(np.isfinite(distances)) or np.any(distances > tolerance):
             raise MeshError("shared refinement neighbour left its owner cylinder")

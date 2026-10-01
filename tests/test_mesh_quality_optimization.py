@@ -502,14 +502,21 @@ def test_three_plate_connect_quality_and_shared_identity_are_deterministic() -> 
         ]["maximum_adjacent_element_growth"]
         assert repair["final_quality"]["maximum_aspect_ratio"] <= 5.0
     else:
-        assert all(
-            item["quality_optimization"]["final_quality"][
-                "max_element_growth"
-            ]
-            <= 1.5
-            for diagnostic in face_diagnostics.values()
-            for item in diagnostic["working_face_diagnostics"]
-        )
+        # A clean mapped/native mix need not run junction repair or have a
+        # native optimizer record for every source. Check all actual cells,
+        # including mapped cells and cross-owner adjacencies, independently.
+        characteristic = {}
+        incidence = {}
+        for element, corners in ((element, first.corners_of(element)) for element in first.shells):
+            lengths = []
+            for a, b in zip(corners, corners[1:] + corners[:1]):
+                lengths.append(float(np.linalg.norm(first.nodes[a] - first.nodes[b])))
+                incidence.setdefault(tuple(sorted((a, b))), []).append(element)
+            characteristic[element] = float(np.mean(lengths))
+        ratios = [max(characteristic[a]/characteristic[b], characteristic[b]/characteristic[a])
+                  for adjacent in incidence.values() if len(adjacent) == 2
+                  for a, b in (adjacent,)]
+        assert max(ratios, default=1.) <= 1.5
 
 
 def test_two_level_plate_intersections_refine_thin_wall_strips_compatibly() -> None:

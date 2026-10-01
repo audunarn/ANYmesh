@@ -1362,6 +1362,129 @@ def _candidate_selection_key(
     return candidate.score
 
 
+def _published_quality_report(core,settings,quality,threshold_report):
+    """Report the actual mixed cells; retain discarded T3 evidence separately."""
+    ids=(*core.tris,*core.quads)
+    perimeters={};incidence={}
+    for identifier in ids:
+        nodes=core.corners_of(identifier)
+        xyz=np.asarray([core.nodes[node] for node in nodes])
+        perimeters[identifier]=float(np.linalg.norm(np.roll(xyz,-1,axis=0)-xyz,axis=1).mean())
+        for first,second in zip(nodes,(*nodes[1:],nodes[0])):
+            incidence.setdefault(tuple(sorted((first,second))),[]).append(identifier)
+    growth_poor=set();maximum_growth=1.
+    for adjacent in incidence.values():
+        if len(adjacent)!=2:continue
+        first,second=(perimeters[identifier] for identifier in adjacent)
+        ratio=max(first/second,second/first)
+        maximum_growth=max(maximum_growth,ratio)
+        if ratio>settings.max_element_growth:growth_poor.update(adjacent)
+    poor=sorted(set(threshold_report['poor_element_ids'])|growth_poor)
+    counts=threshold_report['violation_counts'];worst=threshold_report['worst']
+    return {'quality_scope':'published_elements','invalid_element_count':0,
+        'elements_above_aspect_ratio_5':int(sum(np.count_nonzero(group.aspect_ratio>5.)
+            for group in (quality.triangles,quality.quadrilaterals))),
+        'quality_violation_count':len(poor),
+        'elements_below_minimum_angle':counts['minimum_angle'],
+        'elements_above_maximum_angle':counts['maximum_angle'],
+        'elements_below_minimum_scaled_jacobian':counts['scaled_jacobian'],
+        'elements_above_maximum_growth':len(growth_poor),
+        'max_aspect_ratio':worst['maximum_aspect_ratio'],
+        'min_scaled_jacobian':worst['minimum_scaled_jacobian'],
+        'min_angle':worst['minimum_angle'],'max_angle':worst['maximum_angle'],
+        'max_element_growth':maximum_growth,'poor_element_ids':poor,'repair_element_ids':poor}
+
+
+def _polish_quality_candidate(candidate, protected_edges, explicit_points, settings, statistics):
+    """Bounded local target improvement with exact fixed-node preservation.
+
+    Moves stay inside the oriented triangle star, preserving its material and
+    topology. Include adjacent stars when scoring growth at the star boundary.
+    This supplements Laplacian smoothing, whose objective ignores quality floors.
+    """
+    if (not candidate.report["poor_element_ids"]
+            or (settings is not None and settings.native_options.point_placement != "legacy_lattice")):
+        return candidate
+    policy = settings or SurfaceMeshOptions()
+    points = candidate.points.copy()
+    rows = candidate.triangles
+    fixed = set(_fixed_rows(points, protected_edges, explicit_points))
+    incident = [set() for _ in points]
+    for number, triangle in enumerate(rows):
+        for node in triangle:
+            incident[int(node)].add(number)
+    poor = np.asarray(candidate.report["poor_element_ids"], dtype=int) - 1
+    movable = sorted(set(map(int, rows[poor].ravel())) - fixed)
+    directions = np.asarray(((1,0),(-1,0),(0,1),(0,-1),
+                             (1,1),(1,-1),(-1,1),(-1,-1)), dtype=float)
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    work = 0
+    moved = set(candidate.moved_nodes)
+
+    def objective(report):
+        deficits = (max(0., 1-report["min_angle"]/policy.min_angle),
+                    max(0., report["max_angle"]/policy.max_angle-1),
+                    max(0., report["max_aspect_ratio"]/policy.max_aspect_ratio-1),
+                    max(0., 1-report["min_scaled_jacobian"]/policy.min_scaled_jacobian),
+                    max(0., report["max_element_growth"]/policy.max_element_growth-1))
+        return (report["invalid_element_count"], report["quality_violation_count"],
+                sum(value*value for value in deficits))
+
+    for node in movable:
+        star = sorted(incident[node])
+        neighbours = sorted(set(map(int, rows[star].ravel())) - {node})
+        patch = sorted(set().union(*(incident[other] for other in neighbours), incident[node]))
+        radius = .1 * float(np.median(np.linalg.norm(points[neighbours]-points[node], axis=1)))
+        best_score = objective(_triangle_quality(points, rows[patch], policy)[0])
+        best_position = points[node].copy()
+        original = points[node].copy()
+        corners = points[rows[star]]
+        first, second = corners[:, 1]-corners[:, 0], corners[:, 2]-corners[:, 0]
+        signed = first[:, 0]*second[:, 1] - first[:, 1]*second[:, 0]
+        for fraction in (1., .5, .25):
+            for direction in directions:
+                work += len(patch)
+                if work > 64*len(rows):
+                    break
+                points[node] = original + radius*fraction*direction
+                corners = points[rows[star]]
+                first, second = corners[:, 1]-corners[:, 0], corners[:, 2]-corners[:, 0]
+                areas = first[:, 0]*second[:, 1] - first[:, 1]*second[:, 0]
+                if np.all(areas*signed > 0.):
+                    score = objective(_triangle_quality(points, rows[patch], policy)[0])
+                    if score < best_score:
+                        best_score, best_position = score, points[node].copy()
+            if work > 64*len(rows):
+                break
+        points[node] = best_position
+        if not np.array_equal(best_position, original):
+            moved.add(node)
+        if work > 64*len(rows):
+            break
+    if np.array_equal(points, candidate.points):
+        return candidate
+    polished = _make_candidate(points, rows, flips=candidate.flips,
+                              moved_nodes=tuple(sorted(moved)),
+                              added_points=candidate.added_points, rounds=candidate.rounds,
+                              settings=settings, statistics=statistics)
+    # A local objective may omit distant growth constraints: retain a move only
+    # if the complete candidate improves and introduces no invalid triangles.
+    if (objective(polished.report) < objective(candidate.report)
+            and polished.report["invalid_element_count"] == 0
+            and polished.report["elements_above_maximum_growth"]
+                <= candidate.report["elements_above_maximum_growth"]
+            and polished.report["max_element_growth"] <= candidate.report["max_element_growth"]):
+        if policy.recombine:
+            core = MeshCore(np.column_stack((points, np.zeros(len(points)))), rows)
+            report, thresholds = _qualified_recombination(core, protected_edges, policy, None)
+            published = _published_quality_report(report.mesh, policy,
+                                                   evaluate_quality(report.mesh), thresholds)
+            if published["poor_element_ids"]:
+                return candidate
+        return polished
+    return candidate
+
+
 def _optimize_candidate(
     candidate: _QualityCandidate,
     protected_edges: np.ndarray,
@@ -1370,6 +1493,7 @@ def _optimize_candidate(
     *,
     prefer_growth: bool = False,
     statistics: dict[str, int] | None = None,
+    polish_quality: bool = False,
 ) -> _QualityCandidate:
     """Run the fixed flip/smooth/flip sequence and publish only improvements."""
 
@@ -1458,7 +1582,8 @@ def _optimize_candidate(
         and finished.score[0] == 0
     ):
         best = finished
-    return best
+    return (_polish_quality_candidate(best, protected_edges, explicit_points, settings, statistics)
+            if polish_quality else best)
 
 
 def _refinement_midpoints(
@@ -1539,6 +1664,7 @@ def _run_quality_path(
     *,
     allow_refinement: bool = True,
     preserve_protected_cells: bool = False,
+    polish_quality: bool = False,
 ) -> dict[str, Any]:
     """Triangulate and optimize one detached deterministic point candidate."""
 
@@ -1576,6 +1702,7 @@ def _run_quality_path(
         settings,
         prefer_growth=preserve_protected_cells,
         statistics=work_statistics,
+        polish_quality=polish_quality,
     )
     best = min(
         (initial, current),
@@ -1644,6 +1771,7 @@ def _run_quality_path(
             settings,
             prefer_growth=preserve_protected_cells,
             statistics=work_statistics,
+            polish_quality=polish_quality,
         )
         current = retry
         triangulation = retry_triangulation
@@ -2175,6 +2303,7 @@ def mesh_planar_surface(
     _supplemental_metric_field: MetricFieldSpec | None = None,
     _preserve_spatial_refinement: bool = False,
     _boundary_is_seeded: bool = False,
+    _polish_quality_candidates: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -2297,6 +2426,8 @@ def mesh_planar_surface(
             generated,
             settings,
             cancellation_check,
+            polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
+                            settings.native_options.point_placement == "legacy_lattice"),
         )
     candidate_paths = [baseline_path]
     native_v2_report: dict[str, Any] | None = None
@@ -2376,6 +2507,8 @@ def mesh_planar_surface(
                         or not strict_baseline_complete
                     ),
                     preserve_protected_cells=True,
+                    polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
+                                    settings.native_options.point_placement == "legacy_lattice"),
                 )
             except MeshError as error:
                 outer_report = {
@@ -2416,6 +2549,8 @@ def mesh_planar_surface(
                             or not strict_baseline_complete
                         ),
                         preserve_protected_cells=True,
+                        polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
+                                        settings.native_options.point_placement == "legacy_lattice"),
                     )
                 except MeshError as error:
                     complete_report = {
@@ -2456,6 +2591,8 @@ def mesh_planar_surface(
             dominant,
             settings,
             cancellation_check,
+            polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
+                            settings.native_options.point_placement == "legacy_lattice"),
         )
         dominant_path["lattice_statistics"] = dominant_statistics
         candidate_paths.append(dominant_path)
@@ -2479,6 +2616,8 @@ def mesh_planar_surface(
                     combined,
                     settings,
                     cancellation_check,
+                    polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
+                                    settings.native_options.point_placement == "legacy_lattice"),
                 )
             )
     phase_seconds["alternate_candidate_generation"] = (
@@ -2681,7 +2820,14 @@ def mesh_planar_surface(
             cancellation_check("native surface quadratic promotion complete")
     validation_started = perf_counter()
     assert_valid_mesh(core)
-    threshold_report = _quality_threshold_report(evaluate_quality(core), settings)
+    published_quality=evaluate_quality(core)
+    threshold_report = _quality_threshold_report(published_quality, settings)
+    if selected_published is not None and settings.recombine:
+        quality_diagnostics["triangulation_quality"] = quality_diagnostics["final_quality"]
+        quality_diagnostics["final_quality"] = _published_quality_report(
+            core, settings, published_quality, threshold_report
+        )
+        quality_diagnostics["target_met"] = not quality_diagnostics["final_quality"]["poor_element_ids"]
     if settings.enforce_quality and not threshold_report["accepted"]:
         counts = ", ".join(
             f"{name}={count}"
