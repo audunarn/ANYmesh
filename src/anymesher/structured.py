@@ -78,7 +78,9 @@ class StructurePreference(StrEnum):
 class MeshQualityPolicy:
     minimum_scaled_jacobian: float = 0.20
     maximum_aspect_ratio: float = 4.0
-    minimum_angle: float = 30.0
+    # Default admission matches the qualified solver floor. The 30-degree
+    # preferred S3 repair target is not an implicit rejection threshold.
+    minimum_angle: float = 15.0
     maximum_angle: float = 150.0
     maximum_warpage: float = 0.10
 

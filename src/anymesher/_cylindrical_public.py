@@ -5,7 +5,10 @@ from dataclasses import replace
 import numpy as np
 from anygeometry.curves import Straight
 from anygeometry.surfaces import Cylinder
-from anygeometry import EllipticArc, CylinderIntersectionCurve, query_joint_edge
+from anygeometry import (
+    EllipticArc, CylinderIntersectionCurve, query_joint_edge,
+    CylinderAtlasPolicy, CylinderPatchPolicy,
+)
 
 from ._cylindrical_atlas import prepare_cylindrical_atlas
 from ._cylindrical_patch import prepare_cylindrical_patch
@@ -56,7 +59,14 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
                 raise MeshError("cylindrical native face requires one qualified FaceUse")
             selected.append(geometry.handle("face_use", uses[0]))
         selected = tuple(selected)
-        generalized=any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        legacy_policy = CylinderPatchPolicy() if len(selected) == 1 else CylinderAtlasPolicy()
+        occurrences = sum(len(loop) for face in component
+                          for loop in (geometry.faces[face].loop, *geometry.faces[face].holes))
+        # Select the general owner contract before historical qualification.
+        # Its finite evidence scope must not become a primary workflow count cap.
+        exceeds_legacy_scope = occurrences > legacy_policy.max_occurrences or (
+            len(selected) > 1 and len(selected) > legacy_policy.max_face_uses)
+        generalized=exceeds_legacy_scope or any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
             for face in component for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
             for use in loop)
         generalized=generalized or any(

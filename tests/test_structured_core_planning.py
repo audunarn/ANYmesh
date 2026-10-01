@@ -89,7 +89,7 @@ def test_quality_defaults_match_qualified_023_surface_policy() -> None:
     assert MeshQualityPolicy() == MeshQualityPolicy(
         minimum_scaled_jacobian=0.20,
         maximum_aspect_ratio=4.0,
-        minimum_angle=30.0,
+        minimum_angle=15.0,
         maximum_angle=150.0,
         maximum_warpage=0.10,
     )
