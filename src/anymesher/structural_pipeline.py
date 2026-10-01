@@ -395,11 +395,12 @@ class StructuralMeshingPipeline:
                     )
                 )
                 continue
-            target_store = (
-                self.view.faces
-                if attachment.target_kind is AttachmentTargetKind.FACE
-                else self.view.edges
-            )
+            target_store = {
+                AttachmentTargetKind.FACE: self.view.faces,
+                AttachmentTargetKind.EDGE: self.view.edges,
+                AttachmentTargetKind.SHEET: self.view.sheets,
+                AttachmentTargetKind.MEMBER: self.view.members,
+            }.get(attachment.target_kind, {})
             if attachment.target_id not in target_store:
                 issues.append(
                     PreflightIssue(

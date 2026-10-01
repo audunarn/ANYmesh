@@ -175,7 +175,8 @@ def test_mesh_bvh_inverse_interpolates_all_shell_families(
     assert np.asarray(inverse.weights) @ coordinates == pytest.approx(point)
 
 
-def test_pipeline_preflight_is_local_and_connectivity_is_declared_only() -> None:
+@pytest.mark.parametrize("target_kind", [AttachmentTargetKind.FACE, AttachmentTargetKind.SHEET])
+def test_pipeline_preflight_is_local_and_connectivity_is_declared_only(target_kind) -> None:
     geometry = GeometryModel()
     face, plate_vertices = _plate(geometry)
     second_face, _ = _plate(geometry, (3.0, 0.0, 0.0))
@@ -187,11 +188,13 @@ def test_pipeline_preflight_is_local_and_connectivity_is_declared_only() -> None
     member = geometry.add_member((member_edge,), part_id=part)
     geometry.add_attachment(
         member,
-        AttachmentKind.MEMBER_THROUGH_FACE,
-        AttachmentTargetKind.FACE,
-        face,
+        AttachmentKind.MEMBER_THROUGH_FACE if target_kind is AttachmentTargetKind.FACE
+        else AttachmentKind.MEMBER_CROSS_SHEET,
+        target_kind,
+        face if target_kind is AttachmentTargetKind.FACE else first_sheet,
         ParameterRange.point(0.5),
         (ParameterRange.point(0.5), ParameterRange.point(0.5)),
+        metadata={"face_sequence": [face]},
     )
     view = GeometryMeshingView(geometry)
     with pytest.raises(TypeError):
