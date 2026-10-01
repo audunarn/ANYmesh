@@ -2,11 +2,39 @@ name: Tests
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 0"
 
 jobs:
+  smoke:
+    name: Development smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 26e7e3c98ac1a5573e19643d6658d00094bff0bc
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]"
+      - run: python tools/run_dev_smoke.py
+
   native-v2-contract:
     name: Native-v2 bounded evidence contract
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +53,10 @@ jobs:
       - run: python benchmarks/native_v2_baseline.py check-evidence
 
   pytest:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -53,12 +85,16 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build the optional quad-first MCF and TinyAD workers
         run: python tools/build_quad_workers.py
-      - run: python -m pytest
+      - run: python -m pytest --durations=25
         env:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
 
   native-absent:
     name: Disabled native boundary is absence-only
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       ANYMESHER_DISABLE_NATIVE: "1"
@@ -82,6 +118,10 @@ jobs:
           tests/test_packaging.py::test_disabled_native_build_is_absence_only -q
 
   gmsh:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -119,6 +159,10 @@ jobs:
           -q
 
   wheel:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -151,6 +195,10 @@ jobs:
 
   wheel-full-linux:
     name: Installed Linux native wheel full suite
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v')
     needs: wheel
     runs-on: ubuntu-latest
     steps:
@@ -188,4 +236,4 @@ jobs:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
         run: >-
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
-          --confcutdir=tests --import-mode=importlib tests
+          --confcutdir=tests --import-mode=importlib tests --durations=25

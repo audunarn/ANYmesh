@@ -321,8 +321,17 @@ converts at the widget.
 ```powershell
 python -m pip install --no-deps -e C:\Github\ANYgeometry
 python -m pip install -e "C:\Github\ANYmesh[dev,gmsh]"
+python tools/run_dev_smoke.py
+```
+
+Run affected test files after an edit. The complete source suite remains:
+
+```powershell
 python -m pytest
 ```
+
+[Testing and CI scope](docs/TESTING.md) explains when the full cross-platform
+matrix runs and what the short development check covers.
 
 To open the mesher straight from a checkout — including an IDE's Run button, with
 nothing installed — run [`run_gui.py`](run_gui.py) at the repository root.

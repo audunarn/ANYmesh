@@ -69,7 +69,7 @@ def _assert_no_degenerate_quads(mesh) -> None:
         assert area > 1.0e-12
 
 
-def _every_face_meshes(model: GeometryModel, target_size: float = 0.25) -> None:
+def _every_face_meshes(model: GeometryModel, target_size: float = 0.25):
     for face_id in model.faces:
         assert check_mappable(model, face_id).ok, check_mappable(model, face_id).messages
     mesh = generate_mesh(model, target_size=target_size)
@@ -79,6 +79,7 @@ def _every_face_meshes(model: GeometryModel, target_size: float = 0.25) -> None:
     assert mesh.num_nodes <= sum(
         len(mesh.nodes_on(model.entity_ref("face", face_id))) for face_id in model.faces
     )
+    return mesh
 
 
 def test_a_plain_rectangle_is_already_mappable() -> None:
@@ -449,8 +450,7 @@ def test_a_triangle_becomes_three_mappable_quads() -> None:
     # coincident corners, which is what a solver would otherwise be handed.
     assert len(faces) == 3
     assert len(model.faces) == 3
-    _every_face_meshes(model, target_size=0.15)
-    mesh = generate_mesh(model, target_size=0.15)
+    mesh = _every_face_meshes(model, target_size=0.15)
     _assert_no_degenerate_quads(mesh)
 
 
@@ -477,10 +477,9 @@ def test_punching_a_hole_leaves_a_meshable_ring() -> None:
     assert len(faces) == 4
     assert len(arcs) == 4
     assert face not in model.faces
-    _every_face_meshes(model, target_size=0.15)
+    mesh = _every_face_meshes(model, target_size=0.15)
 
     # No node ends up inside the hole.
-    mesh = generate_mesh(model, target_size=0.15)
     radii = np.linalg.norm(mesh.node_positions()[:, :2] - np.array([1.0, 1.0]), axis=1)
     assert radii.min() == pytest.approx(0.3, rel=1.0e-6)
     ring = np.vstack(

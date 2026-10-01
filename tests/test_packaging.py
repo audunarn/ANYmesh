@@ -145,8 +145,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         encoding="utf-8"
     )
 
-    assert ci.count("repository: audunarn/ANYgeometry") == 6
-    assert ci.count(f"ref: {geometry_ref}") == 6
+    assert ci.count("repository: audunarn/ANYgeometry") == 7
+    assert ci.count(f"ref: {geometry_ref}") == 7
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {geometry_ref}") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
@@ -157,7 +157,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
 
     assert ci.count(
         'python -m pip install -e ".[dev,planar]"'
-    ) == 3
+    ) == 4
     assert ci.count(
         'python -m pip install -e ".[dev,gmsh,planar]"'
     ) == 1
@@ -182,7 +182,30 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         "tests/test_release_correctness_guards.py::"
         "test_gmsh_session_restores_callers_sigint"
     ) in gmsh_job
-    assert ci.startswith("name: Tests\n\non:\n  push:\n  pull_request:\n")
+    assert ci.startswith("name: Tests\n\non:\n  push:\n")
+    assert "\n  pull_request:\n" in ci
+    assert "\n  workflow_dispatch:\n" in ci
+    assert "\n  schedule:\n" in ci
+    job_starts = list(re.finditer(r"(?m)^  ([a-z][a-z0-9-]+):\n", ci.split("\njobs:\n", 1)[1]))
+    job_section = ci.split("\njobs:\n", 1)[1]
+    job_blocks = {
+        match.group(1): job_section[match.end():
+                                    job_starts[index + 1].start()
+                                    if index + 1 < len(job_starts)
+                                    else len(job_section)]
+        for index, match in enumerate(job_starts)
+    }
+    assert "python tools/run_dev_smoke.py" in job_blocks["smoke"]
+    full_event_guard = (
+        "github.event_name == 'workflow_dispatch' ||\n"
+        "      github.event_name == 'schedule' ||\n"
+        "      startsWith(github.ref, 'refs/tags/v')"
+    )
+    assert set(job_blocks) == {
+        "smoke", "native-v2-contract", "pytest", "native-absent",
+        "gmsh", "wheel", "wheel-full-linux",
+    }
+    assert all(full_event_guard in job_blocks[name] for name in set(job_blocks) - {"smoke"})
 
     assert publish.startswith(
         "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"
@@ -238,6 +261,7 @@ def test_sdist_contains_the_installed_wheel_smoke_and_cylinder_fixture(
             sys.executable,
             "-m",
             "build",
+            "--no-isolation",
             "--sdist",
             "--outdir",
             str(output),
@@ -252,6 +276,7 @@ def test_sdist_contains_the_installed_wheel_smoke_and_cylinder_fixture(
         members = set(archive.getnames())
     root = "anymesher-0.5.1"
     assert f"{root}/tools/release_wheel_smoke.py" in members
+    assert f"{root}/tools/run_dev_smoke.py" in members
     assert f"{root}/benchmarks/native_v2_cylinder_cases.py" in members
 
 
