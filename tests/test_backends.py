@@ -265,7 +265,9 @@ def test_gmsh_is_finalized_even_when_meshing_fails() -> None:
 
     # gmsh is process-global state.  A backend that left it initialized would
     # break the next unrelated call, so initializing again must succeed.
-    gmsh.initialize()
+    # Exercise the process-global API without changing the caller's Python
+    # interrupt handler, which later native cancellation tests depend on.
+    gmsh.initialize(interruptible=False)
     gmsh.finalize()
     assert generate_mesh(_rectangle(), backend="gmsh", target_size=0.3).quads
 

@@ -797,7 +797,7 @@ def prepare_structural_closure(
         operands = (*[working.handle("face",face) for face in faces],
                     *[working.handle("member",member) for member in members])
         legacy_curved_only = False
-        if not members and faces and all(isinstance(working.faces[face].surface,
+        if not members and len(faces)>1 and all(isinstance(working.faces[face].surface,
                 (CoonsSurface, Cone, RuledSurface)) for face in faces):
             from anygeometry import query_trimmed_surface_charts
             unavailable = set()
