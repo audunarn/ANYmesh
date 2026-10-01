@@ -711,6 +711,27 @@ def prepare_structural_closure(
     # and callers disabling that batch retain the independent overlap audit.
     def audit_overlaps():
         _cancel(cancellation_check, "structural preparation overlap broad phase")
+        if all(isinstance(geometry.faces[face].surface, (Plane, Cylinder))
+               for face in source_faces):
+            # Classify the complete original set once through its exact owner.
+            # Repeated historical curved-overlap sampling is unnecessary for
+            # already prepared Plane/Cylinder topology.
+            def audit_cancelled():
+                _cancel(cancellation_check, "structural preparation overlap narrow phase")
+                return False
+            try:
+                plan_intersections(geometry,
+                    tuple(geometry.handle("face", face) for face in source_faces),
+                    policy=IntersectionBatchPolicy(
+                        intent=ConnectionIntent.IMPRINT,
+                        max_candidate_pairs=policy.maximum_candidate_pairs,
+                        cancellation_check=audit_cancelled))
+            except GeometryError as error:
+                if "positive-area overlap" in str(error):
+                    raise MeshError("positive-area overlap requires Fragment Overlaps "
+                                    "to select ownership before meshing: " + str(error)) from error
+                raise MeshError("structural overlap owner classification failed: " + str(error)) from error
+            return
         for pair in _face_pairs(geometry, source_faces,
                             maximum_candidates=policy.maximum_candidate_pairs,
                             cancellation_check=cancellation_check):

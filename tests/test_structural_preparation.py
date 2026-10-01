@@ -193,7 +193,8 @@ def test_member_sheet_connection_is_declared_on_working_clone() -> None:
     assert geometry.junctions == {}
 
 
-def test_coplanar_overlap_blocks_without_mutating_source() -> None:
+@pytest.mark.parametrize("automatic", [True, False])
+def test_coplanar_overlap_blocks_without_mutating_source(automatic) -> None:
     geometry = GeometryModel()
     first = geometry.add_plate(
         geometry.add_points(((0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0)))
@@ -204,7 +205,7 @@ def test_coplanar_overlap_blocks_without_mutating_source() -> None:
     before = to_dict(geometry)
 
     with pytest.raises(MeshError, match="Fragment Overlaps"):
-        prepare_structural_closure(geometry, face_ids=(first, second))
+        prepare_structural_closure(geometry, face_ids=(first, second), options=automatic)
 
     assert to_dict(geometry) == before
 
