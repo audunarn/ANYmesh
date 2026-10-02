@@ -22,6 +22,8 @@ from anygeometry.generators import cylinder
 from anymesher.hybrid import generate_hybrid_mesh_result
 from anymesher.preparation import prepare_structural_closure
 from anymesher.quad.options import QuadMeshingOptions
+from anymesher.quad.validate import QuadQualityRejected
+from anymesher.recovery import MeshAutomationOptions, generate_automatic_mesh_result
 from anymesher.serialize import mesh_from_dict, mesh_to_dict
 
 
@@ -105,7 +107,7 @@ def test_split_extrusion_keeps_shared_ids_and_quadratic_owner_mapping():
     assert mesh_to_dict(mesh_from_dict(mesh_to_dict(quadratic))) == mesh_to_dict(quadratic)
 
 
-def test_bezier_quadric_joint_edge_is_sampled_from_its_owner():
+def _wall_pipe_model():
     model = GeometryModel()
     controls = model.add_points((
         (0., 0., 0.), (1., 2., 0.), (2., -1., 0.), (3., 1., 0.),
@@ -123,6 +125,11 @@ def test_bezier_quadric_joint_edge_is_sampled_from_its_owner():
         policy=ConnectionIntent.CONNECT,
     )
     apply_intersections(model, plan, policy=ConnectionIntent.CONNECT)
+    return model
+
+
+def test_bezier_quadric_joint_edge_is_sampled_from_its_owner():
+    model = _wall_pipe_model()
     branch_edges = {
         edge_id for edge_id, item in model.edges.items()
         if isinstance(item.curve, BezierQuadricCurve)
@@ -145,3 +152,34 @@ def test_bezier_quadric_joint_edge_is_sampled_from_its_owner():
     for use in model.faces[candidates[0]].loop:
         if use.edge in branch_edges:
             assert len(mesh.nodes_of_edge[use.edge]) >= 3
+
+
+def test_unqualified_exact_extrusion_fallback_is_inspection_only():
+    model = _wall_pipe_model()
+    large_child = [
+        face_id for face_id in _extruded_faces(model)
+        if len(model.faces[face_id].loop) == 11
+    ]
+    assert len(large_child) == 1
+    settings = dict(
+        face_ids=tuple(large_child), beam_edges=(), member_ids=(),
+        target_size=0.75, strategy="native", native_backend="python",
+        recombine=True, order="quadratic", quad_options=QuadMeshingOptions(),
+    )
+    document = to_dict(model)
+    with pytest.raises(QuadQualityRejected):
+        generate_automatic_mesh_result(
+            model, automation=MeshAutomationOptions(strict_method=True),
+            **settings,
+        )
+    recovered = generate_automatic_mesh_result(
+        model, automation=MeshAutomationOptions(max_seconds=120), **settings,
+    )
+    assert recovered.status == "inspection_only"
+    assert recovered.selected_method == "auto"
+    assert [item["method"] for item in recovered.attempts[:2]] == ["quad_first", "auto"]
+    assert recovered.attempts[1]["error_type"] == "MissingHighOrderCertificate"
+    assert recovered.to_dict()["solver_admission"] == "BLOCKED"
+    assert recovered.mesh.quads and recovered.mesh.tris
+    assert "high_order_geometry" not in recovered.mesh.hybrid_diagnostics
+    assert to_dict(model) == document

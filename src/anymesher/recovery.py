@@ -13,6 +13,10 @@ from time import monotonic
 from typing import Any, Mapping
 
 from anygeometry import GeometryModel, clone_prepared_geometry
+try:
+    from anygeometry.surfaces import ExtrudedSurface
+except ImportError:  # Older supported ANYgeometry builds predate schema 6.
+    ExtrudedSurface = ()
 
 from .errors import MeshError, StructuredQualityRejected
 from .quad.validate import QuadQualityRejected
@@ -102,6 +106,27 @@ def _route_name(options: Mapping[str, Any]) -> str:
     if options.get("quad_options") is not None:
         return "quad_first"
     return str(getattr(options.get("strategy", "auto"), "value", options.get("strategy", "auto")))
+
+
+def _missing_extruded_quadratic_certificate(
+    geometry: GeometryModel, options: Mapping[str, Any], result: HybridMeshResult,
+) -> bool:
+    """Do not admit a new exact owner through an uncertified legacy fallback."""
+    if options.get("order", "linear") != "quadratic":
+        return False
+    selected = options.get("face_ids")
+    face_ids = geometry.faces if selected is None else selected
+    if not any(
+        face_id in geometry.faces
+        and isinstance(geometry.faces[face_id].surface, ExtrudedSurface)
+        for face_id in face_ids
+    ):
+        return False
+    certificate = result.mesh.hybrid_diagnostics.get("high_order_geometry")
+    return not (
+        isinstance(certificate, Mapping)
+        and certificate.get("status") == "CERTIFIED_POSITIVE"
+    )
 
 
 def _attempt_options(
@@ -200,6 +225,7 @@ def generate_automatic_mesh_result(
     admission_error: S3QualityError | None = None
     inspectable_result: HybridMeshResult | None = None
     inspectable_method: str | None = None
+    inspection_reason: str | None = None
     for method, recipe in recipes:
         check_budget(f"automatic meshing: {method}")
         recipe["cancellation_check"] = check_budget
@@ -237,12 +263,35 @@ def generate_automatic_mesh_result(
                 "problem_element_ids": failing_ids,
             })
             continue
+        if method != "quad_first" and _missing_extruded_quadratic_certificate(
+            geometry, first, result
+        ):
+            reason = (
+                "quadratic exact-extrusion fallback lacks a CERTIFIED_POSITIVE "
+                "high-order geometry certificate"
+            )
+            attempts.append({
+                "method": method,
+                "status": "rejected",
+                "error_type": "MissingHighOrderCertificate",
+                "reason": reason,
+                "problem_element_ids": [],
+            })
+            if inspectable_result is None:
+                inspectable_result = result
+                inspectable_method = method
+                inspection_reason = reason
+            if first_recoverable is None:
+                first_recoverable = MeshError(reason)
+            continue
         attempts.append({"method": method, "status": "selected"})
         selected = AutomaticMeshResult(result, method, "ready", tuple(attempts))
         result.mesh.hybrid_diagnostics["automation"] = selected.to_dict()
         return selected
 
-    if policy.allow_inspection and admission_error is not None:
+    if policy.allow_inspection and (
+        admission_error is not None or inspection_reason is not None
+    ):
         # An admission failure happens after mesh construction. Regenerate the
         # preferred recipe without solver admission, then publish it only as an
         # inspection artifact. This path is deliberately last, not a fallback
@@ -270,7 +319,10 @@ def generate_automatic_mesh_result(
                     attempts[0].get("problem_element_ids", ())
                 )),
                 "quality_warnings": list(quality.warnings),
-                "reason": str(admission_error),
+                "reason": (
+                    str(admission_error) if admission_error is not None
+                    else inspection_reason
+                ),
             })
             selected = AutomaticMeshResult(
                 candidate, method, "inspection_only", tuple(attempts)
