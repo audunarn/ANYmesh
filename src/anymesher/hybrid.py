@@ -1379,7 +1379,13 @@ def _mesh_native_face(
         cylindrical_chart = _cylindrical_binding.chart_for(
             uses[0], cancellation_check=cancellation_check
         )
-    chart_transform = np.eye(2, dtype=float)
+    analytic_chart = None
+    if (native_options.point_placement == "frontal_delaunay" and not quadratic
+            and (isinstance(face.surface, Cone) or isinstance(face.surface, ExtrudedSurface))):
+        from ._analytic_metric_chart import AnalyticMetricChart
+        analytic_chart = AnalyticMetricChart(geometry, face_id, cancellation_check)
+    chart_transform = (np.eye(2, dtype=float) if analytic_chart is None
+                       else analytic_chart.transform)
     if cylindrical_chart is not None:
         chart_transform = np.diag((
             cylindrical_chart.circumferential_length,
@@ -1402,6 +1408,9 @@ def _mesh_native_face(
         np.asarray(face.surface.v_vector, dtype=np.float64),
     )) @ chart_inverse.T if isinstance(face.surface, Plane) else None
     metric_to_physical = None
+    if analytic_chart is not None:
+        physical_jacobian = analytic_chart.jacobians
+        metric_to_physical = analytic_chart.evaluate
     if cylindrical_chart is not None:
         physical_jacobian = cylindrical_chart.jacobians
         metric_to_physical = cylindrical_chart.evaluate
@@ -1425,18 +1434,22 @@ def _mesh_native_face(
     automatically_seeded_shared_segments: dict[
         tuple[int, int], tuple[int, float, float]
     ] = {}
+    boundary_parameters = {}
     boundary_offset = 0
     for loop in loops:
         count = len(loop.node_ids)
         for local, specification in enumerate(loop.segment_specs):
             if specification is not None:
-                if cylindrical_chart is not None:
+                if cylindrical_chart is not None or analytic_chart is not None:
                     edge_id = specification[0]
-                    parameters = {
-                        int(entry.node_id): float(entry.key.parameter)
-                        for entry in boundary_registry.entries(edge_id)
-                        if entry.node_id is not None
-                    }
+                    if edge_id not in boundary_parameters:
+                        _check_cancellation(cancellation_check, "native edge boundary lookup")
+                        boundary_parameters[edge_id] = {
+                            int(entry.node_id): float(entry.key.parameter)
+                            for entry in boundary_registry.entries(edge_id)
+                            if entry.node_id is not None
+                        }
+                    parameters = boundary_parameters[edge_id]
                     following = (local + 1) % count
                     ends = (local, following) if local < following else (following, local)
                     specification = (
@@ -1458,7 +1471,7 @@ def _mesh_native_face(
     # chart segment lets the surface filler add interior points without adding
     # unregistered boundary stations.
     chart_size = max(segments) * (1.0 + 64.0 * np.finfo(float).eps)
-    seeded_general_chart = False
+    seeded_general_chart = analytic_chart is not None
     if cylindrical_chart is not None:
         from ._trimmed_cylinder_binding import TrimmedCylinderBinding
         from anygeometry import EllipticArc,CylinderIntersectionCurve
@@ -1474,7 +1487,7 @@ def _mesh_native_face(
     face_native_options = native_options
     if native_options.point_placement == "frontal_delaunay" and not isinstance(
         face.surface, Plane
-    ) and cylindrical_chart is None:
+    ) and cylindrical_chart is None and analytic_chart is None:
         raise MeshError(
             "frontal_delaunay activation is currently limited to planar faces"
         )
@@ -1482,7 +1495,7 @@ def _mesh_native_face(
     supplemental_metric_field = None
     if (
         native_options.metric_mode == "isotropic_spatial"
-        and (isinstance(face.surface, Plane) or cylindrical_chart is not None)
+        and (isinstance(face.surface, Plane) or cylindrical_chart is not None or analytic_chart is not None)
     ):
         if native_options.metric_field is not None:
             explicit = native_options.metric_field
@@ -1571,7 +1584,7 @@ def _mesh_native_face(
             _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
-            _preserve_spatial_refinement=cylindrical_chart is not None,
+            _preserve_spatial_refinement=(cylindrical_chart is not None or analytic_chart is not None),
             _polish_quality_candidates=isinstance(face.surface, Plane),
             _boundary_is_seeded=seeded_general_chart,
             options=(
@@ -1640,7 +1653,7 @@ def _mesh_native_face(
             _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
-            _preserve_spatial_refinement=cylindrical_chart is not None,
+            _preserve_spatial_refinement=(cylindrical_chart is not None or analytic_chart is not None),
             _polish_quality_candidates=isinstance(face.surface, Plane),
             _boundary_is_seeded=seeded_general_chart,
         )
@@ -1746,6 +1759,12 @@ def _mesh_native_face(
     _check_cancellation(cancellation_check, f"native face {face_id} lifting start")
     if cylindrical_chart is not None:
         _cylindrical_binding.validate()
+    if analytic_chart is not None:
+        from .surface_mesh import SurfaceMeshOptions as AnalyticQualityOptions
+        settings = (AnalyticQualityOptions() if quality_options is None else surface_options)
+        registered = np.asarray([mesh.nodes[node] for loop in loops for node in loop.node_ids])
+        surface_diagnostics['analytic_physical_quality'] = analytic_chart.certify_core(
+            core, settings, registered)
     lifting_started = perf_counter()
     assert_valid_mesh(core)
 
@@ -1826,7 +1845,7 @@ def _mesh_native_face(
         mesh.nodes[node_id] = exact_point
         sequence = mesh.nodes_of_edge[edge_id]
         if node_id not in sequence:
-            if cylindrical_chart is not None:
+            if cylindrical_chart is not None or analytic_chart is not None:
                 from ._shared_triangle_split import propagate_triangle_split
 
                 stations = {
@@ -4725,6 +4744,8 @@ def generate_hybrid_mesh_result(
             size_field=size_field,
             overrides=effective_overrides,
             edge_ids=edges,
+            unstructured_face_ids=(native_faces if
+                order == "linear" and native_options.point_placement == "frontal_delaunay" else ()),
             maximum_adjacent_growth=(None if structured_report is not None else
                 (_native_surface_options.max_element_growth
                  if _native_surface_options is not None else None)),
@@ -4795,7 +4816,10 @@ def generate_hybrid_mesh_result(
     automatically_seeded_shared_edges = frozenset(
         edge_id
         for edge_id, incident_faces in edge_faces.items()
-        if len(incident_faces) > 1
+        if (len(incident_faces) > 1 or all(
+            isinstance(geometry.faces[face_id].surface, Cone)
+            or isinstance(geometry.faces[face_id].surface, ExtrudedSurface)
+            for face_id in incident_faces))
         and incident_faces.issubset(native_face_set)
         and edge_id not in set(final_overrides or {})
         and edge_id not in set(beams)

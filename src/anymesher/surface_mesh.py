@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import acos, ceil, degrees, sqrt
 from numbers import Integral
 from time import perf_counter
@@ -1364,21 +1364,39 @@ def _candidate_selection_key(
 
 def _published_quality_report(core,settings,quality,threshold_report):
     """Report the actual mixed cells; retain discarded T3 evidence separately."""
-    ids=(*core.tris,*core.quads)
-    perimeters={};incidence={}
-    for identifier in ids:
-        nodes=core.corners_of(identifier)
-        xyz=np.asarray([core.nodes[node] for node in nodes])
-        perimeters[identifier]=float(np.linalg.norm(np.roll(xyz,-1,axis=0)-xyz,axis=1).mean())
-        for first,second in zip(nodes,(*nodes[1:],nodes[0])):
-            incidence.setdefault(tuple(sorted((first,second))),[]).append(identifier)
+    # Read contiguous active corner rows once. Dictionary views allocate and
+    # resolve stable IDs for each corner, making repeated local scoring costly.
+    lengths,edges,owners,identifiers=[],[],[],[]
+    offset=0
+    for connectivity,active,ids,corners in (
+            (core.triangle_connectivity,core.triangle_active,core.triangle_ids,3),
+            (core.quad_connectivity,core.quad_active,core.quad_ids,4)):
+        rows=connectivity[active,:corners]
+        if not len(rows):continue
+        xyz=core.node_coordinates[rows]
+        lengths.append(np.linalg.norm(np.roll(xyz,-1,axis=1)-xyz,axis=2).mean(axis=1))
+        edges.append(np.sort(np.stack((rows,np.roll(rows,-1,axis=1)),axis=2).reshape(-1,2),axis=1))
+        owners.append(np.repeat(np.arange(offset,offset+len(rows)),corners))
+        identifiers.append(ids[active])
+        offset+=len(rows)
     growth_poor=set();maximum_growth=1.
-    for adjacent in incidence.values():
-        if len(adjacent)!=2:continue
-        first,second=(perimeters[identifier] for identifier in adjacent)
-        ratio=max(first/second,second/first)
-        maximum_growth=max(maximum_growth,ratio)
-        if ratio>settings.max_element_growth:growth_poor.update(adjacent)
+    if lengths:
+        lengths=np.concatenate(lengths)
+        edges=np.concatenate(edges)
+        owners=np.concatenate(owners)
+        identifiers=np.concatenate(identifiers)
+        order=np.lexsort((edges[:,1],edges[:,0]))
+        sorted_edges=edges[order]
+        starts=np.r_[0,1+np.flatnonzero(np.any(sorted_edges[1:]!=sorted_edges[:-1],axis=1))]
+        counts=np.diff(np.r_[starts,len(order)])
+        starts=starts[counts==2]
+        first,second=owners[order[starts]],owners[order[starts+1]]
+        with np.errstate(divide='ignore',invalid='ignore'):
+            ratios=np.where(np.minimum(lengths[first],lengths[second])>0,
+                np.maximum(lengths[first]/lengths[second],lengths[second]/lengths[first]),np.inf)
+        maximum_growth=max(1.,float(np.max(ratios,initial=1.)))
+        failed=ratios>settings.max_element_growth
+        growth_poor=set(map(int,identifiers[np.r_[first[failed],second[failed]]]))
     poor=sorted(set(threshold_report['poor_element_ids'])|growth_poor)
     counts=threshold_report['violation_counts'];worst=threshold_report['worst']
     return {'quality_scope':'published_elements','invalid_element_count':0,
@@ -1393,6 +1411,24 @@ def _published_quality_report(core,settings,quality,threshold_report):
         'min_scaled_jacobian':worst['minimum_scaled_jacobian'],
         'min_angle':worst['minimum_angle'],'max_angle':worst['maximum_angle'],
         'max_element_growth':maximum_growth,'poor_element_ids':poor,'repair_element_ids':poor}
+
+
+def _physical_quality_candidate(candidate, settings, evaluate_coordinates):
+    """Score a chart candidate using the actual owner surface and cell growth."""
+    xyz = np.asarray(evaluate_coordinates(candidate.points), dtype=float)
+    if xyz.shape != (len(candidate.points), 3) or not np.isfinite(xyz).all():
+        raise MeshError("physical candidate evaluator requires finite (n, 3) coordinates")
+    core = MeshCore(xyz, candidate.triangles)
+    quality = evaluate_quality(core, check_validity=False)
+    thresholds = _quality_threshold_report(quality, settings)
+    report = _published_quality_report(core, settings, quality, thresholds)
+    report['invalid_element_count'] = (candidate.report['invalid_element_count']
+                                       + len(quality.validity.errors))
+    score = (report['invalid_element_count'], report['quality_violation_count'],
+             report['elements_above_aspect_ratio_5'], report['max_aspect_ratio'],
+             -report['min_scaled_jacobian'], -report['min_angle'])
+    return replace(candidate, report=report, score=score,
+                   aspect_ratios=quality.triangles.aspect_ratio)
 
 
 def _polish_quality_candidate(candidate, protected_edges, explicit_points, settings, statistics):
@@ -1841,6 +1877,12 @@ def _run_frontal_quality_path(
     if settings.target_size is None:
         raise MeshError("frontal_delaunay point placement requires target_size")
     started = perf_counter()
+    physical_evaluator = metric_to_physical if preserve_spatial_refinement else None
+    if physical_evaluator is not None:
+        physical_baseline = _physical_quality_candidate(baseline['best'], settings, physical_evaluator)
+        baseline = dict(baseline, best=physical_baseline,
+                        target_met=(physical_baseline.report['invalid_element_count'] == 0
+                                    and not physical_baseline.report['poor_element_ids']))
     triangulation, report = frontal_delaunay_refine(
         baseline["triangulation"],
         settings.native_options,
@@ -1854,6 +1896,7 @@ def _run_frontal_quality_path(
         component_seed_registry=component_seed_registry,
         supplemental_metric_field=supplemental_metric_field,
         qualified_seed=bool(baseline["target_met"]),
+        minimum_angle_target=settings.min_angle,
     )
     work_statistics = {
         "full_triangulations": 0,
@@ -1873,6 +1916,9 @@ def _run_frontal_quality_path(
         settings,
         statistics=work_statistics,
     )
+    if physical_evaluator is not None:
+        initial = _physical_quality_candidate(initial, settings, physical_evaluator)
+        optimized = _physical_quality_candidate(optimized, settings, physical_evaluator)
     best = min(
         (initial, optimized),
         key=lambda candidate: _candidate_selection_key(
@@ -1885,7 +1931,13 @@ def _run_frontal_quality_path(
         from ._frontal_transition_quality import repair_frontal_transition
         best, report = repair_frontal_transition(
             best, triangulation.segments, settings, report, cancellation_check,
+            evaluate_coordinates=physical_evaluator,
         )
+    if physical_evaluator is not None and best.report['poor_element_ids']:
+        from ._physical_t3_refinement import refine_physical_candidate
+        best, triangulation, report = refine_physical_candidate(
+            best, triangulation, settings, report, physical_evaluator,
+            automatically_seeded_shared_segments, component_seed_registry, cancellation_check)
     accepted_spatial_refinement = (
         preserve_spatial_refinement
         and settings.native_options.metric_mode == "isotropic_spatial"
@@ -2097,25 +2149,34 @@ def _prepare_recombined_path(
     holes: Sequence[np.ndarray],
     settings: SurfaceMeshOptions,
     cancellation_check: Callable[[str], None] | None,
+    physical_evaluator=None,
 ) -> dict[str, Any]:
     best: _QualityCandidate = path["best"]
     triangulation: PlanarTriangulation = path["triangulation"]
-    core = MeshCore(plane.lift(best.points), best.triangles)
+    core = MeshCore(plane.lift(best.points) if physical_evaluator is None
+                    else physical_evaluator(best.points), best.triangles)
     started = perf_counter()
     report, quality = _qualified_recombination(
         core, triangulation.segments, settings, cancellation_check
     )
     outer_edges, hole_edges = _boundary_edge_groups(outer, holes)
+    published = report.mesh
+    if physical_evaluator is not None:
+        published = MeshCore(plane.lift(best.points),
+            published.triangle_connectivity, published.quad_connectivity,
+            node_ids=published.node_ids, triangle_ids=published.triangle_ids,
+            quad_ids=published.quad_ids, node_active=published.node_active,
+            triangle_active=published.triangle_active, quad_active=published.quad_active)
     return {
         "path": path,
-        "core": report.mesh,
+        "core": published,
         "report": report,
         "quality_policy": quality,
         "outer_alignment": _boundary_alignment(
-            report.mesh, best.points, outer_edges
+            published, best.points, outer_edges
         ),
         "hole_alignment": _boundary_alignment(
-            report.mesh, best.points, hole_edges
+            published, best.points, hole_edges
         ),
         "max_element_growth": float(best.report["max_element_growth"]),
         "seconds": perf_counter() - started,
@@ -2634,6 +2695,7 @@ def mesh_planar_surface(
                 planar_holes,
                 settings,
                 cancellation_check,
+                physical_evaluator=(_metric_to_physical if _preserve_spatial_refinement else None),
             )
             for path in candidate_paths
         ]
@@ -2820,15 +2882,25 @@ def mesh_planar_surface(
             cancellation_check("native surface quadratic promotion complete")
     validation_started = perf_counter()
     assert_valid_mesh(core)
-    published_quality=evaluate_quality(core)
+    quality_core = core
+    if _preserve_spatial_refinement and _metric_to_physical is not None:
+        parameters = core.node_coordinates[:, :2] if plane.dimension == 2 else plane.project(core.node_coordinates)
+        xyz = np.asarray(_metric_to_physical(parameters), dtype=float)
+        if xyz.shape != (core.num_nodes, 3) or not np.isfinite(xyz).all():
+            raise MeshError("physical publication evaluator requires finite (n, 3) coordinates")
+        quality_core = MeshCore(xyz, core.triangle_connectivity, core.quad_connectivity,
+            node_ids=core.node_ids, triangle_ids=core.triangle_ids, quad_ids=core.quad_ids,
+            node_active=core.node_active, triangle_active=core.triangle_active, quad_active=core.quad_active)
+    published_quality=evaluate_quality(quality_core)
     threshold_report = _quality_threshold_report(published_quality, settings)
-    if selected_published is not None and settings.recombine:
+    if (selected_published is not None and settings.recombine) or quality_core is not core:
         quality_diagnostics["triangulation_quality"] = quality_diagnostics["final_quality"]
         quality_diagnostics["final_quality"] = _published_quality_report(
-            core, settings, published_quality, threshold_report
+            quality_core, settings, published_quality, threshold_report
         )
         quality_diagnostics["target_met"] = not quality_diagnostics["final_quality"]["poor_element_ids"]
-    if settings.enforce_quality and not threshold_report["accepted"]:
+    if settings.enforce_quality and (not threshold_report["accepted"] or
+            (quality_core is not core and quality_diagnostics['final_quality']['poor_element_ids'])):
         counts = ", ".join(
             f"{name}={count}"
             for name, count in threshold_report["violation_counts"].items()

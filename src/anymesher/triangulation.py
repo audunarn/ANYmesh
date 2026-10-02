@@ -458,6 +458,7 @@ def _prepare_pslg(
             epsilon,
         )
     split_records: list[tuple[int, int, str]] = []
+    boundary_chains: dict[tuple[int, int], list[int]] = {}
     point_x, point_y = points[:, 0], points[:, 1]
     for record_index, (first, second, kind) in enumerate(records):
         start, end = points[first], points[second]
@@ -486,6 +487,12 @@ def _prepare_pslg(
             ordered = [row for _, row in members]
         else:
             ordered = list(compiled_memberships[record_index])
+        # Tolerance-qualified memberships outside an endpoint are not boundary
+        # stations. Clamping and ID tie breaking must never reorder endpoints.
+        ordered = [first] + [row for row in ordered if row not in (first, second)
+                             and 0.0 < float(np.dot(points[row]-start, direction)/denominator) < 1.0] + [second]
+        if kind == "boundary":
+            boundary_chains[first, second] = ordered
         for a, b in zip(ordered, ordered[1:]):
             if a != b:
                 split_records.append((a, b, kind))
@@ -493,6 +500,21 @@ def _prepare_pslg(
     boundary_set = {_normal_edge(a, b) for a, b, kind in split_records if kind == "boundary"}
     mandatory_set = {_normal_edge(a, b) for a, b, kind in split_records if kind == "mandatory"}
     all_segments = sorted(boundary_set | mandatory_set)
+
+    # Domain filtering follows the actual split boundary, including stations
+    # inserted on a ring edge. Keep its material side on the left.
+    def expanded_ring(ring: list[int]) -> list[int]:
+        result = [node for first, second in zip(ring, ring[1:] + ring[:1])
+                  for node in boundary_chains[first, second][:-1]]
+        if len(set(result)) != len(result):
+            raise MeshError("expanded boundary has ambiguous repeated stations")
+        return result
+
+    outer = expanded_ring(outer)
+    holes = [expanded_ring(ring) for ring in holes]
+    _validate_ring(points, outer, "expanded outer loop")
+    for number, ring in enumerate(holes):
+        _validate_ring(points, ring, f"expanded hole {number}")
 
     compiled_domain = None
     if compiled_kernels:
@@ -791,6 +813,136 @@ def _edge_incidence(triangles: Sequence[tuple[int, int, int]]) -> dict[tuple[int
     return result
 
 
+def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
+                 cancellation_check: Callable[[str], None] | None = None) -> list[int]:
+    """Return the finite hull in CCW order using the adaptive predicate."""
+    order = sorted(range(len(points)), key=lambda node: (*points[node], node))
+    chains: list[list[int]] = []
+    for sequence in (order, reversed(order)):
+        chain: list[int] = []
+        for node in sequence:
+            if cancellation_check is not None:
+                cancellation_check("python triangulation convex hull")
+            while len(chain) > 1:
+                turn = orient2d(points[chain[-2]], points[chain[-1]], points[node])
+                if turn > 0.0 or (retain_collinear and turn == 0.0):
+                    break
+                chain.pop()
+            chain.append(node)
+        chains.append(chain[:-1])
+    return chains[0] + chains[1]
+
+
+def _complete_hull_seed(points: np.ndarray, triangles: Sequence[tuple[int, int, int]],
+                        cancellation_check: Callable[[str], None] | None = None) -> bool:
+    """Certify a connected positive disk with every original hull station."""
+    hull = _convex_hull(points, retain_collinear=True, cancellation_check=cancellation_check)
+    incidence = _edge_incidence(triangles)
+    if not triangles or len(set(hull)) != len(hull):
+        return False
+    expected = {_normal_edge(hull[i], hull[(i + 1) % len(hull)]) for i in range(len(hull))}
+    if {edge for edge, rows in incidence.items() if len(rows) == 1} != expected:
+        return False
+    if any(len(rows) > 2 for rows in incidence.values()):
+        return False
+    if {node for triangle in triangles for node in triangle} != set(range(len(points))):
+        return False
+    if len(points) - len(incidence) + len(triangles) != 1:
+        return False
+    neighbors: list[list[int]] = [[] for _ in triangles]
+    for rows in incidence.values():
+        if len(rows) == 2:
+            neighbors[rows[0]].append(rows[1])
+            neighbors[rows[1]].append(rows[0])
+    reached, pending = set(), [0]
+    while pending:
+        if cancellation_check is not None:
+            cancellation_check("python triangulation hull validation")
+        row = pending.pop()
+        if row in reached:
+            continue
+        reached.add(row)
+        a, b, c = triangles[row]
+        if orient2d(points[a], points[b], points[c]) <= 0.0:
+            return False
+        pending.extend(neighbor for neighbor in neighbors[row] if neighbor not in reached)
+    return len(reached) == len(triangles)
+
+
+def _finite_hull_seed(points: np.ndarray,
+                      cancellation_check: Callable[[str], None] | None = None) -> list[tuple[int, int, int]]:
+    """Seed a complete finite disk when removal of the super triangle loses cells.
+
+    A strict hull fan covers the domain before station insertion. Exact on-edge
+    insertion splits both incident cells; Lawson flips subsequently restore
+    Delaunay legality without changing any input coordinate or identifier.
+    """
+    hull = _convex_hull(points, cancellation_check=cancellation_check)
+    if len(hull) < 3:
+        raise MeshError("finite triangulation hull has zero area")
+    triangles = [_canonical_triangle((hull[0], hull[i], hull[i + 1]), points)
+                 for i in range(1, len(hull) - 1)]
+    installed = set(hull)
+    for node in sorted(set(range(len(points))) - installed, key=lambda index: (*points[index], index)):
+        if cancellation_check is not None:
+            cancellation_check("python triangulation finite hull insertion")
+        containing = []
+        edge = None
+        for row, triangle in enumerate(triangles):
+            turns = [orient2d(points[triangle[i]], points[triangle[(i + 1) % 3]], points[node])
+                     for i in range(3)]
+            if min(turns) >= 0.0:
+                containing.append(row)
+                for i, turn in enumerate(turns):
+                    if turn == 0.0:
+                        edge = _normal_edge(triangle[i], triangle[(i + 1) % 3])
+                if edge is None:
+                    break
+        if not containing:
+            raise MeshError("finite hull insertion could not locate a point")
+        if edge is not None:
+            containing = _edge_incidence(triangles)[edge]
+            replacements = []
+            for row in containing:
+                opposite = next(vertex for vertex in triangles[row] if vertex not in edge)
+                replacements.extend(((edge[0], node, opposite), (node, edge[1], opposite)))
+        else:
+            a, b, c = triangles[containing[0]]
+            replacements = [(a, b, node), (b, c, node), (c, a, node)]
+        removed = set(containing)
+        triangles = [triangle for row, triangle in enumerate(triangles) if row not in removed]
+        triangles.extend(_canonical_triangle(triangle, points) for triangle in replacements)
+    # Strict positivity prevents cocircular flip cycles. The work bound is an
+    # algorithmic convergence guard, not an operand-count restriction.
+    limit = max(64, 32 * len(triangles) ** 2)
+    for _ in range(limit):
+        if cancellation_check is not None:
+            cancellation_check("python triangulation finite hull legality")
+        incidence = _edge_incidence(triangles)
+        changed = False
+        for edge, rows in sorted(incidence.items()):
+            if cancellation_check is not None:
+                cancellation_check("python triangulation finite hull edge")
+            if len(rows) != 2:
+                continue
+            first, second = (triangles[row] for row in rows)
+            a = next(node for node in first if node not in edge)
+            b = next(node for node in second if node not in edge)
+            if (_normal_edge(a, b) not in incidence
+                    and _proper_intersection(points[edge[0]], points[edge[1]], points[a], points[b])
+                    and incircle(*(points[node] for node in first), points[b]) > 0.0):
+                triangles[rows[0]] = _canonical_triangle((a, b, edge[0]), points)
+                triangles[rows[1]] = _canonical_triangle((b, a, edge[1]), points)
+                changed = True
+                break
+        if not changed:
+            result = sorted(triangles)
+            if not _complete_hull_seed(points, result, cancellation_check):
+                raise MeshError("finite hull triangulation is incomplete")
+            return result
+    raise MeshError("finite hull triangulation legality did not converge")
+
+
 def _point_in_closed_triangle(
     point: np.ndarray,
     first: np.ndarray,
@@ -1016,22 +1168,50 @@ def _finish_triangles(
     points: np.ndarray,
     triangles: Any,
     prepared: _PreparedPSLG,
+    cancellation_check: Callable[[str], None] | None = None,
 ) -> np.ndarray:
     raw = np.asarray(triangles, dtype=np.int64)
     if raw.ndim != 2 or raw.shape[1] != 3:
         raise MeshError("triangulation must contain three-node triangles")
     canonical: set[tuple[int, int, int]] = set()
-    ring_edges = _domain_ring_edges(prepared)
     for triangle in raw:
+        if cancellation_check is not None:
+            cancellation_check("python triangulation domain cells")
         if np.any(triangle < 0) or np.any(triangle >= len(points)) or len(set(map(int, triangle))) != 3:
             raise MeshError("triangulation contains invalid connectivity")
         candidate = _canonical_triangle(triangle, points)
         if orient2d(points[candidate[0]], points[candidate[1]], points[candidate[2]]) <= 0.0:
             raise MeshError("triangulation contains a zero-area triangle")
-        centroid = np.mean(points[np.asarray(candidate)], axis=0)
-        if _inside_domain(centroid, prepared, ring_edges):
-            canonical.add(candidate)
-    result = np.asarray(sorted(canonical), dtype=np.int64).reshape((-1, 3))
+        canonical.add(candidate)
+    cells = sorted(canonical)
+    incidence = _edge_incidence(cells)
+    boundary = {tuple(map(int, edge)) for edge in prepared.boundary_segments}
+    rejected: set[int] = set()
+    pending: list[int] = []
+    for ring in (prepared.outer, *prepared.holes):
+        for first, second in zip(ring, np.roll(ring, -1)):
+            if cancellation_check is not None:
+                cancellation_check("python triangulation domain boundary")
+            edge = _normal_edge(int(first), int(second))
+            if edge not in incidence:
+                raise MeshError("triangulation lost a domain boundary")
+            for row in incidence[edge]:
+                opposite = next(node for node in cells[row] if node not in edge)
+                if orient2d(points[first], points[second], points[opposite]) < 0.0:
+                    pending.append(row)
+    while pending:
+        if cancellation_check is not None:
+            cancellation_check("python triangulation domain connectivity")
+        row = pending.pop()
+        if row in rejected:
+            continue
+        rejected.add(row)
+        cell = cells[row]
+        for index in range(3):
+            edge = _normal_edge(cell[index], cell[(index + 1) % 3])
+            if edge not in boundary:
+                pending.extend(neighbor for neighbor in incidence[edge] if neighbor not in rejected)
+    result = np.asarray([cell for row, cell in enumerate(cells) if row not in rejected], dtype=np.int64).reshape((-1, 3))
     edges = set(_edge_incidence([tuple(map(int, row)) for row in result]).keys())
     missing = [tuple(map(int, edge)) for edge in prepared.segments if tuple(map(int, edge)) not in edges]
     if missing:
@@ -1328,7 +1508,7 @@ def constrained_planar_triangulation(
                 result_points, native_result.triangles, prepared
             )
             result_triangles = _finish_triangles(
-                result_points, strict_triangles, prepared
+                result_points, strict_triangles, prepared, cancellation_check
             )
         else:
             result_triangles = validated
@@ -1339,6 +1519,8 @@ def constrained_planar_triangulation(
         if cancellation_check is not None:
             cancellation_check("python triangulation insertion start")
         triangles = _bowyer_watson(prepared.points)
+        if not _complete_hull_seed(prepared.points, triangles, cancellation_check):
+            triangles = _finite_hull_seed(prepared.points, cancellation_check)
         protected: set[tuple[int, int]] = set()
         # ``_recover_segment`` returns the triangles unchanged when the segment
         # is already an edge; test that against one edge set, rebuilt only
@@ -1351,7 +1533,7 @@ def constrained_planar_triangulation(
                 triangles = _recover_segment(prepared.points, triangles, segment, protected)
                 present = set(_edge_incidence(triangles))
             protected.add(_normal_edge(*segment))
-        result_triangles = _finish_triangles(prepared.points, triangles, prepared)
+        result_triangles = _finish_triangles(prepared.points, triangles, prepared, cancellation_check)
         if cancellation_check is not None:
             cancellation_check("python triangulation complete")
 

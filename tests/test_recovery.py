@@ -92,6 +92,7 @@ def test_automatic_analytic_trim_selects_chart_recipe_and_retains_budgets():
     assert native.point_placement=='frontal_delaunay' and native.metric_mode=='isotropic_spatial'
     assert (native.max_insertions,native.max_topology_operations,native.cancellation_interval)==(37,129,7)
     assert chosen[0][1]['recombine'] is False
+    assert chosen[0][1]['_native_surface_options'].quality_policy.minimum_angle == 15.0
     assert first['native_options'] is settings and recipes[0][1]['native_options'] is settings
     for changes in ({'strategy':'native'},{'strategy':'mapped'},{'order':'quadratic'},
                     {'native_options':NativeMeshingOptions(point_placement='frontal_delaunay',

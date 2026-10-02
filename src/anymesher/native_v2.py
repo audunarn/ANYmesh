@@ -666,6 +666,7 @@ class MutableT3Topology:
         _split_proposal: Callable[
             [int, Fraction, Fraction], tuple[Fraction, Any, int | None] | None
         ] | None = None,
+        _validate_candidate=None,
     ) -> dict[str, Any]:
         """Split one registry-authorized automatically seeded shared edge."""
 
@@ -756,6 +757,8 @@ class MutableT3Topology:
         trial._protected_edges = self._protected_edges
         trial._splittable_intervals = new_intervals
         trial.validate()
+        if _validate_candidate is not None:
+            _validate_candidate(extended, new_triangles)
         new_index = self._topology_index.updated(
             new_triangles, cancellation_check=cancellation_check
         )
@@ -821,6 +824,46 @@ class MutableT3Topology:
                 self.quality_cache,
             ) = old_state
             raise
+
+    def bisect_interior_edge(self, edge: tuple[int, int], *, cancellation_check=None,
+                             _validate_candidate=None):
+        """Bisect an unconstrained interior T3 edge with an atomic local split."""
+        target = _edge(*edge)
+        if target in self._protected_edges or target in self._splittable_intervals:
+            raise MeshError("interior bisection cannot split a constrained edge")
+        attached = self._topology_index.attached(target)
+        if len(attached) != 2:
+            raise MeshError("interior bisection requires two incident triangles")
+        if cancellation_check is not None:
+            cancellation_check("native-v2 interior bisection start")
+        node = len(self._points)
+        points = np.vstack((self._points, .5*(self._points[target[0]]+self._points[target[1]])))
+        pairs = [(tuple(map(int, row)), int(self.triangle_owners[i]))
+                 for i,row in enumerate(self._triangles) if i not in attached]
+        for i in attached:
+            opposite = next(int(n) for n in self._triangles[i] if int(n) not in target)
+            for row in ((target[0],node,opposite),(node,target[1],opposite)):
+                pairs.append((_canonical_triangle(row,points),int(self.triangle_owners[i])))
+        pairs.sort(key=lambda item:item[0])
+        triangles = np.asarray([row for row,owner in pairs],dtype=np.int64)
+        owners = np.asarray([owner for row,owner in pairs],dtype=np.int64)
+        node_owners = np.append(self.node_owners,-1)
+        trial = object.__new__(MutableT3Topology)
+        trial._points,trial._triangles = points,triangles
+        trial.node_owners,trial.triangle_owners = node_owners,owners
+        trial._protected_edges,trial._splittable_intervals = self._protected_edges,self._splittable_intervals
+        trial.validate()
+        if _validate_candidate is not None:
+            _validate_candidate(points, triangles)
+        index = self._topology_index.updated(triangles,cancellation_check=cancellation_check)
+        if cancellation_check is not None:
+            cancellation_check("native-v2 interior bisection commit")
+        self._points,self._triangles = points,triangles
+        self.node_owners,self.triangle_owners = node_owners,owners
+        self._topology_index = index
+        self.epoch += 1
+        self.quality_cache = {}
+        return {'point_id':node,'epoch':self.epoch}
 
     def flip_edge(self, edge: tuple[int, int]) -> bool:
         target = _edge(*edge)
@@ -957,12 +1000,15 @@ def frontal_delaunay_refine(
     component_seed_registry: ComponentSeedRegistry | None = None,
     supplemental_metric_field: MetricFieldSpec | None = None,
     qualified_seed: bool = False,
+    minimum_angle_target: float = 30.0,
     _split_proposal: Callable[
         [int, Fraction, Fraction], tuple[Fraction, Any, int | None] | None
     ] | None = None,
 ) -> tuple[PlanarTriangulation, dict[str, Any]]:
     """Refine one qualified planar CDT through a deterministic bounded queue."""
 
+    if not np.isfinite(minimum_angle_target) or not 0.0 < minimum_angle_target < 90.0:
+        raise MeshError("minimum angle target must be finite and in (0, 90)")
     if options.point_placement != "frontal_delaunay":
         raise MeshError("frontal refinement requires point_placement='frontal_delaunay'")
     provider: Any
@@ -990,7 +1036,8 @@ def frontal_delaunay_refine(
         field: SpatialMetricField,
         points: np.ndarray,
     ) -> np.ndarray:
-        if specification.spatial_dimension == 3:
+        if specification.spatial_dimension == 3 or (
+                specification.spatial_dimension is None and metric_to_physical is not None):
             if metric_to_physical is None or metric_jacobian is None:
                 raise MeshError("3D metric controls require a physical chart binding")
             physical_points = np.ascontiguousarray(metric_to_physical(points), dtype=np.float64)
@@ -1123,6 +1170,11 @@ def frontal_delaunay_refine(
             topology, cancellation_check=cancellation_check,
         )
         tensors = evaluate_metric(points)
+        physical_quality_points = (np.asarray(metric_to_physical(points), dtype=float)
+            if metric_to_physical is not None and isinstance(provider, SpatialMetricField)
+            else points)
+        if physical_quality_points.shape[0] != len(points) or not np.all(np.isfinite(physical_quality_points)):
+            raise MeshError("physical quality chart returned invalid points")
         topology_edges = topology._topology_index.canonical_edges(
             cancellation_check=cancellation_check,
         )
@@ -1194,7 +1246,7 @@ def frontal_delaunay_refine(
             record = topology._topology_index.geometry(points, identity)
             coordinates = record.coordinates
             if record.angles is None:
-                record.angles = _angles(coordinates)
+                record.angles = _angles(physical_quality_points[np.asarray(triangle,dtype=np.int64)])
             angles = record.angles
             minimum_angle = min(angles)
             minimum_angle_index = int(np.argmin(angles))
@@ -1213,14 +1265,14 @@ def frontal_delaunay_refine(
                     metric_lengths.append(sqrt(max(float(delta @ center_tensor @ delta), 0.0)))
                 maximum_metric_length = max(metric_lengths)
                 limited = (
-                    minimum_angle < 30.0
+                    minimum_angle < minimum_angle_target
                     and maximum_metric_length
                     <= _MAXIMUM_METRIC_EDGE_LENGTH * (1.0 + 1.0e-12)
                     and protected_corner
                 )
                 severity = max(
                     maximum_metric_length / _MAXIMUM_METRIC_EDGE_LENGTH,
-                    30.0 / max(minimum_angle, 1.0e-12),
+                    minimum_angle_target / max(minimum_angle, 1.0e-12),
                 )
                 return severity, limited
 

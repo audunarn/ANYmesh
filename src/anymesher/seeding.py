@@ -281,6 +281,7 @@ def solve_seeding(
     overrides: Mapping[int, int] | None = None,
     minimum_divisions: Mapping[int, int] | None = None,
     edge_ids: Iterable[int] | None = None,
+    unstructured_face_ids: Iterable[int] = (),
     max_sweeps: int = 200,
     max_divisions: int = 100_000,
     maximum_adjacent_growth: float | None = None,
@@ -293,7 +294,10 @@ def solve_seeding(
     specific edges; pinned edges are never refined, so a pinned edge that
     conflicts with another pinned edge is reported instead of being silently
     overridden.  ``minimum_divisions`` raises the unpinned initial demand
-    before opposite-side constraints are solved.
+    before opposite-side constraints are solved. Faces explicitly delegated to
+    local unstructured refinement keep shared edge demand/overrides, but do not
+    impose mapped-axis compatibility or whole-face uniform transition estimates.
+    Generated-mesh quality gates remain authoritative.
     """
 
     if size_field is None:
@@ -306,6 +310,9 @@ def solve_seeding(
             "a different target; pass one or the other"
         )
 
+    unstructured_faces = frozenset(int(face) for face in unstructured_face_ids)
+    if not unstructured_faces.issubset(geometry.faces):
+        raise SeedingConflict("unstructured seeding references unknown faces")
     overrides = dict(overrides or {})
     minimum_divisions = dict(minimum_divisions or {})
     if maximum_adjacent_growth is not None and (
@@ -340,7 +347,7 @@ def solve_seeding(
     boundary_faces = [
         face
         for face in geometry.faces.values()
-        if all(
+        if face.id not in unstructured_faces and all(
             item.edge in desired
             for loop in (face.loop,) + face.holes
             for item in loop

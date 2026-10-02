@@ -71,6 +71,7 @@ class GlobalEdgeBoundaryRegistry:
             raise TypeError("boundary registry requires a GeometryMeshingView")
         self.view = view
         self._entries: dict[BoundaryKey, BoundaryEntry] = {}
+        self._by_edge: dict[int, dict[float, BoundaryEntry]] = {}
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -99,6 +100,7 @@ class GlobalEdgeBoundaryRegistry:
         current = self._entries.get(key)
         if current is None:
             self._entries[key] = candidate
+            self._by_edge.setdefault(key.edge_id, {})[key.parameter] = candidate
             return candidate
 
         extent = max(self.view.edge_length(key.edge_id), 0.0)
@@ -128,6 +130,7 @@ class GlobalEdgeBoundaryRegistry:
             owners=owners,
         )
         self._entries[key] = updated
+        self._by_edge[key.edge_id][key.parameter] = updated
         return updated
 
     def register_many(
@@ -172,18 +175,13 @@ class GlobalEdgeBoundaryRegistry:
         return made
 
     def parameters(self, edge_id: int) -> tuple[float, ...]:
-        made_edge = int(edge_id)
-        return tuple(
-            key.parameter
-            for key in sorted(self._entries)
-            if key.edge_id == made_edge
-        )
+        return tuple(sorted(self._by_edge.get(int(edge_id), {})))
 
     def entries(self, edge_id: int | None = None) -> tuple[BoundaryEntry, ...]:
-        keys = sorted(self._entries)
         if edge_id is not None:
-            keys = [key for key in keys if key.edge_id == int(edge_id)]
-        return tuple(self._entries[key] for key in keys)
+            entries = self._by_edge.get(int(edge_id), {})
+            return tuple(entries[parameter] for parameter in sorted(entries))
+        return tuple(self._entries[key] for key in sorted(self._entries))
 
     @property
     def mapping(self) -> MappingProxyType:

@@ -14,6 +14,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -366,6 +367,12 @@ public:
         add_super_triangle();
         insert_all_points();
         remove_super_triangles();
+        if (!complete_hull_seed()) {
+            seed_finite_hull();
+            if (!complete_hull_seed()) {
+                throw std::runtime_error("native finite hull triangulation is incomplete");
+            }
+        }
         insertion_seconds_ = elapsed(insertion_start);
 
         const auto recovery_start = Clock::now();
@@ -527,7 +534,7 @@ private:
         throw std::runtime_error("native point location did not converge");
     }
 
-    void insert_all_points() {
+    void insert_all_points(const std::unordered_set<Index>& installed = {}) {
         std::vector<Index> order(static_cast<std::size_t>(input_count_));
         std::iota(order.begin(), order.end(), Index{0});
         std::stable_sort(order.begin(), order.end(), [this](Index first, Index second) {
@@ -549,6 +556,9 @@ private:
                 check_cancel("native triangulation insertion");
             }
             const Index point_id = order[position];
+            if (installed.count(point_id)) {
+                continue;
+            }
             const Point& point = points_[static_cast<std::size_t>(point_id)];
             const Index containing = locate(point);
 
@@ -612,6 +622,9 @@ private:
             location_seed_ = -1;
             for (const auto& entry : boundary_counts) {
                 if (entry.second == 1) {
+                    if (robust_orient(points_[entry.first.first], points_[entry.first.second], point) == 0.0) {
+                        continue;
+                    }
                     const Index made =
                         add_triangle(entry.first.first, entry.first.second, point_id);
                     if (location_seed_ < 0) {
@@ -623,6 +636,117 @@ private:
                 throw std::runtime_error("native Delaunay insertion made no cells");
             }
         }
+    }
+
+    std::vector<Index> convex_hull(bool retain_collinear) {
+        check_cancel("native triangulation convex hull start");
+        std::vector<Index> order(static_cast<std::size_t>(input_count_));
+        std::iota(order.begin(),order.end(),Index{0});
+        std::sort(order.begin(),order.end(),[this](Index a,Index b) {
+            return std::tie(points_[a].x,points_[a].y,a) < std::tie(points_[b].x,points_[b].y,b);
+        });
+        std::vector<Index> lower,upper;
+        auto append = [&](std::vector<Index>& chain,Index node) {
+            check_cancel("native triangulation convex hull");
+            while (chain.size()>1) {
+                const double turn = robust_orient(points_[chain[chain.size()-2]],points_[chain.back()],points_[node]);
+                if (turn>0.0 || (retain_collinear && turn==0.0)) break;
+                chain.pop_back();
+            }
+            chain.push_back(node);
+        };
+        for (Index node:order) append(lower,node);
+        for (auto it=order.rbegin();it!=order.rend();++it) append(upper,*it);
+        lower.pop_back();upper.pop_back();
+        lower.insert(lower.end(),upper.begin(),upper.end());
+        return lower;
+    }
+
+    bool complete_hull_seed() {
+        const auto hull = convex_hull(true);
+        std::unordered_set<Edge, EdgeHash> expected;
+        for (std::size_t i=0;i<hull.size();++i)
+            expected.insert(Edge(hull[i],hull[(i+1)%hull.size()]));
+        if (expected.size()!=hull.size() || alive_count_==0) return false;
+        std::unordered_set<Index> referenced;
+        Index start=-1;
+        for (Index id=0;id<static_cast<Index>(triangles_.size());++id) {
+            check_cancel("native triangulation hull validation");
+            const Triangle& cell=triangles_[id];
+            if (!cell.alive) continue;
+            if (start<0) start=id;
+            if (robust_orient(points_[cell.nodes[0]],points_[cell.nodes[1]],points_[cell.nodes[2]])<=0.0)
+                return false;
+            for (Index node:cell.nodes) {
+                if (node<0 || node>=input_count_) return false;
+                referenced.insert(node);
+            }
+        }
+        std::size_t boundary_count=0;
+        for (const auto& item:incidence_) {
+            if (item.second.first<0) return false;
+            if (item.second.second<0) {
+                ++boundary_count;
+                if (expected.count(item.first)==0) return false;
+            }
+        }
+        if (boundary_count!=expected.size() || referenced.size()!=static_cast<std::size_t>(input_count_)
+            || input_count_-static_cast<Index>(incidence_.size())+static_cast<Index>(alive_count_)!=1)
+            return false;
+        std::unordered_set<Index> reached;
+        std::vector<Index> pending{start};
+        while (!pending.empty()) {
+            check_cancel("native triangulation hull connectivity");
+            const Index id=pending.back();pending.pop_back();
+            if (!reached.insert(id).second) continue;
+            const auto& cell=triangles_[id];
+            for (int i=0;i<3;++i) {
+                const auto& rows=incidence_.at(Edge(cell.nodes[i],cell.nodes[(i+1)%3]));
+                for (Index neighbor:{rows.first,rows.second})
+                    if (neighbor>=0 && reached.count(neighbor)==0) pending.push_back(neighbor);
+            }
+        }
+        return reached.size()==alive_count_;
+    }
+
+    void seed_finite_hull() {
+        check_cancel("native triangulation finite hull seed");
+        const auto hull = convex_hull(false);
+        if (hull.size()<3) throw std::runtime_error("native finite hull has zero area");
+        points_.resize(static_cast<std::size_t>(input_count_));
+        triangles_.clear();incidence_.clear();alive_count_=0;location_seed_=-1;
+        for (std::size_t i=1;i+1<hull.size();++i) {
+            const Index made=add_triangle(hull[0],hull[i],hull[i+1]);
+            if (location_seed_<0) location_seed_=made;
+        }
+        // A finite fan covers the complete hull. Restore Delaunay legality
+        // before using the existing cavity insertion for the remaining points.
+        const std::size_t limit=std::max<std::size_t>(64,32*incidence_.size()*incidence_.size());
+        std::size_t flips=0;
+        for (;;) {
+            check_cancel("native triangulation finite hull legality");
+            std::vector<Edge> edges;
+            for (const auto& item:incidence_) edges.push_back(item.first);
+            std::sort(edges.begin(),edges.end());
+            bool changed=false;
+            for (const Edge& edge:edges) {
+                check_cancel("native triangulation finite hull edge");
+                const auto found=incidence_.find(edge);
+                if (found==incidence_.end() || found->second.first<0 || found->second.second<0) continue;
+                const Triangle& first=triangles_[found->second.first];
+                const Index other=opposite(triangles_[found->second.second],edge);
+                if (robust_incircle(points_[first.nodes[0]],points_[first.nodes[1]],points_[first.nodes[2]],points_[other])>0.0
+                    && flip_edge(edge)) {
+                    if (++flips>limit) throw std::runtime_error("native finite hull legality did not converge");
+                    changed=true;break;
+                }
+            }
+            if (!changed) break;
+        }
+        location_seed_=-1;
+        for (Index i=0;i<static_cast<Index>(triangles_.size());++i)
+            if (triangles_[i].alive) { location_seed_=i;break; }
+        insert_all_points(std::unordered_set<Index>(hull.begin(),hull.end()));
     }
 
     void remove_super_triangles() {
@@ -750,21 +874,53 @@ private:
         return triangle;
     }
 
-    std::vector<std::array<Index, 3>> filter_domain() const {
+    std::vector<std::array<Index, 3>> filter_domain() {
+        // Rings are oriented with material on the left. Flood the right-side
+        // cells without crossing a boundary; rounded centroids are unsuitable
+        // for almost-collinear boundary cells.
+        std::unordered_set<Edge, EdgeHash> boundary;
+        std::vector<Index> pending;
+        auto seed = [&](const std::vector<Index>& ring) {
+            for (std::size_t i=0;i<ring.size();++i) {
+                check_cancel("native triangulation domain boundary");
+                const Index a=ring[i], b=ring[(i+1)%ring.size()];
+                const Edge edge(a,b);
+                boundary.insert(edge);
+                const auto found=incidence_.find(edge);
+                if (found==incidence_.end())
+                    throw std::runtime_error("native triangulation lost a domain boundary");
+                for (Index row:{found->second.first,found->second.second}) {
+                    if (row<0) continue;
+                    const Index other=opposite(triangles_[row],edge);
+                    if (robust_orient(points_[a],points_[b],points_[other])<0.0)
+                        pending.push_back(row);
+                }
+            }
+        };
+        seed(outer_);
+        for (const auto& hole:holes_) seed(hole);
+        std::unordered_set<Index> rejected;
+        while (!pending.empty()) {
+            check_cancel("native triangulation domain connectivity");
+            const Index row=pending.back();pending.pop_back();
+            if (!rejected.insert(row).second) continue;
+            const auto& cell=triangles_[row];
+            for (int i=0;i<3;++i) {
+                const Edge edge(cell.nodes[i],cell.nodes[(i+1)%3]);
+                if (boundary.count(edge)>0) continue;
+                const auto& rows=incidence_.at(edge);
+                for (Index neighbor:{rows.first,rows.second})
+                    if (neighbor>=0 && rejected.count(neighbor)==0) pending.push_back(neighbor);
+            }
+        }
         std::vector<std::array<Index, 3>> result;
         result.reserve(static_cast<std::size_t>(alive_count_));
-        for (const Triangle& triangle : triangles_) {
+        for (std::size_t row=0;row<triangles_.size();++row) {
+            const Triangle& triangle=triangles_[row];
             if (!triangle.alive) {
                 continue;
             }
-            const Point centroid{
-                (points_[static_cast<std::size_t>(triangle.nodes[0])].x +
-                 points_[static_cast<std::size_t>(triangle.nodes[1])].x +
-                 points_[static_cast<std::size_t>(triangle.nodes[2])].x) / 3.0,
-                (points_[static_cast<std::size_t>(triangle.nodes[0])].y +
-                 points_[static_cast<std::size_t>(triangle.nodes[1])].y +
-                 points_[static_cast<std::size_t>(triangle.nodes[2])].y) / 3.0};
-            if (inside_domain(centroid)) {
+            if (rejected.count(static_cast<Index>(row))==0) {
                 result.push_back(canonical(triangle.nodes));
             }
         }

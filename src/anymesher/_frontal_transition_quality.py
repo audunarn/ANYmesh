@@ -14,7 +14,7 @@ from .errors import MeshError
 
 
 def repair_frontal_transition(candidate, protected, settings, report,
-                               cancellation_check=None):
+                               cancellation_check=None, *, evaluate_coordinates=None):
     from .surface_mesh import _candidate_selection_key, _make_candidate
 
     used = report.get("topology_operations")
@@ -44,6 +44,7 @@ def repair_frontal_transition(candidate, protected, settings, report,
         [int(value) - 1 for value in candidate.report["poor_element_ids"]],
         min_angle=settings.min_angle, max_growth=settings.max_element_growth,
         max_trials=limit, cancellation_check=checkpoint, neighbourhood_rings=1,
+        evaluate_coordinates=evaluate_coordinates,
     )
     fixed = sorted({int(node) for edge in protected for node in edge})
     if (repaired.points.shape != candidate.points.shape
@@ -58,6 +59,9 @@ def repair_frontal_transition(candidate, protected, settings, report,
         added_points=candidate.added_points, rounds=candidate.rounds,
         settings=settings,
     )
+    if evaluate_coordinates is not None:
+        from .surface_mesh import _physical_quality_candidate
+        proposed = _physical_quality_candidate(proposed, settings, evaluate_coordinates)
     accepted = (
         proposed.report["invalid_element_count"] == 0
         and not proposed.report["poor_element_ids"]

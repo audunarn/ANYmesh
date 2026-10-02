@@ -176,6 +176,11 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
     native=next((dict(recipe) for method,recipe in recipes if method=='native'),None)
     if native is None:
         return recipes
+    # The automatic analytic route must carry the existing automatic quality
+    # policy rather than silently adopting the direct surface API's preference.
+    from .structured import StructuredMeshingOptions
+    native.setdefault('_native_surface_options',
+                      StructuredMeshingOptions.create(first.get('structured_options')))
     native['native_options']=replace(options,point_placement='frontal_delaunay',
                                      metric_mode='isotropic_spatial')
     return (('native',native),*(item for item in recipes if item[0]!='native'))
