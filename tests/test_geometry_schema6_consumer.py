@@ -59,7 +59,7 @@ def test_split_extrusion_keeps_shared_ids_and_quadratic_owner_mapping():
         model.add_spline(controls[0], tuple(controls[1:-1]), controls[-1])
     ], (0., 0., 2.))[0]
     model.add_sheet((plate,))
-    model.add_sheet((wall,))
+    wall_sheet = model.add_sheet((wall,))
     source_document = to_dict(model)
     prepared, report = prepare_structural_closure(
         model, face_ids=(plate, wall), beam_edges=(),
@@ -83,6 +83,10 @@ def test_split_extrusion_keeps_shared_ids_and_quadratic_owner_mapping():
     certificate = quadratic.hybrid_diagnostics["high_order_geometry"]
     assert certificate["status"] == "CERTIFIED_POSITIVE"
     assert {report["geometry_family"] for report in certificate["reports"]} == {"extruded"}
+    assert set(quadratic.elements_of_sheet[wall_sheet]) == {
+        element_id for face_id in faces
+        for element_id in quadratic.elements_of_face[face_id]
+    }
     shared = {
         use.edge for use in model.faces[faces[0]].loop
     } & {use.edge for use in model.faces[faces[1]].loop}
