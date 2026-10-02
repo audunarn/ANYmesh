@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from anygeometry import EntityRef, GeometryModel
 from anygeometry.serialization import to_dict
+from anygeometry.generators import stiffened_panel
 import numpy as np
 import pytest
 
@@ -24,6 +25,34 @@ def _crossing_faces() -> tuple[GeometryModel, int, int]:
         )
     )
     return geometry, horizontal, vertical
+
+
+def test_stiffened_panel_members_share_existing_vertex_without_reimprint() -> None:
+    geometry = stiffened_panel(
+        4.0,
+        3.0,
+        longitudinal_spacing=1.5,
+        transverse_spacing=2.0,
+        semantic_group="demo_panel",
+    )
+    before = to_dict(geometry)
+
+    result = generate_hybrid_mesh_result(
+        geometry,
+        target_size=0.75,
+        strategy="auto",
+        order="linear",
+        native_backend="python",
+        structural_preparation=True,
+        certification_mode="interactive",
+    )
+
+    assert to_dict(geometry) == before
+    assert result.structural_preparation is not None
+    assert result.structural_preparation.member_connections == 0
+    assert set(result.mesh.nodes_of_member[1]).intersection(
+        result.mesh.nodes_of_member[2]
+    )
 
 
 def test_hybrid_automatically_prepares_crossing_plates_on_clone() -> None:
