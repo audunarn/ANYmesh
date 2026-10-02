@@ -1526,7 +1526,8 @@ def _mesh_native_face(
     if native_options.point_placement == "frontal_delaunay" and not isinstance(
         face.surface, Plane
     ) and cylindrical_chart is None and analytic_chart is None:
-        raise MeshError(
+        from .errors import NativeSurfaceUnsupported
+        raise NativeSurfaceUnsupported(
             "frontal_delaunay activation is currently limited to planar faces"
         )
     size_metric_spec = MetricFieldSpec.from_size_field(size_field)

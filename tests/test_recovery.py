@@ -81,7 +81,7 @@ def test_automatic_analytic_trim_selects_chart_recipe_and_retains_budgets():
     from anymesher.native_v2 import NativeMeshingOptions
     from anymesher.recovery import _attempt_options,_prefer_analytic_trim_recipe
     arc=EllipticArc((0.,0.,0.),(2.,0.,0.),(0.,1.,0.),0.,1.)
-    geometry=SimpleNamespace(edges={1:SimpleNamespace(curve=arc)})
+    geometry=SimpleNamespace(edges={1:SimpleNamespace(curve=arc)}, faces={})
     settings=NativeMeshingOptions(max_insertions=37,max_topology_operations=129,
                                   cancellation_interval=7)
     first={'strategy':'auto','order':'linear','native_options':settings,'recombine':True}
@@ -103,6 +103,21 @@ def test_automatic_analytic_trim_selects_chart_recipe_and_retains_budgets():
     assert _prefer_analytic_trim_recipe(_plate(),first,recipes) is recipes
 
 
+def test_authored_extrusion_selects_owner_region_recipe_before_preparation(monkeypatch):
+    import anygeometry
+    from anymesher.recovery import _attempt_options, _prefer_analytic_trim_recipe
+    model = _plate()
+    points = model.add_points(((0,0,0),(.5,.05,0),(1,.05,0),(1.5,0,0)))
+    wall, = model.extrude((model.add_spline(points[0],points[1:-1],points[-1]),),(0,0,1))
+    first = {'strategy':'auto','order':'linear'}
+    recipes = _attempt_options(first,None)
+    assert _prefer_analytic_trim_recipe(model,first,recipes)[0][0] == 'native'
+    selected = {**first,'face_ids':tuple(face for face in model.faces if face != wall)}
+    assert _prefer_analytic_trim_recipe(model,selected,recipes) is recipes
+    monkeypatch.delattr(anygeometry,'query_material_surface_regions')
+    assert _prefer_analytic_trim_recipe(model,first,recipes) is recipes
+
+
 def test_strict_automatic_request_does_not_select_a_material_recipe(monkeypatch):
     import anymesher.recovery as recovery
     def forbidden(*args):
@@ -111,3 +126,37 @@ def test_strict_automatic_request_does_not_select_a_material_recipe(monkeypatch)
     result=generate_automatic_mesh_result(_plate(),automation=MeshAutomationOptions(strict_method=True),
         strategy='auto',target_size=.25,order='linear',native_backend='python')
     assert result.status=='ready' and result.selected_method=='auto'
+
+
+def test_automatic_region_hint_preserves_generator_face_selection(monkeypatch):
+    import anymesher.recovery as recovery
+    geometry = _plate()
+    points = geometry.add_points(((0,0,0),(.5,.05,0),(1,.05,0),(1.5,0,0)))
+    geometry.extrude((geometry.add_spline(points[0],points[1:-1],points[-1]),),(0,0,1))
+    expected = tuple(geometry.faces)
+    class Stop(BaseException):
+        pass
+    def capture(model, **options):
+        assert options['strategy'] == 'native'
+        assert options['face_ids'] == expected
+        raise Stop
+    monkeypatch.setattr(recovery,'generate_hybrid_mesh_result',capture)
+    with pytest.raises(Stop):
+        generate_automatic_mesh_result(geometry,strategy='auto',
+            face_ids=(face for face in expected))
+
+
+def test_nonextruded_coons_hint_can_recover_to_existing_automatic_route():
+    from anygeometry import CoonsSurface
+    import numpy as np
+    surface = CoonsSurface(bottom=np.asarray(((0,0,0),(2,0,0))),
+        right=np.asarray(((2,0,0),(2,1,.5))),
+        top=np.asarray(((0,1,0),(2,1,.5))),left=np.asarray(((0,0,0),(0,1,0))))
+    model = GeometryModel()
+    points = model.add_points([surface.evaluate(*uv) for uv in ((0,0),(1,0),(1,1),(0,1))])
+    edges = [model.add_line(points[i],points[(i+1)%4]) for i in range(4)]
+    model.add_face(edges,corners=(0,1,2,3),surface=surface)
+    result = generate_automatic_mesh_result(model,strategy='auto',target_size=.5,
+        order='linear',native_backend='python',structural_preparation=False)
+    assert result.status == 'ready' and result.selected_method == 'auto'
+    assert result.attempts[0]['error_type'] == 'NativeSurfaceUnsupported'

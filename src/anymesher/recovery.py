@@ -18,7 +18,7 @@ try:
 except ImportError:  # Older supported ANYgeometry builds predate schema 6.
     ExtrudedSurface = ()
 
-from .errors import MeshError, StructuredQualityRejected
+from .errors import MeshError, StructuredQualityRejected, NativeSurfaceUnsupported
 from .quad.validate import QuadQualityRejected
 from .hybrid import HybridMeshResult, generate_hybrid_mesh_result
 from .quality import verify_mesh_quality
@@ -92,6 +92,7 @@ class AutomaticMeshResult:
 
 
 _RECOVERABLE = (
+    NativeSurfaceUnsupported,
     S3QualityError,
     QuadQualityRejected,
     StructuredQualityRejected,
@@ -165,9 +166,23 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
             or first.get('order','linear')!='linear'):
         return recipes
     import anygeometry as owner
-    types=tuple(kind for name in ('EllipticArc','CylinderIntersectionCurve')
+    types=tuple(kind for name in ('EllipticArc','CylinderIntersectionCurve',
+                                  'QuadricIntersectionCurve','BezierQuadricCurve')
                 if isinstance((kind:=getattr(owner,name,None)),type))
-    if not types or not any(isinstance(edge.curve,types) for edge in geometry.edges.values()):
+    selected = first.get('face_ids')
+    faces = geometry.faces if selected is None else selected
+    # Authored swept profiles remain topology-backed Coons faces until owner
+    # preparation recognizes their exact support. This is a routing hint only;
+    # the owner still qualifies every material chart after preparation.
+    region_candidates = tuple(kind for name in ('ExtrudedSurface', 'CoonsSurface')
+                              if isinstance((kind := getattr(owner, name, None)), type))
+    authored_regions = (bool(region_candidates)
+        and callable(getattr(owner, 'query_material_surface_regions', None))
+        and any(face in geometry.faces
+                and isinstance(geometry.faces[face].surface, region_candidates)
+                and geometry.faces[face].parameterization is None for face in faces))
+    analytic_curves = types and any(isinstance(edge.curve,types) for edge in geometry.edges.values())
+    if not authored_regions and not analytic_curves:
         return recipes
     from .native_v2 import NativeMeshingOptions
     options=NativeMeshingOptions.coerce(first.get('native_options'))
@@ -220,6 +235,8 @@ def generate_automatic_mesh_result(
     if problems:
         raise MeshError("invalid source geometry: " + "; ".join(problems))
     first = dict(meshing_options)
+    if first.get('face_ids') is not None:
+        first['face_ids'] = tuple(first['face_ids'])
     recipes = _attempt_options(first, fallback_structured_options)
     if policy.strict_method:
         recipes = recipes[:1]
