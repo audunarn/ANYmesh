@@ -216,3 +216,22 @@ def test_automatic_region_route_preserves_authored_faces_and_physical_joint(monk
     assert region_record['interior_constraint_edges']
     assert region_record['retained_vertices']
     assert len(observed) == 1
+
+
+def test_retained_vertex_reuses_its_registered_constraint_branch(monkeypatch):
+    from types import SimpleNamespace
+    from anymesher._material_region_binding import MaterialRegionBinding
+    def wrong_inverse(*args):
+        raise AssertionError('registered vertex must not be reprojected')
+    path = object()
+    region = SimpleNamespace(interior_constraints=(path,),
+        retained_vertices=(EntityRef('vertex',17),),
+        support=SimpleNamespace(local_uv_many=wrong_inverse))
+    binding = MaterialRegionBinding(None,None,region,5)
+    mesh = SimpleNamespace(node_of_vertex={17:20},nodes={20:(.5,.5,0)})
+    monkeypatch.setattr(MaterialRegionBinding,'path_chain',
+        lambda self,path,mesh,registry: ([1,20,3],np.asarray(((0.,0.),(.5,.5),(1.,1.))),None))
+    _, ids, points = binding.interior(mesh,None,
+        boundary_rows={1:np.asarray((0.,0.)),3:np.asarray((1.,1.))})
+    assert ids == (20,)
+    np.testing.assert_array_equal(points,((.5,.5),))

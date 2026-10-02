@@ -110,8 +110,14 @@ class MaterialRegionBinding:
                 mesh.node_of_vertex[handle.id] = node
                 mesh.nodes[node] = np.asarray(self.geometry.vertex_position(handle.id), dtype=float)
             if node not in boundary_nodes:
-                row = self.region.support.local_uv_many([mesh.nodes[node]])[0]
-                pinned[node] = receipt(node, row)
+                if node in canonical:
+                    # A physical source path already supplied this vertex's
+                    # owner-qualified branch coordinate. Reprojection is both
+                    # redundant and may choose a different inverse branch.
+                    pinned[node] = canonical[node]
+                else:
+                    row = self.region.support.local_uv_many([mesh.nodes[node]])[0]
+                    pinned[node] = receipt(node, row)
         ids = tuple(sorted(pinned))
         return tuple(segments), ids, np.asarray([pinned[node] for node in ids]).reshape(-1, 2)
 
