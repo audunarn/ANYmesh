@@ -14,7 +14,8 @@ from .errors import MeshError
 
 
 def repair_frontal_transition(candidate, protected, settings, report,
-                               cancellation_check=None, *, evaluate_coordinates=None):
+                               cancellation_check=None, *, evaluate_coordinates=None,
+                               coordinate_batch_size=1):
     from .surface_mesh import _candidate_selection_key, _make_candidate
 
     used = report.get("topology_operations")
@@ -45,6 +46,7 @@ def repair_frontal_transition(candidate, protected, settings, report,
         min_angle=settings.min_angle, max_growth=settings.max_element_growth,
         max_trials=limit, cancellation_check=checkpoint, neighbourhood_rings=1,
         evaluate_coordinates=evaluate_coordinates,
+        coordinate_batch_size=coordinate_batch_size,
     )
     fixed = sorted({int(node) for edge in protected for node in edge})
     if (repaired.points.shape != candidate.points.shape

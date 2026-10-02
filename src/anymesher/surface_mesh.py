@@ -1872,6 +1872,7 @@ def _run_frontal_quality_path(
     supplemental_metric_field: MetricFieldSpec | None,
     preserve_spatial_refinement: bool = False,
     explicit_points: np.ndarray | None = None,
+    coordinate_batch_size: int = 1,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply native-v2 local insertion to the qualified legacy CDT seed."""
 
@@ -1936,6 +1937,7 @@ def _run_frontal_quality_path(
         best, report = repair_frontal_transition(
             best, triangulation.segments, settings, report, cancellation_check,
             evaluate_coordinates=physical_evaluator,
+            coordinate_batch_size=coordinate_batch_size,
         )
         if pinned_rows and not np.array_equal(best.points[list(pinned_rows)],
                                               previous_best.points[list(pinned_rows)]):
@@ -2369,6 +2371,7 @@ def mesh_planar_surface(
     _metric_model_uuid: str | None = None,
     _metric_geometry_revision: int | None = None,
     _metric_to_physical: Callable[[np.ndarray], np.ndarray] | None = None,
+    _coordinate_batch_size: int = 1,
     _metric_jacobian: np.ndarray | None = None,
     _automatically_seeded_shared_segments: Mapping[
         tuple[int, int], int | tuple[int, Any, Any]
@@ -2387,6 +2390,8 @@ def mesh_planar_surface(
 
     if cancellation_check is not None:
         cancellation_check("native surface preprocessing")
+    if type(_coordinate_batch_size) is not int or not 1 <= _coordinate_batch_size <= 8:
+        raise ValueError("invalid owner coordinate batch size")
 
     phase_seconds: dict[str, float] = {}
     preparation_started = perf_counter()
@@ -2519,6 +2524,7 @@ def mesh_planar_surface(
             supplemental_metric_field=_supplemental_metric_field,
             preserve_spatial_refinement=_preserve_spatial_refinement,
             explicit_points=explicit_interior,
+            coordinate_batch_size=_coordinate_batch_size,
         )
         candidate_paths = [frontal_path]
     guide_diagnostics: dict[str, Any] = {

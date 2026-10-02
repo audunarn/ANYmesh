@@ -16,7 +16,7 @@ class JointTriangleRepair:
 def repair_joint_triangle_quality(points, triangles, protected_edges, poor_triangle_ids, *,
                                   min_angle, max_growth, max_trials=2048,
                                   cancellation_check=None, evaluate_coordinates=None,
-                                  neighbourhood_rings=0):
+                                  neighbourhood_rings=0, coordinate_batch_size=1):
     original = np.asarray(points, dtype=np.float64)
     cells = np.asarray(triangles, dtype=np.int64)
     if (original.ndim != 2 or original.shape[1] != 2 or not np.isfinite(original).all()
@@ -24,7 +24,8 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             or np.any(cells >= len(original)) or not 0 < min_angle < 60
             or not np.isfinite(max_growth) or max_growth <= 1
             or isinstance(max_trials, bool) or not isinstance(max_trials, int) or max_trials < 0
-            or type(neighbourhood_rings) is not int or neighbourhood_rings not in (0, 1)):
+            or type(neighbourhood_rings) is not int or neighbourhood_rings not in (0, 1)
+            or type(coordinate_batch_size) is not int or not 1 <= coordinate_batch_size <= 8):
         raise ValueError("invalid joint triangle repair input")
     incidence = {}
     for i, row in enumerate(cells):
@@ -72,7 +73,20 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     target_angle = min_angle + margins[cells]
     target_growth = max_growth - min(.001, (max_growth - 1) * .01)
 
-    def penalty(x):
+    def chart_is_valid(x):
+        xy = x[cells]
+        forward = np.roll(xy, -1, axis=1) - xy
+        backward = np.roll(xy, 1, axis=1) - xy
+        area = forward[:, 0, 0] * backward[:, 0, 1] - forward[:, 0, 1] * backward[:, 0, 0]
+        return not np.any(area <= 0) and np.isfinite(x).all()
+
+    def owner_coordinates(x):
+        xyz = np.asarray(evaluate_coordinates(x), dtype=np.float64)
+        if xyz.shape != (len(x), 3) or not np.isfinite(xyz).all():
+            raise ValueError("invalid owner coordinates in joint triangle repair")
+        return xyz
+
+    def penalty(x, owner_xyz=None):
         xy = x[cells]
         forward = np.roll(xy, -1, axis=1) - xy
         backward = np.roll(xy, 1, axis=1) - xy
@@ -80,9 +94,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         if np.any(area <= 0) or not np.isfinite(x).all():
             return float("inf")
         if evaluate_coordinates is not None:
-            xyz = np.asarray(evaluate_coordinates(x), dtype=np.float64)
-            if xyz.shape != (len(x), 3) or not np.isfinite(xyz).all():
-                raise ValueError("invalid owner coordinates in joint triangle repair")
+            xyz = owner_coordinates(x) if owner_xyz is None else owner_xyz
             xy = xyz[cells]
             forward = np.roll(xy, -1, axis=1) - xy
             backward = np.roll(xy, 1, axis=1) - xy
@@ -121,14 +133,56 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         return value
 
     def gradient(values, value):
+        nonlocal trials, best_points, best_penalty
         result = np.empty_like(values)
         step = min(1e-5, max(1e-8, np.sqrt(max(0., value)) * .01))
-        for j in range(len(values)):
-            delta = np.zeros_like(values)
-            delta[j] = step
-            plus, minus = evaluate(values + delta), evaluate(values - delta)
-            if plus is None or minus is None:
+        probes = []
+        # Only explicitly opted-in row-independent owner evaluators batch. Keep
+        # at most eight detached candidates and preferably <=8192 flattened rows.
+        chunk_size = (min(coordinate_batch_size, max(1, 8192 // len(original)))
+                      if evaluate_coordinates is not None else 1)
+        while len(probes) < 2 * len(values):
+            count = min(chunk_size, 2 * len(values) - len(probes), max_trials - trials)
+            if not count:
+                # An unmatched plus probe has already updated the best point.
                 return None
+            if count == 1:
+                delta = np.zeros_like(values)
+                delta[len(probes) // 2] = step
+                probe = values + delta if len(probes) % 2 == 0 else values - delta
+                probes.append(evaluate(probe))
+                continue
+            candidates = []
+            valid = []
+            # Cancellation is checked before every charged trial. Owner work
+            # follows admission of this bounded chunk, so exception interleaving
+            # and cancellation latency can differ from the serial callback path.
+            for index in range(count):
+                if cancellation_check is not None:
+                    cancellation_check()
+                trials += 1
+                delta = np.zeros_like(values)
+                ordinal = len(probes) + index
+                delta[ordinal // 2] = step
+                probe = values + delta if ordinal % 2 == 0 else values - delta
+                x = original.copy()
+                x[movable] = base + probe.reshape(-1, 2) * scale
+                candidates.append(x)
+                if chart_is_valid(x):
+                    valid.append(index)
+            coordinates = {}
+            if valid:
+                rows = np.concatenate([candidates[index] for index in valid], axis=0)
+                xyz = owner_coordinates(rows).reshape(len(valid), len(original), 3)
+                coordinates = dict(zip(valid, xyz))
+            for index, x in enumerate(candidates):
+                candidate = (penalty(x, coordinates[index]) if index in coordinates
+                             else float("inf"))
+                if candidate < best_penalty:
+                    best_points, best_penalty = x, candidate
+                probes.append(candidate)
+        for j in range(len(values)):
+            plus, minus = probes[2 * j:2 * j + 2]
             if np.isfinite(plus) and np.isfinite(minus):
                 result[j] = (plus - minus) / (2 * step)
             elif np.isfinite(plus):
