@@ -640,6 +640,7 @@ def _restore_collinear_mapped_corners(
     """Restore mapped corners lost only to collinear imprint side splits."""
 
     angular_tolerance = 1.0e-7
+    updates = {}
     for source_face_id, descendants in face_mapping.items():
         if len(source.faces[source_face_id].corners) != 4:
             continue
@@ -665,7 +666,25 @@ def _restore_collinear_mapped_corners(
                 for index in ranked[4:]
             ):
                 continue
-            working.set_face_corners(face_id, corners)
+            updates[face_id] = corners
+    if not updates:
+        return
+    try:
+        from anygeometry import (ExtrudedSurface, has_current_intersection_preparation,
+                                 set_prepared_face_corners)
+    except ImportError:
+        # Older owner builds keep the established edit followed by overlap audit.
+        set_prepared_face_corners = None
+    if (set_prepared_face_corners is not None
+            and has_current_intersection_preparation(working)
+            and all(type(working.faces[face].surface) in (Plane, Cylinder, Cone, ExtrudedSurface)
+                    and working.faces[face].parameterization is None for face in updates)):
+        # The owner proves the complete material document unchanged apart from
+        # corner indices. Never rewrite or bypass the owner's receipt locally.
+        set_prepared_face_corners(working, updates)
+    else:
+        for face, corners in updates.items():
+            working.set_face_corners(face, corners)
 
 
 def prepare_structural_closure(
