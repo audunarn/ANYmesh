@@ -235,3 +235,33 @@ def test_retained_vertex_reuses_its_registered_constraint_branch(monkeypatch):
         boundary_rows={1:np.asarray((0.,0.)),3:np.asarray((1.,1.))})
     assert ids == (20,)
     np.testing.assert_array_equal(points,((.5,.5),))
+
+
+def test_region_evaluation_keeps_owner_before_after_checks_without_outer_duplicates(monkeypatch):
+    from dataclasses import replace
+    from anygeometry import GeometryError
+    import anygeometry.material_regions as owner
+    model, wall, descendants, _ = split_model()
+    binding = prepare_material_regions(model,descendants,{wall:descendants},
+        order='linear',native_options=controls())[min(descendants)]
+    chart = AnalyticMetricChart(model,binding.representative,region_binding=binding)
+    validate = owner.validate_material_surface_regions_binding
+    calls = []
+    def capture(*args,**kwargs):
+        calls.append(args[1])
+        return validate(*args,**kwargs)
+    monkeypatch.setattr(owner,'validate_material_surface_regions_binding',capture)
+    chart.evaluate(np.asarray(((.4,.5),)) @ chart.transform)
+    assert calls == [chart.binding,chart.binding]
+    calls.clear()
+    chart.jacobians(np.asarray(((.4,.5),)) @ chart.transform)
+    assert calls == [chart.binding,chart.binding]
+    good = chart.binding
+    chart.binding = replace(good,regions=(replace(binding.region,material_area=binding.region.material_area+1),))
+    with pytest.raises(GeometryError,match='definition binding changed'):
+        chart.evaluate(np.asarray(((.4,.5),)))
+    chart.binding = good
+    model.add_point(9,9,9)
+    for operation in (chart.evaluate,chart.jacobians):
+        with pytest.raises(GeometryError,match='stale'):
+            operation(np.asarray(((.4,.5),)))

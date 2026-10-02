@@ -29,7 +29,6 @@ class AnalyticMetricChart:
             if region_binding.geometry is not self.owner or self.face_id not in region_binding.face_ids:
                 raise MeshError('analytic region chart does not bind this working face')
             self.binding = region_binding.collection
-            self._current()
             from anygeometry import evaluate_material_surface_region
             du, dv = evaluate_material_surface_region(
                 self.owner, self.binding, self.face_id, [[.5,.5]], derivatives=True,
@@ -49,7 +48,10 @@ class AnalyticMetricChart:
             self.region_binding.validate(self.check)
 
     def _rows(self, points):
-        self._current()
+        # Region evaluation performs owner binding checks before and after the
+        # calculation itself. Do not repeat them around that public operation.
+        if self.region_binding is None:
+            self._current()
         rows = np.asarray(points, dtype=float)
         if rows.ndim != 2 or rows.shape[1] != 2 or not np.all(np.isfinite(rows)):
             raise MeshError('analytic chart requires finite (n, 2) parameters')
@@ -64,7 +66,8 @@ class AnalyticMetricChart:
             values = np.asarray(evaluate_material_surface_region(
                 self.owner, self.binding, self.face_id, rows @ self.inverse,
                 cancellation_check=self.check), dtype=float)
-        self._current()
+        if self.region_binding is None:
+            self._current()
         if values.shape != (len(rows), 3) or not np.all(np.isfinite(values)):
             raise MeshError('owner analytic chart evaluation is invalid')
         return values
@@ -79,7 +82,8 @@ class AnalyticMetricChart:
                 self.owner, self.binding, self.face_id, rows @ self.inverse,
                 derivatives=True, cancellation_check=self.check)
         values = np.stack((du, dv), axis=2) @ self.inverse.T
-        self._current()
+        if self.region_binding is None:
+            self._current()
         if values.shape != (len(rows), 3, 2) or not np.all(np.isfinite(values)):
             raise MeshError('owner analytic chart derivatives are invalid')
         return values
