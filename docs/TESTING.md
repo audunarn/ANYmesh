@@ -18,10 +18,23 @@ python -m pytest -q tests/quad_first_curved
 python -m pytest -q tests/test_native_v2_foundation.py
 ```
 
-Choose the affected files from the change and its dependencies. A change to
-topology or ownership may need both planar and curved integration tests; a
-native change needs its native boundary and runtime tests. Do not infer that a
-smoke pass covers a feature outside its named cases.
+For routine Python edits, the change-aware helper combines the smoke with test
+files found through source imports. It shows its selection before running:
+
+```powershell
+python tools/run_affected_tests.py --list --paths src/anymesher/recovery.py
+python tools/run_affected_tests.py --paths src/anymesher/recovery.py
+python tools/run_affected_tests.py --base HEAD~1 --extra tests/test_intersection_meshing.py
+```
+
+Without `--paths`, it compares tracked files in the working tree with `--base`
+(default `HEAD`) and includes untracked source, test and tool files. Static imports do
+not capture every dynamic or external consumer; use `--extra` for relevant tests
+the helper did not find. It refuses changed source paths with no test mapping.
+It does not schedule the frozen `tests/sg1` gate. A topology or ownership change
+may need both planar and curved integration tests; a native change needs native
+boundary and runtime checks. This helper is development feedback, not an
+acceptance or release command.
 
 The unfiltered source suite remains:
 

@@ -324,7 +324,14 @@ python -m pip install -e "C:\Github\ANYmesh[dev,gmsh]"
 python tools/run_dev_smoke.py
 ```
 
-Run affected test files after an edit. The complete source suite remains:
+Run affected test files after an edit, or use the advisory change-aware check:
+
+```powershell
+python tools/run_affected_tests.py --list
+python tools/run_affected_tests.py
+```
+
+The complete source suite remains:
 
 ```powershell
 python -m pytest
