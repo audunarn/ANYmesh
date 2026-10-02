@@ -26,6 +26,10 @@ from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
 from anygeometry.surfaces import CoonsSurface, Cone, Cylinder, Plane, RuledSurface
+try:
+    from anygeometry.surfaces import ExtrudedSurface
+except ImportError:  # Older supported ANYgeometry builds predate schema 6.
+    ExtrudedSurface = ()
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
@@ -2570,6 +2574,8 @@ def _promote_quad_first_quadratic(
             surface = geometry.faces[int(face_id)].surface
             if isinstance(surface, Cone):
                 face_domains[int(face_id)] = ConicalQuadDomain.from_geometry(geometry, int(face_id))
+            elif isinstance(surface, ExtrudedSurface):
+                face_domains[int(face_id)] = ParametricQuadDomain.from_geometry(geometry, int(face_id))
             else:
                 face_domains[int(face_id)] = PlanarQuadDomain.from_geometry(geometry, int(face_id))
     owner_faces_by_edge: dict[tuple[int, int], set[int]] = {}
@@ -2952,7 +2958,10 @@ def _promote_quad_first_quadratic(
             chart_origin = tuple(float(value) for value in domain.origin)
         if parametric:
             surface = geometry.faces[int(face_id)].surface
-            geometry_family = "ruled" if isinstance(surface, RuledSurface) else "coons"
+            geometry_family = (
+                "extruded" if isinstance(surface, ExtrudedSurface)
+                else "ruled" if isinstance(surface, RuledSurface) else "coons"
+            )
         else:
             geometry_family = "conical" if conical else ("cylindrical" if cylindrical else "planar")
         curvature_classes = tuple(sorted({item.curvature_class for item in boundary_records}))
@@ -3562,6 +3571,11 @@ def _quad_first_execute(
             elif isinstance(surface, Cone):
                 domain = ConicalQuadDomain.from_geometry(geometry, face_id)
                 family = "conical"
+            elif isinstance(surface, ExtrudedSurface):
+                # A small curved child may satisfy a corner-only planar check
+                # even though its exact owner support remains curved.
+                domain = ParametricQuadDomain.from_geometry(geometry, face_id)
+                family = "extruded"
             elif isinstance(surface, (RuledSurface, CoonsSurface)):
                 try:
                     domain = PlanarQuadDomain.from_geometry(geometry, face_id)
@@ -4170,6 +4184,17 @@ def generate_hybrid_mesh_result(
             if isinstance(_surface, Cylinder):
                 continue
             if isinstance(_surface, Cone):
+                continue
+            if isinstance(_surface, ExtrudedSurface):
+                if order == "quadratic" and source_beams:
+                    _boundary_edges = {
+                        int(use.edge)
+                        for use in source_geometry.faces[int(_quad_scope_face_id)].loop
+                    }
+                    if set(map(int, source_beams)) & _boundary_edges:
+                        raise QuadPublicUnsupported(
+                            "quadratic extruded quad-first does not qualify beam ownership on a source-boundary edge"
+                        )
                 continue
             if isinstance(_surface, (RuledSurface, CoonsSurface)):
                 try:
