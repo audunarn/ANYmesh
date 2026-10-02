@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # routes, native fallback, automatic recovery, planar/curved owner identities,
 # structural attachment, and atomic publication with actual source models.
 SMOKE_CASES = (
+    "tests/test_prepared_corner_binding.py",
     "tests/test_hybrid.py",
     "tests/test_recovery.py",
     "tests/test_native_cpp_boundary.py::test_python_fallback_orientation_and_incidence",
