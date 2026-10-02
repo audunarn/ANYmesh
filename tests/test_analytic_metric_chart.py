@@ -73,6 +73,7 @@ def test_physical_certification_uses_active_cells_and_mean_edge_growth():
     core=MeshCore(xyz,((1,0,2),(0,5,2)),((0,1,3,4),),triangle_active=(True,False))
     chart=object.__new__(AnalyticMetricChart)
     chart.face_id=1
+    chart.check=None
     chart.evaluate=lambda rows:np.column_stack((rows,np.zeros(len(rows))))
     report=chart.certify_core(core,SurfaceMeshOptions(max_element_growth=1.1),xyz)
     assert report['accepted']

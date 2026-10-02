@@ -432,6 +432,19 @@ def _source_backend_diagnostics(
             for face_id in descendants
             if face_id in working_diagnostics
         ]
+        # A material region executes once while retaining every consumed face
+        # diagnostic. Do not multiply its timing when publishing the authored face.
+        region_records = set()
+        unique_records = []
+        for record in records:
+            region = record.get('material_region')
+            if region is not None:
+                key = tuple(region['source_faces'])
+                if key in region_records:
+                    continue
+                region_records.add(key)
+            unique_records.append(record)
+        records = unique_records
         if len(records) == 1:
             result[source_face] = {
                 **records[0],
@@ -1322,6 +1335,7 @@ def _mesh_native_face(
     refine_declared_junction_transition: bool,
     cancellation_check: Callable[[str], None] | None,
     _cylindrical_binding: Any = None,
+    _material_region_binding: Any = None,
 ) -> dict[str, Any]:
     if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
         from ._cylindrical_recombine import assert_face_open
@@ -1331,29 +1345,45 @@ def _mesh_native_face(
     _check_cancellation(cancellation_check, f"native face {face_id} boundary start")
     face = geometry.faces[face_id]
     quadratic = order == "quadratic"
-    outer = _loop_boundary(
-        geometry,
-        mesh,
-        face_id,
-        face.loop,
-        quadratic=quadratic,
-        counter_clockwise=True,
-        boundary_registry=boundary_registry,
-        automatically_seeded_shared_edges=automatically_seeded_shared_edges,
-    )
-    holes = tuple(
-        _loop_boundary(
+    if _material_region_binding is not None:
+        _material_region_binding.validate(cancellation_check)
+        region_loops = tuple(
+            _LoopBoundary(nodes, (), uv, specifications)
+            for nodes, uv, specifications in _material_region_binding.loops(
+                mesh, boundary_registry, automatically_seeded_shared_edges))
+        if not region_loops:
+            raise MeshError('material region has no outer boundary')
+        normalized = []
+        for index, loop in enumerate(region_loops):
+            area = _signed_area(loop.uv)
+            if not np.isfinite(area) or abs(area) <= 128 * np.finfo(float).eps * max(float(np.max(np.abs(loop.uv))), 1.)**2:
+                raise MeshError('material region has a degenerate surface chart')
+            normalized.append(_reverse_loop(loop) if (area > 0.) != (index == 0) else loop)
+        outer, holes = normalized[0], tuple(normalized[1:])
+    else:
+        outer = _loop_boundary(
             geometry,
             mesh,
             face_id,
-            loop,
+            face.loop,
             quadratic=quadratic,
-            counter_clockwise=False,
+            counter_clockwise=True,
             boundary_registry=boundary_registry,
             automatically_seeded_shared_edges=automatically_seeded_shared_edges,
         )
-        for loop in face.holes
-    )
+        holes = tuple(
+            _loop_boundary(
+                geometry,
+                mesh,
+                face_id,
+                loop,
+                quadratic=quadratic,
+                counter_clockwise=False,
+                boundary_registry=boundary_registry,
+                automatically_seeded_shared_edges=automatically_seeded_shared_edges,
+            )
+            for loop in face.holes
+        )
     loops = (outer, *holes)
     cylindrical_chart = None
     if isinstance(face.surface, Cylinder) and (
@@ -1383,7 +1413,8 @@ def _mesh_native_face(
     if (native_options.point_placement == "frontal_delaunay" and not quadratic
             and (isinstance(face.surface, Cone) or isinstance(face.surface, ExtrudedSurface))):
         from ._analytic_metric_chart import AnalyticMetricChart
-        analytic_chart = AnalyticMetricChart(geometry, face_id, cancellation_check)
+        analytic_chart = AnalyticMetricChart(geometry, face_id, cancellation_check,
+                                           region_binding=_material_region_binding)
     chart_transform = (np.eye(2, dtype=float) if analytic_chart is None
                        else analytic_chart.transform)
     if cylindrical_chart is not None:
@@ -1431,6 +1462,13 @@ def _mesh_native_face(
         np.asarray(loop.uv, dtype=float) @ chart_transform for loop in holes
     )
     chart_loops = (chart_outer, *chart_holes)
+    region_constraints, region_pinned_ids, region_pinned_uv = (), (), np.empty((0, 2))
+    if _material_region_binding is not None:
+        region_constraints, region_pinned_ids, region_pinned_uv = _material_region_binding.interior(
+            mesh, boundary_registry,
+            boundary_rows={node: row for loop in loops for node, row in zip(loop.node_ids, loop.uv)})
+    chart_constraints = tuple(segment @ chart_transform for segment in region_constraints)
+    chart_pinned = region_pinned_uv @ chart_transform
     automatically_seeded_shared_segments: dict[
         tuple[int, int], tuple[int, float, float]
     ] = {}
@@ -1564,6 +1602,8 @@ def _mesh_native_face(
         core = mesh_planar_surface(
             chart_outer,
             chart_holes,
+            constraints=chart_constraints,
+            interior_points=chart_pinned,
             target_size=chart_size,
             recombine=recombine,
             order=order,
@@ -1606,6 +1646,11 @@ def _mesh_native_face(
             for item in boundary
         }
         outer_edge_ids = {int(item.edge) for item in face.loop}
+        if _material_region_binding is not None:
+            region = _material_region_binding.region
+            face_edge_ids = {int(path.source_edge) for paths in region.boundaries for path in paths}
+            face_edge_ids.update(int(path.source_edge) for path in region.interior_constraints)
+            outer_edge_ids = {int(path.source_edge) for path in region.boundaries[0]}
         declared_edge_ids = {int(edge_id) for edge_id in declared_junction_edges}
         has_declared_junction = bool(
             face_edge_ids.intersection(declared_edge_ids)
@@ -1639,6 +1684,8 @@ def _mesh_native_face(
         core = mesh_planar_surface(
             chart_outer,
             chart_holes,
+            constraints=chart_constraints,
+            interior_points=chart_pinned,
             options=surface_options,
             owner=geometry.handle("face", face_id),
             cancellation_check=cancellation_check,
@@ -1763,13 +1810,27 @@ def _mesh_native_face(
         from .surface_mesh import SurfaceMeshOptions as AnalyticQualityOptions
         settings = (AnalyticQualityOptions() if quality_options is None else surface_options)
         registered = np.asarray([mesh.nodes[node] for loop in loops for node in loop.node_ids])
+        registered_rows = None
+        if _material_region_binding is not None:
+            from ._material_region_binding import registered_core_rows
+            region_core_to_global = registered_core_rows(core, (
+                *[(point, node) for loop in loops for point, node in zip(loop.uv @ chart_transform, loop.node_ids)],
+                *zip(chart_pinned, region_pinned_ids)))
+            registered_rows = {row: mesh.nodes[node] for row, node in region_core_to_global.items()}
+            _material_region_binding.validate_constraints(core, mesh, boundary_registry, region_core_to_global)
         surface_diagnostics['analytic_physical_quality'] = analytic_chart.certify_core(
-            core, settings, registered)
+            core, settings, registered, registered_rows=registered_rows)
+        if _material_region_binding is not None:
+            region_settings = getattr(component_seed_registry, '_material_region_quality_settings', {})
+            region_settings[face_id] = settings
+            component_seed_registry._material_region_quality_settings = region_settings
     lifting_started = perf_counter()
     assert_valid_mesh(core)
 
     input_uv = np.vstack(chart_loops)
     coordinates = np.asarray(core.node_coordinates, dtype=float)
+    region_coordinates = (None if _material_region_binding is None else
+                          analytic_chart.evaluate(coordinates[:, :2]))
     if len(coordinates) < len(input_uv) or not np.allclose(
         coordinates[: len(input_uv), :2], input_uv, rtol=0.0, atol=2.0e-14
     ):
@@ -1784,6 +1845,12 @@ def _mesh_native_face(
         for local, node_id in enumerate(loop.node_ids):
             core_to_global[offset + local] = int(node_id)
         offset += len(loop.node_ids)
+
+    if _material_region_binding is not None:
+        for row, node in region_core_to_global.items():
+            previous = core_to_global.setdefault(row, node)
+            if previous != node:
+                raise MeshError('material region pinned row conflicts with boundary identity')
 
     if quadratic:
         edge_midsides = _core_edge_midsides(core)
@@ -1819,9 +1886,11 @@ def _mesh_native_face(
             float(value)
             for value in (coordinates[core_node, :2] @ chart_inverse)
         )
-        candidate = np.asarray(geometry.face_point(face_id, u, v), dtype=float)
+        candidate = (region_coordinates[core_node]
+                     if _material_region_binding is not None else
+                     np.asarray(geometry.face_point(face_id, u, v), dtype=float))
         tolerance = geometry.tolerance.effective_length(geometry.edge_length(edge_id))
-        if cylindrical_chart is not None:
+        if cylindrical_chart is not None or _material_region_binding is not None:
             from fractions import Fraction
 
             numerator, denominator = record["station"]
@@ -1845,7 +1914,10 @@ def _mesh_native_face(
         mesh.nodes[node_id] = exact_point
         sequence = mesh.nodes_of_edge[edge_id]
         if node_id not in sequence:
-            if cylindrical_chart is not None or analytic_chart is not None:
+            material_neighbour = any(
+                other in getattr(component_seed_registry, '_material_region_representatives', {})
+                for other in geometry.faces_using_edge(edge_id))
+            if cylindrical_chart is not None or analytic_chart is not None or material_neighbour:
                 from ._shared_triangle_split import propagate_triangle_split
 
                 stations = {
@@ -1866,7 +1938,10 @@ def _mesh_native_face(
                     component_seed_registry._published_triangle_incidence = cache
                 propagate_triangle_split(
                     mesh,
-                    (other for other in geometry.faces_using_edge(edge_id) if other != face_id),
+                    {getattr(component_seed_registry, '_material_region_representatives', {}).get(other, other)
+                     for other in geometry.faces_using_edge(edge_id)
+                     if other not in (_material_region_binding.face_ids
+                                      if _material_region_binding is not None else (face_id,))},
                     brackets[0], node_id, cache=cache,
                 )
                 stations[node_id] = parameter
@@ -1897,7 +1972,9 @@ def _mesh_native_face(
             float(value)
             for value in (coordinates[core_node, :2] @ chart_inverse)
         )
-        point = np.asarray(geometry.face_point(face_id, u, v), dtype=float)
+        point = (region_coordinates[core_node]
+                 if _material_region_binding is not None else
+                 np.asarray(geometry.face_point(face_id, u, v), dtype=float))
         if point.shape != (3,) or not np.all(np.isfinite(point)):
             raise MeshError(f"face {face_id} surface evaluation returned an invalid point")
         while next_node in reserved_node_ids or next_node in mesh.nodes:
@@ -1907,6 +1984,17 @@ def _mesh_native_face(
         next_node += 1
 
     _publish_native_face_elements(mesh, face_id, core, core_to_global)
+    if _material_region_binding is not None:
+        _material_region_binding.validate(cancellation_check)
+        region = _material_region_binding.region
+        surface_diagnostics['material_region'] = {
+            'source_faces': sorted(_material_region_binding.face_ids),
+            'authored_face': _material_region_binding.authored_face,
+            'cancelled_seams': [handle.id for handle in region.cancelled_seams],
+            'interior_constraint_edges': [path.source_edge for path in region.interior_constraints],
+            'retained_vertices': [handle.id for handle in region.retained_vertices],
+            'pinned_stations': len(region_pinned_ids),
+        }
     if deferred_recombine:
         from ._cylindrical_recombine import mark_staged
 
@@ -4778,6 +4866,13 @@ def generate_hybrid_mesh_result(
             order=order,
         )
 
+    from ._material_region_binding import prepare_material_regions
+    material_region_bindings = prepare_material_regions(
+        geometry, native_faces, source_to_final_faces, order=order,
+        native_options=native_options, supplied_seeding=supplied_seeding,
+        edge_overrides=final_overrides or {}, cancellation_check=cancellation_check)
+    cancelled_region_edges = {handle.id for binding in material_region_bindings.values()
+                              for handle in binding.region.cancelled_seams}
     boundary_registry = GlobalEdgeBoundaryRegistry(view)
     triangulation_backend_by_face: dict[int, Mapping[str, Any]] = {
         int(face_id): {
@@ -4794,7 +4889,7 @@ def generate_hybrid_mesh_result(
         view,
         mesh,
         boundary_registry,
-        edges,
+        tuple(edge for edge in edges if edge not in cancelled_region_edges),
         seeding,
         size_field,
         order,
@@ -4827,6 +4922,12 @@ def generate_hybrid_mesh_result(
         and not supplied_seeding
         and order == "linear"
     )
+    protected_region_constraints = {
+        int(path.source_edge) for binding in material_region_bindings.values()
+        for path in binding.region.interior_constraints}
+    # Physical intervals inside a union have two local incident cells. The
+    # boundary-only shared-split propagator cannot represent such a split.
+    automatically_seeded_shared_edges = automatically_seeded_shared_edges - protected_region_constraints
     reserved_shared_node_ids: set[int] = set()
 
     def allocate_shared_node_id() -> int:
@@ -4838,6 +4939,8 @@ def generate_hybrid_mesh_result(
         _next_identifier(mesh.nodes),
         node_id_allocator=allocate_shared_node_id,
     )
+    component_seed_registry._material_region_representatives = {
+        face: binding.representative for face, binding in material_region_bindings.items()}
     final_declared_junction_edges = frozenset(
         final_edge
         for prepared_edge in prepared_declared_junction_edges
@@ -4854,6 +4957,9 @@ def generate_hybrid_mesh_result(
         geometry, automatically_seeded_shared_edges, cylindrical_bindings
     )
     for face_id in native_faces:
+        material_region_binding = material_region_bindings.get(face_id)
+        if material_region_binding is not None and face_id != material_region_binding.representative:
+            continue
         quadratic_cylinder = order == "quadratic" and face_id in cylindrical_bindings
         face_diagnostics = _mesh_native_face(
             geometry,
@@ -4887,8 +4993,12 @@ def generate_hybrid_mesh_result(
             ),
             cancellation_check=cancellation_check,
             _cylindrical_binding=None if quadratic_cylinder else cylindrical_bindings.get(face_id),
+            _material_region_binding=material_region_binding,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
+        if material_region_binding is not None:
+            for consumed in material_region_binding.face_ids:
+                triangulation_backend_by_face[consumed] = face_diagnostics
         _check_cancellation(cancellation_check, f"native face {face_id} complete")
 
     final_cylindrical_repairs = {}
@@ -4921,6 +5031,12 @@ def generate_hybrid_mesh_result(
             face_diagnostics=triangulation_backend_by_face,
             cancellation_check=cancellation_check,
         )
+
+    for representative, settings in getattr(component_seed_registry, '_material_region_quality_settings', {}).items():
+        _check_cancellation(cancellation_check, f'material region {representative} final quality')
+        binding = material_region_bindings[representative]
+        triangulation_backend_by_face[representative]['material_region_final_physical_quality'] = (
+            binding.certify_published(mesh, boundary_registry, settings, cancellation_check))
 
     for sheet_id, sheet in geometry.sheets.items():
         element_ids = {

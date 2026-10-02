@@ -1871,6 +1871,7 @@ def _run_frontal_quality_path(
     component_seed_registry: Any | None,
     supplemental_metric_field: MetricFieldSpec | None,
     preserve_spatial_refinement: bool = False,
+    explicit_points: np.ndarray | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply native-v2 local insertion to the qualified legacy CDT seed."""
 
@@ -1912,7 +1913,7 @@ def _run_frontal_quality_path(
     optimized = _optimize_candidate(
         initial,
         triangulation.segments,
-        np.empty((0, 2), dtype=np.float64),
+        np.empty((0, 2), dtype=np.float64) if explicit_points is None else explicit_points,
         settings,
         statistics=work_statistics,
     )
@@ -1929,10 +1930,22 @@ def _run_frontal_quality_path(
             and settings.native_options.metric_mode == "isotropic_spatial"
             and best.report["poor_element_ids"]):
         from ._frontal_transition_quality import repair_frontal_transition
+        pinned_rows = _fixed_rows(best.points, np.empty((0, 2), dtype=np.int64),
+                                 np.empty((0, 2)) if explicit_points is None else explicit_points)
+        previous_best = best
         best, report = repair_frontal_transition(
             best, triangulation.segments, settings, report, cancellation_check,
             evaluate_coordinates=physical_evaluator,
         )
+        if pinned_rows and not np.array_equal(best.points[list(pinned_rows)],
+                                              previous_best.points[list(pinned_rows)]):
+            # Retain consumed work, but reject an unqualified move of an explicit input.
+            best = previous_best
+            report = dict(report)
+            receipt = dict(report['chart_transition_repair'])
+            receipt.update(accepted=False, candidate_moved_nodes=[],
+                           pinned_input_rejection=True, final_quality=dict(best.report))
+            report['chart_transition_repair'] = receipt
     if physical_evaluator is not None and best.report['poor_element_ids']:
         from ._physical_t3_refinement import refine_physical_candidate
         best, triangulation, report = refine_physical_candidate(
@@ -2505,6 +2518,7 @@ def mesh_planar_surface(
             component_seed_registry=_component_seed_registry,
             supplemental_metric_field=_supplemental_metric_field,
             preserve_spatial_refinement=_preserve_spatial_refinement,
+            explicit_points=explicit_interior,
         )
         candidate_paths = [frontal_path]
     guide_diagnostics: dict[str, Any] = {
