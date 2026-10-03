@@ -83,6 +83,12 @@ from .recovery import (
     generate_automatic_mesh_result,
 )
 from .mesh import Coupling, Mesh
+from .prepared_current_associations import (
+    PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
+    PreparedCurrentAssociationReceipt,
+    query_prepared_current_component_associations,
+    validate_prepared_current_component_associations,
+)
 from .preparation import (
     StructuralPreparationOptions,
     StructuralPreparationReport,
@@ -232,6 +238,8 @@ __all__ = [
     "MutableT3Topology",
     "ComponentSeedRegistry",
     "QuadMeshingOptions",
+    "PREPARED_CURRENT_ASSOCIATIONS_SCHEMA",
+    "PreparedCurrentAssociationReceipt",
     "QUAD_MESHING_OPTIONS_SCHEMA",
     "MeshingStrategy",
     "OrientedEdge",
@@ -320,6 +328,7 @@ __all__ = [
     "plan_structured_layout",
     "prepare_structural_closure",
     "prepare_qualified_s3_mesh",
+    "query_prepared_current_component_associations",
     "refine_around",
     "refine_at",
     "repair_s3_admission",
@@ -340,4 +349,5 @@ __all__ = [
     "surface_point",
     "triangle_to_quads",
     "verify_mesh_quality",
+    "validate_prepared_current_component_associations",
 ]

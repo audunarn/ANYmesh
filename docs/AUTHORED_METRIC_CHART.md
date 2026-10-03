@@ -155,3 +155,28 @@ refuse. The two root station plans can share one unchanged global edge
 registry. The owner explicitly leaves arbitrary structural/reference semantic
 remapping unqualified; this component binding does not construct a current
 mesh association receipt, invoke a native route or permit publication.
+
+The later exact-current-material owner candidate `e509862b` (wheel SHA256
+`2761f6d62611ea62b69f80d6ec47659c4cfa1142d3ac07ed460e54fc191165ed`)
+adds current edge traces in the original Plane chart and accepts exact rational
+cell UV. Keep these material stations separate from ancestral source-edge UV:
+on the cutter, the same current vertex can legitimately have different
+ancestral and current-material fractions. A source-only two-Sheet fixture now
+passes the owner's exact partition for both roots without moving a node or
+casting the cell fractions to binary64.
+
+`query_prepared_current_component_associations` exposes a versioned,
+**current-only** receipt for an already staged, complete linear T3/Q4
+Plane/Straight component. It revalidates the owner component, all root station
+receipts, exact cell partition and current face/Sheet/FaceUse buckets, every
+ordered edge and joint chain, all current vertex nodes and the known Mesh field
+schema. Original source-boundary chains retain the owner's loop direction and
+the exact ordered current edge/station sequence; an interior joint is not
+mislabelled as a source exterior edge. It refuses members, offsets, grids,
+seeding, thickness, activity,
+diagnostic records and nonzero automatic-connection counters until those
+semantics are implemented. Empty ancestral vertex preimages and interior edge
+ancestry are recorded without calling them generated-only. This narrow API is
+not an actual meshing route, does not transfer application source references,
+and marks solver admission and publication false. Its validator rederives the
+owner proofs; the mesh digest alone is not an admission certificate.

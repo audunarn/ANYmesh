@@ -2,6 +2,7 @@
 
 import pytest
 import numpy as np
+from fractions import Fraction
 
 import anygeometry as owner
 from anymesher._authored_component_binding import bind_authored_sheet_joint_component
@@ -93,5 +94,7 @@ def test_shared_registry_stations_cover_both_authored_roots_without_rekeying():
     assert all(plan.publication_qualified is False for plan in plans)
     assert all(any(receipt.edge_id == edge for receipt in plan.interior_receipts)
                for plan in plans)
+    assert dict(plans[1].node_material_uv)[11][0] == Fraction(1, 6)
+    assert all(len(plan.material_receipts) > 0 for plan in plans)
     assert tuple(entry.node_id for entry in registry.entries(edge)) == (
         model.edges[edge].start, model.edges[edge].end)
