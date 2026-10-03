@@ -63,7 +63,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
                                   min_angle, max_growth, max_trials=2048,
                                   cancellation_check=None, evaluate_coordinates=None,
                                   neighbourhood_rings=0, coordinate_batch_size=1, pinned_nodes=(),
-                                  physical_priority=False):
+                                  physical_priority=False, candidate_callback=None):
     original = np.asarray(points, dtype=np.float64)
     cells = np.asarray(triangles, dtype=np.int64)
     if (original.ndim != 2 or original.shape[1] != 2 or not np.isfinite(original).all()
@@ -74,7 +74,9 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             or type(neighbourhood_rings) is not int or neighbourhood_rings not in (0, 1)
             or type(coordinate_batch_size) is not int or not 1 <= coordinate_batch_size <= 8
             or type(physical_priority) is not bool
-            or physical_priority and evaluate_coordinates is None):
+            or physical_priority and evaluate_coordinates is None
+            or candidate_callback is not None and (not callable(candidate_callback)
+                                                    or evaluate_coordinates is None)):
         raise ValueError("invalid joint triangle repair input")
     incidence = {}
     for i, row in enumerate(cells):
@@ -145,7 +147,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             raise ValueError("invalid owner coordinates in joint triangle repair")
         return xyz
 
-    def penalty(x, owner_xyz=None):
+    def penalty(x, owner_xyz=None, trial_ordinal=None):
         xy = x[cells]
         forward = np.roll(xy, -1, axis=1) - xy
         backward = np.roll(xy, 1, axis=1) - xy
@@ -165,7 +167,19 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         perimeter = np.linalg.norm(forward, axis=2).sum(axis=1)
         ratios = perimeter[pairs[:, 0]] / perimeter[pairs[:, 1]]
         growth_defect = np.maximum(0., np.maximum(ratios, 1 / ratios) / target_growth - 1)
-        return float(np.sum(angle_defect ** 2) + np.sum(growth_defect ** 2))
+        value = float(np.sum(angle_defect ** 2) + np.sum(growth_defect ** 2))
+        if candidate_callback is not None and trial_ordinal is not None and np.isfinite(value):
+            if cancellation_check is not None:
+                cancellation_check()
+            # Detached read-only receipts cannot modify the search or a later
+            # row in the same owner batch, even if a callback changes flags.
+            observed_points, observed_xyz = x.copy(), xyz.copy()
+            observed_points.setflags(write=False)
+            observed_xyz.setflags(write=False)
+            candidate_callback(observed_points, observed_xyz, value, trial_ordinal)
+            if cancellation_check is not None:
+                cancellation_check()
+        return value
 
     initial = penalty(original)
     if not np.isfinite(initial):
@@ -186,7 +200,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         trials += 1
         x = original.copy()
         x[movable] = base + values.reshape(-1, 2) * scale
-        value = penalty(x)
+        value = penalty(x, trial_ordinal=trials)
         if value < best_penalty:
             best_points, best_penalty = x, value
         return value
@@ -213,6 +227,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
                 continue
             candidates = []
             valid = []
+            chunk_start = trials
             # Cancellation is checked before every charged trial. Owner work
             # follows admission of this bounded chunk, so exception interleaving
             # and cancellation latency can differ from the serial callback path.
@@ -235,7 +250,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
                 xyz = owner_coordinates(rows).reshape(len(valid), len(original), 3)
                 coordinates = dict(zip(valid, xyz))
             for index, x in enumerate(candidates):
-                candidate = (penalty(x, coordinates[index]) if index in coordinates
+                candidate = (penalty(x, coordinates[index], chunk_start + index + 1) if index in coordinates
                              else float("inf"))
                 if candidate < best_penalty:
                     best_points, best_penalty = x, candidate

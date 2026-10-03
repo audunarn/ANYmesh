@@ -8,6 +8,7 @@ Explicit owner opt-in may adopt physical progress while quality remains unsatisf
 from __future__ import annotations
 
 import math
+from time import perf_counter
 import numpy as np
 
 from ._joint_triangle_repair import repair_joint_triangle_quality, _validate_pinned_nodes
@@ -38,9 +39,15 @@ def repair_frontal_transition(candidate, protected, settings, report,
         "initial_quality": dict(candidate.report),
         "final_quality": dict(candidate.report),
         "proposed_quality": None, "proposed_moved_nodes": [],
-        "initial_penalty": None, "final_penalty": None,
+        "initial_penalty": None, "final_penalty": None, "proposed_penalty": None,
         "selected_nodes": [], "root_nodes": [], "neighbour_nodes": [],
         "priority_mode": 'physical_severity' if allow_partial_progress and evaluate_coordinates is not None else 'node_id',
+        "candidate_observations": 0, "candidate_scorings": 0,
+        "candidate_refusals": 0, "candidate_retentions": 0,
+        "candidate_observation_seconds": 0., "candidate_scoring_seconds": 0.,
+        "selected_trial": None, "selected_penalty": None,
+        "admissible_quality": None, "admissible_penalty": None,
+        "admissible_trial": None,
     }
     if (not candidate.report["poor_element_ids"] or not limit
             or not 0 < settings.min_angle < 60
@@ -52,6 +59,48 @@ def repair_frontal_transition(candidate, protected, settings, report,
         if cancellation_check is not None:
             cancellation_check("native-v2 chart transition repair")
 
+    fixed = sorted({int(node) for edge in protected for node in edge} | pinned)
+    admissible = None
+    admissible_penalty = float('inf')
+    admissible_trial = None
+    observed_best_penalty = float('inf')
+    observed_best_trial = None
+
+    def observe(points, xyz, penalty, ordinal):
+        nonlocal admissible, admissible_penalty, admissible_trial
+        nonlocal observed_best_penalty, observed_best_trial
+        started = perf_counter()
+        receipt['candidate_observations'] += 1
+        try:
+            if penalty < observed_best_penalty:
+                observed_best_penalty, observed_best_trial = penalty, ordinal
+            if penalty >= admissible_penalty:
+                return
+            checkpoint()
+            if points[fixed].tobytes() != candidate.points[fixed].tobytes():
+                raise MeshError("invalid frontal chart-transition trial")
+            moved = tuple(node for node in range(len(points))
+                          if points[node].tobytes() != candidate.points[node].tobytes())
+            from .surface_mesh import _physical_quality_candidate_from_xyz
+            from ._physical_t3_refinement import _alternative_progress
+            scoring_started = perf_counter()
+            receipt['candidate_scorings'] += 1
+            try:
+                trial = _make_candidate(points.copy(), candidate.triangles, flips=candidate.flips,
+                    moved_nodes=tuple(sorted(set(candidate.moved_nodes) | set(moved))),
+                    added_points=candidate.added_points, rounds=candidate.rounds, settings=settings)
+                trial = _physical_quality_candidate_from_xyz(trial, settings, xyz)
+            finally:
+                receipt['candidate_scoring_seconds'] += perf_counter() - scoring_started
+            checkpoint()
+            if not _alternative_progress(candidate.report, trial.report):
+                receipt['candidate_refusals'] += 1
+                return
+            admissible, admissible_penalty, admissible_trial = trial, penalty, ordinal
+            receipt['candidate_retentions'] += 1
+        finally:
+            receipt['candidate_observation_seconds'] += perf_counter() - started
+
     checkpoint()
     repaired = repair_joint_triangle_quality(
         candidate.points, candidate.triangles, protected,
@@ -62,8 +111,8 @@ def repair_frontal_transition(candidate, protected, settings, report,
         coordinate_batch_size=coordinate_batch_size,
         pinned_nodes=pinned,
         physical_priority=allow_partial_progress and evaluate_coordinates is not None,
+        candidate_callback=observe if allow_partial_progress and evaluate_coordinates is not None else None,
     )
-    fixed = sorted({int(node) for edge in protected for node in edge} | pinned)
     if (repaired.points.shape != candidate.points.shape
             or not np.isfinite(repaired.points).all()
             or repaired.points[fixed].tobytes() != candidate.points[fixed].tobytes()
@@ -85,23 +134,41 @@ def repair_frontal_transition(candidate, protected, settings, report,
         and _candidate_selection_key(proposed, prefer_growth=False)
             < _candidate_selection_key(candidate, prefer_growth=False)
     )
+    selected = proposed
+    selected_trial = (observed_best_trial if observed_best_penalty < repaired.initial_penalty else None)
+    selected_penalty = repaired.final_penalty
     adopted = accepted
-    if allow_partial_progress and evaluate_coordinates is not None and proposed.report['poor_element_ids']:
-        from ._physical_t3_refinement import _alternative_progress
-        adopted = _alternative_progress(candidate.report, proposed.report)
+    if not accepted and admissible is not None:
+        selected, selected_trial, selected_penalty = admissible, admissible_trial, admissible_penalty
+        adopted = True
+        accepted = (selected.report['invalid_element_count'] == 0
+            and not selected.report['poor_element_ids']
+            and _candidate_selection_key(selected, prefer_growth=False)
+                < _candidate_selection_key(candidate, prefer_growth=False))
+    selected_moved = [node for node in range(len(selected.points))
+                      if selected.points[node].tobytes() != candidate.points[node].tobytes()]
     checkpoint()
     receipt.update(
         trials=repaired.trials, accepted=accepted,
         candidate_adopted=adopted, quality_satisfied=accepted,
-        candidate_moved_nodes=list(repaired.moved_nodes) if adopted else [],
+        candidate_moved_nodes=selected_moved if adopted else [],
         budget_exhausted=repaired.budget_exhausted,
-        final_quality=dict(proposed.report if adopted else candidate.report),
+        final_quality=dict(selected.report if adopted else candidate.report),
         proposed_quality=dict(proposed.report), proposed_moved_nodes=list(repaired.moved_nodes),
-        initial_penalty=repaired.initial_penalty, final_penalty=repaired.final_penalty,
+        initial_penalty=repaired.initial_penalty,
+        final_penalty=((selected_penalty if adopted else repaired.initial_penalty)
+                       if allow_partial_progress and evaluate_coordinates is not None
+                       else repaired.final_penalty),
+        proposed_penalty=repaired.final_penalty,
         selected_nodes=list(repaired.selected_nodes), root_nodes=list(repaired.root_nodes),
         neighbour_nodes=list(repaired.neighbour_nodes), priority_mode=repaired.priority_mode,
+        selected_trial=selected_trial if adopted else None,
+        selected_penalty=selected_penalty if adopted else None,
+        admissible_quality=dict(admissible.report) if admissible is not None else None,
+        admissible_penalty=admissible_penalty if admissible is not None else None,
+        admissible_trial=admissible_trial,
     )
-    return (proposed if adopted else candidate), dict(
+    return (selected if adopted else candidate), dict(
         report, topology_operations=used + repaired.trials,
         chart_transition_repair=receipt,
     )

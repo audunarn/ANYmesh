@@ -1415,7 +1415,13 @@ def _published_quality_report(core,settings,quality,threshold_report):
 
 def _physical_quality_candidate(candidate, settings, evaluate_coordinates):
     """Score a chart candidate using the actual owner surface and cell growth."""
-    xyz = np.asarray(evaluate_coordinates(candidate.points), dtype=float)
+    return _physical_quality_candidate_from_xyz(candidate, settings,
+                                                evaluate_coordinates(candidate.points))
+
+
+def _physical_quality_candidate_from_xyz(candidate, settings, xyz):
+    """Score already evaluated coordinates from this exact chart trial."""
+    xyz = np.asarray(xyz, dtype=float)
     if xyz.shape != (len(candidate.points), 3) or not np.isfinite(xyz).all():
         raise MeshError("physical candidate evaluator requires finite (n, 3) coordinates")
     core = MeshCore(xyz, candidate.triangles)

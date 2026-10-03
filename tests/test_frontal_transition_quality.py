@@ -145,7 +145,8 @@ def test_increased_other_physical_threshold_refuses_proposal_but_keeps_evidence(
     assert result is candidate and entry['final_quality'] == candidate.report
     assert not entry['candidate_adopted'] and not entry['quality_satisfied'] and not entry['accepted']
     assert entry['proposed_moved_nodes'] == [4] and entry['candidate_moved_nodes'] == []
-    assert entry['initial_penalty'] == .75 and entry['final_penalty'] == .5
+    assert entry['initial_penalty'] == entry['final_penalty'] == .75
+    assert entry['proposed_penalty'] == .5 and entry['selected_penalty'] is None
     assert entry['trials'] == 7 and report['topology_operations'] == 10
 
 
