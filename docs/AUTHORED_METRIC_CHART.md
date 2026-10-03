@@ -129,17 +129,18 @@ It extends the child-containment guard only for exact coplanar Plane domains
 with one simple straight outer loop per face and no holes. Previous wheel
 identities remain in the living task note as historical inputs.
 
-The private `_authored_planar_stations` preflight uses the owner's existing
-exterior station query to retain exact original UV, source parameters and
-current global node IDs/XYZ before any opt-in root meshing. It explicitly
-refuses a physical interior edge. In the qualified 4-by-4 planar split at
-`x=3`, current joint edge 25 is listed by `correspondence.interior_incidence`,
-but `query_prepared_authored_boundary_stations` rejects it as non-exterior and
-`query_prepared_authored_curve_stations` rejects its straight curve. The owner
-does not yet provide authenticated original-UV station coordinates for this
-protected internal chain. Inverting mesh XYZ into the original chart would
-create an unowned substitute for that missing proof. The required next owner
-contract is an interior-edge station receipt bound to the same preparation,
-source parameters, child incidence, original UV and original/current XYZ,
-with a coordinate validator. No native root call or publication route was
-activated by this preflight.
+The private `_authored_planar_stations` preflight uses the owner's exterior
+station and candidate straight-interior station queries to retain exact
+original UV, source parameters, and registered current node IDs/XYZ before
+any opt-in root meshing. It validates both exact original and current XYZ
+representations and retains the owner's complete vertex-preimage receipt. In
+the 4-by-4 planar split at `x=3`, current joint edge 25 now has an authenticated
+ordered original-UV chain and child incidence; missing or altered stations
+refuse. The interior-station candidate is ANYgeometry `fe1ed812` (wheel SHA256
+`17b6d6450a1731345ebc47e166508194ec97543a2bd08fe36bb6bc63fbbb978c`),
+not a released dependency. Its vertex receipt says which current vertices have
+original *vertex* ancestors; absent ancestry does not prove absence of a
+source-edge, member, attachment or junction reference. The physical split has
+a sheet joint and attachments on this generated interior edge. Complete
+structural association semantics and a current-keyed FEM output receipt remain
+unproven, so no native root call or publication route is activated.
