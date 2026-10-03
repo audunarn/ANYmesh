@@ -35,3 +35,13 @@ assertion. It retains original UV and owner evidence alongside the same node IDs
 and coordinates. Its receipt also has `publication_qualified=False`; rerun the
 binding after any candidate topology change. It grants no station insertion,
 constraint remap or authored-root mesh publication permission.
+
+`anymesher._authored_scope_binding.bind_authored_root_inputs` consumes the
+owner's complete original/current prepared-model snapshot. It requires every
+descendant of one authored face to be selected and refuses member/attachment
+records, physical junctions, groups, tags, construction/isolated vertices,
+extensions, feature records, changed child face metadata and adjacent shared
+edges until their meaning has an explicit consumer. It revalidates the owner
+receipt after inspection. The result remains `publication_qualified=False`:
+FaceUse/Sheet interpretation, external ANYfem loads and supports, original work
+accounting, shared-component transactions and final mesh gates are still open.
