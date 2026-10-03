@@ -1,8 +1,24 @@
 """Discretization adapters for geometry-owner qualified material regions."""
 from dataclasses import dataclass, replace
+from fractions import Fraction
+from numbers import Integral
 import numpy as np
 
 from .errors import MeshError
+
+
+@dataclass(frozen=True)
+class BoundaryIntervalReceipt:
+    """Source identity of one owner boundary occurrence, never split permission."""
+    binding: object
+    loop_index: int
+    path_index: int
+    interval_index: int
+    source_edge: int
+    nodes: tuple[int, int]
+    parameters: tuple[Fraction, Fraction]
+    uv: tuple[tuple[float, float], tuple[float, float]]
+    xyz: tuple[tuple[float, float, float], tuple[float, float, float]]
 
 
 @dataclass(frozen=True)
@@ -58,6 +74,115 @@ class MaterialRegionBinding:
         if uv.shape != (len(nodes), 2) or not np.isfinite(uv).all():
             raise MeshError("material region returned invalid station parameters")
         return nodes, uv, parameters
+
+    def _boundary_source_chain(self, path, mesh, registry):
+        nodes, uv, parameters = self.path_chain(path, mesh, registry)
+        entries = registry.entries(path.source_edge)
+        selected = set(nodes)
+        seen = set()
+        for entry in entries:
+            if entry.node_id not in selected:
+                raise MeshError('material boundary chain omitted a registered source station')
+            if entry.node_id in seen:
+                raise MeshError('material boundary node has multiple source stations')
+            seen.add(entry.node_id)
+        source_points = np.asarray(self.geometry.sample_edge(path.source_edge, parameters), dtype=float)
+        registered = np.asarray([mesh.nodes[node] for node in nodes], dtype=float)
+        if (source_points.shape != registered.shape or not np.isfinite(source_points).all()
+                or not np.allclose(source_points, registered, rtol=0., atol=self.region.world_tolerance)):
+            raise MeshError('material boundary registry does not bind source parameters')
+        return nodes, uv, parameters
+
+    def _validate_boundary_owner(self, cancellation_check):
+        if not any(region is self.region for region in self.collection.regions):
+            raise MeshError('material boundary region is not its validated owner collection')
+        self.validate(cancellation_check)
+
+    def boundary_intervals(self, mesh, registry, cancellation_check=None):
+        """Retain exact registered stations even on protected curved paths.
+
+        Eligibility is deliberately absent. A caller must separately qualify its
+        owner, curve-error, resource and whole-component publication contracts.
+        """
+        self._validate_boundary_owner(cancellation_check)
+        result = []
+        for loop_index, paths in enumerate(self.region.boundaries):
+            for path_index, path in enumerate(paths):
+                if cancellation_check is not None:
+                    cancellation_check('material boundary source receipts')
+                nodes, uv, parameters = self._boundary_source_chain(path, mesh, registry)
+                if (len(nodes) < 2 or len(set(nodes)) != len(nodes)
+                        or any(isinstance(node, (bool, np.bool_))
+                               or not isinstance(node, Integral) or node < 1 for node in nodes)):
+                    raise MeshError('material boundary has ambiguous station identities')
+                differences = np.diff(parameters)
+                if not (np.all(differences > 0.) or np.all(differences < 0.)):
+                    raise MeshError('material boundary has ambiguous source intervals')
+                for index in range(len(nodes)-1):
+                    pair = tuple(nodes[index:index+2])
+                    result.append(BoundaryIntervalReceipt(
+                        self, loop_index, path_index, index, int(path.source_edge), pair,
+                        tuple(Fraction(float(t)) for t in parameters[index:index+2]),
+                        tuple(tuple(map(float, row)) for row in uv[index:index+2]),
+                        tuple(tuple(map(float, mesh.nodes[node])) for node in pair)))
+        self._validate_boundary_owner(cancellation_check)
+        return tuple(result)
+
+    def boundary_station(self, receipt, mesh, registry, parameter, cancellation_check=None):
+        """Evaluate a still-bound exact source station in its owner occurrence.
+
+        This read-only query grants no refinement permission and registers no
+        station. Nonrepresentable rational parameters fail instead of silently
+        changing their shared identity to a nearby binary64 value.
+        """
+        if not isinstance(receipt, BoundaryIntervalReceipt) or receipt.binding is not self:
+            raise MeshError('material boundary station requires its source receipt')
+        if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral)
+               or value < 0 for value in
+               (receipt.loop_index, receipt.path_index, receipt.interval_index)):
+            raise MeshError('material boundary source occurrence is unavailable')
+        if not isinstance(parameter, Fraction):
+            raise MeshError('material boundary station requires an exact rational parameter')
+        lower, upper = sorted(receipt.parameters)
+        if not lower < parameter < upper:
+            raise MeshError('material boundary station must be inside its original interval')
+        value = float(parameter)
+        if not np.isfinite(value) or Fraction(value) != parameter:
+            raise MeshError('material boundary station is not exactly representable')
+        self._validate_boundary_owner(cancellation_check)
+        # Reconstruct only the declared occurrence; no coordinate identity search.
+        try:
+            path = self.region.boundaries[receipt.loop_index][receipt.path_index]
+        except (IndexError, TypeError):
+            raise MeshError('material boundary source occurrence is unavailable') from None
+        if (receipt.loop_index < 0 or receipt.path_index < 0 or receipt.interval_index < 0
+                or path.source_edge != receipt.source_edge):
+            raise MeshError('material boundary source occurrence changed')
+        nodes, uv, parameters = self._boundary_source_chain(path, mesh, registry)
+        index = receipt.interval_index
+        current_nodes = tuple(nodes[index:index+2])
+        current_parameters = tuple(Fraction(float(t)) for t in parameters[index:index+2])
+        if (current_nodes != receipt.nodes or current_parameters != receipt.parameters
+                or tuple(tuple(map(float, row)) for row in uv[index:index+2]) != receipt.uv
+                or tuple(tuple(map(float, mesh.nodes[node])) for node in current_nodes) != receipt.xyz):
+            raise MeshError('material boundary station receipt is no longer current')
+        path_parameter = value if receipt.parameters[0] < receipt.parameters[1] else 1.-value
+        row = np.asarray(self.region.domain.uv(path.curve, path_parameter), dtype=float)
+        point = np.asarray(self.geometry.sample_edge(receipt.source_edge, np.asarray((value,))), dtype=float)
+        expected = np.asarray(path.curve.evaluate(path_parameter), dtype=float)
+        if (row.shape != (2,) or point.shape != (1, 3) or expected.shape != (3,)
+                or not np.isfinite(row).all() or not np.isfinite(point).all()
+                or not np.isfinite(expected).all()
+                or not np.allclose(point[0], expected, rtol=0., atol=self.region.world_tolerance)):
+            raise MeshError('material boundary station lost its exact owner correspondence')
+        from anygeometry import evaluate_material_surface_region
+        owner_point = evaluate_material_surface_region(
+            self.geometry, self.collection, self.representative, row[None, :],
+            require_material=True, cancellation_check=cancellation_check)
+        if not np.allclose(owner_point[0], point[0], rtol=0., atol=self.region.world_tolerance):
+            raise MeshError('material boundary station does not bind its owner support')
+        self._validate_boundary_owner(cancellation_check)
+        return row.copy(), point[0].copy()
 
     def loops(self, mesh, registry, splittable):
         result = []
