@@ -28,6 +28,13 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
     if type(allow_physical_flips) is not bool:
         raise MeshError('invalid physical flip option')
 
+    owner_cavities = False
+    if allow_physical_flips:
+        from ._analytic_metric_chart import AnalyticMetricChart
+        chart = getattr(evaluate_coordinates, '__self__', None)
+        owner_cavities = (isinstance(chart, AnalyticMetricChart)
+            and getattr(evaluate_coordinates, '__func__', None) is AnalyticMetricChart.evaluate)
+
     cancellation_failure = None
     if cancellation_check is not None:
         incoming_cancellation_check = cancellation_check
@@ -87,6 +94,8 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
     blocked = None
     attempts = alternative_attempts = alternative_splits = refused_attempts = 0
     flips = flip_attempts = flip_refused_attempts = 0
+    cavity_stats = dict(first_attempts=0, second_attempts=0, first_refusals=0,
+                        second_refusals=0, commits=0, stop_reason=None)
     flip_candidates_exhausted = False
     selected_cell_exhausted = False
     candidate_cells_exhausted = False
@@ -263,6 +272,53 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                 else:
                     candidate_cells_exhausted = True
                     stop_reason = 'no_progress_for_candidate_cells_and_flips'
+        if not committed and owner_cavities and flip_candidates_exhausted:
+            from ._physical_t3_cavity import two_flip_cavity
+
+            def charge_cavity_attempt(kind):
+                nonlocal used
+                if used >= settings.native_options.max_topology_operations:
+                    return False
+                used += 1
+                cavity_stats[kind + '_attempts'] += 1
+                return True
+
+            def score_cavity(points, cells):
+                return _physical_quality_candidate_from_xyz(
+                    _make_candidate(points, cells, settings=settings), settings, xyz)
+
+            def first_cavity_edges():
+                # Retain the committed state's defect/growth row priority.
+                for row in rows:
+                    if cancellation_check is not None:
+                        cancellation_check('native-v2 physical cavity defect row')
+                    cell = cells[row]
+                    yield from sorted((tuple(sorted((int(a), int(b))))
+                        for a, b in zip(cell, np.roll(cell, -1))),
+                        key=lambda ends: (float(np.linalg.norm(xyz[ends[1]]-xyz[ends[0]])), ends),
+                        reverse=True)
+
+            closure = two_flip_cavity(topology, current, first_cavity_edges(),
+                score=score_cavity, progress=_alternative_progress,
+                owner_checkpoint=chart._current, charge_attempt=charge_cavity_attempt,
+                stats=cavity_stats, cancellation_check=cancellation_check)
+            if closure is not None:
+                topology, current = closure
+                flips += 2
+                committed = True
+                blocked = stop_reason = None
+                candidate_cells_exhausted = flip_candidates_exhausted = False
+            elif cavity_stats['stop_reason'] == 'topology_budget':
+                candidate_cells_exhausted = False
+                stop_reason = 'topology_budget'
+            elif insertions + reused >= settings.native_options.max_insertions:
+                # The local flip families were exhausted, but bisection
+                # candidates could not be attempted with the spent allowance.
+                candidate_cells_exhausted = False
+                stop_reason = 'no_progress_for_flip_candidates_insertion_budget'
+            else:
+                candidate_cells_exhausted = True
+                stop_reason = 'no_progress_for_candidate_cells_flips_and_local_two_flip_cavities'
         if not committed:
             if stop_reason is None:
                 candidate_cells_exhausted = True
@@ -275,10 +331,10 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
     updated = dict(report, topology_operations=used, insertions=insertions,
                    shared_segment_splits=int(report['shared_segment_splits'])+boundary_splits,
                    physical_quality_bisections=splits, physical_quality_blocked_edge=blocked,
-                   physical_quality_attempts=attempts+flip_attempts,
+                   physical_quality_attempts=attempts+flip_attempts+cavity_stats['first_attempts']+cavity_stats['second_attempts'],
                    physical_quality_alternative_attempts=alternative_attempts,
                    physical_quality_alternative_bisections=alternative_splits,
-                   physical_quality_refused_attempts=refused_attempts+flip_refused_attempts,
+                   physical_quality_refused_attempts=refused_attempts+flip_refused_attempts+cavity_stats['first_refusals']+cavity_stats['second_refusals'],
                    physical_quality_selected_cell_exhausted=selected_cell_exhausted,
                    physical_quality_candidate_cells_exhausted=candidate_cells_exhausted,
                    physical_quality_exhausted_cell_count=exhausted_cells,
@@ -292,6 +348,14 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                        physical_quality_flip_attempts=flip_attempts,
                        physical_quality_flip_refused_attempts=flip_refused_attempts,
                        physical_quality_flip_candidates_exhausted=flip_candidates_exhausted)
+    if owner_cavities:
+        updated.update(physical_quality_two_flip_cavity_enabled=True,
+            physical_quality_cavity_first_attempts=cavity_stats['first_attempts'],
+            physical_quality_cavity_second_attempts=cavity_stats['second_attempts'],
+            physical_quality_cavity_first_refusals=cavity_stats['first_refusals'],
+            physical_quality_cavity_second_refusals=cavity_stats['second_refusals'],
+            physical_quality_cavity_commits=cavity_stats['commits'],
+            physical_quality_cavity_stop_reason=cavity_stats['stop_reason'])
     updated['selected_route'] = ('frontal_delaunay_physical_quality_satisfied'
         if not result.report['poor_element_ids'] and not result.report['invalid_element_count']
         else 'frontal_delaunay_geometry_limited' if candidate_cells_exhausted
