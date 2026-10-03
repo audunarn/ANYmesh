@@ -1,4 +1,4 @@
-"""Conforming physical-quality bisection using the remaining frontal budget."""
+"""Conforming bisection and owner-only flips within the frontal work budget."""
 from dataclasses import replace
 from fractions import Fraction
 import numpy as np
@@ -21,8 +21,12 @@ def _alternative_progress(before, after):
 
 def refine_physical_candidate(candidate, triangulation, settings, report,
                               evaluate_coordinates, original_segments,
-                              seed_registry, cancellation_check=None):
-    from .surface_mesh import _make_candidate, _physical_quality_candidate
+                              seed_registry, cancellation_check=None, *, allow_physical_flips=False):
+    from .surface_mesh import (_make_candidate, _physical_quality_candidate,
+                               _physical_quality_candidate_from_xyz)
+
+    if type(allow_physical_flips) is not bool:
+        raise MeshError('invalid physical flip option')
 
     cancellation_failure = None
     if cancellation_check is not None:
@@ -82,6 +86,8 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
     boundary_splits = 0
     blocked = None
     attempts = alternative_attempts = alternative_splits = refused_attempts = 0
+    flips = flip_attempts = flip_refused_attempts = 0
+    flip_candidates_exhausted = False
     selected_cell_exhausted = False
     candidate_cells_exhausted = False
     exhausted_cells = candidate_cells_visited = 0
@@ -114,7 +120,7 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                 raise _GeometryLimited('alternative physical bisection makes no admissible progress')
         staged = trial, coordinates
     while (used < settings.native_options.max_topology_operations
-           and insertions + reused < settings.native_options.max_insertions):
+           and (allow_physical_flips or insertions + reused < settings.native_options.max_insertions)):
         if cancellation_check is not None:
             cancellation_check('native-v2 physical quality bisection')
         points, cells = current.points, current.triangles
@@ -204,6 +210,58 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
             exhausted_cells += 1
             if cell_ordinal == 0:
                 selected_cell_exhausted = True
+        if not committed and allow_physical_flips and used < settings.native_options.max_topology_operations:
+            flip_refusal = None
+
+            def validate_flip(points, cells):
+                nonlocal staged, flip_refusal
+                trial = _physical_quality_candidate_from_xyz(
+                    _make_candidate(points, cells, settings=settings), settings, xyz)
+                if not _alternative_progress(current.report, trial.report):
+                    flip_refusal = _GeometryLimited('physical flip makes no admissible progress')
+                    raise flip_refusal
+                staged = trial, xyz
+
+            flip_candidates_exhausted = True
+            for ordinal, edge in enumerate(sorted(incidence)):
+                if cancellation_check is not None and ordinal % settings.native_options.cancellation_interval == 0:
+                    cancellation_check('native-v2 physical flip candidate scan')
+                if (len(incidence[edge]) != 2 or edge in topology.protected_edges
+                        or edge in topology.splittable_edges):
+                    continue
+                if used >= settings.native_options.max_topology_operations:
+                    stop_reason = 'topology_budget'
+                    flip_candidates_exhausted = False
+                    break
+                if cancellation_check is not None:
+                    cancellation_check('native-v2 physical flip attempt')
+                used += 1
+                flip_attempts += 1
+                staged = None
+                flip_refusal = None
+                try:
+                    changed = topology.flip_edge(edge, cancellation_check=cancellation_check,
+                                                 _validate_candidate=validate_flip)
+                except _GeometryLimited as error:
+                    if error is not flip_refusal:
+                        raise
+                    changed = False
+                if not changed:
+                    flip_refused_attempts += 1
+                    continue
+                current, xyz = staged
+                flips += 1
+                committed = True
+                blocked = None
+                stop_reason = None
+                flip_candidates_exhausted = False
+                break
+            if not committed and flip_candidates_exhausted:
+                if stop_reason == 'insertion_budget':
+                    stop_reason = 'no_progress_for_flip_candidates_insertion_budget'
+                else:
+                    candidate_cells_exhausted = True
+                    stop_reason = 'no_progress_for_candidate_cells_and_flips'
         if not committed:
             if stop_reason is None:
                 candidate_cells_exhausted = True
@@ -211,14 +269,15 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
             break
     points, cells = current.points, current.triangles
     result = replace(candidate, points=points, triangles=cells, report=current.report,
-                     score=current.score, aspect_ratios=current.aspect_ratios)
+                     score=current.score, aspect_ratios=current.aspect_ratios,
+                     flips=candidate.flips+flips)
     updated = dict(report, topology_operations=used, insertions=insertions,
                    shared_segment_splits=int(report['shared_segment_splits'])+boundary_splits,
                    physical_quality_bisections=splits, physical_quality_blocked_edge=blocked,
-                   physical_quality_attempts=attempts,
+                   physical_quality_attempts=attempts+flip_attempts,
                    physical_quality_alternative_attempts=alternative_attempts,
                    physical_quality_alternative_bisections=alternative_splits,
-                   physical_quality_refused_attempts=refused_attempts,
+                   physical_quality_refused_attempts=refused_attempts+flip_refused_attempts,
                    physical_quality_selected_cell_exhausted=selected_cell_exhausted,
                    physical_quality_candidate_cells_exhausted=candidate_cells_exhausted,
                    physical_quality_exhausted_cell_count=exhausted_cells,
@@ -227,6 +286,11 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                                   'edge_id': int(value[1]),
                                   'station': (value[2].numerator, value[2].denominator)}
                                  for node, value in sorted(topology.shared_node_ids.items())])
+    if allow_physical_flips:
+        updated.update(physical_quality_flips=flips,
+                       physical_quality_flip_attempts=flip_attempts,
+                       physical_quality_flip_refused_attempts=flip_refused_attempts,
+                       physical_quality_flip_candidates_exhausted=flip_candidates_exhausted)
     updated['selected_route'] = ('frontal_delaunay_physical_quality_satisfied'
         if not result.report['poor_element_ids'] and not result.report['invalid_element_count']
         else 'frontal_delaunay_geometry_limited' if candidate_cells_exhausted
@@ -235,5 +299,14 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
         ('satisfied' if not result.report['poor_element_ids'] and not result.report['invalid_element_count']
          else 'topology_budget' if used >= settings.native_options.max_topology_operations
          else 'insertion_budget'))
+    if allow_physical_flips:
+        from ._analytic_metric_chart import AnalyticMetricChart
+        chart = getattr(evaluate_coordinates, '__self__', None)
+        if (isinstance(chart, AnalyticMetricChart)
+                and getattr(evaluate_coordinates, '__func__', None) is AnalyticMetricChart.evaluate):
+            # Cached XYZ cannot certify a binding that changed during a flip.
+            # This adds binding validation only; the publication owner evaluation
+            # and physical certification remain the caller's independent gate.
+            chart._current()
     return result, replace(triangulation, points=points, triangles=cells,
                            segments=topology.constraint_edges), updated

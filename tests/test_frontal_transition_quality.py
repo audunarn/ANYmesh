@@ -287,7 +287,7 @@ def test_surface_opts_in_only_bound_analytic_evaluate_and_forwards_pins(monkeypa
         return candidate, dict(report, chart_transition_repair={})
     monkeypatch.setattr(repair, 'repair_frontal_transition', capture)
     monkeypatch.setattr(physical, 'refine_physical_candidate',
-                        lambda candidate, triangulation, settings, report, *args:
+                        lambda candidate, triangulation, settings, report, *args, **kwargs:
                         (candidate, triangulation, report))
     surface.mesh_planar_surface(((0., 0.), (1., 0.), (1., 1.), (0., 1.)), interior_points=point,
         options=SurfaceMeshOptions(target_size=1., recombine=False, backend='python',

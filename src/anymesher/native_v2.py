@@ -865,9 +865,23 @@ class MutableT3Topology:
         self.quality_cache = {}
         return {'point_id':node,'epoch':self.epoch}
 
-    def flip_edge(self, edge: tuple[int, int]) -> bool:
+    def flip_edge(self, edge: tuple[int, int], *, cancellation_check=None,
+                  _validate_candidate=None) -> bool:
+        """Stage a strictly convex diagonal replacement before atomic publication."""
+        callback_failure = None
+
+        def checkpoint(phase):
+            nonlocal callback_failure
+            if cancellation_check is not None:
+                try:
+                    cancellation_check(phase)
+                except BaseException as error:
+                    callback_failure = error
+                    raise
+
+        checkpoint('native-v2 edge flip start')
         target = _edge(*edge)
-        if target in self.protected_edges:
+        if target in self._protected_edges or target in self._splittable_intervals:
             return False
         incidence = self._topology_index
         attached = incidence.attached(target)
@@ -878,6 +892,16 @@ class MutableT3Topology:
         if attached_owners[0] != attached_owners[1]:
             return False
         opposite = [next(int(node) for node in triangle if int(node) not in target) for triangle in (first, second)]
+        if len(set(target + tuple(opposite))) != 4:
+            return False
+        # Compare signs directly: multiplying small robust determinants could
+        # underflow and silently change the strict diagonal-separation test.
+        for a, b, c, d in ((*target, *opposite), (*opposite, *target)):
+            first_sign = orient2d(self._points[a], self._points[b], self._points[c])
+            second_sign = orient2d(self._points[a], self._points[b], self._points[d])
+            if not ((first_sign > 0 and second_sign < 0)
+                    or (first_sign < 0 and second_sign > 0)):
+                return False
         replacement_edge = _edge(*opposite)
         if replacement_edge in incidence:
             return False
@@ -894,21 +918,33 @@ class MutableT3Topology:
         ]
         trial.extend((candidate, attached_owners[0]) for candidate in candidates)
         ordered = sorted(trial, key=lambda item: item[0])
-        previous = self._triangles
-        previous_owners = self.triangle_owners
-        previous_index = self._topology_index
+        triangles = np.asarray([row for row, _ in ordered], dtype=np.int64)
+        owners = np.asarray([value for _, value in ordered], dtype=np.int64)
+        if _validate_candidate is not None:
+            # A validator gets detached backing; its exception is operational,
+            # including MeshError, and must never become a primitive refusal.
+            receipt_points, receipt_cells = self._points.copy(), triangles.copy()
+            receipt_points.setflags(write=False)
+            receipt_cells.setflags(write=False)
+            _validate_candidate(receipt_points, receipt_cells)
         try:
-            self._triangles = np.asarray([row for row, _ in ordered], dtype=np.int64)
-            self.triangle_owners = np.asarray([value for _, value in ordered], dtype=np.int64)
+            index = self._topology_index.updated(triangles, cancellation_check=checkpoint
+                                                if cancellation_check is not None else None)
+        except MeshError as error:
+            if callback_failure is error:
+                raise
+            return False
+        checkpoint('native-v2 edge flip commit')
+        previous, previous_owners = self._triangles, self.triangle_owners
+        self._triangles, self.triangle_owners = triangles, owners
+        try:
             self.validate()
-            self._topology_index = previous_index.updated(self._triangles)
         except BaseException as error:
-            self._triangles = previous
-            self.triangle_owners = previous_owners
-            self._topology_index = previous_index
+            self._triangles, self.triangle_owners = previous, previous_owners
             if isinstance(error, MeshError):
                 return False
             raise
+        self._topology_index = index
         self.epoch += 1
         self.quality_cache.clear()
         return True

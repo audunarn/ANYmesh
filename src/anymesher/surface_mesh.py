@@ -1962,9 +1962,12 @@ def _run_frontal_quality_path(
             report['chart_transition_repair'] = receipt
     if physical_evaluator is not None and best.report['poor_element_ids']:
         from ._physical_t3_refinement import refine_physical_candidate
+        from ._analytic_metric_chart import AnalyticMetricChart
         best, triangulation, report = refine_physical_candidate(
             best, triangulation, settings, report, physical_evaluator,
-            automatically_seeded_shared_segments, component_seed_registry, cancellation_check)
+            automatically_seeded_shared_segments, component_seed_registry, cancellation_check,
+            allow_physical_flips=(isinstance(getattr(physical_evaluator, '__self__', None), AnalyticMetricChart)
+                                  and getattr(physical_evaluator, '__func__', None) is AnalyticMetricChart.evaluate))
     accepted_spatial_refinement = (
         preserve_spatial_refinement
         and settings.native_options.metric_mode == "isotropic_spatial"
