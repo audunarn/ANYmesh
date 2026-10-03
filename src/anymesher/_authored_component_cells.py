@@ -6,7 +6,9 @@ mesh for publication or analysis.
 """
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from numbers import Integral
 import numpy as np
 
@@ -36,6 +38,7 @@ class AuthoredComponentCellAssociations:
 def validate_authored_component_cells(
     geometry, component: BoundAuthoredSheetJointComponent, mesh,
     registry: GlobalEdgeBoundaryRegistry, cell_current_faces, *,
+    created_material_uv_by_root=None,
     cancellation_check=None,
 ) -> AuthoredComponentCellAssociations:
     """Prove exact source-only CURRENT buckets for linear planar shell cells."""
@@ -164,12 +167,57 @@ def validate_authored_component_cells(
             or set(mesh.declared_plate_junction_edges) != joint_segments):
         raise MeshError("authored component joint declaration changed")
 
+    if created_material_uv_by_root is None:
+        created_material_uv_by_root = {
+            correspondence.authored_definition.face_id: {}
+            for correspondence in current.boundary_correspondences
+        }
+    if (not isinstance(created_material_uv_by_root, Mapping)
+            or set(created_material_uv_by_root) != set(current.authored_face_ids)
+            or any(not isinstance(values, Mapping)
+                   for values in created_material_uv_by_root.values())):
+        raise MeshError("authored component created UV needs every original root")
+    created_ids = set()
+
     for correspondence in current.boundary_correspondences:
         plan = plan_authored_planar_stations(
             geometry, correspondence, mesh, registry,
             cancellation_check=cancellation_check,
         )
         uv = dict(plan.node_material_uv)
+        root = int(correspondence.authored_definition.face_id)
+        created = created_material_uv_by_root[root]
+        root_used = {
+            int(node) for face in correspondence.descendants
+            for cell in expected_faces[face] for node in shells[cell]
+        }
+        if set(created) != root_used - set(uv):
+            raise MeshError("authored component created UV does not match root nodes")
+        if set(created) & created_ids:
+            raise MeshError("authored component created node crosses original roots")
+        created_ids.update(created)
+        for node, pair in created.items():
+            if (isinstance(node, bool) or not isinstance(node, Integral)
+                    or node not in mesh.nodes or not isinstance(pair, tuple)
+                    or len(pair) != 2
+                    or any(type(value) is not Fraction for value in pair)):
+                raise MeshError("authored component created UV needs exact node provenance")
+        if created:
+            from anygeometry import evaluate_prepared_authored_face
+
+            nodes = tuple(sorted(created))
+            expected_xyz = evaluate_prepared_authored_face(
+                geometry, correspondence,
+                [[float(value) for value in created[node]] for node in nodes],
+                cancellation_check=cancellation_check,
+            )
+            actual_xyz = np.asarray([mesh.nodes[node] for node in nodes], dtype=float)
+            if (actual_xyz.shape != expected_xyz.shape
+                    or not np.all(np.isfinite(actual_xyz))
+                    or np.any(np.linalg.norm(actual_xyz - expected_xyz, axis=1)
+                              > registry.view.effective_length())):
+                raise MeshError("authored component created node left owner support")
+            uv.update(created)
         triangles_by_child = {}
         for face in correspondence.descendants:
             triangles = []

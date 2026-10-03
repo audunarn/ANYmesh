@@ -5,7 +5,7 @@ Fraction UV stays attached to every unchanged global station for later owner
 partition proof. Building this packet does not invoke an engine or publish.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 import numpy as np
 
@@ -14,6 +14,8 @@ from ._authored_metric_chart import AuthoredMetricChart
 from ._authored_planar_stations import plan_authored_planar_stations
 from .boundary import GlobalEdgeBoundaryRegistry
 from .errors import MeshError
+from ._authored_work_ledger import AuthoredWorkLedger
+from .native_v2 import NativeMeshingOptions, frontal_delaunay_refine
 from .triangulation import PlanarTriangulation, triangulate_polygon
 
 
@@ -26,6 +28,7 @@ class AuthoredRootBoundaryPacket:
     constraint_metric: tuple[tuple[tuple[float, float], tuple[float, float]], ...]
     material_uv_by_node: tuple
     chart: AuthoredMetricChart
+    _correspondence: object = field(repr=False, compare=False)
     _geometry: object = field(repr=False, compare=False)
     _mesh: object = field(repr=False, compare=False)
     _registry: GlobalEdgeBoundaryRegistry = field(repr=False, compare=False)
@@ -44,6 +47,19 @@ class AuthoredRootTriangulation:
 
     triangulation: PlanarTriangulation
     original_uv_by_row: tuple[tuple[Fraction, Fraction], ...]
+    _packet: AuthoredRootBoundaryPacket = field(repr=False, compare=False)
+
+    @property
+    def publication_qualified(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True)
+class AuthoredRootChildBinding:
+    """Exact owner-adjudicated current child for every detached root T3 row."""
+
+    authored_face_id: int
+    triangle_current_faces: tuple[int, ...]
 
     @property
     def publication_qualified(self) -> bool:
@@ -118,7 +134,107 @@ def triangulate_authored_root_boundary(
             raise MeshError("authored triangulation lost exact material station UV")
         mutable[row] = source_uv[node]
     _assert_packet_current(packet)
-    return AuthoredRootTriangulation(seed, tuple(mutable))
+    return AuthoredRootTriangulation(seed, tuple(mutable), packet)
+
+
+def bind_authored_root_triangles_to_children(
+    packet: AuthoredRootBoundaryPacket, result: AuthoredRootTriangulation,
+    correspondence, *, cancellation_check=None,
+) -> AuthoredRootChildBinding:
+    """Propose child IDs by owner projection, then require exact full partition.
+
+    Projection/containment only chooses a candidate bucket. The owner exact
+    partition, over every child and cell, is the authority for that bucket.
+    """
+    from anygeometry import (
+        validate_prepared_authored_boundary_correspondence_binding,
+        validate_prepared_authored_face_partition,
+    )
+
+    _assert_packet_current(packet)
+    if (not isinstance(result, AuthoredRootTriangulation)
+            or result._packet is not packet
+            or correspondence is not packet._correspondence
+            or int(correspondence.authored_definition.face_id) != packet.authored_face_id
+            or len(result.original_uv_by_row) != len(result.triangulation.points)):
+        raise MeshError("authored root child binding has mismatched inputs")
+    validate_prepared_authored_boundary_correspondence_binding(
+        packet._geometry, correspondence, cancellation_check=cancellation_check,
+    )
+    geometry = packet._geometry
+    children = tuple(int(face) for face in correspondence.descendants)
+    buckets = {face: [] for face in children}
+    child_rows = []
+    tolerance = packet._registry.view.effective_length()
+    for triangle in result.triangulation.triangles:
+        if cancellation_check is not None:
+            cancellation_check("authored root child classification")
+        uv = tuple(result.original_uv_by_row[int(row)] for row in triangle)
+        if any(len(point) != 2 for point in uv):
+            raise MeshError("authored root triangle lacks original UV")
+        centre = np.asarray([[float(sum(point[axis] for point in uv) / 3)
+                              for axis in (0, 1)]], dtype=float)
+        xyz = packet.chart.evaluate(packet.chart.to_metric(centre))[0]
+        matches = []
+        for face in children:
+            local = geometry.face_local_uv(face, xyz)
+            projected = geometry.face_point(face, *local)
+            if (geometry.face_contains_uv(face, local)
+                    and np.linalg.norm(projected - xyz) <= tolerance):
+                matches.append(face)
+        if len(matches) != 1:
+            raise MeshError("authored root triangle has ambiguous current child")
+        child_rows.append(matches[0])
+        buckets[matches[0]].append(uv)
+    validate_prepared_authored_face_partition(
+        geometry, correspondence, buckets, cancellation_check=cancellation_check,
+    )
+    _assert_packet_current(packet)
+    return AuthoredRootChildBinding(packet.authored_face_id, tuple(child_rows))
+
+
+def refine_authored_root_with_ledger(
+    packet: AuthoredRootBoundaryPacket, seed: AuthoredRootTriangulation,
+    ledger: AuthoredWorkLedger, original_options: NativeMeshingOptions, *,
+    target_size: float, cancellation_check=None,
+) -> tuple[AuthoredRootTriangulation, AuthoredWorkLedger, dict]:
+    """Refine detached T3 work inside the remaining original native allowance."""
+    _assert_packet_current(packet)
+    if (not isinstance(seed, AuthoredRootTriangulation) or seed._packet is not packet
+            or not isinstance(ledger, AuthoredWorkLedger)
+            or not isinstance(original_options, NativeMeshingOptions)
+            or original_options.point_placement != "frontal_delaunay"
+            or original_options.max_insertions != ledger.insertion_limit
+            or original_options.max_topology_operations != ledger.topology_limit):
+        raise MeshError("authored refinement needs its original native budget binding")
+    if ledger.remaining_insertions < 1 or ledger.remaining_operations < 1:
+        raise MeshError("authored refinement has no original native work allowance left")
+    limited_options = replace(
+        original_options, max_insertions=ledger.remaining_insertions,
+        max_topology_operations=ledger.remaining_operations,
+    )
+    triangulation, report = frontal_delaunay_refine(
+        seed.triangulation, limited_options, target_size=target_size,
+        model_uuid=str(packet._geometry.model_id),
+        geometry_revision=packet._geometry.revision,
+        metric_to_physical=packet.chart.evaluate,
+        metric_jacobian=packet.chart.jacobians,
+        cancellation_check=cancellation_check,
+    )
+    if (triangulation.protected_node_rows != seed.triangulation.protected_node_rows
+            or len(triangulation.points) < len(seed.original_uv_by_row)):
+        raise MeshError("authored refinement lost seed row identity")
+    created = packet.chart.to_authored_uv(
+        triangulation.points[len(seed.original_uv_by_row):]
+    )
+    uv = (*seed.original_uv_by_row,
+          *(tuple(Fraction.from_float(float(value)) for value in row)
+            for row in created))
+    charged = ledger.charge(
+        insertions=report["insertions"], operations=report["topology_operations"],
+    )
+    _assert_packet_current(packet)
+    return AuthoredRootTriangulation(triangulation, uv, packet), charged, dict(report)
 
 
 def plan_authored_component_boundaries(
@@ -183,7 +299,7 @@ def plan_authored_component_boundaries(
         packets.append(AuthoredRootBoundaryPacket(
             int(correspondence.authored_definition.face_id), tuple(outer),
             outer_metric, tuple(pairs), constraint_metric,
-            station_plan.node_material_uv, chart, geometry, mesh, registry,
+            station_plan.node_material_uv, chart, correspondence, geometry, mesh, registry,
             edge_ids, _registry_snapshot(registry, edge_ids),
             _node_xyz_snapshot(mesh, node_ids),
         ))

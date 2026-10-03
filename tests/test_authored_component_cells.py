@@ -1,6 +1,7 @@
 """Exact current linear associations and material coverage, without routing."""
 
 from collections import defaultdict
+from fractions import Fraction
 import numpy as np
 import pytest
 
@@ -112,3 +113,58 @@ def test_unsupported_offset_or_altered_material_coordinate_refuses():
     value[2].nodes[node] = value[2].nodes[node] + np.array((0., 0., .01))
     with pytest.raises(MeshError, match="vertex coordinate changed"):
         prove(value)
+
+
+def test_created_interior_node_requires_exact_root_uv_and_owner_xyz():
+    from anygeometry import evaluate_prepared_authored_face
+    from anymesher._authored_planar_stations import plan_authored_planar_stations
+
+    geometry, component, mesh, registry, cell_faces = candidate()
+    old_cell = min(mesh.tris)
+    face = cell_faces.pop(old_cell)
+    corners = mesh.tris.pop(old_cell)
+    correspondence = next(item for item in component.boundary_correspondences
+                          if face in item.descendants)
+    source_uv = dict(plan_authored_planar_stations(
+        geometry, correspondence, mesh, registry,
+    ).node_material_uv)
+    centre = tuple(sum(source_uv[node][axis] for node in corners) / 3
+                   for axis in (0, 1))
+    assert all(type(value) is Fraction for value in centre)
+    new_node = max(mesh.nodes) + 1
+    mesh.nodes[new_node] = evaluate_prepared_authored_face(
+        geometry, correspondence, [[float(value) for value in centre]],
+    )[0]
+    new_cells = tuple(range(max(mesh.tris) + 1, max(mesh.tris) + 4))
+    for identifier, triangle in zip(new_cells,
+                                    ((corners[0], corners[1], new_node),
+                                     (corners[1], corners[2], new_node),
+                                     (corners[2], corners[0], new_node))):
+        mesh.tris[identifier] = triangle
+        cell_faces[identifier] = face
+    mesh.elements_of_face[face] = sorted(
+        (*[cell for cell in mesh.elements_of_face[face] if cell != old_cell],
+         *new_cells)
+    )
+    for sheet, cells in mesh.elements_of_sheet.items():
+        if old_cell in cells:
+            mesh.elements_of_sheet[sheet] = sorted(
+                (*[cell for cell in cells if cell != old_cell], *new_cells)
+            )
+    roots = {root: {} for root in component.authored_face_ids}
+    roots[correspondence.authored_definition.face_id][new_node] = centre
+    validated = validate_authored_component_cells(
+        geometry, component, mesh, registry, cell_faces,
+        created_material_uv_by_root=roots,
+    )
+    assert len(validated.cell_current_faces) == 18
+    with pytest.raises(MeshError, match="created UV"):
+        validate_authored_component_cells(
+            geometry, component, mesh, registry, cell_faces,
+        )
+    mesh.nodes[new_node] = mesh.nodes[new_node] + np.array((0., 0., .01))
+    with pytest.raises(MeshError, match="left owner support"):
+        validate_authored_component_cells(
+            geometry, component, mesh, registry, cell_faces,
+            created_material_uv_by_root=roots,
+        )

@@ -1662,6 +1662,12 @@ def frontal_delaunay_refine(
     elif insertions == 0 and route == "frontal_delaunay":
         route = "frontal_delaunay_baseline_satisfied"
     points, triangles = topology.canonical_export()
+    if triangulation.protected_node_rows and (
+        len(points) < len(triangulation.points)
+        or points[:len(triangulation.points)].tobytes(order="C")
+        != triangulation.points.tobytes(order="C")
+    ):
+        raise MeshError("frontal refinement changed protected seed point rows")
     native_diagnostics = dict(triangulation.native_diagnostics)
     report = {
         "selected_route": route,
@@ -1709,4 +1715,5 @@ def frontal_delaunay_refine(
         backend=triangulation.backend, requested_backend=triangulation.requested_backend,
         selected_backend=triangulation.selected_backend, actual_backend=triangulation.actual_backend,
         fallback_reason=triangulation.fallback_reason, native_diagnostics=native_diagnostics,
+        protected_node_rows=triangulation.protected_node_rows,
     ), report

@@ -5,6 +5,7 @@ import pytest
 
 from anymesher.errors import MeshError
 from anymesher.native import NativeTriangulation
+from anymesher.native_v2 import NativeMeshingOptions, frontal_delaunay_refine
 from anymesher.triangulation import constrained_planar_triangulation
 
 
@@ -81,3 +82,18 @@ def test_cancellation_does_not_return_protected_binding() -> None:
             SQUARE, (0, 1, 2, 3), backend="python",
             protected_node_ids=STATIONS, cancellation_check=cancel,
         )
+
+
+def test_frontal_refinement_preserves_protected_rows_and_reports_work() -> None:
+    seed = constrained_planar_triangulation(
+        SQUARE, (0, 1, 2, 3), backend="python", protected_node_ids=STATIONS,
+    )
+    result, report = frontal_delaunay_refine(
+        seed, NativeMeshingOptions(point_placement="frontal_delaunay",
+                                   max_insertions=8, max_topology_operations=1000),
+        target_size=0.45,
+    )
+    assert result.protected_node_rows == seed.protected_node_rows
+    np.testing.assert_array_equal(result.points[:len(seed.points)], seed.points)
+    assert report["insertions"] >= 0
+    assert report["topology_operations"] >= 0
