@@ -96,3 +96,25 @@ The owner original-domain triangle validator explicitly does not certify the
 literal current-fragment partition. A conforming child boundary plus an
 input manifest is not a proof of each cell's current-child membership; that
 proof and the strict quality/high-order gates remain required for routing.
+
+The later private `validate_authored_child_project_cells` guard uses the
+owner's literal prepared-child triangle API for **linear** root-owned T3/Q4
+cells when ANYfem declares a child-local reference. The caller must provide
+one current child ID per cell and original UV per corner from the authored
+chart. Node XYZ is checked against the original owner support; each whole
+triangle (or both halves of a convex Q4) is validated inside the named actual
+child. The guard retains original-root `elements_of_face` and original Sheet
+scope, verifies required child-boundary station chains, and revalidates owner
+and project inputs at completion. A crossing cell, wrong child, missing
+required boundary or changed input refuses. It remains
+`publication_qualified=False`: neither a partial child triangulation nor this
+per-cell proof establishes completeness or uniqueness of the global current
+fragment partition. Quadratic cells, rounded split-spline/BQC/QIC child trims,
+detached project output remapping and active production routing still refuse.
+
+Exact final owner development input for this guard is ANYgeometry candidate
+`931916ab9ee399ff59013c01e622eb8da20cffe9`, wheel SHA-256
+`a7c64ad31cffc463b8d4e3b3d8f2084700465bafbeec3b9ba80441011d838cea`.
+It supersedes the earlier tested `a2ea7eb` candidate after an owner fix for
+reversed polynomial trims; both identities remain in the task evidence.
+The previous exact ANYfem wheel remains `ea1a7d2daf0cb269eb8271ae48c8ad35918afded7046a3f0f1089f028cf9def5`.

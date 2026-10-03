@@ -5,6 +5,7 @@ Root-only association is refused when the project has a child-local reference.
 """
 
 from dataclasses import dataclass
+from numbers import Integral
 
 import numpy as np
 
@@ -23,6 +24,18 @@ class BoundAuthoredProjectReferences:
     required_boundary_edge_ids: tuple[int, ...]
     required_vertex_ids: tuple[int, ...]
     manifest: object
+
+    @property
+    def publication_qualified(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True)
+class AuthoredChildMembershipEvidence:
+    authored_face: int
+    selected_children: tuple[int, ...]
+    cell_children: tuple[tuple[int, int], ...]
+    required_boundary_edge_ids: tuple[int, ...]
 
     @property
     def publication_qualified(self) -> bool:
@@ -198,4 +211,147 @@ def validate_authored_project_stage(
     validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
     validate_prepared_project_reference_scope(
         project, prepared_geometry, manifest, closure=closure,
+    )
+
+
+def validate_authored_child_project_cells(
+    project, prepared_geometry, bound: BoundAuthoredRootInputs, manifest,
+    correspondence, mesh, boundary_registry, element_to_child,
+    node_authored_uv, *, closure=None, cancellation_check=None,
+) -> AuthoredChildMembershipEvidence:
+    """Prove each declared linear cell fits its literal selected child.
+
+    The caller supplies original UV from its chart; XYZ is checked against the
+    owner support. This proves neither child-area completeness nor a global
+    partition, and returns no mesh-publication authority.
+    """
+    try:
+        from anyfem.prepared_reference_scope import validate_prepared_project_reference_scope
+        from anygeometry import (
+            evaluate_prepared_authored_face,
+            validate_prepared_authored_boundary_correspondence_binding,
+            validate_prepared_authored_face_child_triangles,
+            validate_prepared_model_scope_binding,
+        )
+    except ImportError as error:
+        raise MeshError("authored child coverage capability is unavailable") from error
+    if not isinstance(bound, BoundAuthoredRootInputs):
+        raise MeshError("authored child cells need a bound owner root")
+    validate_prepared_project_reference_scope(
+        project, prepared_geometry, manifest, closure=closure,
+    )
+    validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
+    validate_prepared_authored_boundary_correspondence_binding(
+        prepared_geometry, correspondence, cancellation_check=cancellation_check,
+    )
+    if (bound.scope.face_preimages != manifest.owner_scope.face_preimages
+            or bound.scope.authored_document != manifest.authored_document
+            or bound.scope.current_document != manifest.current_document
+            or int(correspondence.authored_definition.face_id) != bound.authored_face
+            or tuple(correspondence.descendants) != bound.descendants):
+        raise MeshError("child cells and project references bind different preparations")
+    selected = set()
+    for reference in manifest.references:
+        if reference.authority == "derived_cache":
+            continue
+        for scope in reference.face_scopes:
+            if scope.authored_face_id == bound.authored_face and not scope.whole_authored_root:
+                selected.update(scope.current_face_ids)
+    if not selected or not selected.issubset(set(bound.descendants)):
+        raise MeshError("authored child cells need an explicit selected-child reference")
+    if mesh.order != "linear" or mesh.beams or mesh.couplings:
+        raise MeshError("authored child proof currently requires linear shell cells only")
+    if set(mesh.tris) & set(mesh.quads):
+        raise MeshError("authored child proof found reused shell element IDs")
+    shells = {**mesh.tris, **mesh.quads}
+    if (not shells or set(shells) != set(element_to_child)
+            or any(isinstance(cell, bool) or not isinstance(cell, Integral)
+                   for cell in element_to_child)
+            or any(isinstance(child, bool) or not isinstance(child, Integral)
+                   or int(child) not in bound.descendants
+                   for child in element_to_child.values())):
+        raise MeshError("authored child cells need one declared descendant per shell cell")
+    if not selected.issubset({int(child) for child in element_to_child.values()}):
+        raise MeshError("authored child reference has no declared shell cells")
+    if mesh.elements_of_face != {bound.authored_face: sorted(shells)}:
+        raise MeshError("authored child cells must retain their original-root owner")
+    original_uses = (
+        use for use in manifest.authored_document["structural"]["face_uses"]
+        if int(use["face_id"]) == bound.authored_face
+    )
+    expected_sheets = {
+        int(use["sheet_id"]): sorted(shells) for use in original_uses
+    }
+    if mesh.elements_of_sheet != expected_sheets:
+        raise MeshError("authored child cells changed original Sheet ownership")
+    corners = set()
+    for cell_id, connection in shells.items():
+        expected = 3 if cell_id in mesh.tris else 4
+        if len(connection) != expected or len(set(connection)) != expected:
+            raise MeshError("authored child proof needs valid linear corner connectivity")
+        corners.update(int(node) for node in connection)
+    if set(node_authored_uv) != corners or not corners.issubset(mesh.nodes):
+        raise MeshError("authored child proof needs original UV for every active corner")
+    ordered = tuple(sorted(corners))
+    try:
+        uv = np.asarray([node_authored_uv[node] for node in ordered], dtype=float)
+    except (TypeError, ValueError) as error:
+        raise MeshError("authored child UV rows are invalid") from error
+    if uv.shape != (len(ordered), 2) or not np.all(np.isfinite(uv)):
+        raise MeshError("authored child UV rows must be finite pairs")
+    actual = np.asarray([mesh.nodes[node] for node in ordered], dtype=float)
+    if actual.shape != (len(ordered), 3) or not np.all(np.isfinite(actual)):
+        raise MeshError("authored child mesh coordinates are invalid")
+    support = evaluate_prepared_authored_face(
+        prepared_geometry, correspondence, uv,
+        cancellation_check=cancellation_check,
+    )
+    extent = max(float(np.ptp(actual, axis=0).max()), 1.0)
+    if np.max(np.linalg.norm(actual - support, axis=1)) > 1e-10 * extent:
+        raise MeshError("authored child UV does not support the preserved node XYZ")
+    by_node = dict(zip(ordered, uv))
+    triangles_by_child: dict[int, list[np.ndarray]] = {}
+    for cell_id, connection in sorted(shells.items()):
+        points = np.asarray([by_node[int(node)] for node in connection], dtype=float)
+        if len(connection) == 3:
+            triangles = (points,)
+        else:
+            crosses = [float(np.linalg.det(np.stack((points[(i + 1) % 4] - points[i],
+                                                     points[(i + 2) % 4] - points[(i + 1) % 4]))))
+                       for i in range(4)]
+            if (any(value == 0.0 for value in crosses)
+                    or min(crosses) < 0 < max(crosses)):
+                raise MeshError("authored child quad has no convex original-UV cover")
+            triangles = (points[[0, 1, 2]], points[[0, 2, 3]])
+        by_child = triangles_by_child.setdefault(int(element_to_child[cell_id]), [])
+        by_child.extend(triangles)
+    for child, triangles in sorted(triangles_by_child.items()):
+        validate_prepared_authored_face_child_triangles(
+            prepared_geometry, correspondence, child, np.asarray(triangles),
+            cancellation_check=cancellation_check,
+        )
+    source_rows = tuple(row for row in manifest.authored_face_sources
+                        if row[0] == bound.authored_face)
+    if len(source_rows) != 1:
+        raise MeshError("child cells lack one explicit project source identity")
+    if (source_rows[0][1] != "project_authored"
+            or int(source_rows[0][2]) != bound.authored_face):
+        raise MeshError("detached authored child cells need a qualified project output remap")
+    reference = BoundAuthoredProjectReferences(
+        bound.authored_face, str(source_rows[0][1]), int(source_rows[0][2]),
+        bound.descendants, tuple(manifest.required_boundary_edge_ids),
+        tuple(manifest.required_vertex_ids), manifest,
+    )
+    validate_required_project_constraints(
+        project, prepared_geometry, reference, mesh, boundary_registry,
+        closure=closure,
+    )
+    validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
+    validate_prepared_project_reference_scope(
+        project, prepared_geometry, manifest, closure=closure,
+    )
+    return AuthoredChildMembershipEvidence(
+        bound.authored_face, tuple(sorted(selected)),
+        tuple(sorted((int(cell), int(child)) for cell, child in element_to_child.items())),
+        tuple(manifest.required_boundary_edge_ids),
     )
