@@ -128,3 +128,18 @@ The exact partition owner input is later candidate
 It extends the child-containment guard only for exact coplanar Plane domains
 with one simple straight outer loop per face and no holes. Previous wheel
 identities remain in the living task note as historical inputs.
+
+The private `_authored_planar_stations` preflight uses the owner's existing
+exterior station query to retain exact original UV, source parameters and
+current global node IDs/XYZ before any opt-in root meshing. It explicitly
+refuses a physical interior edge. In the qualified 4-by-4 planar split at
+`x=3`, current joint edge 25 is listed by `correspondence.interior_incidence`,
+but `query_prepared_authored_boundary_stations` rejects it as non-exterior and
+`query_prepared_authored_curve_stations` rejects its straight curve. The owner
+does not yet provide authenticated original-UV station coordinates for this
+protected internal chain. Inverting mesh XYZ into the original chart would
+create an unowned substitute for that missing proof. The required next owner
+contract is an interior-edge station receipt bound to the same preparation,
+source parameters, child incidence, original UV and original/current XYZ,
+with a coordinate validator. No native root call or publication route was
+activated by this preflight.
