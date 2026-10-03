@@ -354,8 +354,8 @@ def test_stale_owner_after_cached_flip_cannot_return_a_candidate(monkeypatch):
 
 def test_opt_in_preserves_successful_ordinary_bisection_before_any_flip():
     from dataclasses import replace
-    from test_physical_quality_bisection import protected_diamond
-    candidate,triangulation,settings,owner,intervals=protected_diamond()
+    from test_physical_primary_progress import progress_cavity
+    candidate,triangulation,settings,owner,intervals,_=progress_cavity()
     triangulation=replace(triangulation,segments=triangulation.boundary_segments,
                           mandatory_segments=np.empty((0,2),dtype=int))
     settings=replace(settings,native_options=NativeMeshingOptions(max_topology_operations=1))

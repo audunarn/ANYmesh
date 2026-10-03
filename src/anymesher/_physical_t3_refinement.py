@@ -115,9 +115,10 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
             raise
         if trial.report['invalid_element_count']:
             raise _GeometryLimited('physical bisection would invalidate the mesh')
-        if require_progress:
+        if require_progress or allow_physical_flips:
             if not _alternative_progress(current.report, trial.report):
-                raise _GeometryLimited('alternative physical bisection makes no admissible progress')
+                raise _GeometryLimited('physical bisection makes no admissible progress'
+                    if allow_physical_flips else 'alternative physical bisection makes no admissible progress')
         staged = trial, coordinates
     while (used < settings.native_options.max_topology_operations
            and (allow_physical_flips or insertions + reused < settings.native_options.max_insertions)):
