@@ -296,3 +296,23 @@ def test_surface_opts_in_only_bound_analytic_evaluate_and_forwards_pins(monkeypa
         _metric_jacobian=np.asarray(((1., 0.), (0., 1.), (0., 0.))),
         _preserve_spatial_refinement=True)
     assert seen == [analytic] and to_dict(model) == before
+
+
+@pytest.mark.parametrize('allow_partial,has_owner', ((False, False), (False, True), (True, False), (True, True)))
+def test_helper_enables_physical_priority_only_for_owner_partial_opt_in(monkeypatch, allow_partial, has_owner):
+    candidate, protected, settings, owner = small_owner_candidate(trials=1)
+    seen = []
+    original = repair.repair_joint_triangle_quality
+    def capture(*args, **kwargs):
+        seen.append(kwargs['physical_priority'])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(repair, 'repair_joint_triangle_quality', capture)
+    _, report = repair.repair_frontal_transition(candidate, protected, settings,
+        dict(topology_operations=0), evaluate_coordinates=owner if has_owner else None,
+        allow_partial_progress=allow_partial)
+    entry = report['chart_transition_repair']
+    enabled = allow_partial and has_owner
+    assert seen == [enabled]
+    assert entry['priority_mode'] == ('physical_severity' if enabled else 'node_id')
+    assert entry['selected_nodes'] == entry['root_nodes'] + entry['neighbour_nodes']
+    assert entry['selected_nodes'] and entry['trials'] == report['topology_operations'] == 1

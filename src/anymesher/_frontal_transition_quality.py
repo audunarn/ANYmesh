@@ -39,6 +39,8 @@ def repair_frontal_transition(candidate, protected, settings, report,
         "final_quality": dict(candidate.report),
         "proposed_quality": None, "proposed_moved_nodes": [],
         "initial_penalty": None, "final_penalty": None,
+        "selected_nodes": [], "root_nodes": [], "neighbour_nodes": [],
+        "priority_mode": 'physical_severity' if allow_partial_progress and evaluate_coordinates is not None else 'node_id',
     }
     if (not candidate.report["poor_element_ids"] or not limit
             or not 0 < settings.min_angle < 60
@@ -59,6 +61,7 @@ def repair_frontal_transition(candidate, protected, settings, report,
         evaluate_coordinates=evaluate_coordinates,
         coordinate_batch_size=coordinate_batch_size,
         pinned_nodes=pinned,
+        physical_priority=allow_partial_progress and evaluate_coordinates is not None,
     )
     fixed = sorted({int(node) for edge in protected for node in edge} | pinned)
     if (repaired.points.shape != candidate.points.shape
@@ -95,6 +98,8 @@ def repair_frontal_transition(candidate, protected, settings, report,
         final_quality=dict(proposed.report if adopted else candidate.report),
         proposed_quality=dict(proposed.report), proposed_moved_nodes=list(repaired.moved_nodes),
         initial_penalty=repaired.initial_penalty, final_penalty=repaired.final_penalty,
+        selected_nodes=list(repaired.selected_nodes), root_nodes=list(repaired.root_nodes),
+        neighbour_nodes=list(repaired.neighbour_nodes), priority_mode=repaired.priority_mode,
     )
     return (proposed if adopted else candidate), dict(
         report, topology_operations=used + repaired.trials,

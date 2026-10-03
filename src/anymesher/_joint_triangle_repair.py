@@ -12,6 +12,10 @@ class JointTriangleRepair:
     initial_penalty: float
     final_penalty: float
     budget_exhausted: bool
+    selected_nodes: tuple = ()
+    root_nodes: tuple = ()
+    neighbour_nodes: tuple = ()
+    priority_mode: str = 'node_id'
 
 
 def _validate_pinned_nodes(nodes, count):
@@ -25,10 +29,41 @@ def _validate_pinned_nodes(nodes, count):
     return frozenset(map(int, values))
 
 
+def _physical_priority_key(points, cells, angles, lengths, pairs, min_angle, max_growth,
+                           cancellation_check=None):
+    """Reduce cached physical defects across incidence once, without owner calls."""
+    if cancellation_check is not None:
+        cancellation_check()
+    if not np.isfinite(angles).all() or not np.isfinite(lengths).all():
+        raise ValueError('nonfinite physical joint triangle priority')
+    growth = np.ones(len(cells))
+    if len(pairs):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = lengths[pairs[:, 0]] / lengths[pairs[:, 1]]
+            ratios = np.maximum(ratios, 1. / ratios)
+        if not np.isfinite(ratios).all():
+            raise ValueError('nonfinite physical joint triangle priority')
+        np.maximum.at(growth, pairs.ravel(), np.repeat(ratios, 2))
+    minimum_angle = np.full(len(points), np.inf)
+    maximum_growth = np.ones(len(points))
+    np.minimum.at(minimum_angle, cells.ravel(), np.repeat(np.min(angles, axis=1), 3))
+    np.maximum.at(maximum_growth, cells.ravel(), np.repeat(growth, 3))
+    angle_deficit = np.maximum(0., (min_angle - minimum_angle) / min_angle)
+    growth_deficit = np.maximum(0., maximum_growth / max_growth - 1.)
+    severity = np.maximum(angle_deficit, growth_deficit)
+    if not all(np.isfinite(values).all() for values in (growth, angle_deficit, growth_deficit, severity)):
+        raise ValueError('nonfinite physical joint triangle priority')
+    if cancellation_check is not None:
+        cancellation_check()
+    return lambda node: (-severity[node], -angle_deficit[node], -growth_deficit[node],
+                         *points[node], node)
+
+
 def repair_joint_triangle_quality(points, triangles, protected_edges, poor_triangle_ids, *,
                                   min_angle, max_growth, max_trials=2048,
                                   cancellation_check=None, evaluate_coordinates=None,
-                                  neighbourhood_rings=0, coordinate_batch_size=1, pinned_nodes=()):
+                                  neighbourhood_rings=0, coordinate_batch_size=1, pinned_nodes=(),
+                                  physical_priority=False):
     original = np.asarray(points, dtype=np.float64)
     cells = np.asarray(triangles, dtype=np.int64)
     if (original.ndim != 2 or original.shape[1] != 2 or not np.isfinite(original).all()
@@ -37,7 +72,9 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             or not np.isfinite(max_growth) or max_growth <= 1
             or isinstance(max_trials, bool) or not isinstance(max_trials, int) or max_trials < 0
             or type(neighbourhood_rings) is not int or neighbourhood_rings not in (0, 1)
-            or type(coordinate_batch_size) is not int or not 1 <= coordinate_batch_size <= 8):
+            or type(coordinate_batch_size) is not int or not 1 <= coordinate_batch_size <= 8
+            or type(physical_priority) is not bool
+            or physical_priority and evaluate_coordinates is None):
         raise ValueError("invalid joint triangle repair input")
     incidence = {}
     for i, row in enumerate(cells):
@@ -52,14 +89,6 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     bad = sorted(set(map(int, poor_triangle_ids)))
     if any(i < 0 or i >= len(cells) for i in bad):
         raise ValueError("invalid joint triangle repair selection")
-    movable = sorted({int(n) for i in bad for n in cells[i]} - fixed)[:12]
-    if neighbourhood_rings and movable:
-        # An angle-only boundary defect can require motion in the adjacent
-        # interior star, even though those adjacent cells currently pass. Keep
-        # the original defect nodes first and cap the coupled search at 12.
-        roots = set(movable)
-        neighbouring = {int(n) for row in cells if any(int(v) in roots for v in row) for n in row}
-        movable = (movable + sorted(neighbouring - fixed - roots))[:12]
     pairs = np.asarray([v for v in incidence.values() if len(v) == 2], dtype=np.int64).reshape(-1, 2)
     # Search margins cannot demand more total angle than a vertex star owns.
     # In particular, three triangles at a right-angle corner cannot each be
@@ -78,6 +107,23 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     else:
         cross = np.abs(forward[:, :, 0] * backward[:, :, 1] - forward[:, :, 1] * backward[:, :, 0])
     angles = np.degrees(np.arctan2(cross, np.sum(forward * backward, axis=2)))
+    priority = None
+    if physical_priority:
+        priority = _physical_priority_key(original, cells, angles,
+            np.linalg.norm(forward, axis=2).mean(axis=1), pairs, min_angle, max_growth,
+            cancellation_check)
+    movable = sorted({int(n) for i in bad for n in cells[i]} - fixed, key=priority)[:12]
+    root_nodes = tuple(movable)
+    neighbour_nodes = ()
+    if neighbourhood_rings and movable and len(movable) < 12:
+        # Direct defect roots precede the ring; neighbours only fill unused slots.
+        roots = set(movable)
+        neighbouring = {int(n) for row in cells if any(int(v) in roots for v in row) for n in row}
+        neighbour_nodes = tuple(sorted(neighbouring - fixed - roots, key=priority)[:12-len(movable)])
+        movable += list(neighbour_nodes)
+    selection = dict(selected_nodes=tuple(movable), root_nodes=root_nodes,
+                     neighbour_nodes=neighbour_nodes,
+                     priority_mode='physical_severity' if physical_priority else 'node_id')
     counts = np.bincount(cells.ravel(), minlength=len(original))
     totals = np.bincount(cells.ravel(), weights=angles.ravel(), minlength=len(original))
     average = np.divide(totals, counts, out=np.full(len(original), float(min_angle)), where=counts > 0)
@@ -125,7 +171,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     if not np.isfinite(initial):
         raise ValueError("non-positive joint triangle repair input")
     if not movable or not max_trials or initial == 0:
-        return JointTriangleRepair(original.copy(), 0, (), initial, initial, max_trials == 0)
+        return JointTriangleRepair(original.copy(), 0, (), initial, initial, max_trials == 0, **selection)
     scale = float(np.median([np.linalg.norm(original[a] - original[b]) for a, b in incidence]))
     base = original[movable].copy()
     trials = 0
@@ -249,4 +295,4 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     moved = tuple(n for n in movable if best_points[n].tobytes() != original[n].tobytes())
     if best_points[sorted(fixed)].tobytes() != original[sorted(fixed)].tobytes():
         raise ValueError("joint triangle repair changed fixed nodes")
-    return JointTriangleRepair(best_points, trials, moved, initial, best_penalty, trials >= max_trials)
+    return JointTriangleRepair(best_points, trials, moved, initial, best_penalty, trials >= max_trials, **selection)
