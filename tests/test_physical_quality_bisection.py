@@ -305,7 +305,7 @@ def protected_diamond():
     return candidate, triangulation, settings, evaluate, intervals
 
 
-@pytest.mark.parametrize('remaining,already_used', ((0, 1), (1, 5), (2, 7), (3, 9), (4, 11)))
+@pytest.mark.parametrize('remaining,already_used', ((0, 1), (1, 5), (2, 7), (3, 9), (4, 11), (5, 13)))
 def test_alternative_attempt_budget_order_and_nonprogress_rollback(monkeypatch, remaining, already_used):
     from anymesher.native_v2 import _GeometryLimited
     candidate, triangulation, settings, evaluate, intervals = protected_diamond()
@@ -329,19 +329,20 @@ def test_alternative_attempt_budget_order_and_nonprogress_rollback(monkeypatch, 
     points, cells = candidate.points.tobytes(), candidate.triangles.tobytes()
     result, updated_triangles, receipt = refine_physical_candidate(candidate, triangulation,
         settings, report, evaluate, intervals, registry)
-    charged = min(remaining, 3)
+    charged = min(remaining, 5)
     assert receipt['topology_operations'] == already_used + charged
     assert receipt['physical_quality_attempts'] == receipt['physical_quality_refused_attempts'] == charged
     assert receipt['physical_quality_alternative_attempts'] == max(0, charged - 1)
-    assert attempts == [(1, 2), (0, 2)][:max(0, charged - 1)]  # Equal lengths use descending ID tie order.
+    assert attempts == [(1, 2), (0, 2), (1, 3), (0, 3)][:max(0, charged - 1)]
     assert receipt['physical_quality_bisections'] == receipt['physical_quality_alternative_bisections'] == 0
     assert receipt['insertions'] == 0 and not registry.assigned_node_ids
     assert result.points.tobytes() == points and result.triangles.tobytes() == cells
     assert tuple(sorted((0, 1))) in set(map(tuple, updated_triangles.segments))
     assert receipt['physical_quality_selected_cell_exhausted'] == (remaining >= 3)
-    assert receipt['selected_route'] == ('frontal_delaunay_geometry_limited' if remaining >= 3
+    assert receipt['physical_quality_candidate_cells_exhausted'] == (remaining >= 5)
+    assert receipt['selected_route'] == ('frontal_delaunay_geometry_limited' if remaining >= 5
                                          else 'frontal_delaunay_budget_limited')
-    assert receipt['physical_quality_stop_reason'] == ('no_progress_for_selected_cell' if remaining >= 3
+    assert receipt['physical_quality_stop_reason'] == ('no_progress_for_candidate_cells' if remaining >= 5
                                                        else 'topology_budget')
     assert report == dict(topology_operations=already_used, insertions=0, shared_segment_splits=0, shared_nodes=[])
     assert registry.resolve(100, 1, 2) == 500
@@ -522,6 +523,176 @@ def test_valid_ordinary_longest_edge_retains_prior_behavior():
     assert len(result.points) == len(candidate.points) + 1
     assert result.report['quality_violation_count'] > candidate.report['quality_violation_count']
     np.testing.assert_array_equal(result.points[:len(candidate.points)], candidate.points)
+
+
+def later_defect_fixture(*, insertion_limit=1, sharp_angle=9.9):
+    candidate, _, settings, evaluate, intervals = protected_diamond()
+    # Angles 20, 9.9, 150.1 degrees: bisecting the long base removes the excessive
+    # maximum angle while only one child retains the original sharp corner.
+    a, b = np.deg2rad((20., sharp_angle))
+    side = np.sin(b) / np.sin(a + b)
+    points = np.vstack((candidate.points, (3., 0.), (4., 0.),
+                        (3. + side*np.cos(a), side*np.sin(a))))
+    cells = np.vstack((candidate.triangles, (4, 5, 6)))
+    boundary = np.asarray(((0, 2), (1, 2), (0, 3), (1, 3), (4, 5), (5, 6), (4, 6)))
+    settings = replace(settings, native_options=NativeMeshingOptions(
+        max_topology_operations=6, max_insertions=insertion_limit))
+    candidate = _physical_quality_candidate(_make_candidate(points, cells, settings=settings), settings, evaluate)
+    triangulation = PlanarTriangulation(points, cells, np.vstack((boundary, (0, 1))), boundary,
+        np.asarray(((0, 1),)), np.asarray((0, 3, 1, 2)), ())
+    intervals.update({tuple(edge): (200 + i, 0, 1) for i, edge in enumerate(boundary[4:])})
+    return candidate, triangulation, settings, evaluate, intervals
+
+
+def test_later_defective_cell_progress_is_guarded_and_repeatable(monkeypatch):
+    import anymesher._physical_t3_refinement as physical
+    candidate, triangulation, settings, evaluate, intervals = later_defect_fixture()
+    guard = physical._alternative_progress
+    records = []
+    def inspect_guard(before, after):
+        records.append((id(before), before.copy(), after.copy(), guard(before, after)))
+        return records[-1][-1]
+    monkeypatch.setattr(physical, '_alternative_progress', inspect_guard)
+    original = MutableT3Topology.split_segment
+    attempts = []
+    def capture(topology, edge, **kwargs):
+        attempts.append(edge)
+        return original(topology, edge, **kwargs)
+    monkeypatch.setattr(MutableT3Topology, 'split_segment', capture)
+    results = []
+    for _ in range(2):
+        start = len(records)
+        result, _, receipt = refine_physical_candidate(candidate, triangulation, settings,
+            dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[]),
+            evaluate, intervals, ComponentSeedRegistry(500))
+        assert receipt['physical_quality_attempts'] == 6
+        assert receipt['physical_quality_refused_attempts'] == 5
+        assert receipt['physical_quality_alternative_attempts'] == 5
+        assert receipt['physical_quality_alternative_bisections'] == 1
+        assert receipt['physical_quality_selected_cell_exhausted']
+        assert not receipt['physical_quality_candidate_cells_exhausted']
+        assert receipt['physical_quality_exhausted_cell_count'] == 2
+        assert receipt['physical_quality_candidate_cells_visited'] == 3
+        assert result.report['violation_counts']['maximum_angle'] < candidate.report['violation_counts']['maximum_angle']
+        assert all(result.report['violation_counts'][name] <= value
+                   for name, value in candidate.report['violation_counts'].items())
+        assert result.report['quality_violation_count'] <= candidate.report['quality_violation_count']
+        assert result.points[:len(candidate.points)].tobytes() == candidate.points.tobytes()
+        current_records = records[start:]
+        assert len(current_records) == 5 and len({record[0] for record in current_records}) == 1
+        assert [record[-1] for record in current_records] == [False]*4 + [True]
+        results.append((result.points.tobytes(), result.triangles.tobytes(), receipt))
+    assert results[0] == results[1]
+    expected = [(1, 2), (0, 2), (1, 3), (0, 3), (4, 5)]
+    assert attempts == expected + expected  # Shared refused edge (0, 1) is charged once per baseline.
+
+
+def test_later_cell_primary_cannot_bypass_nonprogress_guard():
+    candidate, triangulation, settings, evaluate, intervals = later_defect_fixture(sharp_angle=9.)
+    registry = ComponentSeedRegistry(500)
+    result, _, receipt = refine_physical_candidate(candidate, triangulation, settings,
+        dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[]),
+        evaluate, intervals, registry)
+    assert receipt['physical_quality_attempts'] == receipt['physical_quality_refused_attempts'] == 6
+    assert receipt['physical_quality_alternative_attempts'] == 5
+    assert receipt['physical_quality_candidate_cells_visited'] == 3
+    assert receipt['physical_quality_blocked_edge'] == (4, 5)
+    assert receipt['physical_quality_bisections'] == 0 and not registry.assigned_node_ids
+    assert result.points.tobytes() == candidate.points.tobytes()
+    assert result.triangles.tobytes() == candidate.triangles.tobytes()
+
+
+def test_refusal_cache_clears_after_later_cell_commit(monkeypatch):
+    candidate, triangulation, settings, evaluate, intervals = later_defect_fixture(insertion_limit=2)
+    settings = replace(settings, native_options=NativeMeshingOptions(
+        max_topology_operations=9, max_insertions=2))
+    attempts = []
+    original = MutableT3Topology.split_segment
+    def capture(topology, edge, **kwargs):
+        attempts.append((topology.epoch, edge))
+        return original(topology, edge, **kwargs)
+    monkeypatch.setattr(MutableT3Topology, 'split_segment', capture)
+    result, _, receipt = refine_physical_candidate(candidate, triangulation, settings,
+        dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[]),
+        evaluate, intervals, ComponentSeedRegistry(500))
+    assert attempts == [(0, (1, 2)), (0, (0, 2)), (0, (1, 3)), (0, (0, 3)), (0, (4, 5)),
+                        (1, (1, 2)), (1, (0, 2))]
+    assert receipt['physical_quality_attempts'] == 9 and receipt['physical_quality_bisections'] == 1
+    assert not receipt['physical_quality_candidate_cells_exhausted']
+    assert result.points[:len(candidate.points)].tobytes() == candidate.points.tobytes()
+
+
+def test_growth_priority_rows_and_ties_precede_physical_poor_rows():
+    points = np.asarray(((0., 0.), (2., 0.), (0., 2.), (0., -.1),
+                         (10., 0.), (12., 0.), (10., 2.), (10., -.1)))
+    cells = np.asarray(((0, 1, 2), (0, 3, 1), (4, 5, 6), (4, 7, 5)))
+    segments = np.asarray(((0, 1), (0, 2), (1, 2), (0, 3), (1, 3),
+                           (4, 5), (4, 6), (5, 6), (4, 7), (5, 7)))
+    settings = SurfaceMeshOptions(min_angle=15., prefer_quality_policy=True,
+        native_options=NativeMeshingOptions(max_topology_operations=4, max_insertions=1))
+    evaluate = lambda rows: np.column_stack((rows, np.zeros(len(rows))))
+    candidate = _physical_quality_candidate(_make_candidate(points, cells, settings=settings), settings, evaluate)
+    triangulation = PlanarTriangulation(points, cells, segments, segments,
+        np.empty((0, 2), dtype=int), np.arange(len(points)), ())
+    result, _, receipt = refine_physical_candidate(candidate, triangulation, settings,
+        dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[]),
+        evaluate, {}, ComponentSeedRegistry(500))
+    # Equal growth ratios choose row 0 then row 2, ahead of physical-poor row 1.
+    assert receipt['physical_quality_candidate_cells_visited'] == 2
+    assert receipt['physical_quality_exhausted_cell_count'] == 1
+    assert receipt['physical_quality_attempts'] == 4
+    assert receipt['physical_quality_blocked_edge'] == (5, 6)
+    assert receipt['physical_quality_stop_reason'] == 'topology_budget'
+    assert result.points.tobytes() == points.tobytes() and result.triangles.tobytes() == cells.tobytes()
+
+
+@pytest.mark.parametrize('phase', ('native-v2 physical growth priority',
+                                 'native-v2 physical quality candidate priority'))
+def test_candidate_priority_construction_is_cancellable(phase):
+    from anymesher.native_v2 import _GeometryLimited
+    candidate, triangulation, settings, evaluate, intervals = later_defect_fixture()
+    registry = ComponentSeedRegistry(500)
+    error = _GeometryLimited('cancel while constructing candidate priorities')
+    report = dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[])
+    def cancel(where):
+        if where == phase:
+            raise error
+    with pytest.raises(_GeometryLimited) as caught:
+        refine_physical_candidate(candidate, triangulation, settings, report,
+                                  evaluate, intervals, registry, cancel)
+    assert caught.value is error and not registry.assigned_node_ids
+    assert report == dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[])
+
+
+def test_cancellation_in_later_cell_preserves_refused_baseline(monkeypatch):
+    from anymesher.native_v2 import _GeometryLimited
+    candidate, triangulation, settings, evaluate, intervals = later_defect_fixture()
+    topology_seen = []
+    original = MutableT3Topology.split_segment
+    def capture(topology, edge, **kwargs):
+        topology_seen.append((topology, topology._topology_index))
+        return original(topology, edge, **kwargs)
+    monkeypatch.setattr(MutableT3Topology, 'split_segment', capture)
+    registry = ComponentSeedRegistry(500)
+    error = _GeometryLimited('cancel later cell before any publication')
+    visits = 0
+    def cancel(phase):
+        nonlocal visits
+        if phase == 'native-v2 physical quality candidate cell':
+            visits += 1
+            if visits == 3:
+                raise error
+    with pytest.raises(_GeometryLimited) as caught:
+        refine_physical_candidate(candidate, triangulation, settings,
+            dict(topology_operations=0, insertions=0, shared_segment_splits=0, shared_nodes=[]),
+            evaluate, intervals, registry, cancel)
+    assert caught.value is error and visits == 3 and len(topology_seen) == 4
+    assert not registry.assigned_node_ids
+    for topology, index in topology_seen:
+        points, cells = topology.canonical_export()
+        assert points.tobytes() == candidate.points.tobytes()
+        assert cells.tobytes() == candidate.triangles.tobytes()
+        assert topology.epoch == 0 and topology._topology_index is index and not topology.shared_node_ids
 
 
 @pytest.mark.parametrize('change,expected', (
