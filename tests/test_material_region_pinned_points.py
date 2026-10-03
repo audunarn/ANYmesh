@@ -40,7 +40,7 @@ def test_transition_repair_cannot_move_an_explicit_vertex_or_erase_spent_work(mo
     monkeypatch.setattr(transition,'repair_frontal_transition',invalid_move)
     # Isolate the move-rejection contract from the subsequent bisection remedy.
     monkeypatch.setattr(physical,'refine_physical_candidate',
-                        lambda candidate, triangulation, settings, report, *args:
+                        lambda candidate, triangulation, settings, report, *args, **kwargs:
                         (candidate,triangulation,report))
     diagnostics = {}
     core = mesh_planar_surface(((0,0),(1,0),(1,1),(0,1)),interior_points=point,
