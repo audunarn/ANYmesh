@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from .errors import MeshError
+from ._component_reservations import ComponentNodeReservationPool
 from ._t3_incidence import T3IncidenceIndex
 from ._t3_runtime import TriangleWorkQueue
 from .metric import (
@@ -205,10 +206,18 @@ class ComponentSeedRegistry:
         first_node_id: int,
         *,
         node_id_allocator: Callable[[], int] | None = None,
+        reservation_pool: ComponentNodeReservationPool | None = None,
     ) -> None:
+        if reservation_pool is not None and node_id_allocator is not None:
+            raise MeshError("component seeds need exactly one node allocator")
+        if reservation_pool is not None and not isinstance(reservation_pool, ComponentNodeReservationPool):
+            raise MeshError("component seed reservation pool is invalid")
         self._next = int(first_node_id)
         self._values: dict[tuple[int, int, int], int] = {}
-        self._node_id_allocator = node_id_allocator
+        self._reservation_pool = reservation_pool
+        self._node_id_allocator = (
+            reservation_pool.allocate if reservation_pool is not None else node_id_allocator
+        )
         self._resolution_lock = RLock()
         self._resolving = False
 
@@ -287,7 +296,21 @@ class ComponentSeedRegistry:
                 raise MeshError("component seed resolution is already active")
             return tuple(sorted(self._values.values()))
 
-    def fork_detached(self, first_node_id: int) -> "ComponentSeedRegistry":
+    @property
+    def reservation_pool(self) -> ComponentNodeReservationPool | None:
+        return self._reservation_pool
+
+    def committed_snapshot(self):
+        """Capture deterministic station assignments before detached work."""
+        with self._resolution_lock:
+            if self._resolving:
+                raise MeshError("component seed resolution is already active")
+            return self._next, tuple(sorted(self._values.items()))
+
+    def fork_detached(
+        self, first_node_id: int, *,
+        reservation_pool: ComponentNodeReservationPool | None = None,
+    ) -> "ComponentSeedRegistry":
         """Copy committed station identities without sharing allocator effects.
 
         Used by an inactive authored-component staging path. The caller must
@@ -299,11 +322,17 @@ class ComponentSeedRegistry:
         with self._resolution_lock:
             if self._resolving:
                 raise MeshError("component seed resolution is already active")
-            if self._node_id_allocator is not None:
+            if self._node_id_allocator is not None and self._reservation_pool is None:
                 raise MeshError("external seed reservations need an atomic allocator snapshot")
+            if self._reservation_pool is not None and (
+                reservation_pool is None or reservation_pool.origin is not self._reservation_pool
+            ):
+                raise MeshError("detached seeds need the matching reservation fork")
+            if self._reservation_pool is None and reservation_pool is not None:
+                raise MeshError("detached seeds cannot acquire an unrelated reservation pool")
             if getattr(self, "_deferred_cylindrical_components", None):
                 raise MeshError("deferred cylindrical components cannot be staged")
-            supported = {"_next", "_values", "_node_id_allocator", "_resolution_lock",
+            supported = {"_next", "_values", "_node_id_allocator", "_reservation_pool", "_resolution_lock",
                          "_resolving", "_deferred_cylindrical_components",
                          "_material_region_representatives",
                          "_material_region_quality_settings",
@@ -315,7 +344,7 @@ class ComponentSeedRegistry:
             first = int(first_node_id)
             if first <= max((self._next - 1, *self._values.values()), default=0):
                 raise MeshError("detached seed start overlaps committed identities")
-            fork = ComponentSeedRegistry(first)
+            fork = ComponentSeedRegistry(first, reservation_pool=reservation_pool)
             fork._values = dict(self._values)
             for name in ("_material_region_representatives",
                          "_material_region_quality_settings",

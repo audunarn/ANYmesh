@@ -65,12 +65,15 @@ to provide an explicit prepared-reference manifest and basis: which original
 or current faces each external reference addresses, and whether each internal
 child boundary must be imprinted so cells cannot straddle that reference.
 
-The private `_authored_component_stage` copies the mesh and boundary stations
-and forks seed identities before provisional changes; a failed validator or
-abort leaves the original objects untouched. Its seed fork refuses the current
-native path's external allocator because outstanding reserved IDs are not
-exposed atomically. That path needs one component-owned reservation snapshot
-and a staged allocator before shared stations can be committed together.
-Neither private helper is called by production routing. Owner binding,
-complete source associations, strict mesh checks, resource limits and external
-reference handling remain mandatory before any authored-root publication.
+The native shared-node allocator now uses a component-owned reservation pool.
+It preserves the previous ID sequence and keeps failed reservations occupied.
+The private `_authored_component_stage` copies the mesh and boundary stations,
+then forks that pool and seed identities before provisional changes. Its
+publication holder rejects stale state and swaps the mesh, station registry
+and seed registry together only after a caller-provided validator admits them.
+Failure, cancellation or stale owner validation discards the staged pool and
+leaves original reservations unchanged. Arbitrary external allocator callbacks
+still refuse staging because their reservations cannot be snapshotted.
+Production authored-root routing does not call these private helpers. Owner
+binding, complete source associations, strict mesh checks, resource limits and
+external reference handling remain mandatory before any authored-root result.

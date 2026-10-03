@@ -56,6 +56,7 @@ from .metric import (
     MetricFieldSpec,
 )
 from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
+from ._component_reservations import ComponentNodeReservationPool
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.timing import record_quad_stage, timed_quad_call
 from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain
@@ -4931,16 +4932,10 @@ def generate_hybrid_mesh_result(
     # Physical intervals inside a union have two local incident cells. The
     # boundary-only shared-split propagator cannot represent such a split.
     automatically_seeded_shared_edges = automatically_seeded_shared_edges - protected_region_constraints
-    reserved_shared_node_ids: set[int] = set()
-
-    def allocate_shared_node_id() -> int:
-        node_id = max((*mesh.nodes, *reserved_shared_node_ids), default=0) + 1
-        reserved_shared_node_ids.add(node_id)
-        return node_id
-
+    shared_node_reservations = ComponentNodeReservationPool(mesh)
     component_seed_registry = ComponentSeedRegistry(
         _next_identifier(mesh.nodes),
-        node_id_allocator=allocate_shared_node_id,
+        reservation_pool=shared_node_reservations,
     )
     component_seed_registry._material_region_representatives = {
         face: binding.representative for face, binding in material_region_bindings.items()}
