@@ -436,18 +436,25 @@ class MutableT3Topology:
         *,
         owner: int = -1,
         cancellation_check: Callable[[str], None] | None = None,
+        preserve_splittable: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        if type(preserve_splittable) is not bool:
+            raise MeshError('invalid constraint-preserving insertion option')
+        nonremovable = (frozenset(self._protected_edges | set(self._splittable_intervals))
+                        if preserve_splittable else self.protected_edges)
         scale = max(float(np.ptp(self._points, axis=0).max()), 1.0)
         tolerance = 64.0 * np.finfo(float).eps * scale
         if np.min(np.linalg.norm(self._points - candidate, axis=1)) <= tolerance:
             raise _GeometryLimited("frontal candidate duplicates an existing point")
-        for edge_number, (first, second) in enumerate(self.protected_edges):
+        for edge_number, (first, second) in enumerate(nonremovable):
             if cancellation_check is not None and edge_number % 4096 == 0:
                 cancellation_check("native-v2 protected-edge scan")
             edge_vector = self._points[second] - self._points[first]
             cross = abs(float(edge_vector[0] * (candidate[1] - self._points[first, 1]) - edge_vector[1] * (candidate[0] - self._points[first, 0])))
             if cross <= tolerance * max(float(np.linalg.norm(edge_vector)), 1.0) and np.all(candidate >= np.minimum(self._points[first], self._points[second]) - tolerance) and np.all(candidate <= np.maximum(self._points[first], self._points[second]) + tolerance):
-                raise _GeometryLimited("frontal candidate encroaches an unsplittable protected edge")
+                raise _GeometryLimited(
+                    "frontal candidate lies on a registered constraint" if preserve_splittable else
+                    "frontal candidate encroaches an unsplittable protected edge")
         bad_triangles = []
         for row, triangle in enumerate(self._triangles):
             if cancellation_check is not None and row % 4096 == 0:
@@ -508,8 +515,10 @@ class MutableT3Topology:
                 edge = _edge(int(triangle[index]), int(triangle[(index + 1) % 3]))
                 counts[edge] = counts.get(edge, 0) + 1
                 edge_owners.setdefault(edge, []).append(int(self.triangle_owners[row]))
-        if any(count == 2 and edge in self.protected_edges for edge, count in counts.items()):
-            raise _GeometryLimited("frontal cavity would remove an unsplittable protected edge")
+        if any(count == 2 and edge in nonremovable for edge, count in counts.items()):
+            raise _GeometryLimited(
+                "frontal cavity would remove a registered constraint" if preserve_splittable else
+                "frontal cavity would remove an unsplittable protected edge")
         boundary = sorted(edge for edge, count in counts.items() if count == 1)
         new_id = len(self._points)
         extended = np.vstack((self._points, candidate))
@@ -586,7 +595,10 @@ class MutableT3Topology:
         *,
         owner: int = -1,
         cancellation_check: Callable[[str], None] | None = None,
+        preserve_splittable: bool = False,
     ) -> dict[str, Any]:
+        if type(preserve_splittable) is not bool:
+            raise MeshError('invalid constraint-preserving insertion option')
         candidate = np.asarray(point, dtype=np.float64)
         if candidate.shape != (2,) or not np.all(np.isfinite(candidate)):
             raise MeshError("frontal insertion point must be one finite 2D coordinate")
@@ -598,7 +610,8 @@ class MutableT3Topology:
         native = native_mutable_t3_insert(
                 self._points,
                 self._triangles,
-                np.asarray(sorted(self.protected_edges), dtype=np.int64).reshape((-1, 2)),
+                (self.constraint_edges if preserve_splittable else
+                 np.asarray(sorted(self.protected_edges), dtype=np.int64).reshape((-1, 2))),
                 candidate,
                 *((self._topology_index._native_state,)
                   if self._topology_index._native_state is not None else ()),
@@ -608,6 +621,7 @@ class MutableT3Topology:
         if native is None:
             new_triangles, reference_owners, report = self._python_insert_with_owners(
                 candidate, owner=owner, cancellation_check=cancellation_check,
+                **({'preserve_splittable': True} if preserve_splittable else {}),
             )
         else:
             new_triangles, report = native
@@ -991,6 +1005,35 @@ def _short_edge_metric_frame(coordinates: np.ndarray, tensors: np.ndarray):
     return mean, transform, whitened, lengths, edge_index
 
 
+def _metric_segment_mean(endpoint_tensors):
+    """Validate the computed mean once, including floating SPD roundoff."""
+    from .metric import _validate_spd
+    metrics = np.asarray(endpoint_tensors, dtype=np.float64)
+    if metrics.shape != (2, 2, 2):
+        raise MeshError('metric encroachment requires SPD endpoint tensors')
+    for tensor in metrics:
+        _validate_spd(tensor, 'metric encroachment endpoint tensor')
+    mean = .5 * metrics[0] + .5 * metrics[1]
+    mean = .5 * mean + .5 * mean.T
+    _validate_spd(mean, 'metric encroachment mean tensor')
+    mean.setflags(write=False)
+    return mean
+
+
+def _metric_segment_penetration(candidate, first, second, endpoint_tensors, *, _mean=None):
+    """Frozen endpoint ellipse, optionally from this epoch's validated mean."""
+    coordinates = np.asarray((candidate, first, second), dtype=np.float64)
+    if coordinates.shape != (3, 2) or not np.isfinite(coordinates).all():
+        raise MeshError('metric encroachment requires finite endpoints')
+    mean = _metric_segment_mean(endpoint_tensors) if _mean is None else np.asarray(_mean,dtype=np.float64)
+    if mean.shape != (2, 2) or not np.isfinite(mean).all():
+        raise MeshError('metric encroachment requires a finite mean tensor')
+    penetration = float((coordinates[0]-coordinates[1]) @ mean @ (coordinates[0]-coordinates[2]))
+    if not np.isfinite(penetration):
+        raise MeshError('metric encroachment product is not finite')
+    return penetration
+
+
 def _offcentre(coordinates: np.ndarray, tensors: np.ndarray, fallback_size: float, *,
                short_edge_metric: bool = False) -> np.ndarray:
     if type(short_edge_metric) is not bool:
@@ -1137,15 +1180,31 @@ def frontal_delaunay_refine(
         )
 
     owner_xyz_cache = None
+    owner_xyz_eligible = False
     if type(provider) is SpatialMetricField and getattr(metric_to_physical, '__self__', None) is not None:
         from ._analytic_metric_chart import AnalyticMetricChart
         if (isinstance(metric_to_physical.__self__, AnalyticMetricChart)
                 and getattr(metric_to_physical, '__func__', None) is AnalyticMetricChart.evaluate):
+            owner_xyz_eligible = True
             from ._owner_xyz_cache import OwnerXYZCache
             owner_xyz_cache = OwnerXYZCache(metric_to_physical,
                 max_rows=len(triangulation.points)+options.max_insertions,
                 batch_rows=min(4096,options.cancellation_interval),
                 cancellation_check=cancellation_check)
+
+    owner_metric_encroachment = (short_edge_offcentre and owner_xyz_eligible
+                                 and options.metric_mode == 'isotropic_spatial')
+    callback_failure = None
+    if owner_metric_encroachment and cancellation_check is not None:
+        incoming_check = cancellation_check
+        def owner_checkpoint(phase):
+            nonlocal callback_failure
+            try:
+                incoming_check(phase)
+            except BaseException as error:
+                callback_failure = error
+                raise
+        cancellation_check = owner_checkpoint
 
     def evaluate_spec(
         specification: MetricFieldSpec,
@@ -1263,7 +1322,9 @@ def frontal_delaunay_refine(
                     edge, cancellation_check=cancellation_check,
                     _split_proposal=_split_proposal,
                 )
-        except _GeometryLimited:
+        except _GeometryLimited as error:
+            if owner_metric_encroachment and error is callback_failure:
+                raise
             if edge not in refused_shared_edges:
                 refused_shared_edges.add(edge)
                 geometry_limited += 1
@@ -1321,6 +1382,13 @@ def frontal_delaunay_refine(
             [edge for edge in topology.splittable_edges if edge not in refused_shared_edges],
             dtype=np.int64,
         ).reshape((-1, 2))
+        metric_segment_means = {}
+        if owner_metric_encroachment:
+            for edge_number, segment in enumerate(splittable_edges):
+                if cancellation_check is not None and edge_number % options.cancellation_interval == 0:
+                    cancellation_check('native-v2 metric encroachment means')
+                edge = _edge(*map(int,segment))
+                metric_segment_means[edge] = _metric_segment_mean(tensors[list(edge)])
         splittable_lengths = _metric_lengths(
             points,
             splittable_edges,
@@ -1477,9 +1545,16 @@ def frontal_delaunay_refine(
                             cancellation_check("native-v2 proposed-point encroachment scan")
                         edge = _edge(*map(int, segment))
                         first, second = points[list(edge)]
-                        penetration = float((candidate - first) @ (candidate - second))
+                        protected = edge in topology.protected_edges or edge in refused_shared_edges
+                        # Frozen, already gradation-limited endpoint tensors.
+                        # Protected/refused blockers keep the Euclidean rule
+                        # and never join the dimensionless metric ranking.
+                        penetration = (_metric_segment_penetration(
+                            candidate, first, second, None, _mean=metric_segment_means[edge])
+                            if owner_metric_encroachment and not protected else
+                            float((candidate - first) @ (candidate - second)))
                         if penetration < 0.0:
-                            if edge in topology.protected_edges or edge in refused_shared_edges:
+                            if protected:
                                 blocked = True
                             else:
                                 encroached.append((penetration, edge))
@@ -1498,8 +1573,11 @@ def frontal_delaunay_refine(
                     topology.insert_point(
                         candidate,
                         cancellation_check=cancellation_check,
+                        **({'preserve_splittable': True} if owner_metric_encroachment else {}),
                     )
-                except _GeometryLimited:
+                except _GeometryLimited as error:
+                    if owner_metric_encroachment and error is callback_failure:
+                        raise
                     rejected.add(key)
                     geometry_limited += 1
                     continue
@@ -1554,6 +1632,8 @@ def frontal_delaunay_refine(
         report['short_edge_offcentre'] = True
     if owner_xyz_cache is not None:
         report['owner_xyz_cache'] = owner_xyz_cache.receipt()
+    if owner_metric_encroachment:
+        report['owner_metric_encroachment'] = True
     native_diagnostics["native_v2"] = report
     return PlanarTriangulation(
         points=points, triangles=triangles, segments=topology.constraint_edges,
