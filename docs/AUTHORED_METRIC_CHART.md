@@ -180,3 +180,16 @@ ancestry are recorded without calling them generated-only. This narrow API is
 not an actual meshing route, does not transfer application source references,
 and marks solver admission and publication false. Its validator rederives the
 owner proofs; the mesh digest alone is not an admission certificate.
+
+The private `_authored_route_boundary` packet is the first engine-input slice
+for an opt-in authored-root route. For every root in the qualified whole
+component it joins owner-ordered exterior station IDs into one closed loop,
+retains each paired interior edge as protected constraint segments, and maps
+their exact current-material UV into the original-root metric chart. Exact
+rational UV remains attached to the unchanged global node IDs beside the float
+metric coordinates needed by the existing surface mesher. The source-only
+fixture proves both roots share the same joint IDs and rejects altered or stale
+stations. This packet does not invoke triangulation. A native-result adapter
+must still retain each created node's original UV and work-ledger charge before
+the exact partition, conformity, quality and current-association gates can
+admit a staged result; no current production route calls this packet.
