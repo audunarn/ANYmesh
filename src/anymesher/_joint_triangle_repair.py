@@ -1,5 +1,6 @@
 """Bounded coupled angle/perimeter repair, used only on detached chart points."""
 from dataclasses import dataclass
+from numbers import Integral
 import numpy as np
 
 
@@ -13,10 +14,21 @@ class JointTriangleRepair:
     budget_exhausted: bool
 
 
+def _validate_pinned_nodes(nodes, count):
+    try:
+        values = tuple(nodes)
+    except TypeError as error:
+        raise ValueError("invalid pinned joint triangle repair nodes") from error
+    if any(isinstance(node, (bool, np.bool_)) or not isinstance(node, Integral)
+           or not 0 <= node < count for node in values):
+        raise ValueError("invalid pinned joint triangle repair nodes")
+    return frozenset(map(int, values))
+
+
 def repair_joint_triangle_quality(points, triangles, protected_edges, poor_triangle_ids, *,
                                   min_angle, max_growth, max_trials=2048,
                                   cancellation_check=None, evaluate_coordinates=None,
-                                  neighbourhood_rings=0, coordinate_batch_size=1):
+                                  neighbourhood_rings=0, coordinate_batch_size=1, pinned_nodes=()):
     original = np.asarray(points, dtype=np.float64)
     cells = np.asarray(triangles, dtype=np.int64)
     if (original.ndim != 2 or original.shape[1] != 2 or not np.isfinite(original).all()
@@ -36,6 +48,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         raise ValueError("invalid joint triangle repair incidence")
     fixed = {n for edge in protected for n in edge}
     fixed.update(n for edge, rows in incidence.items() if len(rows) == 1 for n in edge)
+    fixed.update(_validate_pinned_nodes(pinned_nodes, len(original)))
     bad = sorted(set(map(int, poor_triangle_ids)))
     if any(i < 0 or i >= len(cells) for i in bad):
         raise ValueError("invalid joint triangle repair selection")
@@ -234,4 +247,6 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             inverse = identity * 100.
         values, value, g = next_values, candidate, next_gradient
     moved = tuple(n for n in movable if best_points[n].tobytes() != original[n].tobytes())
+    if best_points[sorted(fixed)].tobytes() != original[sorted(fixed)].tobytes():
+        raise ValueError("joint triangle repair changed fixed nodes")
     return JointTriangleRepair(best_points, trials, moved, initial, best_penalty, trials >= max_trials)
