@@ -1892,6 +1892,11 @@ def _run_frontal_quality_path(
         baseline = dict(baseline, best=physical_baseline,
                         target_met=(physical_baseline.report['invalid_element_count'] == 0
                                     and not physical_baseline.report['poor_element_ids']))
+    owner_short_edge = False
+    if metric_to_physical is not None:
+        from ._analytic_metric_chart import AnalyticMetricChart
+        owner_short_edge = (isinstance(getattr(metric_to_physical, '__self__', None), AnalyticMetricChart)
+                            and getattr(metric_to_physical, '__func__', None) is AnalyticMetricChart.evaluate)
     triangulation, report = frontal_delaunay_refine(
         baseline["triangulation"],
         settings.native_options,
@@ -1906,6 +1911,7 @@ def _run_frontal_quality_path(
         supplemental_metric_field=supplemental_metric_field,
         qualified_seed=bool(baseline["target_met"]),
         minimum_angle_target=settings.min_angle,
+        short_edge_offcentre=owner_short_edge,
     )
     work_statistics = {
         "full_triangulations": 0,

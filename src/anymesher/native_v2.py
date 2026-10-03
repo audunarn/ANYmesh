@@ -980,7 +980,71 @@ def _angles(coordinates: np.ndarray) -> tuple[float, float, float]:
     return tuple(result)  # type: ignore[return-value]
 
 
-def _offcentre(coordinates: np.ndarray, tensors: np.ndarray, fallback_size: float) -> np.ndarray:
+def _short_edge_metric_frame(coordinates: np.ndarray, tensors: np.ndarray):
+    """One base convention for placement and its nearer-circumcentre guard."""
+    mean = np.mean(tensors, axis=0)
+    mean = .5 * mean + .5 * mean.T
+    transform = np.linalg.cholesky(mean)
+    whitened = (coordinates-coordinates[0]) @ transform
+    lengths = np.linalg.norm(np.roll(whitened, -1, axis=0)-whitened, axis=1)
+    edge_index = min(range(3), key=lambda row: (lengths[row], row))
+    return mean, transform, whitened, lengths, edge_index
+
+
+def _offcentre(coordinates: np.ndarray, tensors: np.ndarray, fallback_size: float, *,
+               short_edge_metric: bool = False) -> np.ndarray:
+    if type(short_edge_metric) is not bool:
+        raise MeshError('invalid short-edge offcentre option')
+    if short_edge_metric:
+        from .metric import _validate_spd
+        coordinates = np.asarray(coordinates, dtype=np.float64)
+        tensors = np.asarray(tensors, dtype=np.float64)
+        if (coordinates.shape != (3, 2) or not np.isfinite(coordinates).all()
+                or tensors.shape != (3, 2, 2) or not np.isfinite(tensors).all()
+                or not np.isfinite(fallback_size) or fallback_size <= 0.):
+            raise MeshError('short-edge offcentre requires finite coordinates, metrics and size')
+        if orient2d(*coordinates) == 0.:
+            raise MeshError('short-edge offcentre requires a nondegenerate triangle')
+        for tensor in tensors:
+            _validate_spd(tensor, 'short-edge offcentre metric')
+        try:
+            # Row coordinates multiply L, since M=L L.T. L.T would whiten
+            # using a different metric whenever M has off-diagonal entries.
+            mean, transform, whitened, lengths, edge_index = _short_edge_metric_frame(coordinates, tensors)
+            _validate_spd(mean, 'short-edge offcentre mean metric')
+            origin = coordinates[0]
+            length = float(lengths[edge_index])
+            if not np.isfinite(whitened).all() or not np.isfinite(lengths).all() or length <= 0.:
+                raise MeshError('short-edge offcentre metric triangle is invalid')
+            first = whitened[edge_index]
+            second = whitened[(edge_index + 1) % 3]
+            opposite = whitened[(edge_index + 2) % 3]
+            midpoint = .5 * first + .5 * second
+            edge = second-first
+            normal = np.asarray((-edge[1], edge[0])) / length
+            if float((opposite-midpoint) @ normal) < 0.:
+                normal = -normal
+            chart_normal = np.linalg.solve(transform.T, normal)
+            chart_length = float(np.linalg.norm(chart_normal))
+            if not np.isfinite(chart_length) or chart_length <= 0.:
+                raise MeshError('short-edge offcentre inverse direction is invalid')
+            # Keep the original chart desired-height bound for this edge,
+            # converted to a whitened offset along the inverse-mapped normal.
+            # The metric already contains h^-2; its desired side length is one.
+            chart_edge_length = float(np.linalg.norm(
+                coordinates[(edge_index + 1) % 3]-coordinates[edge_index]))
+            target = min(fallback_size, 1. / sqrt(float(np.linalg.eigvalsh(mean)[-1])))
+            desired_chart_height = sqrt(max(target * target - (.5 * chart_edge_length) ** 2,
+                                            (.35 * target) ** 2))
+            desired_metric_height = sqrt(max(1. - (.5 * length) ** 2, .35 ** 2))
+            height = min(sqrt(3.) * .5 * length, desired_metric_height,
+                         desired_chart_height / chart_length)
+            candidate = origin + np.linalg.solve(transform.T, midpoint + height * normal)
+        except (np.linalg.LinAlgError, OverflowError) as error:
+            raise MeshError('short-edge offcentre metric is singular') from error
+        if not np.isfinite(candidate).all() or height <= 0.:
+            raise MeshError('short-edge offcentre candidate is invalid')
+        return candidate
     lengths = [float(np.linalg.norm(coordinates[(i + 1) % 3] - coordinates[i])) for i in range(3)]
     edge_index = min(range(3), key=lambda row: (lengths[row], row))
     first = coordinates[edge_index]
@@ -1037,6 +1101,7 @@ def frontal_delaunay_refine(
     supplemental_metric_field: MetricFieldSpec | None = None,
     qualified_seed: bool = False,
     minimum_angle_target: float = 30.0,
+    short_edge_offcentre: bool = False,
     _split_proposal: Callable[
         [int, Fraction, Fraction], tuple[Fraction, Any, int | None] | None
     ] | None = None,
@@ -1045,6 +1110,10 @@ def frontal_delaunay_refine(
 
     if not np.isfinite(minimum_angle_target) or not 0.0 < minimum_angle_target < 90.0:
         raise MeshError("minimum angle target must be finite and in (0, 90)")
+    if type(short_edge_offcentre) is not bool:
+        raise MeshError('invalid frontal short-edge offcentre option')
+    if short_edge_offcentre and not callable(metric_to_physical):
+        raise MeshError('short-edge offcentre requires owner coordinates')
     if options.point_placement != "frontal_delaunay":
         raise MeshError("frontal refinement requires point_placement='frontal_delaunay'")
     provider: Any
@@ -1344,7 +1413,8 @@ def frontal_delaunay_refine(
                 and isinstance(provider, SpatialMetricField)
                 else evaluate_metric(coordinates)
             )
-            proposals = [_offcentre(coordinates, local_tensors, target_size)]
+            proposals = ([_offcentre(coordinates, local_tensors, target_size, short_edge_metric=True)]
+                         if short_edge_offcentre else [_offcentre(coordinates, local_tensors, target_size)])
             circumcentre = _circumcentre(coordinates)
             if (
                 circumcentre is not None
@@ -1353,13 +1423,14 @@ def frontal_delaunay_refine(
             ):
                 # An off-centre is the nearer alternative to the circumcentre,
                 # not a license to jump past it and seed another thin cavity.
-                edge_index = min(
-                    range(3),
-                    key=lambda row: (
-                        float(np.linalg.norm(coordinates[(row + 1) % 3] - coordinates[row])),
-                        row,
-                    ),
-                )
+                edge_index = (_short_edge_metric_frame(coordinates, local_tensors)[-1]
+                    if short_edge_offcentre else min(
+                        range(3),
+                        key=lambda row: (
+                            float(np.linalg.norm(coordinates[(row + 1) % 3] - coordinates[row])),
+                            row,
+                        ),
+                    ))
                 midpoint = .5 * (coordinates[edge_index] + coordinates[(edge_index + 1) % 3])
                 if float(np.linalg.norm(proposals[0] - midpoint)) >= float(
                     np.linalg.norm(circumcentre - midpoint)
@@ -1463,6 +1534,8 @@ def frontal_delaunay_refine(
         report["reserved_node_reuses"] = reserved_node_reuses
         report["staged_point_insertions"] = insertions + reserved_node_reuses
         report["refused_shared_edges"] = sorted(refused_shared_edges)
+    if short_edge_offcentre:
+        report['short_edge_offcentre'] = True
     native_diagnostics["native_v2"] = report
     return PlanarTriangulation(
         points=points, triangles=triangles, segments=topology.constraint_edges,
