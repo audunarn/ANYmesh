@@ -1,6 +1,7 @@
 """Local conformity repair for detached, already-generated T3 neighbours."""
 
 import numpy as np
+from numbers import Integral
 
 from .errors import MeshError
 
@@ -9,60 +10,115 @@ def _edges(nodes):
     return tuple(tuple(sorted((nodes[i], nodes[(i + 1) % 3]))) for i in range(3))
 
 
-def propagate_triangle_split(mesh, face_ids, endpoints, node_id, *, cache):
+def propagate_triangle_split(mesh, face_ids, endpoints, node_id, *, cache,
+                             interior_face_ids=(), cancellation_check=None):
     """Stage all incident-face replacements, then commit using source IDs.
 
     Each face incidence index is built once and updated locally. The caller
     owns the detached mesh, the registered straight-edge station and new node.
-    Quadratic/recombined neighbours are deliberately not silently decomposed.
+    ``interior_face_ids`` must come from the owner's material-path incidence,
+    never from observed mesh adjacency. Those faces require two triangles;
+    other faces retain the one-triangle boundary contract. Return the number
+    of original triangles replaced. Quadratic/recombined neighbours refuse.
+    Interior permissions refer only to already-built neighbours. The caller
+    binds the registered straight station and invalidates cached incidence
+    after every other connectivity change.
     """
     edge = tuple(sorted(map(int, endpoints)))
+    faces = sorted(set(face_ids))
+    raw_interior = tuple(interior_face_ids)
+    if any(isinstance(face, (bool, np.bool_)) or not isinstance(face, Integral)
+           or face < 1 for face in raw_interior):
+        raise MeshError("interior split permission requires positive face identities")
+    interior = set(raw_interior)
+    if not interior.issubset(faces):
+        raise MeshError("interior split permission refers to an unselected face")
     plans = []
+    indexes = {}
+    claimed = set()
     next_id = max((*mesh.tris, *mesh.quads, *mesh.beams), default=0) + 1
-    for face_id in sorted(set(face_ids)):
+    for face_id in faces:
+        if cancellation_check is not None:
+            cancellation_check("shared triangle split owner staging")
         elements = mesh.elements_of_face.get(face_id, ())
         if not elements:
+            if face_id in interior:
+                raise MeshError("declared interior split neighbour has no active triangles")
             continue
         index = cache.get(face_id)
         if index is None:
             index = {}
-            for element_id in elements:
+            for ordinal, element_id in enumerate(elements):
+                if cancellation_check is not None and ordinal % 256 == 0:
+                    cancellation_check("shared triangle split incidence staging")
                 nodes = mesh.tris.get(element_id)
                 if nodes is None or len(nodes) != 3:
                     raise MeshError("shared refinement requires staged linear T3 neighbours")
                 for key in _edges(nodes):
                     index.setdefault(key, set()).add(element_id)
-            cache[face_id] = index
         adjacent = index.get(edge, set())
-        if len(adjacent) != 1:
-            raise MeshError("shared-edge split requires exactly one incident boundary triangle per face")
-        element_id = next(iter(adjacent))
-        original = mesh.tris[element_id]
-        start = next(
-            i for i in range(3)
-            if tuple(sorted((original[i], original[(i + 1) % 3]))) == edge
-        )
-        a, b, c = (original[(start + i) % 3] for i in range(3))
-        replacements = ((a, node_id, c), (node_id, b, c))
-        old = np.asarray([mesh.nodes[n] for n in (a, b, c)], dtype=np.float64)
-        reference = np.cross(old[1] - old[0], old[2] - old[0])
-        for nodes in replacements:
-            points = np.asarray([mesh.nodes[n] for n in nodes], dtype=np.float64)
-            normal = np.cross(points[1] - points[0], points[2] - points[0])
-            if not np.all(np.isfinite(normal)) or float(normal @ reference) <= 0.:
-                raise MeshError("shared-edge split would invert or degenerate a neighbour")
-        plans.append((face_id, index, element_id, next_id, original, replacements))
-        next_id += 1
+        expected = 2 if face_id in interior else 1
+        if len(adjacent) != expected:
+            raise MeshError("shared-edge split requires exactly two incident interior triangles per face"
+                            if expected == 2 else
+                            "shared-edge split requires exactly one incident boundary triangle per face")
+        directions = []
+        indexes[face_id] = index
+        for element_id in sorted(adjacent):
+            if element_id in claimed:
+                raise MeshError("shared refinement has ambiguous face ownership")
+            claimed.add(element_id)
+            original = mesh.tris.get(element_id)
+            if (element_id not in elements or original is None
+                    or len(original) != 3):
+                raise MeshError("shared refinement requires staged linear T3 neighbours")
+            if edge not in _edges(original):
+                raise MeshError("shared refinement cache does not match its parent interval")
+            start = next(
+                i for i in range(3)
+                if tuple(sorted((original[i], original[(i + 1) % 3]))) == edge
+            )
+            a, b, c = (original[(start + i) % 3] for i in range(3))
+            directions.append((a, b))
+            if node_id in original:
+                raise MeshError("shared-edge split station is already an incident vertex")
+            replacements = ((a, node_id, c), (node_id, b, c))
+            old = np.asarray([mesh.nodes[n] for n in (a, b, c)], dtype=np.float64)
+            reference = np.cross(old[1] - old[0], old[2] - old[0])
+            if not np.all(np.isfinite(reference)):
+                raise MeshError("shared-edge split has non-finite parent orientation")
+            for nodes in replacements:
+                points = np.asarray([mesh.nodes[n] for n in nodes], dtype=np.float64)
+                normal = np.cross(points[1] - points[0], points[2] - points[0])
+                if not np.all(np.isfinite(normal)) or float(normal @ reference) <= 0.:
+                    raise MeshError("shared-edge split would invert or degenerate a neighbour")
+            plans.append((face_id, index, element_id, next_id, original, replacements))
+            next_id += 1
+        if expected == 2 and directions[0] != directions[1][::-1]:
+            raise MeshError("shared interior split has inconsistent face orientation")
+    # Build only affected index deltas. No caller cache mutates before all
+    # owners and the final cancellation checkpoint have passed.
+    deltas = {}
     for face_id, index, element_id, added_id, original, replacements in plans:
+        changed = deltas.setdefault(face_id, {})
         for key in _edges(original):
-            index[key].remove(element_id)
-            if not index[key]:
-                del index[key]
-        mesh.tris[element_id], mesh.tris[added_id] = replacements
-        mesh.elements_of_face[face_id].append(added_id)
+            changed.setdefault(key, set(index.get(key, ()))).remove(element_id)
         for identifier, nodes in zip((element_id, added_id), replacements):
             for key in _edges(nodes):
-                index.setdefault(key, set()).add(identifier)
+                changed.setdefault(key, set(index.get(key, ()))).add(identifier)
+    if cancellation_check is not None:
+        cancellation_check("shared triangle split commit")
+    for face_id, index, element_id, added_id, original, replacements in plans:
+        mesh.tris[element_id], mesh.tris[added_id] = replacements
+        mesh.elements_of_face[face_id].append(added_id)
+    for face_id, changed in deltas.items():
+        index = indexes[face_id]
+        for key, values in changed.items():
+            if values:
+                index[key] = values
+            else:
+                index.pop(key, None)
+        cache[face_id] = index
     return len(plans)
 
 
