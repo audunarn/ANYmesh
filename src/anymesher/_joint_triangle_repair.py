@@ -16,6 +16,14 @@ class JointTriangleRepair:
     root_nodes: tuple = ()
     neighbour_nodes: tuple = ()
     priority_mode: str = 'node_id'
+    line_search_admission: bool = False
+    admission_checks: int = 0
+    admission_refusals: int = 0
+    line_search_trials: int = 0
+    line_search_refusals: int = 0
+    line_search_admissions: int = 0
+    line_search_advancements: int = 0
+    refused_zero_trials: int = 0
 
 
 def _validate_pinned_nodes(nodes, count):
@@ -63,7 +71,19 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
                                   min_angle, max_growth, max_trials=2048,
                                   cancellation_check=None, evaluate_coordinates=None,
                                   neighbourhood_rings=0, coordinate_batch_size=1, pinned_nodes=(),
-                                  physical_priority=False, candidate_callback=None):
+                                  physical_priority=False, candidate_callback=None,
+                                  line_search_admission=False):
+    """Observe finite charged trials; only explicit admission interprets bool returns.
+
+    Admission qualifies Armijo steps and zero-merit stopping. Raw probe merits,
+    gradients and the returned raw global winner remain independent of admission.
+
+    The callback receives detached read-only (points, xyz, merit, ordinal).
+    Ordinals are one-based charged trials and may have gaps for invalid chart
+    rows. Admission mode requires an exact Python bool; otherwise returns are
+    ignored. line_search_refusals counts physically rejected Armijo candidates,
+    excluding ordinary Armijo failures and invalid chart rows.
+    """
     original = np.asarray(points, dtype=np.float64)
     cells = np.asarray(triangles, dtype=np.int64)
     if (original.ndim != 2 or original.shape[1] != 2 or not np.isfinite(original).all()
@@ -74,6 +94,8 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             or type(neighbourhood_rings) is not int or neighbourhood_rings not in (0, 1)
             or type(coordinate_batch_size) is not int or not 1 <= coordinate_batch_size <= 8
             or type(physical_priority) is not bool
+            or type(line_search_admission) is not bool
+            or line_search_admission and (not callable(evaluate_coordinates) or candidate_callback is None)
             or physical_priority and evaluate_coordinates is None
             or candidate_callback is not None and (not callable(candidate_callback)
                                                     or evaluate_coordinates is None)):
@@ -126,6 +148,11 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     selection = dict(selected_nodes=tuple(movable), root_nodes=root_nodes,
                      neighbour_nodes=neighbour_nodes,
                      priority_mode='physical_severity' if physical_priority else 'node_id')
+    admission = dict(line_search_admission=line_search_admission, admission_checks=0,
+        admission_refusals=0, line_search_trials=0, line_search_refusals=0,
+        line_search_admissions=0, line_search_advancements=0, refused_zero_trials=0)
+    admitted_trials = {}
+    admitted_zero = False
     counts = np.bincount(cells.ravel(), minlength=len(original))
     totals = np.bincount(cells.ravel(), weights=angles.ravel(), minlength=len(original))
     average = np.divide(totals, counts, out=np.full(len(original), float(min_angle)), where=counts > 0)
@@ -148,6 +175,7 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         return xyz
 
     def penalty(x, owner_xyz=None, trial_ordinal=None):
+        nonlocal admitted_zero
         xy = x[cells]
         forward = np.roll(xy, -1, axis=1) - xy
         backward = np.roll(xy, 1, axis=1) - xy
@@ -176,7 +204,18 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             observed_points, observed_xyz = x.copy(), xyz.copy()
             observed_points.setflags(write=False)
             observed_xyz.setflags(write=False)
-            candidate_callback(observed_points, observed_xyz, value, trial_ordinal)
+            qualified = candidate_callback(observed_points, observed_xyz, value, trial_ordinal)
+            if line_search_admission:
+                if type(qualified) is not bool:
+                    raise ValueError("invalid joint triangle line-search admission receipt")
+                # Charged ordinals include invalid chart rows omitted from an
+                # owner batch. Missing receipts never admit a line-search step.
+                admitted_trials[trial_ordinal] = qualified
+                admission['admission_checks'] += 1
+                admission['admission_refusals'] += int(not qualified)
+                if value == 0.:
+                    admitted_zero = admitted_zero or qualified
+                    admission['refused_zero_trials'] += int(not qualified)
             if cancellation_check is not None:
                 cancellation_check()
         return value
@@ -184,8 +223,9 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     initial = penalty(original)
     if not np.isfinite(initial):
         raise ValueError("non-positive joint triangle repair input")
-    if not movable or not max_trials or initial == 0:
-        return JointTriangleRepair(original.copy(), 0, (), initial, initial, max_trials == 0, **selection)
+    if not movable or not max_trials or initial == 0 and not line_search_admission:
+        return JointTriangleRepair(original.copy(), 0, (), initial, initial, max_trials == 0,
+                                   **selection, **admission)
     scale = float(np.median([np.linalg.norm(original[a] - original[b]) for a, b in incidence]))
     base = original[movable].copy()
     trials = 0
@@ -273,7 +313,8 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
     inverse = identity * 100.
     g = gradient(values, value)
     for _ in range(48):
-        if g is None or best_penalty == 0. or trials >= max_trials:
+        if (g is None or best_penalty == 0. and (not line_search_admission or admitted_zero)
+                or trials >= max_trials):
             break
         direction = -inverse @ g
         if float(direction @ g) >= 0:
@@ -290,7 +331,14 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
             candidate = evaluate(values + delta)
             if candidate is None:
                 break
+            if line_search_admission:
+                admission['line_search_trials'] += 1
             if candidate <= value + 1e-4 * float(g @ delta):
+                if line_search_admission and not admitted_trials.get(trials, False):
+                    admission['line_search_refusals'] += 1
+                    continue
+                if line_search_admission:
+                    admission['line_search_admissions'] += 1
                 accepted = True
                 break
         if not accepted:
@@ -307,7 +355,10 @@ def repair_joint_triangle_quality(points, triangles, protected_edges, poor_trian
         else:
             inverse = identity * 100.
         values, value, g = next_values, candidate, next_gradient
+        if line_search_admission:
+            admission['line_search_advancements'] += 1
     moved = tuple(n for n in movable if best_points[n].tobytes() != original[n].tobytes())
     if best_points[sorted(fixed)].tobytes() != original[sorted(fixed)].tobytes():
         raise ValueError("joint triangle repair changed fixed nodes")
-    return JointTriangleRepair(best_points, trials, moved, initial, best_penalty, trials >= max_trials, **selection)
+    return JointTriangleRepair(best_points, trials, moved, initial, best_penalty, trials >= max_trials,
+                               **selection, **admission)

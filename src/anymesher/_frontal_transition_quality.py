@@ -17,7 +17,8 @@ from .errors import MeshError
 
 def repair_frontal_transition(candidate, protected, settings, report,
                                cancellation_check=None, *, evaluate_coordinates=None,
-                               coordinate_batch_size=1, pinned_nodes=(), allow_partial_progress=False):
+                               coordinate_batch_size=1, pinned_nodes=(), allow_partial_progress=False,
+                               line_search_admission=False):
     from .surface_mesh import _candidate_selection_key, _make_candidate
 
     used = report.get("topology_operations")
@@ -25,6 +26,9 @@ def repair_frontal_transition(candidate, protected, settings, report,
         raise MeshError("invalid frontal topology-work receipt")
     if type(allow_partial_progress) is not bool:
         raise MeshError("invalid frontal partial-progress option")
+    if (type(line_search_admission) is not bool or line_search_admission
+            and (not allow_partial_progress or evaluate_coordinates is None)):
+        raise MeshError("invalid frontal line-search admission option")
     pinned = _validate_pinned_nodes(pinned_nodes, len(candidate.points))
     if allow_partial_progress and evaluate_coordinates is not None and 'violation_counts' not in candidate.report:
         from .surface_mesh import _physical_quality_candidate
@@ -49,6 +53,10 @@ def repair_frontal_transition(candidate, protected, settings, report,
         "admissible_quality": None, "admissible_penalty": None,
         "admissible_trial": None,
     }
+    if line_search_admission:
+        receipt.update(line_search_admission=True, admission_checks=0, admission_refusals=0,
+            line_search_trials=0, line_search_refusals=0, line_search_admissions=0,
+            line_search_advancements=0, refused_zero_trials=0)
     if (not candidate.report["poor_element_ids"] or not limit
             or not 0 < settings.min_angle < 60
             or not math.isfinite(settings.max_element_growth)
@@ -74,7 +82,7 @@ def repair_frontal_transition(candidate, protected, settings, report,
         try:
             if penalty < observed_best_penalty:
                 observed_best_penalty, observed_best_trial = penalty, ordinal
-            if penalty >= admissible_penalty:
+            if not line_search_admission and penalty >= admissible_penalty:
                 return
             checkpoint()
             if points[fixed].tobytes() != candidate.points[fixed].tobytes():
@@ -95,9 +103,11 @@ def repair_frontal_transition(candidate, protected, settings, report,
             checkpoint()
             if not _alternative_progress(candidate.report, trial.report):
                 receipt['candidate_refusals'] += 1
-                return
-            admissible, admissible_penalty, admissible_trial = trial, penalty, ordinal
-            receipt['candidate_retentions'] += 1
+                return False
+            if penalty < admissible_penalty:
+                admissible, admissible_penalty, admissible_trial = trial, penalty, ordinal
+                receipt['candidate_retentions'] += 1
+            return True
         finally:
             receipt['candidate_observation_seconds'] += perf_counter() - started
 
@@ -112,7 +122,13 @@ def repair_frontal_transition(candidate, protected, settings, report,
         pinned_nodes=pinned,
         physical_priority=allow_partial_progress and evaluate_coordinates is not None,
         candidate_callback=observe if allow_partial_progress and evaluate_coordinates is not None else None,
+        line_search_admission=line_search_admission,
     )
+    if line_search_admission:
+        for name in ('admission_checks', 'admission_refusals', 'line_search_trials',
+                     'line_search_refusals', 'line_search_admissions',
+                     'line_search_advancements', 'refused_zero_trials'):
+            receipt[name] = getattr(repaired, name)
     if (repaired.points.shape != candidate.points.shape
             or not np.isfinite(repaired.points).all()
             or repaired.points[fixed].tobytes() != candidate.points[fixed].tobytes()

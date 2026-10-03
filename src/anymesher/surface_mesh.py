@@ -1942,13 +1942,15 @@ def _run_frontal_quality_path(
                                  np.empty((0, 2)) if explicit_points is None else explicit_points)
         previous_best = best
         from ._analytic_metric_chart import AnalyticMetricChart
+        owner_transition = (isinstance(getattr(physical_evaluator, '__self__', None), AnalyticMetricChart)
+                            and getattr(physical_evaluator, '__func__', None) is AnalyticMetricChart.evaluate)
         best, report = repair_frontal_transition(
             best, triangulation.segments, settings, report, cancellation_check,
             evaluate_coordinates=physical_evaluator,
             coordinate_batch_size=coordinate_batch_size,
             pinned_nodes=pinned_rows,
-            allow_partial_progress=(isinstance(getattr(physical_evaluator, '__self__', None), AnalyticMetricChart)
-                                    and getattr(physical_evaluator, '__func__', None) is AnalyticMetricChart.evaluate),
+            allow_partial_progress=owner_transition,
+            line_search_admission=owner_transition,
         )
         if pinned_rows and best.points[list(pinned_rows)].tobytes() != previous_best.points[list(pinned_rows)].tobytes():
             # Retain consumed work, but reject an unqualified move of an explicit input.
