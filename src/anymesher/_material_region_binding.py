@@ -75,7 +75,19 @@ class MaterialRegionBinding:
             raise MeshError("material region returned invalid station parameters")
         return nodes, uv, parameters
 
+    def _validate_boundary_source_owner(self, mesh, registry):
+        # Coincident coordinates and reusable local IDs cannot transfer receipts
+        # between geometry owners, including independently loaded copies.
+        view = registry.view
+        if view.source is not self.geometry:
+            raise MeshError('material boundary registry belongs to a different geometry owner')
+        view.assert_current(self.geometry)
+        mesh_owner = getattr(mesh, 'geometry_model_id', None)
+        if mesh_owner is not None and str(mesh_owner) != str(self.geometry.model_id):
+            raise MeshError('material boundary mesh belongs to a different geometry owner')
+
     def _boundary_source_chain(self, path, mesh, registry):
+        self._validate_boundary_source_owner(mesh, registry)
         nodes, uv, parameters = self.path_chain(path, mesh, registry)
         entries = registry.entries(path.source_edge)
         selected = set(nodes)
@@ -126,7 +138,28 @@ class MaterialRegionBinding:
                         tuple(tuple(map(float, row)) for row in uv[index:index+2]),
                         tuple(tuple(map(float, mesh.nodes[node])) for node in pair)))
         self._validate_boundary_owner(cancellation_check)
+        # No callback follows these final source/chain checks. Cache by owner
+        # occurrence so a long seeded boundary is checked once, not per interval.
+        self._validate_boundary_source_owner(mesh, registry)
+        chains = {}
+        for receipt in result:
+            occurrence = (receipt.loop_index, receipt.path_index)
+            if occurrence not in chains:
+                path = self.region.boundaries[receipt.loop_index][receipt.path_index]
+                chains[occurrence] = self._boundary_source_chain(path, mesh, registry)
+            self._assert_boundary_receipt_current(receipt, mesh, chains[occurrence])
         return tuple(result)
+
+    @staticmethod
+    def _assert_boundary_receipt_current(receipt, mesh, chain):
+        nodes, uv, parameters = chain
+        index = receipt.interval_index
+        current_nodes = tuple(nodes[index:index+2])
+        current_parameters = tuple(Fraction(float(t)) for t in parameters[index:index+2])
+        if (current_nodes != receipt.nodes or current_parameters != receipt.parameters
+                or tuple(tuple(map(float, row)) for row in uv[index:index+2]) != receipt.uv
+                or tuple(tuple(map(float, mesh.nodes[node])) for node in current_nodes) != receipt.xyz):
+            raise MeshError('material boundary station receipt is no longer current')
 
     def boundary_station(self, receipt, mesh, registry, parameter, cancellation_check=None):
         """Evaluate a still-bound exact source station in its owner occurrence.
@@ -158,14 +191,8 @@ class MaterialRegionBinding:
         if (receipt.loop_index < 0 or receipt.path_index < 0 or receipt.interval_index < 0
                 or path.source_edge != receipt.source_edge):
             raise MeshError('material boundary source occurrence changed')
-        nodes, uv, parameters = self._boundary_source_chain(path, mesh, registry)
-        index = receipt.interval_index
-        current_nodes = tuple(nodes[index:index+2])
-        current_parameters = tuple(Fraction(float(t)) for t in parameters[index:index+2])
-        if (current_nodes != receipt.nodes or current_parameters != receipt.parameters
-                or tuple(tuple(map(float, row)) for row in uv[index:index+2]) != receipt.uv
-                or tuple(tuple(map(float, mesh.nodes[node])) for node in current_nodes) != receipt.xyz):
-            raise MeshError('material boundary station receipt is no longer current')
+        self._assert_boundary_receipt_current(
+            receipt, mesh, self._boundary_source_chain(path, mesh, registry))
         path_parameter = value if receipt.parameters[0] < receipt.parameters[1] else 1.-value
         row = np.asarray(self.region.domain.uv(path.curve, path_parameter), dtype=float)
         point = np.asarray(self.geometry.sample_edge(receipt.source_edge, np.asarray((value,))), dtype=float)
@@ -182,6 +209,8 @@ class MaterialRegionBinding:
         if not np.allclose(owner_point[0], point[0], rtol=0., atol=self.region.world_tolerance):
             raise MeshError('material boundary station does not bind its owner support')
         self._validate_boundary_owner(cancellation_check)
+        self._assert_boundary_receipt_current(
+            receipt, mesh, self._boundary_source_chain(path, mesh, registry))
         return row.copy(), point[0].copy()
 
     def loops(self, mesh, registry, splittable):
