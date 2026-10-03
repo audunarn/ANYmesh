@@ -144,3 +144,14 @@ source-edge, member, attachment or junction reference. The physical split has
 a sheet joint and attachments on this generated interior edge. Complete
 structural association semantics and a current-keyed FEM output receipt remain
 unproven, so no native root call or publication route is activated.
+
+The candidate ANYgeometry Sheet-joint component receipt at `da101adc`
+(wheel SHA256 `1bc9121b19d73b6ebcfad6ffd6e08c3c42dcc497fd20a319cea9dfbfc9569cce`)
+allows a separate private `_authored_component_binding` preflight. It requires
+both authored roots, all current descendants, both Sheets and the complete
+qualified original-root/Sheet FaceUse occurrence correspondence. Root-only
+selection, missing root boundaries, source-less Sheets and stale bindings
+refuse. The two root station plans can share one unchanged global edge
+registry. The owner explicitly leaves arbitrary structural/reference semantic
+remapping unqualified; this component binding does not construct a current
+mesh association receipt, invoke a native route or permit publication.
