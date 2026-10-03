@@ -287,6 +287,43 @@ class ComponentSeedRegistry:
                 raise MeshError("component seed resolution is already active")
             return tuple(sorted(self._values.values()))
 
+    def fork_detached(self, first_node_id: int) -> "ComponentSeedRegistry":
+        """Copy committed station identities without sharing allocator effects.
+
+        Used by an inactive authored-component staging path. The caller must
+        choose an ID above every already published or reserved mesh node.
+        Deferred cylindrical work has additional mutable state and is refused.
+        """
+        from copy import deepcopy
+
+        with self._resolution_lock:
+            if self._resolving:
+                raise MeshError("component seed resolution is already active")
+            if self._node_id_allocator is not None:
+                raise MeshError("external seed reservations need an atomic allocator snapshot")
+            if getattr(self, "_deferred_cylindrical_components", None):
+                raise MeshError("deferred cylindrical components cannot be staged")
+            supported = {"_next", "_values", "_node_id_allocator", "_resolution_lock",
+                         "_resolving", "_deferred_cylindrical_components",
+                         "_material_region_representatives",
+                         "_material_region_quality_settings",
+                         "_published_triangle_incidence"}
+            if set(vars(self)) - supported:
+                raise MeshError("component seed state has no detached staging contract")
+            if isinstance(first_node_id, bool) or not isinstance(first_node_id, Integral):
+                raise MeshError("detached seed start must be an integer")
+            first = int(first_node_id)
+            if first <= max((self._next - 1, *self._values.values()), default=0):
+                raise MeshError("detached seed start overlaps committed identities")
+            fork = ComponentSeedRegistry(first)
+            fork._values = dict(self._values)
+            for name in ("_material_region_representatives",
+                         "_material_region_quality_settings",
+                         "_published_triangle_incidence"):
+                if hasattr(self, name):
+                    setattr(fork, name, deepcopy(getattr(self, name)))
+            return fork
+
 
 class MutableT3Topology:
     """Atomic deterministic mutable T3 state used by the frontal queue."""

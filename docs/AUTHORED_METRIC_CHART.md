@@ -53,3 +53,24 @@ reserved shared-node reuses, and refuses incomplete or altered counts. Charges
 are immutable and cannot exceed the original allowance. This accounting helper
 does not reset the invocation's time/cancellation budget or authorize a retry.
 It is not wired to authored-root publication yet.
+
+The private `_authored_associations` plan binds a complete standalone root-local
+shell to its original face and original FaceUse/Sheet orientations. It checks
+that every current descendant retains the same use and Sheet meaning, and
+stages those source associations on a detached mesh. It never assigns a
+root-born cell to a current child merely to satisfy a load.
+It cannot see application-owned child-local loads, supports or sections and
+therefore remains `publication_qualified=False`. A consuming application needs
+to provide an explicit prepared-reference manifest and basis: which original
+or current faces each external reference addresses, and whether each internal
+child boundary must be imprinted so cells cannot straddle that reference.
+
+The private `_authored_component_stage` copies the mesh and boundary stations
+and forks seed identities before provisional changes; a failed validator or
+abort leaves the original objects untouched. Its seed fork refuses the current
+native path's external allocator because outstanding reserved IDs are not
+exposed atomically. That path needs one component-owned reservation snapshot
+and a staged allocator before shared stations can be committed together.
+Neither private helper is called by production routing. Owner binding,
+complete source associations, strict mesh checks, resource limits and external
+reference handling remain mandatory before any authored-root publication.
