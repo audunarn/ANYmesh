@@ -7,10 +7,34 @@ from .errors import MeshError
 from .native_v2 import MutableT3Topology, _GeometryLimited
 
 
+def _alternative_progress(before, after):
+    """Admit progress against the same committed physical-quality report."""
+    previous_counts, proposed_counts = before['violation_counts'], after['violation_counts']
+    increases = (after['invalid_element_count'] != 0
+        or any(proposed_counts[name] > count for name, count in previous_counts.items())
+        or after['quality_violation_count'] > before['quality_violation_count']
+        or after['elements_above_maximum_growth'] > before['elements_above_maximum_growth'])
+    progresses = (any(proposed_counts[name] < count for name, count in previous_counts.items())
+        or after['max_element_growth'] < before['max_element_growth'])
+    return not increases and progresses
+
+
 def refine_physical_candidate(candidate, triangulation, settings, report,
                               evaluate_coordinates, original_segments,
                               seed_registry, cancellation_check=None):
     from .surface_mesh import _make_candidate, _physical_quality_candidate
+
+    cancellation_failure = None
+    if cancellation_check is not None:
+        incoming_cancellation_check = cancellation_check
+
+        def cancellation_check(phase):
+            nonlocal cancellation_failure
+            try:
+                incoming_cancellation_check(phase)
+            except _GeometryLimited as error:
+                cancellation_failure = error
+                raise
 
     for name in ('topology_operations', 'insertions', 'reserved_node_reuses'):
         value = report.get(name, 0)
@@ -57,6 +81,9 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
     splits = 0
     boundary_splits = 0
     blocked = None
+    attempts = alternative_attempts = alternative_splits = refused_attempts = 0
+    selected_cell_exhausted = False
+    stop_reason = None
     def physical_state(points, cells):
         xyz = np.asarray(evaluate_coordinates(points), dtype=float)
         trial = _physical_quality_candidate(_make_candidate(points, cells, settings=settings),
@@ -66,12 +93,23 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
     # Reuse each detached state's validated values until its next atomic change.
     current, xyz = physical_state(*topology.canonical_export())
     staged = None
+    require_progress = False
+    owner_failure = None
 
     def validate_split(points, cells):
-        nonlocal staged
-        trial, coordinates = physical_state(points, cells)
+        nonlocal staged, owner_failure
+        try:
+            trial, coordinates = physical_state(points, cells)
+        except _GeometryLimited as error:
+            # An evaluator exception is not a local split refusal, even when a
+            # callback happens to use the mesher's private exception type.
+            owner_failure = error
+            raise
         if trial.report['invalid_element_count']:
             raise _GeometryLimited('physical bisection would invalidate the mesh')
+        if require_progress:
+            if not _alternative_progress(current.report, trial.report):
+                raise _GeometryLimited('alternative physical bisection makes no admissible progress')
         staged = trial, coordinates
     while (used < settings.native_options.max_topology_operations
            and insertions + reused < settings.native_options.max_insertions):
@@ -79,6 +117,7 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
             cancellation_check('native-v2 physical quality bisection')
         points, cells = current.points, current.triangles
         if current.report['invalid_element_count'] or not current.report['poor_element_ids']:
+            stop_reason = 'invalid_candidate' if current.report['invalid_element_count'] else 'satisfied'
             break
         lengths = np.linalg.norm(np.roll(xyz[cells], -1, axis=1)-xyz[cells], axis=2).mean(axis=1)
         incidence = {}
@@ -96,43 +135,79 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                     growth.append((-ratio, large))
         row = min(growth)[1] if growth else int(current.report['poor_element_ids'][0])-1
         cell = cells[row]
-        edge = max((tuple(sorted((int(a), int(b)))) for a, b in zip(cell, np.roll(cell, -1))),
-                   key=lambda ends: (float(np.linalg.norm(xyz[ends[1]]-xyz[ends[0]])), ends))
-        used += 1
-        if edge in topology.protected_edges:
-            blocked = edge
+        edges = sorted((tuple(sorted((int(a), int(b)))) for a, b in zip(cell, np.roll(cell, -1))),
+            key=lambda ends: (float(np.linalg.norm(xyz[ends[1]]-xyz[ends[0]])), ends), reverse=True)
+        committed = False
+        for ordinal, edge in enumerate(edges):
+            if used >= settings.native_options.max_topology_operations:
+                stop_reason = 'topology_budget'
+                break
+            if insertions + reused >= settings.native_options.max_insertions:
+                stop_reason = 'insertion_budget'
+                break
+            if cancellation_check is not None:
+                cancellation_check('native-v2 physical quality edge attempt')
+            used += 1
+            attempts += 1
+            require_progress = ordinal > 0
+            alternative_attempts += int(require_progress)
+            if edge in topology.protected_edges:
+                refused_attempts += 1
+                blocked = edge
+                continue
+            staged = None
+            owner_failure = None
+            cancellation_failure = None
+            boundary = edge in topology.splittable_edges
+            try:
+                if boundary:
+                    topology.split_segment(edge, cancellation_check=cancellation_check,
+                                           _validate_candidate=validate_split)
+                else:
+                    topology.bisect_interior_edge(edge, cancellation_check=cancellation_check,
+                                                 _validate_candidate=validate_split)
+            except _GeometryLimited as error:
+                if owner_failure is error or cancellation_failure is error:
+                    raise
+                refused_attempts += 1
+                blocked = edge
+                continue
+            boundary_splits += int(boundary)
+            alternative_splits += int(require_progress)
+            insertions += 1
+            splits += 1
+            current, xyz = staged
+            blocked = None
+            committed = True
             break
-        if edge in topology.splittable_edges:
-            try:
-                topology.split_segment(edge, cancellation_check=cancellation_check,
-                                       _validate_candidate=validate_split)
-            except _GeometryLimited:
-                blocked = edge
-                break
-            boundary_splits += 1
-        else:
-            try:
-                topology.bisect_interior_edge(edge, cancellation_check=cancellation_check,
-                                             _validate_candidate=validate_split)
-            except _GeometryLimited:
-                blocked = edge
-                break
-        insertions += 1
-        splits += 1
-        current, xyz = staged
+        if not committed:
+            if stop_reason is None:
+                selected_cell_exhausted = True
+                stop_reason = 'no_progress_for_selected_cell'
+                blocked = edges[0]
+            break
     points, cells = current.points, current.triangles
     result = replace(candidate, points=points, triangles=cells, report=current.report,
                      score=current.score, aspect_ratios=current.aspect_ratios)
     updated = dict(report, topology_operations=used, insertions=insertions,
                    shared_segment_splits=int(report['shared_segment_splits'])+boundary_splits,
                    physical_quality_bisections=splits, physical_quality_blocked_edge=blocked,
+                   physical_quality_attempts=attempts,
+                   physical_quality_alternative_attempts=alternative_attempts,
+                   physical_quality_alternative_bisections=alternative_splits,
+                   physical_quality_refused_attempts=refused_attempts,
+                   physical_quality_selected_cell_exhausted=selected_cell_exhausted,
                    shared_nodes=[{'local_node_id': int(node), 'node_id': int(value[0]),
                                   'edge_id': int(value[1]),
                                   'station': (value[2].numerator, value[2].denominator)}
                                  for node, value in sorted(topology.shared_node_ids.items())])
     updated['selected_route'] = ('frontal_delaunay_physical_quality_satisfied'
         if not result.report['poor_element_ids'] and not result.report['invalid_element_count']
-        else 'frontal_delaunay_geometry_limited' if blocked is not None
+        else 'frontal_delaunay_geometry_limited' if selected_cell_exhausted
         else 'frontal_delaunay_budget_limited')
+    updated['physical_quality_stop_reason'] = (stop_reason or
+        ('satisfied' if not result.report['poor_element_ids'] and not result.report['invalid_element_count']
+         else 'topology_budget' if used >= settings.native_options.max_topology_operations
+         else 'insertion_budget'))
     return result, replace(triangulation, points=points, triangles=cells,
                            segments=topology.constraint_edges), updated

@@ -1422,6 +1422,7 @@ def _physical_quality_candidate(candidate, settings, evaluate_coordinates):
     quality = evaluate_quality(core, check_validity=False)
     thresholds = _quality_threshold_report(quality, settings)
     report = _published_quality_report(core, settings, quality, thresholds)
+    report['violation_counts'] = dict(thresholds['violation_counts'])
     report['invalid_element_count'] = (candidate.report['invalid_element_count']
                                        + len(quality.validity.errors))
     score = (report['invalid_element_count'], report['quality_violation_count'],

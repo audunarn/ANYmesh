@@ -361,3 +361,102 @@ def test_scoped_material_region_batch_rejects_stale_binding(monkeypatch, stage):
     if stage == "during":
         assert validations == [chart.binding] * 6
         assert recorded.row_counts == [len(points), len(points), 8 * len(points)]
+
+
+def test_scoped_region_registered_restoration_matches_owner_quality(monkeypatch):
+    """Compare actual source-station restoration with repair's owner scoring."""
+    import json
+    from anygeometry import to_dict
+    from anymesher.boundary import GlobalEdgeBoundaryRegistry
+    from anymesher.core import MeshCore
+    from anymesher.errors import StructuredQualityRejected
+    from anymesher.mesh import Mesh
+    from anymesher.meshing_view import GeometryMeshingView
+    from anymesher._material_region_binding import registered_core_rows
+    from anymesher.quality_v2 import evaluate_quality
+    from anymesher.surface_mesh import (SurfaceMeshOptions, _make_candidate,
+        _physical_quality_candidate, _quality_threshold_report, _published_quality_report)
+    from anymesher.triangulation import triangulate_polygon
+    model, chart = scoped_material_region_chart()
+    binding = chart.region_binding
+    source = to_dict(model)
+    mesh = Mesh()
+    for vertex in sorted(model.vertices):
+        mesh.node_of_vertex[vertex] = vertex
+        mesh.nodes[vertex] = np.asarray(model.vertex_position(vertex)).copy()
+    next_node = max(mesh.nodes, default=0) + 1
+    registry = GlobalEdgeBoundaryRegistry(GeometryMeshingView(model))
+    edges = {path.source_edge for paths in binding.region.boundaries for path in paths}
+    edges.update(path.source_edge for path in binding.region.interior_constraints)
+    parameters = np.asarray((0., .5, 1.))
+    for edge_id in sorted(edges):
+        edge = model.edges[edge_id]
+        mesh.nodes[next_node] = np.asarray(model.sample_edge(edge_id, parameters[1:2])[0]).copy()
+        chain = [mesh.node_of_vertex[edge.start], next_node, mesh.node_of_vertex[edge.end]]
+        next_node += 1
+        mesh.nodes_of_edge[edge_id] = chain
+        registry.register_many(edge_id, parameters, points=[mesh.nodes[node] for node in chain],
+                               node_ids=chain, owner=model.handle('edge', edge_id))
+    loops = binding.loops(mesh, registry, ())
+    segments, pinned_ids, pinned_uv = binding.interior(mesh, registry,
+        boundary_rows={node: uv for nodes, rows, _ in loops for node, uv in zip(nodes, rows)})
+    chart_loops = [rows @ chart.transform for _, rows, _ in loops]
+    chart_pinned = pinned_uv @ chart.transform
+    triangulation = triangulate_polygon(chart_loops[0], chart_loops[1:],
+        constraints=[segment @ chart.transform for segment in segments],
+        interior_points=chart_pinned, backend='python')
+    core = MeshCore(np.column_stack((triangulation.points, np.zeros(len(triangulation.points)))),
+                    triangulation.triangles)
+    core_before = core.node_coordinates.tobytes(), core.triangle_connectivity.tobytes()
+    mesh_before = {node: point.tobytes() for node, point in mesh.nodes.items()}
+    receipts = [*(pair for (nodes, _, _), points in zip(loops, chart_loops)
+                    for pair in zip(points, nodes)), *zip(chart_pinned, pinned_ids)]
+    row_to_node = registered_core_rows(core, receipts)
+    registered = {row: mesh.nodes[node] for row, node in row_to_node.items()}
+    boundary_points = np.asarray([mesh.nodes[node] for nodes, _, _ in loops for node in nodes])
+    binding.validate_constraints(core, mesh, registry, row_to_node)
+    settings = SurfaceMeshOptions(min_angle=15., prefer_quality_policy=True)
+    scored = _physical_quality_candidate(_make_candidate(triangulation.points,
+        triangulation.triangles, settings=settings), settings, chart.evaluate)
+    owner_xyz = chart.evaluate(triangulation.points)
+    owner_core = MeshCore(owner_xyz, triangulation.triangles)
+    owner_thresholds = _quality_threshold_report(evaluate_quality(owner_core), settings)
+    assert scored.report['violation_counts'] == owner_thresholds['violation_counts']
+    observed = []
+    certify = type(chart).certify_physical_core
+    def capture(self, physical_core, policy):
+        assert self is chart and policy is settings
+        observed.append(physical_core)
+        return certify(self, physical_core, policy)
+    monkeypatch.setattr(type(chart), 'certify_physical_core', capture)
+    rejection = None
+    try:
+        chart.certify_core(core, settings, boundary_points, registered_rows=registered)
+    except StructuredQualityRejected as error:
+        rejection = str(error)
+    assert len(observed) == 1
+    restored = observed[0]
+    restored_quality = evaluate_quality(restored)
+    restored_thresholds = _quality_threshold_report(restored_quality, settings)
+    restored_report = _published_quality_report(restored, settings, restored_quality, restored_thresholds)
+    changed_rows = np.flatnonzero(np.any(restored.node_coordinates != owner_xyz, axis=1))
+    evidence = dict(nodes=core.num_nodes, cells=core.num_triangles,
+        registered_rows=len(registered), restored_changed_rows=list(map(int, changed_rows)),
+        max_coordinate_change=float(np.max(np.abs(restored.node_coordinates - owner_xyz), initial=0.)),
+        owner_counts=owner_thresholds['violation_counts'], restored_counts=restored_thresholds['violation_counts'],
+        owner_growth=scored.report['max_element_growth'], restored_growth=restored_report['max_element_growth'],
+        owner_min_angle=scored.report['min_angle'], restored_min_angle=restored_report['min_angle'],
+        owner_scaled_jacobian=scored.report['min_scaled_jacobian'],
+        restored_scaled_jacobian=restored_report['min_scaled_jacobian'],
+        owner_aspect=scored.report['max_aspect_ratio'], restored_aspect=restored_report['max_aspect_ratio'],
+        certificate_rejection=rejection)
+    print('REGISTERED_RESTORATION ' + json.dumps(evidence, sort_keys=True))
+    for row, point in registered.items():
+        np.testing.assert_array_equal(restored.node_coordinates[row], point)
+    assert owner_thresholds['violation_counts'] == restored_thresholds['violation_counts']
+    assert scored.report['poor_element_ids'] == restored_report['poor_element_ids']
+    owner_accepts = owner_thresholds['accepted'] and scored.report['max_element_growth'] <= settings.max_element_growth
+    assert (rejection is None) == owner_accepts
+    assert to_dict(model) == source
+    assert {node: point.tobytes() for node, point in mesh.nodes.items()} == mesh_before
+    assert (core.node_coordinates.tobytes(), core.triangle_connectivity.tobytes()) == core_before
