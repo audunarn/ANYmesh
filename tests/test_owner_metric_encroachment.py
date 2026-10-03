@@ -1,4 +1,10 @@
-"""Metric encroachment must never remove a registered constraint."""
+"""Metric encroachment must never remove a registered constraint.
+
+Handmade fixtures follow qualified producers' canonical cell convention.
+The public mutable constructor currently accepts cyclically noncanonical cells,
+but compiled retained-row accounting does not support those rotations: an
+existing input-normalization limitation, separate from this encroachment change.
+"""
 from fractions import Fraction
 import numpy as np
 import pytest
@@ -8,6 +14,12 @@ from anymesher.errors import MeshError
 from anymesher.native_cpp import COMPILED_NATIVE_V2_AVAILABLE
 
 
+def qualified_cells(points, cells):
+    records=sorted((native._canonical_triangle(row,points),index)
+                   for index,row in enumerate(cells))
+    return np.array([row for row,_ in records],dtype=np.int64),np.array([index for _,index in records])
+
+
 def diamond():
     points=np.array(((-1.,0.),(1.,0.),(0.,1.),(0.,-1.),(-3.,0.),(3.,0.),(0.,3.),(0.,-3.)))
     triangles=[(0,1,2),(0,3,1)]
@@ -15,10 +27,11 @@ def diamond():
     for i in range(4):
         j=(i+1)%4
         triangles.extend(((inner[i],outer[i],outer[j]),(inner[i],outer[j],inner[j])))
+    triangles,source_rows=qualified_cells(points,triangles)
     return native.MutableT3Topology(points,triangles,
         protected_edges=((4,7),(7,5),(5,6),(6,4)),splittable_edges={(0,1):(7,0,1)},
         seed_registry=native.ComponentSeedRegistry(100),
-        node_owners=np.arange(8),triangle_owners=np.arange(10)+20)
+        node_owners=np.arange(8),triangle_owners=(np.arange(10)+20)[source_rows])
 
 
 def edges(cells):
@@ -199,7 +212,8 @@ def frontal_seed():
         a,b=inner[i],inner[(i+1)%4];x=4+2*i;y=4+(2*i+1)%8;z=4+(2*i+2)%8
         triangles.extend(((a,x,y),(a,y,z),(a,z,b)))
     boundary=np.array([tuple(sorted((4+i,4+(i+1)%8))) for i in range(8)],dtype=np.int64)
-    return PlanarTriangulation(points=points,triangles=np.asarray(triangles,dtype=np.int64),
+    triangles,_=qualified_cells(points,triangles)
+    return PlanarTriangulation(points=points,triangles=triangles,
         segments=np.vstack((boundary,(0,1))),boundary_segments=boundary,
         mandatory_segments=np.array(((0,1),),dtype=np.int64),outer_loop=np.arange(4,12),hole_loops=())
 
