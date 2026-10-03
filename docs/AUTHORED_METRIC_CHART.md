@@ -105,12 +105,15 @@ chart. Node XYZ is checked against the original owner support; each whole
 triangle (or both halves of a convex Q4) is validated inside the named actual
 child. The guard retains original-root `elements_of_face` and original Sheet
 scope, verifies required child-boundary station chains, and revalidates owner
-and project inputs at completion. A crossing cell, wrong child, missing
-required boundary or changed input refuses. It remains
-`publication_qualified=False`: neither a partial child triangulation nor this
-per-cell proof establishes completeness or uniqueness of the global current
-fragment partition. Quadratic cells, rounded split-spline/BQC/QIC child trims,
-detached project output remapping and active production routing still refuse.
+and project inputs at completion. The final exact owner partition call requires
+triangles for **every** authenticated child and certifies complete closed
+material equality and disjoint interiors in its narrow straight-planar scope.
+Missing, partial, duplicated, overlapping, crossing or wrong-child cells
+refuse. It remains `publication_qualified=False`: partition coverage does not
+certify node/joint conformity, structural attachments, quality, high-order
+mapping or application/solver consumption. Quadratic cells, curved/holed and
+rounded split-spline/BQC/QIC trims, detached project output remapping and
+active production routing still refuse.
 
 Exact final owner development input for this guard is ANYgeometry candidate
 `931916ab9ee399ff59013c01e622eb8da20cffe9`, wheel SHA-256
@@ -118,3 +121,10 @@ Exact final owner development input for this guard is ANYgeometry candidate
 It supersedes the earlier tested `a2ea7eb` candidate after an owner fix for
 reversed polynomial trims; both identities remain in the task evidence.
 The previous exact ANYfem wheel remains `ea1a7d2daf0cb269eb8271ae48c8ad35918afded7046a3f0f1089f028cf9def5`.
+
+The exact partition owner input is later candidate
+`be2dd134887e2d245c194e7011124c230aea4d1e`, wheel SHA-256
+`94c83f919852210ee22c8f3f72e78df47f181eeaca8b7f30e0defad713914d19`.
+It extends the child-containment guard only for exact coplanar Plane domains
+with one simple straight outer loop per face and no holes. Previous wheel
+identities remain in the living task note as historical inputs.

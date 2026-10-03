@@ -36,6 +36,7 @@ class AuthoredChildMembershipEvidence:
     selected_children: tuple[int, ...]
     cell_children: tuple[tuple[int, int], ...]
     required_boundary_edge_ids: tuple[int, ...]
+    literal_partition_complete: bool
 
     @property
     def publication_qualified(self) -> bool:
@@ -219,11 +220,12 @@ def validate_authored_child_project_cells(
     correspondence, mesh, boundary_registry, element_to_child,
     node_authored_uv, *, closure=None, cancellation_check=None,
 ) -> AuthoredChildMembershipEvidence:
-    """Prove each declared linear cell fits its literal selected child.
+    """Prove the literal planar child partition of linear root-owned cells.
 
     The caller supplies original UV from its chart; XYZ is checked against the
-    owner support. This proves neither child-area completeness nor a global
-    partition, and returns no mesh-publication authority.
+    owner support. The owner proves complete child/original material equality
+    only for its narrow exact straight-planar contract. This still grants no
+    mesh-publication authority.
     """
     try:
         from anyfem.prepared_reference_scope import validate_prepared_project_reference_scope
@@ -231,6 +233,7 @@ def validate_authored_child_project_cells(
             evaluate_prepared_authored_face,
             validate_prepared_authored_boundary_correspondence_binding,
             validate_prepared_authored_face_child_triangles,
+            validate_prepared_authored_face_partition,
             validate_prepared_model_scope_binding,
         )
     except ImportError as error:
@@ -330,6 +333,14 @@ def validate_authored_child_project_cells(
             prepared_geometry, correspondence, child, np.asarray(triangles),
             cancellation_check=cancellation_check,
         )
+    partition = {
+        child: np.asarray(triangles_by_child.get(child, ()), dtype=float).reshape((-1, 3, 2))
+        for child in bound.descendants
+    }
+    validate_prepared_authored_face_partition(
+        prepared_geometry, correspondence, partition,
+        cancellation_check=cancellation_check,
+    )
     source_rows = tuple(row for row in manifest.authored_face_sources
                         if row[0] == bound.authored_face)
     if len(source_rows) != 1:
@@ -353,5 +364,5 @@ def validate_authored_child_project_cells(
     return AuthoredChildMembershipEvidence(
         bound.authored_face, tuple(sorted(selected)),
         tuple(sorted((int(cell), int(child)) for cell, child in element_to_child.items())),
-        tuple(manifest.required_boundary_edge_ids),
+        tuple(manifest.required_boundary_edge_ids), True,
     )
