@@ -45,3 +45,11 @@ edges until their meaning has an explicit consumer. It revalidates the owner
 receipt after inspection. The result remains `publication_qualified=False`:
 FaceUse/Sheet interpretation, external ANYfem loads and supports, original work
 accounting, shared-component transactions and final mesh gates are still open.
+
+`anymesher._authored_work_ledger.AuthoredWorkLedger` carries the original native
+insertion and topology-operation limits forward from an actual diagnostic
+receipt. It requires the report's limits to equal the original options, charges
+reserved shared-node reuses, and refuses incomplete or altered counts. Charges
+are immutable and cannot exceed the original allowance. This accounting helper
+does not reset the invocation's time/cancellation budget or authorize a retry.
+It is not wired to authored-root publication yet.
