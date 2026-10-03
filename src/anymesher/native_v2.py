@@ -1136,6 +1136,17 @@ def frontal_delaunay_refine(
             geometry_revision=geometry_revision,
         )
 
+    owner_xyz_cache = None
+    if type(provider) is SpatialMetricField and getattr(metric_to_physical, '__self__', None) is not None:
+        from ._analytic_metric_chart import AnalyticMetricChart
+        if (isinstance(metric_to_physical.__self__, AnalyticMetricChart)
+                and getattr(metric_to_physical, '__func__', None) is AnalyticMetricChart.evaluate):
+            from ._owner_xyz_cache import OwnerXYZCache
+            owner_xyz_cache = OwnerXYZCache(metric_to_physical,
+                max_rows=len(triangulation.points)+options.max_insertions,
+                batch_rows=min(4096,options.cancellation_interval),
+                cancellation_check=cancellation_check)
+
     def evaluate_spec(
         specification: MetricFieldSpec,
         field: SpatialMetricField,
@@ -1145,7 +1156,9 @@ def frontal_delaunay_refine(
                 specification.spatial_dimension is None and metric_to_physical is not None):
             if metric_to_physical is None or metric_jacobian is None:
                 raise MeshError("3D metric controls require a physical chart binding")
-            physical_points = np.ascontiguousarray(metric_to_physical(points), dtype=np.float64)
+            physical_points = np.ascontiguousarray(
+                owner_xyz_cache.evaluate(points) if owner_xyz_cache is not None else metric_to_physical(points),
+                dtype=np.float64)
             physical_tensors = field.evaluate(
                 physical_points,
                 cancellation_check=cancellation_check,
@@ -1274,8 +1287,11 @@ def frontal_delaunay_refine(
         points, triangles = canonical_frontal_export(
             topology, cancellation_check=cancellation_check,
         )
+        if owner_xyz_cache is not None:
+            owner_xyz_cache.register(points)
         tensors = evaluate_metric(points)
-        physical_quality_points = (np.asarray(metric_to_physical(points), dtype=float)
+        physical_quality_points = (np.asarray(
+            owner_xyz_cache.evaluate(points) if owner_xyz_cache is not None else metric_to_physical(points),dtype=float)
             if metric_to_physical is not None and isinstance(provider, SpatialMetricField)
             else points)
         if physical_quality_points.shape[0] != len(points) or not np.all(np.isfinite(physical_quality_points)):
@@ -1536,6 +1552,8 @@ def frontal_delaunay_refine(
         report["refused_shared_edges"] = sorted(refused_shared_edges)
     if short_edge_offcentre:
         report['short_edge_offcentre'] = True
+    if owner_xyz_cache is not None:
+        report['owner_xyz_cache'] = owner_xyz_cache.receipt()
     native_diagnostics["native_v2"] = report
     return PlanarTriangulation(
         points=points, triangles=triangles, segments=topology.constraint_edges,
