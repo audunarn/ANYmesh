@@ -77,3 +77,22 @@ still refuse staging because their reservations cannot be snapshotted.
 Production authored-root routing does not call these private helpers. Owner
 binding, complete source associations, strict mesh checks, resource limits and
 external reference handling remain mandatory before any authored-root result.
+
+`_authored_project_references` consumes ANYfem's optional, preparation-bound
+reference manifest. It validates the complete owner/project scope, preserves
+the explicit source namespace, and refuses root-only associations when a
+child-local load, support or section exists. Its required-edge check needs
+registered endpoint stations, unchanged node coordinates and an active shell
+edge chain; required vertices need active source-linked nodes. A private stage
+preflight rechecks the manifest immediately before a separate full mesh gate
+and refuses detached source namespaces until an output remap is qualified.
+It returns no admission token and is not wired to production publication.
+
+Exact coordinated development inputs: ANYfem candidate wheel SHA-256
+`ea1a7d2daf0cb269eb8271ae48c8ad35918afded7046a3f0f1089f028cf9def5`
+and ANYgeometry wheel SHA-256
+`2d7468767d0cbca26185dcab543912582048d828d435a15fd3c6c6736cb4b553`.
+The owner original-domain triangle validator explicitly does not certify the
+literal current-fragment partition. A conforming child boundary plus an
+input manifest is not a proof of each cell's current-child membership; that
+proof and the strict quality/high-order gates remain required for routing.
