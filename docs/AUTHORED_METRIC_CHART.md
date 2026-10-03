@@ -26,3 +26,12 @@ slice. Full original-domain constraint import, reference/scope qualification,
 immutable shared-node handling, approximation and quality certification, work
 budget accounting and detached atomic shared-component publication still need
 integration. Existing native diagnostic authority is not renewed by this adapter.
+
+`anymesher._authored_boundary_binding.bind_authored_exterior_stations` is a
+separate read-only bridge for already registered exterior nodes. It requires a
+current geometry-bound registry, one exact station per existing global node,
+unchanged mesh XYZ, and the owner's original/current station coordinate
+assertion. It retains original UV and owner evidence alongside the same node IDs
+and coordinates. Its receipt also has `publication_qualified=False`; rerun the
+binding after any candidate topology change. It grants no station insertion,
+constraint remap or authored-root mesh publication permission.
