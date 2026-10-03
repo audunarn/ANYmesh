@@ -256,7 +256,7 @@ def _deduplicate(
     holes: Sequence[Sequence[int]],
     constraints: Sequence[Sequence[int]],
     tolerance: float,
-) -> tuple[np.ndarray, list[int], list[list[int]], list[tuple[int, int]]]:
+) -> tuple[np.ndarray, list[int], list[list[int]], list[tuple[int, int]], np.ndarray]:
     # A linear scan of every prior unique point made PSLG preparation
     # quadratic before the triangulator even started. Tolerance-sized buckets
     # preserve the same earliest-match semantics: any point within tolerance
@@ -305,7 +305,7 @@ def _deduplicate(
         if mapped[0] == mapped[1]:
             raise MeshError("mandatory constraint has zero length")
         mapped_constraints.append(mapped)
-    return np.asarray(unique, dtype=np.float64), mapped_outer, mapped_holes, mapped_constraints
+    return np.asarray(unique, dtype=np.float64), mapped_outer, mapped_holes, mapped_constraints, remap
 
 
 def _ring_segments(ring: Sequence[int]) -> list[tuple[int, int]]:
@@ -380,6 +380,7 @@ class _PreparedPSLG:
     boundary_segments: np.ndarray
     mandatory_segments: np.ndarray
     tolerance: float
+    protected_node_rows: tuple[tuple[int, int], ...] = ()
 
 
 def _prepare_pslg(
@@ -390,6 +391,7 @@ def _prepare_pslg(
     tolerance: float | None,
     *,
     compiled_kernels: bool = False,
+    protected_node_ids: Mapping[int, int] | None = None,
 ) -> _PreparedPSLG:
     points = np.asarray(raw_points, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 2 or len(points) < 3:
@@ -401,9 +403,44 @@ def _prepare_pslg(
     if not np.isfinite(epsilon) or epsilon <= 0.0:
         raise MeshError("tolerance must be positive and finite")
     outer = list(range(len(points))) if raw_outer is None else list(raw_outer)
-    points, outer, holes, constraints = _deduplicate(
+    required_protected_input_rows: set[int] = set()
+    if protected_node_ids is not None:
+        required_protected_input_rows.update(outer)
+        required_protected_input_rows.update(row for ring in raw_holes for row in ring)
+        required_protected_input_rows.update(row for edge in raw_constraints for row in edge)
+    original_points = points
+    points, outer, holes, constraints, remap = _deduplicate(
         points, outer, raw_holes, raw_constraints, epsilon
     )
+    protected_rows: tuple[tuple[int, int], ...] = ()
+    if protected_node_ids is not None:
+        if not isinstance(protected_node_ids, Mapping):
+            raise MeshError("protected_node_ids must map input rows to registry IDs")
+        by_id: dict[int, int] = {}
+        by_row: dict[int, int] = {}
+        supplied_rows: set[int] = set()
+        for raw_row, registry_id in protected_node_ids.items():
+            if isinstance(raw_row, (bool, np.bool_)) or not isinstance(raw_row, (int, np.integer)):
+                raise MeshError("protected input row must be an integer")
+            if isinstance(registry_id, (bool, np.bool_)) or not isinstance(registry_id, (int, np.integer)) or registry_id < 0:
+                raise MeshError("protected registry ID must be a nonnegative integer")
+            row = int(raw_row)
+            node_id = int(registry_id)
+            if row < 0 or row >= len(original_points):
+                raise MeshError("protected input row is outside the PSLG")
+            mapped = int(remap[row])
+            if not np.array_equal(original_points[row], points[mapped]):
+                raise MeshError("protected station coordinate changed during deduplication")
+            if node_id in by_id and by_id[node_id] != mapped:
+                raise MeshError("one protected registry ID maps to multiple point rows")
+            if mapped in by_row and by_row[mapped] != node_id:
+                raise MeshError("distinct protected registry IDs collapsed to one point row")
+            by_id[node_id] = mapped
+            by_row[mapped] = node_id
+            supplied_rows.add(row)
+        if not required_protected_input_rows <= supplied_rows:
+            raise MeshError("boundary or mandatory constraint is missing a protected registry ID")
+        protected_rows = tuple(sorted(by_id.items()))
     _validate_ring(points, outer, "outer loop")
     for number, ring in enumerate(holes):
         _validate_ring(points, ring, f"hole {number}")
@@ -557,6 +594,7 @@ def _prepare_pslg(
         boundary_segments=array_of(boundary_set),
         mandatory_segments=array_of(mandatory_set),
         tolerance=epsilon,
+        protected_node_rows=protected_rows,
     )
 
 
@@ -1234,6 +1272,7 @@ class PlanarTriangulation:
     actual_backend: str = "python"
     fallback_reason: str | None = None
     native_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    protected_node_rows: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("points", "triangles", "segments", "boundary_segments", "mandatory_segments", "outer_loop"):
@@ -1245,6 +1284,7 @@ class PlanarTriangulation:
             ring.setflags(write=False)
         object.__setattr__(self, "hole_loops", holes)
         object.__setattr__(self, "native_diagnostics", dict(self.native_diagnostics))
+        object.__setattr__(self, "protected_node_rows", tuple(self.protected_node_rows))
 
     @property
     def constraint_edges(self) -> np.ndarray:
@@ -1420,6 +1460,7 @@ def constrained_planar_triangulation(
     tolerance: float | None = None,
     backend: str | NativeBoundary | None = "auto",
     cancellation_check: Callable[[str], None] | None = None,
+    protected_node_ids: Mapping[int, int] | None = None,
 ) -> PlanarTriangulation:
     """Triangulate a planar straight-line graph.
 
@@ -1466,6 +1507,7 @@ def constrained_planar_triangulation(
             selection is not None
             and selection.name == "anymesher-cpp17"
         ),
+        protected_node_ids=protected_node_ids,
     )
 
     used_backend = "python"
@@ -1537,6 +1579,12 @@ def constrained_planar_triangulation(
         if cancellation_check is not None:
             cancellation_check("python triangulation complete")
 
+    if prepared.protected_node_rows and (
+        result_points.shape != prepared.points.shape
+        or result_points.tobytes(order="C") != prepared.points.tobytes(order="C")
+    ):
+        raise MeshError("triangulation changed protected station point rows or binary64 values")
+
     return PlanarTriangulation(
         points=result_points,
         triangles=result_triangles,
@@ -1551,6 +1599,7 @@ def constrained_planar_triangulation(
         actual_backend=str(used_backend),
         fallback_reason=fallback_reason,
         native_diagnostics=native_diagnostics,
+        protected_node_rows=prepared.protected_node_rows,
     )
 
 
@@ -1566,6 +1615,7 @@ def triangulate_polygon(
     tolerance: float | None = None,
     backend: str | NativeBoundary | None = "auto",
     cancellation_check: Callable[[str], None] | None = None,
+    protected_node_ids: Mapping[int, int] | None = None,
 ) -> PlanarTriangulation:
     """Coordinate-oriented wrapper around ``constrained_planar_triangulation``."""
 
@@ -1606,4 +1656,5 @@ def triangulate_polygon(
         tolerance=tolerance,
         backend=backend,
         cancellation_check=cancellation_check,
+        protected_node_ids=protected_node_ids,
     )

@@ -115,7 +115,7 @@ def test_pslg_deduplication_preserves_earliest_match_across_bucket_edges() -> No
         )
     )
 
-    unique, outer, holes, constraints = _deduplicate(
+    unique, outer, holes, constraints, remap = _deduplicate(
         points,
         (0, 4, 2, 3),
         (),
@@ -127,6 +127,7 @@ def test_pslg_deduplication_preserves_earliest_match_across_bucket_edges() -> No
     assert outer == [0, 1, 2, 3]
     assert holes == []
     assert constraints == [(1, 2)]
+    assert remap.tolist() == [0, 1, 2, 3, 1]
 
 
 def test_segment_broad_phase_contains_every_true_crossing() -> None:
