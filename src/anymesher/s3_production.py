@@ -501,39 +501,19 @@ def prepare_source_bound_qualified_s3_mesh(
         raise S3OwnerAuthorityError(
             "source-bound S3 sheet ownership disagrees with source FaceUse authority"
         )
-    # Matching normals alone cannot distinguish a translated parallel face.
-    # This authored-component bridge is planar/linear. Check source support
-    # distance, then ask the owner to prove each *whole* closed triangle lies
-    # in the SOURCE material, including concave trims and holes. Samples alone
-    # would miss a side crossing excluded material.
+    # Matching normals cannot distinguish a parallel but unrelated SOURCE
+    # face. The owner proves the actual XYZ corners lift exactly from its
+    # Plane, then proves each whole closed triangle lies in its material.
     from anygeometry import (
         query_material_surface_regions,
-        validate_material_surface_region_triangles,
+        validate_material_surface_region_triangles_xyz,
     )
 
-    positions = np.asarray(list(source_mesh.nodes.values()), dtype=float)
-    diameter = float(np.linalg.norm(np.ptp(positions, axis=0)))
-    support_limit = 1.0e-10 * max(1.0, diameter)
     regions_by_face = {}
+    triangles_by_face: dict[int, list[np.ndarray]] = {}
     for cell, face in _element_face_map(source_mesh).items():
         corners = np.asarray([source_mesh.nodes[node]
                               for node in source_mesh.corners_of(cell)], dtype=float)
-        samples = list(corners)
-        samples.extend((first + second) / 2.0
-                       for first, second in zip(corners, np.roll(corners, -1, axis=0)))
-        samples.append(np.mean(corners, axis=0))
-        try:
-            distances = [source_geometry.project_to_face(face, point)[2]
-                         for point in samples]
-        except (GeometryError, KeyError, TypeError, ValueError) as error:
-            raise S3OwnerAuthorityError(
-                f"source-bound S3 cell {cell} lacks owner support"
-            ) from error
-        if any(not np.isfinite(distance) or distance > support_limit
-               for distance in distances):
-            raise S3OwnerAuthorityError(
-                f"source-bound S3 cell {cell} lies outside its SOURCE face support"
-            )
         if face not in regions_by_face:
             try:
                 regions_by_face[face] = query_material_surface_regions(
@@ -552,18 +532,19 @@ def prepare_source_bound_qualified_s3_mesh(
             raise S3OwnerAuthorityError(
                 f"source-bound S3 cell {cell} lacks one exact SOURCE material region"
             )
+        pieces = (corners,) if len(corners) == 3 else (
+            corners[[0, 1, 2]], corners[[0, 2, 3]],
+        )
+        triangles_by_face.setdefault(face, []).extend(pieces)
+    for face, triangles in sorted(triangles_by_face.items()):
         try:
-            uv = [source_geometry.face_support_local_uv(face, point)
-                  for point in corners]
-            pieces = (uv,) if len(uv) == 3 else ((uv[0], uv[1], uv[2]),
-                                                    (uv[0], uv[2], uv[3]))
-            validate_material_surface_region_triangles(
-                source_geometry, regions, face, pieces,
+            validate_material_surface_region_triangles_xyz(
+                source_geometry, regions_by_face[face], face, triangles,
                 cancellation_check=cancellation_check,
             )
         except (GeometryError, KeyError, TypeError, ValueError) as error:
             raise S3OwnerAuthorityError(
-                f"source-bound S3 cell {cell} leaves exact SOURCE material"
+                f"source-bound S3 face {face} has cells outside exact SOURCE material"
             ) from error
     assert_inputs_current()
     if set(source_normals) != set(current_normals) or any(

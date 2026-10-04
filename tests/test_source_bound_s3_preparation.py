@@ -117,7 +117,7 @@ def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
     )
     translated_mesh = deepcopy(source)
     translated_mesh.geometry_revision = translated_source.revision
-    with pytest.raises(S3OwnerAuthorityError, match="SOURCE face support"):
+    with pytest.raises(S3OwnerAuthorityError, match="exact SOURCE material"):
         qualify(translated_mesh, source_geometry=translated_source)
 
     holed_source = from_dict(to_dict(fixture.geometry))
