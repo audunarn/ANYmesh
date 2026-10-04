@@ -48,6 +48,20 @@ class BoundAuthoredSheetJointComponent:
     def publication_qualified(self) -> bool:
         return False
 
+    def bind_current_only_joint_cells(
+        self, geometry, mesh, registry, cell_current_faces, *,
+        current_associations=None, cancellation_check=None,
+    ):
+        """Prove only this component's current-only joint on active cells."""
+        from ._authored_current_only_joint_cells import (
+            query_current_only_sheet_joint_cells,
+        )
+        return query_current_only_sheet_joint_cells(
+            geometry, self, mesh, registry, cell_current_faces,
+            current_associations=current_associations,
+            cancellation_check=cancellation_check,
+        )
+
 
 def bind_authored_sheet_joint_component(
     geometry, current_joint_edge_id, boundary_correspondences,

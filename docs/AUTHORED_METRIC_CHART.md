@@ -201,3 +201,20 @@ stations. This packet does not invoke triangulation. A native-result adapter
 must still retain each created node's original UV and work-ledger charge before
 the exact partition, conformity, quality and current-association gates can
 admit a staged result; no current production route calls this packet.
+
+The private `_authored_current_only_joint_cells` receipt composes the exact
+current-only `sheet_on_joint` Attachments and `sheet_joint` Junction with an
+already staged complete linear T3/Q4 component. It rebinds the owner scope,
+checks both Attachment Sheet sources, the shared current edge and full parameter
+interval, then proves the owner-ordered joint station chain and the two current
+FaceUse/cell sides on **each** Sheet for every segment. It accepts only the
+known current-edge intersection-decomposition seam tags when present; these remain opaque
+and no source tag meaning is inferred. Validation rederives the owner, cell and
+registry evidence against a detached receipt snapshot rather than trusting a
+digest. A supplied association is pinned before owner callbacks and checked
+again before return; the component and mesh are pinned at the same entry point.
+Created-node UV carried by a versioned current-association receipt is
+preserved on revalidation. The exact two-Sheet, two-sided crossing scope does
+not qualify boundary junctions or T junctions. This is a current-only joint
+cell binding, not proof that a batch created the records. Source-reference
+transfer, solver admission, meshing and publication remain unqualified.
