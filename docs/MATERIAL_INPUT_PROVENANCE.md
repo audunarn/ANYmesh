@@ -40,3 +40,23 @@ source station.
 This output slice has only focused Python/emulated checks so far. It does not
 certify the physical chart transform or the separate Plane parameter fallback,
 and it does not establish accepted connected mixed meshing or solver behavior.
+
+## Analytic chart-authority development candidate
+
+For an eligible cone or extrusion, the chart's reference differential is
+queried through the original ANYgeometry owner and validated collection. Its
+Cholesky transform and inverse are checked for finite, nonsingular metric
+consistency and captured with the original owner, face, source checksum,
+collection definition and region context in a local entry signature before
+the reference derivative callback. Evaluation and Jacobian batches copy submitted rows
+before callbacks, then check the same selected chart before and after the
+owner-guarded operation. The hybrid material input path binds the emitted
+chart transform to that selected entry. This reference metric chooses a
+discretization chart; it is not a claim that physical metric is uniform over
+the whole surface. The material Plane parameter fallback remains refused
+until its separate emitted inputs and output rows are proved.
+
+Collection and region content tokens come from ANYgeometry's public
+`chart_definition_fingerprint` API. They compare the original definition with
+the live evidence object; public owner binding validation separately checks
+that object against the current geometry.

@@ -1417,8 +1417,9 @@ def _mesh_native_face(
         from ._analytic_metric_chart import AnalyticMetricChart
         analytic_chart = AnalyticMetricChart(geometry, face_id, cancellation_check,
                                            region_binding=_material_region_binding)
+    analytic_entry = None if analytic_chart is None else analytic_chart._authority
     chart_transform = (np.eye(2, dtype=float) if analytic_chart is None
-                       else analytic_chart.transform)
+                       else np.array(analytic_chart.transform, copy=True))
     if cylindrical_chart is not None:
         chart_transform = np.diag((
             cylindrical_chart.circumferential_length,
@@ -1436,6 +1437,27 @@ def _mesh_native_face(
         )
         chart_transform = np.linalg.cholesky(metric)
     chart_inverse = np.linalg.inv(chart_transform)
+    analytic_transform_bytes = (None if analytic_chart is None
+                                else chart_transform.tobytes())
+    analytic_inverse_bytes = (None if analytic_chart is None
+                              else chart_inverse.tobytes())
+
+    def require_analytic_choice():
+        if analytic_chart is None:
+            return
+        if (analytic_chart._authority is not analytic_entry
+                or chart_transform.tobytes() != analytic_transform_bytes
+                or chart_inverse.tobytes() != analytic_inverse_bytes
+                or chart_transform.tobytes() != analytic_chart.transform.tobytes()
+                or chart_inverse.tobytes() != analytic_chart.inverse.tobytes()):
+            raise MeshError('analytic chart choice changed before native input')
+        analytic_chart.validate_reference()
+        if (analytic_chart._authority is not analytic_entry
+                or chart_transform.tobytes() != analytic_transform_bytes
+                or chart_inverse.tobytes() != analytic_inverse_bytes):
+            raise MeshError('analytic chart choice changed during owner validation')
+
+    require_analytic_choice()
     physical_jacobian = np.column_stack((
         np.asarray(face.surface.u_vector, dtype=np.float64),
         np.asarray(face.surface.v_vector, dtype=np.float64),
@@ -1621,6 +1643,7 @@ def _mesh_native_face(
         receipt = _material_region_binding.input_provenance(
             mesh, boundary_registry, loops, region_pinned_ids,
             _material_input_eligibility, emitted, cancellation_check)
+        require_analytic_choice()
         from ._row_provenance import material_input_rows
         protected_input_rows = material_input_rows(receipt)
         records = getattr(component_seed_registry, '_material_input_provenance', None)
@@ -1853,6 +1876,7 @@ def _mesh_native_face(
             "owner_contract": _cylindrical_binding.certification_kind,
         }
     _check_cancellation(cancellation_check, f"native face {face_id} lifting start")
+    require_analytic_choice()
     if cylindrical_chart is not None:
         _cylindrical_binding.validate()
     region_core_to_global = None
