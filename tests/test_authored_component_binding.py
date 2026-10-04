@@ -1,5 +1,6 @@
 """Whole connected Sheet-joint scope is a prerequisite, not publication."""
 
+from dataclasses import replace
 import pytest
 import numpy as np
 from fractions import Fraction
@@ -7,22 +8,28 @@ from fractions import Fraction
 import anygeometry as owner
 from anymesher._authored_component_binding import bind_authored_sheet_joint_component
 from anymesher._authored_planar_stations import plan_authored_planar_stations
+from anymesher._authored_route_boundary import plan_authored_component_boundaries
 from anymesher.boundary import GlobalEdgeBoundaryRegistry
 from anymesher.errors import MeshError
 from anymesher.mesh import Mesh
 from anymesher.meshing_view import GeometryMeshingView
 
 
-def prepared(*, explicit_sheets=True):
+def prepared(*, explicit_sheets=True, member=False, metadata=False):
     model = owner.GeometryModel()
     root = model.add_plate(model.add_points(
         ((0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0))))
     model.set_face_surface(root, owner.Plane((0, 0, 0), (1, 0, 0), (0, 1, 0)))
     cutter = model.add_plate(model.add_points(
         ((3, -1, -1), (3, 5, -1), (3, 5, 1), (3, -1, 1))))
+    if metadata:
+        model.set_face_metadata(root, {"zone": "opaque"})
     if explicit_sheets:
         model.add_sheet((root,), name="source root")
         model.add_sheet((cutter,), name="source cutter")
+    if member:
+        first, second = model.add_points(((8, 0, 0), (8, 0, 1)))
+        model.add_member((model.add_line(first, second),))
     owner.apply_intersections(
         model, owner.plan_intersections(model, tuple(model.faces), policy="connect"),
         policy="connect",
@@ -46,8 +53,56 @@ def test_whole_component_and_occurrence_provenance_are_bound_without_publication
     assert [len(row[3]) for row in bound.occurrence_correspondence] == [2, 6]
     assert bound.owner_receipt.occurrence_mapping_qualified is True
     assert bound.owner_receipt.semantic_mapping_qualified is False
+    assert bound.constraint_receipt.selected_root_ids == roots
+    assert bound.constraint_receipt.current_face_ids == bound.current_face_ids
+    assert not bound.constraint_receipt.publication_qualified
+    assert not bound.constraint_receipt.outside_root_ids
     assert bound.publication_qualified is False
     assert owner.to_dict(model) == before
+
+
+def test_complete_inventory_reports_unqualified_member_scope_without_admission():
+    model, roots, correspondences, edge = prepared(member=True)
+    bound = bind_authored_sheet_joint_component(model, edge, correspondences, roots)
+    assert "members" in bound.unqualified_reference_categories
+    assert "member_edge_uses" in bound.unqualified_reference_categories
+    assert bound.publication_qualified is False
+
+
+def test_metadata_category_requires_nonempty_payload():
+    model, roots, correspondences, edge = prepared()
+    empty = bind_authored_sheet_joint_component(model, edge, correspondences, roots)
+    assert "metadata" not in empty.unqualified_reference_categories
+    model, roots, correspondences, edge = prepared(metadata=True)
+    occupied = bind_authored_sheet_joint_component(model, edge, correspondences, roots)
+    assert "metadata" in occupied.unqualified_reference_categories
+
+
+def test_late_owner_callback_cannot_change_returned_boundary(monkeypatch):
+    model, roots, correspondences, edge = prepared()
+    original = owner.validate_prepared_authored_constraint_scope_binding
+    changed = False
+
+    def late_validate(geometry, receipt, *, cancellation_check=None):
+        nonlocal changed
+        if cancellation_check is not None and not changed:
+            def mutate_once(stage):
+                nonlocal changed
+                if not changed:
+                    changed = True
+                    object.__setattr__(correspondences[0], "descendants",
+                                       correspondences[0].descendants[:-1])
+                return False
+            cancellation_check = mutate_once
+        return original(geometry, receipt, cancellation_check=cancellation_check)
+
+    monkeypatch.setattr(owner, "validate_prepared_authored_constraint_scope_binding",
+                        late_validate)
+    with pytest.raises((owner.GeometryError, MeshError)):
+        bind_authored_sheet_joint_component(
+            model, edge, correspondences, roots,
+            cancellation_check=lambda stage: False)
+    assert changed
 
 
 def test_partial_or_extra_root_boundary_refuses():
@@ -98,3 +153,38 @@ def test_shared_registry_stations_cover_both_authored_roots_without_rekeying():
     assert all(len(plan.material_receipts) > 0 for plan in plans)
     assert tuple(entry.node_id for entry in registry.entries(edge)) == (
         model.edges[edge].start, model.edges[edge].end)
+
+
+def test_boundary_packets_bind_each_root_to_inventory_trace_edges_without_triangulation():
+    model, roots, correspondences, edge = prepared()
+    bound = bind_authored_sheet_joint_component(model, edge, correspondences, roots)
+    mesh = Mesh(nodes={vid: np.asarray(model.vertex_position(vid), dtype=float)
+                       for vid in model.vertices})
+    registry = GlobalEdgeBoundaryRegistry(GeometryMeshingView(model))
+    edges = {trace["current_edge_id"]
+             for trace in bound.constraint_receipt.inventory["traces"]}
+    for edge_id in sorted(edges):
+        current = model.edges[edge_id]
+        registry.register(edge_id, 0., node_id=current.start)
+        registry.register(edge_id, 1., node_id=current.end)
+    packets = plan_authored_component_boundaries(model, bound, mesh, registry)
+    assert tuple(packet.authored_face_id for packet in packets) == roots
+    for packet in packets:
+        expected = {trace["current_edge_id"]
+                    for trace in bound.constraint_receipt.inventory["traces"]
+                    if trace["authored_root_id"] == packet.authored_face_id}
+        assert set(packet._edge_ids) == expected
+        assert packet.publication_qualified is False
+
+
+def test_boundary_planning_refuses_omitted_and_duplicated_component_roots():
+    model, roots, correspondences, edge = prepared()
+    bound = bind_authored_sheet_joint_component(model, edge, correspondences, roots)
+    for forged, expected in (
+        (replace(bound, boundary_correspondences=bound.boundary_correspondences[:1]),
+         "lacks root boundaries"),
+        (replace(bound, boundary_correspondences=(bound.boundary_correspondences[0],) * 2),
+         "boundaries disagree"),
+    ):
+        with pytest.raises(MeshError, match=expected):
+            plan_authored_component_boundaries(model, forged, None, None)

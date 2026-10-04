@@ -9,7 +9,9 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 import numpy as np
 
-from ._authored_component_binding import BoundAuthoredSheetJointComponent
+from ._authored_component_binding import (
+    BoundAuthoredSheetJointComponent, bind_authored_sheet_joint_component,
+)
 from ._authored_metric_chart import AuthoredMetricChart
 from ._authored_planar_stations import plan_authored_planar_stations
 from .boundary import GlobalEdgeBoundaryRegistry
@@ -244,11 +246,35 @@ def plan_authored_component_boundaries(
     """Prepare every root together, preserving owner loop and station order."""
     if not isinstance(component, BoundAuthoredSheetJointComponent):
         raise MeshError("authored route boundaries need a whole component")
+    current_component = bind_authored_sheet_joint_component(
+        geometry, component.joint_edge_id, component.boundary_correspondences,
+        component.authored_face_ids, cancellation_check=cancellation_check,
+    )
+    if current_component != component:
+        raise MeshError("authored route component binding changed")
+    try:
+        from anygeometry import validate_prepared_authored_constraint_scope_binding
+    except ImportError as error:
+        raise MeshError("authored route needs complete constraint scope capability") from error
+    constraint = component.constraint_receipt
+    validate_prepared_authored_constraint_scope_binding(
+        geometry, constraint, cancellation_check=cancellation_check,
+    )
+    if (constraint.selected_root_ids != component.authored_face_ids
+            or constraint.current_face_ids != component.current_face_ids
+            or constraint.outside_root_ids):
+        raise MeshError("authored route has an incomplete current-root constraint scope")
+    trace_edges = {}
+    for trace in constraint.inventory["traces"]:
+        trace_edges.setdefault(trace["authored_root_id"], set()).add(
+            trace["current_edge_id"])
+    if set(trace_edges) != set(component.authored_face_ids):
+        raise MeshError("authored route constraint traces omit a selected root")
     if not isinstance(registry, GlobalEdgeBoundaryRegistry):
         raise MeshError("authored route boundaries need a global registry")
     registry.view.assert_current(geometry)
     packets = []
-    for correspondence in component.boundary_correspondences:
+    for correspondence in current_component.boundary_correspondences:
         if len(correspondence.exterior_loops) != 1:
             raise MeshError("authored route currently needs one straight outer loop")
         station_plan = plan_authored_planar_stations(
@@ -295,6 +321,9 @@ def plan_authored_component_boundaries(
             edge for _source, _forward, current in correspondence.exterior_loops[0]
             for edge in current
         )) + tuple(edge for edge, _uses in correspondence.interior_incidence)
+        if set(edge_ids) != trace_edges.get(
+                int(correspondence.authored_definition.face_id)):
+            raise MeshError("authored route stations differ from owner constraint traces")
         node_ids = (*outer, *(node for pair in pairs for node in pair))
         packets.append(AuthoredRootBoundaryPacket(
             int(correspondence.authored_definition.face_id), tuple(outer),
@@ -304,4 +333,11 @@ def plan_authored_component_boundaries(
             _node_xyz_snapshot(mesh, node_ids),
         ))
     registry.view.assert_current(geometry)
+    validate_prepared_authored_constraint_scope_binding(
+        geometry, constraint, cancellation_check=cancellation_check,
+    )
+    if (bind_authored_sheet_joint_component(
+            geometry, component.joint_edge_id, component.boundary_correspondences,
+            component.authored_face_ids) != component):
+        raise MeshError("authored route component changed during station planning")
     return tuple(packets)

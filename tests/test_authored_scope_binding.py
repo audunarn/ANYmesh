@@ -33,6 +33,10 @@ def test_simple_complete_owner_scope_is_bound_but_not_publishable():
     assert bound.descendants == correspondence.descendants
     assert bound.publication_qualified is False
     assert bound.scope.authored_document["faces"]
+    assert bound.constraint_receipt.selected_root_ids == (bound.authored_face,)
+    assert bound.constraint_receipt.current_face_ids == bound.descendants
+    assert bound.constraint_receipt.typed_inventory_complete
+    assert not bound.constraint_receipt.semantic_mapping_qualified
     assert owner.to_dict(model) == before
 
 
@@ -57,10 +61,25 @@ def test_member_and_physical_interface_need_separate_consumers():
         bind_authored_root_inputs(model, correspondence, correspondence.descendants)
 
 
+def test_face_corner_offsets_do_not_hide_an_isolated_vertex():
+    model = owner.GeometryModel()
+    isolated = model.add_point(20, 20, 20)
+    root = model.add_plate(model.add_points(((0, 0, 0), (2, 0, 0),
+                                             (2, 2, 0), (0, 2, 0))))
+    owner.apply_intersections(
+        model, owner.plan_intersections(model, (root,), policy="connect"),
+        policy="connect")
+    correspondence = owner.query_prepared_authored_boundary_correspondence(model, root)
+    receipt = owner.query_prepared_authored_constraint_scope(model, (root,))
+    assert isolated in receipt.inventory["original"]["isolated_vertex_ids"]
+    with pytest.raises(MeshError, match="isolated vertices need a qualified consumer"):
+        bind_authored_root_inputs(model, correspondence, correspondence.descendants)
+
+
 def test_missing_scope_capability_and_stale_binding_refuse(monkeypatch):
     model, correspondence = prepared()
     with monkeypatch.context() as patch:
-        patch.delattr(owner, "query_prepared_model_scope")
+        patch.delattr(owner, "query_prepared_authored_constraint_scope")
         with pytest.raises(MeshError, match="scope capability is unavailable"):
             bind_authored_root_inputs(model, correspondence, correspondence.descendants)
     model.add_point(10, 10, 10)

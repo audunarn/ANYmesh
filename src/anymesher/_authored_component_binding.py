@@ -19,6 +19,30 @@ class BoundAuthoredSheetJointComponent:
     occurrence_correspondence: tuple
     owner_receipt: object
     boundary_correspondences: tuple
+    constraint_receipt: object
+
+    @property
+    def unqualified_reference_categories(self) -> tuple[str, ...]:
+        inventory = self.constraint_receipt.inventory
+        categories = set()
+        for side in ("original", "current"):
+            document = inventory[side]
+            categories.update(kind for kind, records in document["records"].items()
+                              if records)
+            categories.update(kind for kind in (
+                "groups", "tags", "construction_vertices", "extensions")
+                              if document["opaque_unqualified"][kind])
+            if document["opaque_unqualified"]["features"].get("records"):
+                categories.add("features")
+            if any(row["metadata"] for rows in
+                   document["opaque_unqualified"]["metadata"].values()
+                   for row in rows):
+                categories.add("metadata")
+            if document["isolated_vertex_ids"]:
+                categories.add("isolated_vertices")
+        if self.constraint_receipt.outside_root_ids:
+            categories.add("outside_shared_trim_roots")
+        return tuple(sorted(categories))
 
     @property
     def publication_qualified(self) -> bool:
@@ -41,6 +65,8 @@ def bind_authored_sheet_joint_component(
             validate_prepared_sheet_joint_component_binding,
             validate_prepared_sheet_joint_component_selection,
             validate_prepared_authored_boundary_correspondence_binding,
+            query_prepared_authored_constraint_scope,
+            validate_prepared_authored_constraint_scope_binding,
         )
     except ImportError as error:
         raise MeshError("authored Sheet-joint component capability is unavailable") from error
@@ -92,9 +118,43 @@ def bind_authored_sheet_joint_component(
     validate_prepared_sheet_joint_component_binding(
         geometry, receipt, cancellation_check=cancellation_check,
     )
+    constraint = query_prepared_authored_constraint_scope(
+        geometry, receipt.authored_face_ids,
+        expected_revision=geometry.revision,
+        cancellation_check=cancellation_check,
+    )
+    if (constraint.selected_root_ids != tuple(receipt.authored_face_ids)
+            or constraint.current_face_ids != tuple(receipt.current_face_ids)
+            or constraint.scope.face_preimages != receipt.scope.face_preimages
+            or tuple(constraint.boundary_correspondences) != tuple(
+                by_root[root] for root in receipt.authored_face_ids)
+            or not constraint.typed_inventory_complete
+            or constraint.semantic_mapping_qualified
+            or constraint.parameter_remapping_qualified
+            or constraint.publication_qualified):
+        raise MeshError("authored Sheet-joint constraint inventory binds a different component")
+    validate_prepared_authored_constraint_scope_binding(
+        geometry, constraint, cancellation_check=cancellation_check,
+    )
+    # The caller's boundary objects can be changed by the final owner callback.
+    # Pin their definitions and both owner receipts with callback-free checks
+    # after every callback-bearing query/validation has completed.
+    validate_prepared_sheet_joint_component_binding(geometry, receipt)
+    validate_prepared_authored_constraint_scope_binding(geometry, constraint)
+    final_boundaries = tuple(by_root[root] for root in receipt.authored_face_ids)
+    for correspondence in final_boundaries:
+        validate_prepared_authored_boundary_correspondence_binding(
+            geometry, correspondence)
+    final_current = tuple(int(face) for correspondence in final_boundaries
+                          for face in correspondence.descendants)
+    if (final_boundaries != constraint.boundary_correspondences
+            or len(final_current) != len(set(final_current))
+            or set(final_current) != set(receipt.current_face_ids)
+            or set(final_current) != set(constraint.current_face_ids)):
+        raise MeshError("authored Sheet-joint boundary definitions changed after owner validation")
     return BoundAuthoredSheetJointComponent(
         int(receipt.joint_edge_id), tuple(receipt.authored_face_ids),
         tuple(receipt.current_face_ids), tuple(receipt.sheet_ids),
         occurrences, receipt,
-        tuple(by_root[root] for root in receipt.authored_face_ids),
+        final_boundaries, constraint,
     )

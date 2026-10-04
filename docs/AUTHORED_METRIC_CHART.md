@@ -37,12 +37,20 @@ binding after any candidate topology change. It grants no station insertion,
 constraint remap or authored-root mesh publication permission.
 
 `anymesher._authored_scope_binding.bind_authored_root_inputs` consumes the
-owner's complete original/current prepared-model snapshot. It requires every
-descendant of one authored face to be selected and refuses member/attachment
-records, physical junctions, groups, tags, construction/isolated vertices,
-extensions, feature records, changed child face metadata and adjacent shared
-edges until their meaning has an explicit consumer. It revalidates the owner
-receipt after inspection. The result remains `publication_qualified=False`:
+owner's complete typed original/current constraint inventory. It binds the
+exact authored root, every current descendant and each owner trace, then
+refuses member/attachment records, physical junctions, groups, tags,
+construction/isolated vertices, extensions, feature records, changed child
+face metadata and outside shared-trim roots until their meaning has an explicit
+consumer. `Face.corners` are loop offsets; isolated-vertex detection now comes
+from the owner inventory. The separate complete Sheet-joint binding retains
+the same inventory for both selected roots and reports unqualified reference
+categories, including occupied opaque metadata, without treating literal
+record equality as a remap. Boundary planning rebinds the whole Sheet-joint
+component, checks exact root/boundary coverage and registered edge sets against
+each root's typed trace, then rebinds after callback-bearing station work.
+The owner inventory is revalidated after inspection. These results remain
+`publication_qualified=False`:
 FaceUse/Sheet interpretation, external ANYfem loads and supports, original work
 accounting, shared-component transactions and final mesh gates are still open.
 
