@@ -418,6 +418,7 @@ def prepare_source_bound_qualified_s3_mesh(
     from .prepared_current_associations import (
         validate_prepared_current_component_associations,
     )
+    from ._authored_component_stage import _mesh_digest
 
     if type(source_mesh) is not Mesh or type(current_mesh) is not Mesh:
         raise TypeError("source-bound S3 preparation requires canonical Mesh inputs")
@@ -425,16 +426,34 @@ def prepare_source_bound_qualified_s3_mesh(
         prepared_geometry, GeometryModel
     ):
         raise TypeError("source-bound S3 preparation requires live owner models")
+    if not source_mesh.tris:
+        raise S3OwnerAuthorityError("source-bound S3 preparation requires T3 cells")
+    source_identity = (source_geometry.model_id, source_geometry.revision)
+    prepared_identity = (prepared_geometry.model_id, prepared_geometry.revision)
     if (source_mesh.geometry_model_id != source_geometry.model_id
             or source_mesh.geometry_revision != source_geometry.revision):
         raise S3OwnerAuthorityError("source-bound S3 mesh has stale source geometry identity")
     if source_mesh.structural_preparation.get("qualified_s3") is not None:
         raise S3OwnerAuthorityError("source-bound S3 mesh already has S3 authority")
+    source_digest = _mesh_digest(source_mesh)
+    current_digest = _mesh_digest(current_mesh)
+
+    def assert_inputs_current():
+        if ((source_geometry.model_id, source_geometry.revision) != source_identity
+                or (prepared_geometry.model_id, prepared_geometry.revision) != prepared_identity
+                or (source_mesh.geometry_model_id, source_mesh.geometry_revision)
+                != source_identity or _mesh_digest(source_mesh) != source_digest
+                or _mesh_digest(current_mesh) != current_digest):
+            raise S3OwnerAuthorityError(
+                "source-bound S3 owner or input mesh changed during qualification"
+            )
+
     validate_prepared_current_component_associations(
         prepared_geometry, association_receipt, association_component,
         current_mesh, association_registry, cell_current_faces,
         cancellation_check=cancellation_check,
     )
+    assert_inputs_current()
     if (source_mesh.order != current_mesh.order or source_mesh.order != "linear"
             or source_mesh.tris != current_mesh.tris
             or source_mesh.quads != current_mesh.quads
@@ -470,6 +489,31 @@ def prepare_source_bound_qualified_s3_mesh(
         raise S3OwnerAuthorityError(
             "source-bound S3 sheet ownership disagrees with source FaceUse authority"
         )
+    # Matching normals alone cannot distinguish a translated parallel face.
+    # This authored-component bridge is planar/linear: every source cell must
+    # lie on its trimmed SOURCE owner, including interior and edge samples.
+    positions = np.asarray(list(source_mesh.nodes.values()), dtype=float)
+    diameter = float(np.linalg.norm(np.ptp(positions, axis=0)))
+    support_limit = 1.0e-10 * max(1.0, diameter)
+    for cell, face in _element_face_map(source_mesh).items():
+        corners = np.asarray([source_mesh.nodes[node]
+                              for node in source_mesh.corners_of(cell)], dtype=float)
+        samples = list(corners)
+        samples.extend((first + second) / 2.0
+                       for first, second in zip(corners, np.roll(corners, -1, axis=0)))
+        samples.append(np.mean(corners, axis=0))
+        try:
+            distances = [source_geometry.project_to_face(face, point)[2]
+                         for point in samples]
+        except (GeometryError, KeyError, TypeError, ValueError) as error:
+            raise S3OwnerAuthorityError(
+                f"source-bound S3 cell {cell} lacks owner support"
+            ) from error
+        if any(not np.isfinite(distance) or distance > support_limit
+               for distance in distances):
+            raise S3OwnerAuthorityError(
+                f"source-bound S3 cell {cell} lies outside its SOURCE face support"
+            )
     if set(source_normals) != set(current_normals) or any(
         float(np.dot(source_normals[cell], current_normals[cell])) < 1.0 - 1.0e-10
         for cell in source_normals
@@ -480,6 +524,7 @@ def prepare_source_bound_qualified_s3_mesh(
     made, record = prepare_qualified_s3_mesh(
         source_mesh, source_geometry, target_policy=None,
     )
+    assert_inputs_current()
     if (made.tris != source_mesh.tris or made.quads != source_mesh.quads
             or set(made.nodes) != set(source_mesh.nodes)
             or any(not np.array_equal(made.nodes[node], source_mesh.nodes[node])
@@ -493,4 +538,5 @@ def prepare_source_bound_qualified_s3_mesh(
     })
     made.structural_preparation = dict(made.structural_preparation)
     made.structural_preparation["qualified_s3"] = record
+    assert_inputs_current()
     return made, record

@@ -7,6 +7,9 @@ from pathlib import Path
 import sys
 
 import pytest
+from anygeometry.editing import translate_entities
+from anygeometry.entities import EntityRef
+from anygeometry.serialization import from_dict, to_dict
 
 from anymesher import (
     S3OwnerAuthorityError,
@@ -30,11 +33,13 @@ def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
     source = deepcopy(staged.mesh)
     before_tris = deepcopy(source.tris)
 
-    def qualify(candidate=source, receipt=staged.current_receipt):
+    def qualify(candidate=source, receipt=staged.current_receipt,
+                source_geometry=fixture.geometry, cancellation_check=None):
         return prepare_source_bound_qualified_s3_mesh(
-            candidate, fixture.geometry, fixture.geometry, staged.mesh,
+            candidate, source_geometry, fixture.geometry, staged.mesh,
             receipt, fixture.component, fixture.source_registry,
             dict(staged.cell_current_faces),
+            cancellation_check=cancellation_check,
         )
 
     made, record = qualify()
@@ -70,3 +75,34 @@ def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
     changed.elements_of_sheet[sheet].pop()
     with pytest.raises(S3OwnerAuthorityError, match="sheet ownership"):
         qualify(changed)
+
+    changed = deepcopy(source)
+    changed.tris.clear()
+    with pytest.raises(S3OwnerAuthorityError, match="requires T3 cells"):
+        qualify(changed)
+    assert changed.structural_preparation == {}
+
+    separate_source = from_dict(to_dict(fixture.geometry))
+    callbacks = []
+
+    def mutate_source(_stage):
+        callbacks.append(_stage)
+        if len(callbacks) == 1:
+            separate_source.add_point(20, 20, 20)
+        return False
+
+    with pytest.raises(S3OwnerAuthorityError, match="changed during qualification"):
+        qualify(source_geometry=separate_source, cancellation_check=mutate_source)
+    assert callbacks
+    assert source.structural_preparation == {}
+
+    translated_source = from_dict(to_dict(fixture.geometry))
+    translate_entities(
+        translated_source,
+        tuple(EntityRef("sheet", sheet) for sheet in translated_source.sheets),
+        (0, 0, 0.25),
+    )
+    translated_mesh = deepcopy(source)
+    translated_mesh.geometry_revision = translated_source.revision
+    with pytest.raises(S3OwnerAuthorityError, match="SOURCE face support"):
+        qualify(translated_mesh, source_geometry=translated_source)
