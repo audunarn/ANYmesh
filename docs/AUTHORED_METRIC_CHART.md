@@ -218,3 +218,12 @@ preserved on revalidation. The exact two-Sheet, two-sided crossing scope does
 not qualify boundary junctions or T junctions. This is a current-only joint
 cell binding, not proof that a batch created the records. Source-reference
 transfer, solver admission, meshing and publication remain unqualified.
+
+`stage_authored_root_pair` now requires this same private joint proof before
+finishing its detached result, and retains the receipt beside the versioned
+current-only association record. A staged pair reports only the narrow
+current-only interior joint cell binding as qualified; source-reference
+transfer, solver admission and publication stay false. Manual prebuilt T3
+fixtures exercise both the ordinary and created-node-UV association versions
+without calling a triangulation or refinement engine. This still does not
+enable the authored-root production route or establish a solver-ready mesh.

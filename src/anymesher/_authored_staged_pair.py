@@ -10,6 +10,7 @@ from ._authored_component_stage import (
     AuthoredComponentStage, _mesh_digest, _registry_receipt,
 )
 from ._authored_component_binding import BoundAuthoredSheetJointComponent
+from ._authored_current_only_joint_cells import CurrentOnlySheetJointCells
 from ._authored_route_boundary import (
     AuthoredRootBoundaryPacket, AuthoredRootChildBinding,
     AuthoredRootTriangulation, _assert_packet_current,
@@ -36,6 +37,16 @@ class DetachedAuthoredPair:
     current_receipt: PreparedCurrentAssociationReceipt
     created_material_uv_by_root: tuple
     cell_current_faces: tuple[tuple[int, int], ...]
+    current_only_joint_receipt: CurrentOnlySheetJointCells
+
+    @property
+    def current_only_joint_cell_binding_qualified(self) -> bool:
+        """Only the two-Sheet interior current-joint cell composition is proven."""
+        return self.current_only_joint_receipt.current_only_joint_cell_binding_qualified
+
+    @property
+    def source_reference_transfer_qualified(self) -> bool:
+        return False
 
     @property
     def publication_qualified(self) -> bool:
@@ -247,8 +258,8 @@ def stage_authored_root_pair(
     """Assemble two complete roots with one global station and created-ID space.
 
     Source objects stay untouched. Exact owner partition and a fresh public
-    current-only receipt are required; no source-reference or quality admission
-    claim follows from the returned detached artifact.
+    current-only receipt and private interior-joint cell proof are required;
+    no source-reference or quality admission claim follows from the artifact.
     """
     if (type(source_mesh) is not Mesh
             or not isinstance(source_registry, GlobalEdgeBoundaryRegistry)
@@ -374,17 +385,30 @@ def stage_authored_root_pair(
             )
             if receipt.source_reference_transfer_qualified or receipt.publication_qualified:
                 raise MeshError("authored pair current receipt widened its qualification")
+            joint_receipt = component.bind_current_only_joint_cells(
+                geometry, candidate_mesh, candidate_registry, cell_faces,
+                current_associations=receipt,
+                cancellation_check=cancellation_check,
+            )
+            if (not joint_receipt.current_only_joint_cell_binding_qualified
+                    or joint_receipt.current_associations != receipt
+                    or joint_receipt.source_reference_transfer_qualified
+                    or joint_receipt.solver_admitted
+                    or joint_receipt.publication_qualified):
+                raise MeshError("authored pair joint receipt widened its qualification")
             if (_mesh_digest(source_mesh) != source_digest
                     or _registry_receipt(source_registry) != source_stations
                     or source_seeds.committed_snapshot() != source_seed_state):
                 raise MeshError("authored pair source changed during validation")
-            proved["core"], proved["receipt"] = core, receipt
+            proved["core"], proved["receipt"], proved["joint"] = (
+                core, receipt, joint_receipt,
+            )
             return True
 
         detached_mesh, _detached_registry, _detached_seeds = stage.finish(validate)
         return DetachedAuthoredPair(
             detached_mesh, proved["core"], proved["receipt"], normalized_created,
-            tuple(sorted(cell_faces.items())),
+            tuple(sorted(cell_faces.items())), proved["joint"],
         )
     except BaseException:
         stage.abort()
