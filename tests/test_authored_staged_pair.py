@@ -10,12 +10,15 @@ from anymesher._authored_route_boundary import (
     triangulate_authored_root_boundary,
 )
 from anymesher._authored_staged_pair import (
+    prepare_authored_component_boundary_stations,
     refine_authored_pair_with_one_ledger, stage_authored_root_pair,
 )
 from anymesher._authored_component_stage import _mesh_digest, _registry_receipt
 from anymesher._authored_work_ledger import AuthoredWorkLedger
 from anymesher.errors import MeshError
 from anymesher.native_v2 import ComponentSeedRegistry, NativeMeshingOptions
+from anymesher.quality_v2 import mesh_quality
+from anymesher.s3_quality import S3QualityError, assert_s3_admissible
 from anymesher.prepared_current_associations import (
     PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA,
     PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
@@ -48,6 +51,72 @@ def test_pair_stages_exact_mesh_without_changing_source():
         np.testing.assert_array_equal(result.mesh.nodes[node], source.nodes[node])
     assert result.mesh.nodes_of_edge == source.nodes_of_edge
     assert result.mesh.elements_of_sheet.keys() == source.elements_of_sheet.keys()
+    normals = {
+        cell: args[0].face_normal(face, 0.5, 0.5)
+        for cell, face in result.cell_current_faces
+    }
+    with pytest.raises(S3QualityError, match="minimum angle"):
+        assert_s3_admissible(result.mesh, element_owner_normals=normals)
+    assert (_mesh_digest(source), _registry_receipt(registry), seeds.committed_snapshot()) == before
+
+
+def test_size_driven_shared_stations_admit_the_staged_linear_s3_shape():
+    geometry, component, source, registry, seeds, *_ = inputs()
+    before = (_mesh_digest(source), _registry_receipt(registry), seeds.committed_snapshot())
+    prepared = prepare_authored_component_boundary_stations(
+        geometry, component, source, registry, seeds, target_size=2.0,
+    )
+    assert prepared.publication_qualified is False
+    assert prepared.added_station_count == 7
+    assert (_mesh_digest(source), _registry_receipt(registry), seeds.committed_snapshot()) == before
+    packets = plan_authored_component_boundaries(
+        geometry, component, prepared.mesh, prepared.registry,
+    )
+    roots = tuple(triangulate_authored_root_boundary(packet) for packet in packets)
+    children = tuple(bind_authored_root_triangles_to_children(packet, root, correspondence)
+                     for packet, root, correspondence in zip(
+                         packets, roots, component.boundary_correspondences))
+    result = stage_authored_root_pair(
+        geometry, component, prepared.mesh, prepared.registry, prepared.seeds,
+        packets, roots, children,
+    )
+    rows = {int(node): row for row, node in enumerate(result.core.node_ids)}
+    quality = mesh_quality(result.core, declared_plate_junction_edges=[
+        (rows[a], rows[b]) for a, b in result.mesh.declared_plate_junction_edges
+    ])
+    assert quality.validity.valid
+    assert quality.minimum_angle >= 15.0
+    assert quality.maximum_aspect_ratio <= 4.0
+    normals = {
+        cell: geometry.face_normal(face, 0.5, 0.5)
+        for cell, face in result.cell_current_faces
+    }
+    assert_s3_admissible(result.mesh, element_owner_normals=normals)
+    assert result.publication_qualified is False
+    assert result.solver_admitted is False
+
+
+def test_size_driven_stationing_budget_failure_and_cancel_leave_source_unchanged():
+    geometry, component, source, registry, seeds, *_ = inputs()
+    before = (_mesh_digest(source), _registry_receipt(registry), seeds.committed_snapshot())
+    with pytest.raises(MeshError, match="budget exhausted"):
+        prepare_authored_component_boundary_stations(
+            geometry, component, source, registry, seeds,
+            target_size=2.0, max_new_stations=6,
+        )
+    with pytest.raises(MeshError, match="budget exhausted"):
+        prepare_authored_component_boundary_stations(
+            geometry, component, source, registry, seeds,
+            target_size=1.0e-300, max_new_stations=6,
+        )
+    def cancel(phase):
+        if phase == "authored boundary station insertion":
+            raise LookupError("cancelled")
+    with pytest.raises(LookupError, match="cancelled"):
+        prepare_authored_component_boundary_stations(
+            geometry, component, source, registry, seeds,
+            target_size=2.0, cancellation_check=cancel,
+        )
     assert (_mesh_digest(source), _registry_receipt(registry), seeds.committed_snapshot()) == before
 
 

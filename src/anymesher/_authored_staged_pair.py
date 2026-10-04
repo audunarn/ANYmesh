@@ -1,12 +1,15 @@
 """Detached whole-component authored T3 assembly; never publishes a mesh."""
 
 from dataclasses import dataclass
+from fractions import Fraction
+from math import ceil, isfinite
 
 import numpy as np
 
 from ._authored_component_stage import (
     AuthoredComponentStage, _mesh_digest, _registry_receipt,
 )
+from ._authored_component_binding import BoundAuthoredSheetJointComponent
 from ._authored_route_boundary import (
     AuthoredRootBoundaryPacket, AuthoredRootChildBinding,
     AuthoredRootTriangulation, _assert_packet_current,
@@ -41,6 +44,139 @@ class DetachedAuthoredPair:
     @property
     def solver_admitted(self) -> bool:
         return False
+
+
+@dataclass(frozen=True)
+class DetachedAuthoredBoundaryStations:
+    """Prepared source-edge stations, not an accepted shell mesh."""
+
+    mesh: Mesh
+    registry: GlobalEdgeBoundaryRegistry
+    seeds: ComponentSeedRegistry
+    added_station_count: int
+
+    @property
+    def publication_qualified(self) -> bool:
+        return False
+
+
+def prepare_authored_component_boundary_stations(
+    geometry, component: BoundAuthoredSheetJointComponent,
+    source_mesh: Mesh, source_registry: GlobalEdgeBoundaryRegistry,
+    source_seeds: ComponentSeedRegistry, *, target_size: float,
+    max_new_stations: int = 10_000, cancellation_check=None,
+) -> DetachedAuthoredBoundaryStations:
+    """Subdivide straight component edge spans by physical size in one ID space.
+
+    The result is a detached *preparation* input for boundary planning. Source
+    cells may not yet use the new stations, so the result cannot be published.
+    Each current edge is visited once; both original roots then consume its
+    same registered station IDs and XYZ.
+    """
+    if (not isinstance(component, BoundAuthoredSheetJointComponent)
+            or type(source_mesh) is not Mesh
+            or not isinstance(source_registry, GlobalEdgeBoundaryRegistry)
+            or not isinstance(source_seeds, ComponentSeedRegistry)):
+        raise MeshError("authored stationing needs a bound component and source state")
+    if (isinstance(target_size, bool) or not isinstance(target_size, (int, float))
+            or not isfinite(target_size) or target_size <= 0.0):
+        raise MeshError("authored station target size must be finite and positive")
+    if (isinstance(max_new_stations, bool) or not isinstance(max_new_stations, int)
+            or max_new_stations < 0):
+        raise MeshError("authored station budget must be nonnegative")
+    try:
+        from anygeometry import Straight
+    except ImportError as error:
+        raise MeshError("authored stationing needs authoritative straight curves") from error
+    source_registry.view.assert_current(geometry)
+    expected_edges = {
+        int(edge) for correspondence in component.boundary_correspondences
+        for loop in correspondence.exterior_loops
+        for _source, _forward, edges in loop for edge in edges
+    } | {
+        int(edge) for correspondence in component.boundary_correspondences
+        for edge, _uses in correspondence.interior_incidence
+    }
+    if set(source_mesh.nodes_of_edge) != expected_edges:
+        raise MeshError("authored stationing needs the complete current edge scope")
+    original_mesh = _mesh_digest(source_mesh)
+    original_registry = _registry_receipt(source_registry)
+    original_seeds = source_seeds.committed_snapshot()
+    stage = AuthoredComponentStage(source_mesh, source_registry, source_seeds)
+    try:
+        additions = []
+        for edge in sorted(expected_edges):
+            if cancellation_check is not None:
+                cancellation_check("authored boundary stationing")
+            if not isinstance(geometry.edges[edge].curve, Straight):
+                raise MeshError("authored stationing currently needs straight owner edges")
+            entries = stage.boundary_registry.entries(edge)
+            chain = tuple(entry.node_id for entry in entries)
+            if (len(chain) < 2 or any(node is None or node not in stage.mesh.nodes
+                                      for node in chain)
+                    or stage.mesh.nodes_of_edge[edge] != list(chain)):
+                raise MeshError("authored stationing found an inconsistent edge chain")
+            for entry in entries:
+                if np.linalg.norm(stage.mesh.nodes[entry.node_id] - entry.point) > (
+                    stage.boundary_registry.view.effective_length(
+                        stage.boundary_registry.view.edge_length(edge)
+                    )
+                ):
+                    raise MeshError("authored stationing found an off-edge node")
+            for left, right in zip(entries, entries[1:]):
+                span = float(np.linalg.norm(right.point - left.point))
+                ratio = span / target_size
+                if not isfinite(ratio) or ratio > max_new_stations - len(additions) + 1:
+                    raise MeshError("authored station budget exhausted")
+                divisions = max(1, ceil(ratio))
+                if len(additions) + divisions - 1 > max_new_stations:
+                    raise MeshError("authored station budget exhausted")
+                for step in range(1, divisions):
+                    parameter = float(left.key.parameter +
+                                      (right.key.parameter - left.key.parameter)
+                                      * step / divisions)
+                    if not left.key.parameter < parameter < right.key.parameter:
+                        raise MeshError("authored station spacing lost parameter order")
+                    additions.append((edge, parameter))
+        for edge, parameter in additions:
+            if cancellation_check is not None:
+                cancellation_check("authored boundary station insertion")
+            fraction = Fraction.from_float(parameter)
+            node = stage.seed_registry.resolve(
+                edge, fraction.numerator, fraction.denominator,
+            )
+            point = stage.boundary_registry.view.edge_point(edge, parameter)
+            stage.boundary_registry.register(edge, parameter, point, node_id=node)
+            stage.mesh.nodes[node] = np.array(point, dtype=float, copy=True)
+        for edge in sorted(expected_edges):
+            stage.mesh.nodes_of_edge[edge] = [
+                entry.node_id for entry in stage.boundary_registry.entries(edge)
+            ]
+        stage.mesh.declared_plate_junction_edges = tuple(sorted({
+            (min(a, b), max(a, b))
+            for edge in component.owner_receipt.joint_edge_ids
+            for a, b in zip(stage.mesh.nodes_of_edge[int(edge)],
+                            stage.mesh.nodes_of_edge[int(edge)][1:])
+        }))
+
+        def validate(mesh, registry, seeds):
+            registry.view.assert_current(geometry)
+            if (_mesh_digest(source_mesh) != original_mesh
+                    or _registry_receipt(source_registry) != original_registry
+                    or source_seeds.committed_snapshot() != original_seeds):
+                raise MeshError("authored station source changed during preparation")
+            if any(mesh.nodes_of_edge[edge] != [entry.node_id
+                    for entry in registry.entries(edge)] for edge in expected_edges):
+                raise MeshError("authored prepared edge chain changed")
+            if cancellation_check is not None:
+                cancellation_check("authored boundary station validation")
+            return True
+
+        mesh, registry, seeds = stage.finish(validate)
+        return DetachedAuthoredBoundaryStations(mesh, registry, seeds, len(additions))
+    except BaseException:
+        stage.abort()
+        raise
 
 
 @dataclass(frozen=True)
@@ -170,6 +306,12 @@ def stage_authored_root_pair(
         mesh.quads = {}
         mesh.elements_of_face = {int(face): [] for face in component.current_face_ids}
         mesh.elements_of_sheet = {int(sheet): [] for sheet in component.sheet_ids}
+        mesh.declared_plate_junction_edges = tuple(sorted({
+            (min(a, b), max(a, b))
+            for edge in component.owner_receipt.joint_edge_ids
+            for a, b in zip(mesh.nodes_of_edge[int(edge)],
+                            mesh.nodes_of_edge[int(edge)][1:])
+        }))
         created_uv = {root: {} for root in roots}
         cell_faces = {}
         next_cell = max((*source_mesh.tris, *source_mesh.quads), default=0) + 1
