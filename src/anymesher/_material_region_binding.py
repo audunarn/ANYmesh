@@ -233,6 +233,17 @@ class MaterialRegionBinding:
             result.append((tuple(nodes), np.asarray(rows), tuple(specifications)))
         return tuple(result)
 
+    def input_provenance(self, mesh, registry, loops, pinned_ids, eligibility_context,
+                         emitted_inputs,
+                         cancellation_check=None):
+        """Bind pre-native input identities without granting split permission."""
+        from ._material_input_provenance import make_material_input_provenance
+
+        return make_material_input_provenance(
+            self, mesh, registry, loops, pinned_ids, eligibility_context,
+            emitted_inputs,
+            cancellation_check)
+
     def interior(self, mesh, registry, *, boundary_rows=None):
         segments, pinned = [], {}
         if boundary_rows is None:

@@ -1337,6 +1337,7 @@ def _mesh_native_face(
     cancellation_check: Callable[[str], None] | None,
     _cylindrical_binding: Any = None,
     _material_region_binding: Any = None,
+    _material_input_eligibility: Any = None,
 ) -> dict[str, Any]:
     if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
         from ._cylindrical_recombine import assert_face_open
@@ -1599,13 +1600,38 @@ def _mesh_native_face(
             supplemental_metric_field=supplemental_metric_field,
         )
         recombine = False
+    native_outer, native_holes = chart_outer, chart_holes
+    native_constraints, native_pinned = chart_constraints, chart_pinned
+    if _material_region_binding is not None:
+        if _material_input_eligibility is None:
+            raise MeshError('material input provenance requires route eligibility context')
+        # The receipt certifies the same detached arrays passed into native
+        # meshing. Owner callbacks cannot substitute the earlier chart arrays.
+        native_outer = np.array(chart_outer, copy=True)
+        native_holes = tuple(np.array(item, copy=True) for item in chart_holes)
+        native_constraints = tuple(np.array(item, copy=True) for item in chart_constraints)
+        native_pinned = np.array(chart_pinned, copy=True)
+        emitted = {
+            'transform': np.array(chart_transform, copy=True),
+            'chart_loops': (native_outer, *native_holes),
+            'chart_constraints': native_constraints,
+            'chart_pinned': native_pinned,
+        }
+        receipt = _material_region_binding.input_provenance(
+            mesh, boundary_registry, loops, region_pinned_ids,
+            _material_input_eligibility, emitted, cancellation_check)
+        records = getattr(component_seed_registry, '_material_input_provenance', None)
+        if records is None:
+            records = {}
+            component_seed_registry._material_input_provenance = records
+        records[face_id] = receipt
     surface_diagnostics: dict[str, Any] = {}
     if quality_options is None:
         core = mesh_planar_surface(
-            chart_outer,
-            chart_holes,
-            constraints=chart_constraints,
-            interior_points=chart_pinned,
+            native_outer,
+            native_holes,
+            constraints=native_constraints,
+            interior_points=native_pinned,
             target_size=chart_size,
             recombine=recombine,
             order=order,
@@ -1685,10 +1711,10 @@ def _mesh_native_face(
             native_options=face_native_options,
         )
         core = mesh_planar_surface(
-            chart_outer,
-            chart_holes,
-            constraints=chart_constraints,
-            interior_points=chart_pinned,
+            native_outer,
+            native_holes,
+            constraints=native_constraints,
+            interior_points=native_pinned,
             options=surface_options,
             owner=geometry.handle("face", face_id),
             cancellation_check=cancellation_check,
@@ -4954,6 +4980,40 @@ def generate_hybrid_mesh_result(
     automatically_seeded_shared_edges = component_local_split_edges(
         geometry, automatically_seeded_shared_edges, cylindrical_bindings
     )
+    material_input_eligibility = None
+    if material_region_bindings:
+        material_edges = {
+            int(path.source_edge) for binding in material_region_bindings.values()
+            for paths in binding.region.boundaries for path in paths
+        } | protected_region_constraints
+        edge_terms = {}
+        for edge_id in sorted(material_edges):
+            incident = edge_faces.get(edge_id, set())
+            terms = {
+                'shared_or_analytic_supports': bool(incident) and (
+                    len(incident) > 1 or all(
+                        isinstance(geometry.faces[face].surface, Cone)
+                        or isinstance(geometry.faces[face].surface, ExtrudedSurface)
+                        for face in incident)),
+                'all_native_faces': bool(incident) and incident.issubset(native_face_set),
+                'not_overridden': edge_id not in set(final_overrides or {}),
+                'no_beam': edge_id not in set(beams),
+                'straight_curve': isinstance(geometry.edges[edge_id].curve, Straight),
+                'default_seeding': not supplied_seeding,
+                'linear_order': order == 'linear',
+                'not_region_interior': edge_id not in protected_region_constraints,
+            }
+            prior_eligible = all(terms.values())
+            terms['component_local_allowed'] = (
+                edge_id in automatically_seeded_shared_edges if prior_eligible else True)
+            terms['selected'] = all(terms.values())
+            if terms['selected'] != (edge_id in automatically_seeded_shared_edges):
+                raise MeshError('material input eligibility differs from the selected route')
+            edge_terms[edge_id] = terms
+        material_input_eligibility = {
+            'model_id': str(geometry.model_id), 'revision': geometry.revision,
+            'edges': edge_terms,
+        }
     for face_id in native_faces:
         material_region_binding = material_region_bindings.get(face_id)
         if material_region_binding is not None and face_id != material_region_binding.representative:
@@ -4992,6 +5052,7 @@ def generate_hybrid_mesh_result(
             cancellation_check=cancellation_check,
             _cylindrical_binding=None if quadratic_cylinder else cylindrical_bindings.get(face_id),
             _material_region_binding=material_region_binding,
+            _material_input_eligibility=material_input_eligibility,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
         if material_region_binding is not None:
