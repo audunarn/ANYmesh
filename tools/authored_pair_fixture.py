@@ -1,6 +1,6 @@
 """Portable, detached authored two-Sheet fixture for cross-package development.
 
-Invoke with ANYmesh ``src`` and the exact ANYgeometry e509862 wheel on
+Invoke with ANYmesh ``src`` and a pinned ANYgeometry handoff wheel on
 ``PYTHONPATH``. This builds live owner/registry/receipt objects; it does not
 publish a mesh or assert source-reference transfer or solver acceptance.
 """
@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from hashlib import sha256
 import json
+from pathlib import Path
 from typing import Callable
 
 import anygeometry as owner
@@ -33,11 +35,33 @@ from anymesher.s3_quality import evaluate_s3_admission
 
 
 FIXTURE_SCHEMA = "anymesher.detached-authored-pair-handoff-v1"
-GEOMETRY_COMMIT = "e509862bfb7f957d4200d090b05207d24f55ca82"
-GEOMETRY_WHEEL_SHA256 = (
-    "2761f6d62611ea62b69f80d6ec47659c4cfa1142d3ac07ed460e54fc191165ed"
-)
+PINNED_OWNER_WHEELS = {
+    "2761f6d62611ea62b69f80d6ec47659c4cfa1142d3ac07ed460e54fc191165ed":
+        "e509862bfb7f957d4200d090b05207d24f55ca82",
+    "97c717ef2ada2508408290a002cf5fa5839dd009dbf7c975fd3ad1d2dd275dbc":
+        "972d70a616de4f95b1c0f5ff79386f9725525595",
+}
 STAGED_MESHER_BASE = "969c106b7ed94c60890b5a64b0dba9ee6b21a7c4"
+
+
+def _owner_identity() -> tuple[str, str]:
+    """Bind the fixture to the exact imported owner wheel, not a label."""
+    location = str(owner.__file__)
+    marker = location.lower().find(".whl")
+    if marker < 0:
+        raise ValueError("authored handoff needs an exact pinned ANYgeometry wheel")
+    wheel = Path(location[:marker + 4])
+    if not wheel.is_file():
+        raise ValueError("imported ANYgeometry wheel is unavailable for hashing")
+    digest = sha256()
+    with wheel.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    hexdigest = digest.hexdigest()
+    commit = PINNED_OWNER_WHEELS.get(hexdigest)
+    if commit is None:
+        raise ValueError("imported ANYgeometry wheel is not a pinned handoff candidate")
+    return commit, hexdigest
 
 
 @dataclass(frozen=True)
@@ -56,11 +80,12 @@ class AuthoredPairFixture:
 
     @property
     def manifest(self) -> dict:
+        geometry_commit, wheel_sha256 = _owner_identity()
         return {
             "schema": FIXTURE_SCHEMA,
             "variant": self.variant,
-            "geometry_commit": GEOMETRY_COMMIT,
-            "geometry_wheel_sha256": GEOMETRY_WHEEL_SHA256,
+            "geometry_commit": geometry_commit,
+            "geometry_wheel_sha256": wheel_sha256,
             "geometry_import": owner.__file__,
             "mesher_base": STAGED_MESHER_BASE,
             "source_model_id": str(self.geometry.model_id),
@@ -212,6 +237,7 @@ def build_fixture(
     """
     if variant not in ("legacy14", "size2", "interior"):
         raise ValueError("fixture variant must be legacy14, size2 or interior")
+    _owner_identity()
     geometry, component, correspondences = _source_component(
         _default_source_factory if source_factory is None else source_factory
     )
