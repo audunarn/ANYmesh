@@ -419,6 +419,7 @@ def prepare_source_bound_qualified_s3_mesh(
         validate_prepared_current_component_associations,
     )
     from ._authored_component_stage import _mesh_digest
+    from anygeometry.serialization import to_dict as owner_to_dict
 
     if type(source_mesh) is not Mesh or type(current_mesh) is not Mesh:
         raise TypeError("source-bound S3 preparation requires canonical Mesh inputs")
@@ -430,6 +431,8 @@ def prepare_source_bound_qualified_s3_mesh(
         raise S3OwnerAuthorityError("source-bound S3 preparation requires T3 cells")
     source_identity = (source_geometry.model_id, source_geometry.revision)
     prepared_identity = (prepared_geometry.model_id, prepared_geometry.revision)
+    source_definition = owner_to_dict(source_geometry)
+    prepared_definition = owner_to_dict(prepared_geometry)
     if (source_mesh.geometry_model_id != source_geometry.model_id
             or source_mesh.geometry_revision != source_geometry.revision):
         raise S3OwnerAuthorityError("source-bound S3 mesh has stale source geometry identity")
@@ -439,8 +442,17 @@ def prepare_source_bound_qualified_s3_mesh(
     current_digest = _mesh_digest(current_mesh)
 
     def assert_inputs_current():
+        try:
+            source_now = owner_to_dict(source_geometry)
+            prepared_now = owner_to_dict(prepared_geometry)
+        except (GeometryError, TypeError, ValueError) as error:
+            raise S3OwnerAuthorityError(
+                "source-bound S3 owner changed during qualification"
+            ) from error
         if ((source_geometry.model_id, source_geometry.revision) != source_identity
                 or (prepared_geometry.model_id, prepared_geometry.revision) != prepared_identity
+                or source_now != source_definition
+                or prepared_now != prepared_definition
                 or (source_mesh.geometry_model_id, source_mesh.geometry_revision)
                 != source_identity or _mesh_digest(source_mesh) != source_digest
                 or _mesh_digest(current_mesh) != current_digest):
@@ -490,11 +502,19 @@ def prepare_source_bound_qualified_s3_mesh(
             "source-bound S3 sheet ownership disagrees with source FaceUse authority"
         )
     # Matching normals alone cannot distinguish a translated parallel face.
-    # This authored-component bridge is planar/linear: every source cell must
-    # lie on its trimmed SOURCE owner, including interior and edge samples.
+    # This authored-component bridge is planar/linear. Check source support
+    # distance, then ask the owner to prove each *whole* closed triangle lies
+    # in the SOURCE material, including concave trims and holes. Samples alone
+    # would miss a side crossing excluded material.
+    from anygeometry import (
+        query_material_surface_regions,
+        validate_material_surface_region_triangles,
+    )
+
     positions = np.asarray(list(source_mesh.nodes.values()), dtype=float)
     diameter = float(np.linalg.norm(np.ptp(positions, axis=0)))
     support_limit = 1.0e-10 * max(1.0, diameter)
+    regions_by_face = {}
     for cell, face in _element_face_map(source_mesh).items():
         corners = np.asarray([source_mesh.nodes[node]
                               for node in source_mesh.corners_of(cell)], dtype=float)
@@ -514,6 +534,38 @@ def prepare_source_bound_qualified_s3_mesh(
             raise S3OwnerAuthorityError(
                 f"source-bound S3 cell {cell} lies outside its SOURCE face support"
             )
+        if face not in regions_by_face:
+            try:
+                regions_by_face[face] = query_material_surface_regions(
+                    source_geometry, operands=(source_geometry.handle("face", face),),
+                    expected_revision=source_identity[1],
+                    cancellation_check=cancellation_check,
+                )
+            except (GeometryError, KeyError, TypeError, ValueError) as error:
+                raise S3OwnerAuthorityError(
+                    f"source-bound S3 face {face} lacks exact material authority"
+                ) from error
+        regions = regions_by_face[face]
+        matching = [region for region in regions.regions
+                    if any(handle.id == face for handle in region.faces)]
+        if len(matching) != 1 or len(matching[0].faces) != 1:
+            raise S3OwnerAuthorityError(
+                f"source-bound S3 cell {cell} lacks one exact SOURCE material region"
+            )
+        try:
+            uv = [source_geometry.face_support_local_uv(face, point)
+                  for point in corners]
+            pieces = (uv,) if len(uv) == 3 else ((uv[0], uv[1], uv[2]),
+                                                    (uv[0], uv[2], uv[3]))
+            validate_material_surface_region_triangles(
+                source_geometry, regions, face, pieces,
+                cancellation_check=cancellation_check,
+            )
+        except (GeometryError, KeyError, TypeError, ValueError) as error:
+            raise S3OwnerAuthorityError(
+                f"source-bound S3 cell {cell} leaves exact SOURCE material"
+            ) from error
+    assert_inputs_current()
     if set(source_normals) != set(current_normals) or any(
         float(np.dot(source_normals[cell], current_normals[cell])) < 1.0 - 1.0e-10
         for cell in source_normals

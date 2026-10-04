@@ -8,7 +8,7 @@ import sys
 
 import pytest
 from anygeometry.editing import translate_entities
-from anygeometry.entities import EntityRef
+from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.serialization import from_dict, to_dict
 
 from anymesher import (
@@ -96,6 +96,19 @@ def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
     assert callbacks
     assert source.structural_preparation == {}
 
+    unversioned_source = from_dict(to_dict(fixture.geometry))
+    unchanged_revision = unversioned_source.revision
+
+    def mutate_definition(_stage):
+        plane = unversioned_source.faces[min(unversioned_source.faces)].surface
+        object.__setattr__(plane, "origin", plane.origin + (0, 0, .125))
+        return False
+
+    with pytest.raises(S3OwnerAuthorityError, match="changed during qualification"):
+        qualify(source_geometry=unversioned_source,
+                cancellation_check=mutate_definition)
+    assert unversioned_source.revision == unchanged_revision
+
     translated_source = from_dict(to_dict(fixture.geometry))
     translate_entities(
         translated_source,
@@ -106,3 +119,25 @@ def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
     translated_mesh.geometry_revision = translated_source.revision
     with pytest.raises(S3OwnerAuthorityError, match="SOURCE face support"):
         qualify(translated_mesh, source_geometry=translated_source)
+
+    holed_source = from_dict(to_dict(fixture.geometry))
+    face = next(face for face in sorted(source.elements_of_face)
+                if abs(holed_source.face_normal(face, .5, .5)[2]) > .9)
+    cell = source.elements_of_face[face][0]
+    corners = [source.nodes[node] for node in source.tris[cell]]
+    center = .6 * corners[0] + .25 * corners[1] + .15 * corners[2]
+    radius = .001
+    x, y, z = center
+    points = ((x-radius, y-radius, z), (x-radius, y+radius, z),
+              (x+radius, y+radius, z), (x+radius, y-radius, z))
+    edges = holed_source.add_polyline(holed_source.add_points(points), close=True)
+    with holed_source.transaction():
+        holed_source._put_entity(
+            "face", replace(holed_source.faces[face], holes=(
+                tuple(OrientedEdge(edge, True) for edge in edges),
+            )),
+        )
+    holed_mesh = deepcopy(source)
+    holed_mesh.geometry_revision = holed_source.revision
+    with pytest.raises(S3OwnerAuthorityError, match="exact SOURCE material"):
+        qualify(holed_mesh, source_geometry=holed_source)
