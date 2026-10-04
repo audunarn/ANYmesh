@@ -5,7 +5,7 @@ material partition. It neither remaps source project references nor admits a
 mesh for publication or analysis.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
@@ -82,10 +82,11 @@ def validate_authored_component_cells(
         raise MeshError("authored component cells need one current face per shell")
     face_cells = {face: [] for face in current.current_face_ids}
     shell_segments = set()
-    face_root = {int(face): int(correspondence.authored_definition.face_id)
-                 for correspondence in current.boundary_correspondences
-                 for face in correspondence.descendants}
-    segment_roots = defaultdict(set)
+    current_faces = {
+        int(face) for correspondence in current.boundary_correspondences
+        for face in correspondence.descendants
+    }
+    segment_face_counts = defaultdict(Counter)
     active_nodes = set()
     for cell_id, connection in shells.items():
         corners = 3 if cell_id in mesh.tris else 4
@@ -99,7 +100,7 @@ def validate_authored_component_cells(
             a, b = int(connection[index]), int(connection[(index + 1) % corners])
             edge = (min(a, b), max(a, b))
             shell_segments.add(edge)
-            segment_roots[edge].add(face_root[int(cell_current_faces[cell_id])])
+            segment_face_counts[edge][int(cell_current_faces[cell_id])] += 1
     if any(not ids for ids in face_cells.values()):
         raise MeshError("authored component has a current face without cells")
     expected_faces = {face: sorted(ids) for face, ids in face_cells.items()}
@@ -172,9 +173,29 @@ def validate_authored_component_cells(
     if (len(mesh.declared_plate_junction_edges) != len(joint_segments)
             or set(mesh.declared_plate_junction_edges) != joint_segments):
         raise MeshError("authored component joint declaration changed")
-    if any(segment_roots[edge] != set(current.authored_face_ids)
-           for edge in joint_segments):
-        raise MeshError("authored component joint lacks shell incidence from both roots")
+    owner_records = current.owner_receipt.current_records
+    face_uses = {int(row["id"]): row for row in owner_records["face_uses"]}
+    for edge_id, chain in joint_chains:
+        joint_coedges = [row for row in owner_records["coedges"]
+                         if int(row["edge_id"]) == edge_id]
+        use_ids = tuple(int(row["face_use_id"]) for row in joint_coedges)
+        if not use_ids or len(set(use_ids)) != len(use_ids) or any(
+            use not in face_uses for use in use_ids
+        ):
+            raise MeshError("authored component joint has ambiguous owner incidence")
+        incident_faces = {int(face_uses[use]["face_id"]) for use in use_ids}
+        incident_sheets = {int(face_uses[use]["sheet_id"]) for use in use_ids}
+        if (len(incident_sheets) < 2
+                or not incident_sheets <= set(current.sheet_ids)
+                or not incident_faces <= current_faces
+                or set(geometry.face_uses_using_edge(edge_id)) != set(use_ids)
+                or set(geometry.faces_using_edge(edge_id)) != incident_faces
+                or set(geometry.sheets_using_edge(edge_id)) != incident_sheets):
+            raise MeshError("authored component joint owner incidence changed")
+        expected = {face: 1 for face in incident_faces}
+        if any(dict(segment_face_counts[(min(a, b), max(a, b))]) != expected
+               for a, b in zip(chain, chain[1:])):
+            raise MeshError("authored component joint lacks shell incidence from exact owner faces")
 
     if created_material_uv_by_root is None:
         created_material_uv_by_root = {

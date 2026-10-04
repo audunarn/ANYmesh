@@ -121,6 +121,27 @@ def test_coincident_duplicate_joint_node_cannot_fake_shared_root_incidence():
         )
 
 
+def test_extra_nonincident_face_cannot_claim_a_joint_segment():
+    geometry, component, mesh, registry, cell_faces = candidate()
+    joint = tuple(mesh.nodes_of_edge[component.joint_edge_id])
+    incident = set(geometry.faces_using_edge(component.joint_edge_id))
+    other = next(face for face in component.current_face_ids if face not in incident)
+    third = next(node for cell in mesh.elements_of_face[other]
+                 for node in mesh.tris[cell] if node not in joint)
+    added = max(mesh.tris) + 1
+    mesh.tris[added] = (joint[0], joint[1], third)
+    mesh.elements_of_face[other].append(added)
+    cell_faces[added] = other
+    for cells in mesh.elements_of_sheet.values():
+        if any(cell in cells for cell in mesh.elements_of_face[other] if cell != added):
+            cells.append(added)
+            cells.sort()
+    with pytest.raises(MeshError, match="joint lacks shell incidence"):
+        validate_authored_component_cells(
+            geometry, component, mesh, registry, cell_faces,
+        )
+
+
 def test_unsupported_offset_or_altered_material_coordinate_refuses():
     value = candidate()
     value[2].offset_nodes_of_edge[value[1].joint_edge_id] = [1]
