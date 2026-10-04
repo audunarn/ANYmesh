@@ -6,7 +6,9 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import numpy as np
 import pytest
+import anygeometry
 from anygeometry.editing import translate_entities
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.serialization import from_dict, to_dict
@@ -27,7 +29,7 @@ def _fixture():
     return module.build_fixture("size2")
 
 
-def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
+def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells(monkeypatch):
     fixture = _fixture()
     staged = fixture.staged
     source = deepcopy(staged.mesh)
@@ -54,6 +56,43 @@ def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells():
     assert record["authority_model"]["source_model_id"] == str(fixture.geometry.model_id)
     assert record["authority_model"]["source_revision"] == fixture.geometry.revision
     assert made.structural_preparation["qualified_s3"] == record
+
+    # A source region callback can alter a later cell and restore it before
+    # the final live-input digest check.  Certification and S3 must both see
+    # the unchanged entry snapshot, never the transiently altered cell.
+    first_face = next(face for face, cells in source.elements_of_face.items()
+                      if len(cells) > 1)
+    first_cell, later_cell = source.elements_of_face[first_face][:2]
+    changed_node = next(node for node in source.tris[later_cell]
+                        if node not in source.tris[first_cell])
+    original = source.nodes[changed_node].copy()
+    normal = np.asarray(fixture.geometry.face_normal(first_face, .5, .5), dtype=float)
+    real_query = anygeometry.query_material_surface_regions
+    real_validate = anygeometry.validate_material_surface_region_triangles_xyz
+    transient = {"changed": False, "restored": False}
+
+    def transient_query(*args, **kwargs):
+        result = real_query(*args, **kwargs)
+        if not transient["changed"]:
+            source.nodes[changed_node] = original + .1 * normal
+            transient["changed"] = True
+        return result
+
+    def transient_validate(*args, **kwargs):
+        if transient["changed"] and not transient["restored"]:
+            source.nodes[changed_node] = original.copy()
+            transient["restored"] = True
+        return real_validate(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(anygeometry, "query_material_surface_regions", transient_query)
+        patch.setattr(anygeometry, "validate_material_surface_region_triangles_xyz",
+                      transient_validate)
+        snap_made, snap_record = qualify()
+    assert transient == {"changed": True, "restored": True}
+    assert np.array_equal(source.nodes[changed_node], original)
+    assert np.array_equal(snap_made.nodes[changed_node], original)
+    assert snap_record == record
 
     changed = deepcopy(source)
     first = min(changed.nodes)

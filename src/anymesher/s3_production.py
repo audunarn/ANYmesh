@@ -12,6 +12,7 @@ owner, an unsupported T6, or exhausted repair raises a typed S3 rejection.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -440,6 +441,11 @@ def prepare_source_bound_qualified_s3_mesh(
         raise S3OwnerAuthorityError("source-bound S3 mesh already has S3 authority")
     source_digest = _mesh_digest(source_mesh)
     current_digest = _mesh_digest(current_mesh)
+    # Owner queries can invoke caller callbacks.  All physical cells used by
+    # CURRENT validation, SOURCE proof, and S3 preparation must come from the
+    # same entry snapshot, even if a callback changes and restores a live mesh.
+    frozen_source = deepcopy(source_mesh)
+    frozen_current = deepcopy(current_mesh)
 
     def assert_inputs_current():
         try:
@@ -460,34 +466,40 @@ def prepare_source_bound_qualified_s3_mesh(
                 "source-bound S3 owner or input mesh changed during qualification"
             )
 
+    assert_inputs_current()
+    if (_mesh_digest(frozen_source) != source_digest
+            or _mesh_digest(frozen_current) != current_digest):
+        raise S3OwnerAuthorityError(
+            "source-bound S3 input snapshot differs from entry mesh"
+        )
     validate_prepared_current_component_associations(
         prepared_geometry, association_receipt, association_component,
-        current_mesh, association_registry, cell_current_faces,
+        frozen_current, association_registry, cell_current_faces,
         cancellation_check=cancellation_check,
     )
     assert_inputs_current()
-    if (source_mesh.order != current_mesh.order or source_mesh.order != "linear"
-            or source_mesh.tris != current_mesh.tris
-            or source_mesh.quads != current_mesh.quads
-            or source_mesh.beams != current_mesh.beams
-            or source_mesh.declared_plate_junction_edges
-            != current_mesh.declared_plate_junction_edges
-            or set(source_mesh.nodes) != set(current_mesh.nodes)
-            or any(not np.array_equal(source_mesh.nodes[node], current_mesh.nodes[node])
-                   for node in source_mesh.nodes)):
+    if (frozen_source.order != frozen_current.order or frozen_source.order != "linear"
+            or frozen_source.tris != frozen_current.tris
+            or frozen_source.quads != frozen_current.quads
+            or frozen_source.beams != frozen_current.beams
+            or frozen_source.declared_plate_junction_edges
+            != frozen_current.declared_plate_junction_edges
+            or set(frozen_source.nodes) != set(frozen_current.nodes)
+            or any(not np.array_equal(frozen_source.nodes[node], frozen_current.nodes[node])
+                   for node in frozen_source.nodes)):
         raise S3OwnerAuthorityError(
             "source-bound S3 physical cells differ from the validated CURRENT mesh"
         )
-    current_normals, _ = _shell_owner_authority(prepared_geometry, current_mesh)
-    source_normals, _ = _shell_owner_authority(source_geometry, source_mesh)
+    current_normals, _ = _shell_owner_authority(prepared_geometry, frozen_current)
+    source_normals, _ = _shell_owner_authority(source_geometry, frozen_source)
     source_face_cells = {
         int(face): tuple(int(cell) for cell in cells)
-        for face, cells in source_mesh.elements_of_face.items()
+        for face, cells in frozen_source.elements_of_face.items()
     }
     if (any(face not in source_geometry.faces or len(cells) != len(set(cells))
             for face, cells in source_face_cells.items())
             or any(len(cells) != len(set(cells))
-                   for cells in source_mesh.elements_of_sheet.values())):
+                   for cells in frozen_source.elements_of_sheet.values())):
         raise S3OwnerAuthorityError("source-bound S3 ownership has invalid face or sheet cells")
     expected_sheets: dict[int, set[int]] = {}
     for use in source_geometry.face_uses.values():
@@ -495,8 +507,8 @@ def prepare_source_bound_qualified_s3_mesh(
             expected_sheets.setdefault(int(use.sheet_id), set()).update(
                 source_face_cells[int(use.face_id)]
             )
-    if (set(source_mesh.elements_of_sheet) != set(expected_sheets)
-            or any(set(source_mesh.elements_of_sheet[sheet]) != cells
+    if (set(frozen_source.elements_of_sheet) != set(expected_sheets)
+            or any(set(frozen_source.elements_of_sheet[sheet]) != cells
                    for sheet, cells in expected_sheets.items())):
         raise S3OwnerAuthorityError(
             "source-bound S3 sheet ownership disagrees with source FaceUse authority"
@@ -511,9 +523,9 @@ def prepare_source_bound_qualified_s3_mesh(
 
     regions_by_face = {}
     triangles_by_face: dict[int, list[np.ndarray]] = {}
-    for cell, face in _element_face_map(source_mesh).items():
-        corners = np.asarray([source_mesh.nodes[node]
-                              for node in source_mesh.corners_of(cell)], dtype=float)
+    for cell, face in _element_face_map(frozen_source).items():
+        corners = np.asarray([frozen_source.nodes[node]
+                              for node in frozen_source.corners_of(cell)], dtype=float)
         if face not in regions_by_face:
             try:
                 regions_by_face[face] = query_material_surface_regions(
@@ -555,13 +567,13 @@ def prepare_source_bound_qualified_s3_mesh(
             "source-bound S3 physical normals disagree with prepared Sheet/FaceUse authority"
         )
     made, record = prepare_qualified_s3_mesh(
-        source_mesh, source_geometry, target_policy=None,
+        frozen_source, source_geometry, target_policy=None,
     )
     assert_inputs_current()
-    if (made.tris != source_mesh.tris or made.quads != source_mesh.quads
-            or set(made.nodes) != set(source_mesh.nodes)
-            or any(not np.array_equal(made.nodes[node], source_mesh.nodes[node])
-                   for node in source_mesh.nodes)):
+    if (made.tris != frozen_source.tris or made.quads != frozen_source.quads
+            or set(made.nodes) != set(frozen_source.nodes)
+            or any(not np.array_equal(made.nodes[node], frozen_source.nodes[node])
+                   for node in frozen_source.nodes)):
         raise S3OwnerAuthorityError(
             "source-bound S3 qualification requires a mesh repair before reference transfer"
         )
