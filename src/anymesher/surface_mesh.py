@@ -1708,6 +1708,7 @@ def _run_quality_path(
     allow_refinement: bool = True,
     preserve_protected_cells: bool = False,
     polish_quality: bool = False,
+    protected_node_ids: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """Triangulate and optimize one detached deterministic point candidate."""
 
@@ -1718,6 +1719,16 @@ def _run_quality_path(
     }
     triangulation_started = perf_counter()
     interior = np.vstack((explicit_interior, generated))
+    native_protected = protected_node_ids
+    if protected_node_ids is not None:
+        # The caller names boundary + explicit pins + constraint endpoints.
+        # Generated interior rows are inserted before constraints in the PSLG.
+        constraint_start = (len(outer) + sum(len(hole) for hole in holes)
+                            + len(explicit_interior))
+        native_protected = {
+            int(row) + (len(generated) if int(row) >= constraint_start else 0): int(node)
+            for row, node in protected_node_ids.items()
+        }
     triangulation = triangulate_polygon(
         outer,
         holes,
@@ -1725,6 +1736,7 @@ def _run_quality_path(
         interior_points=interior,
         backend=settings.backend,
         cancellation_check=cancellation_check,
+        protected_node_ids=native_protected,
     )
     triangulation_seconds = perf_counter() - triangulation_started
 
@@ -1786,6 +1798,13 @@ def _run_quality_path(
             row for row in range(len(current.points)) if row not in protected_nodes
         ]
         retry_interior = np.vstack((current.points[interior_rows], additions))
+        retry_protected = None
+        if native_protected is not None:
+            from ._row_provenance import retry_input_rows
+            retry_protected = retry_input_rows(
+                native_protected, triangulation.protected_node_rows,
+                len(outer) + sum(len(hole) for hole in holes),
+                interior_rows, len(retry_interior), len(constraints))
         retry_started = perf_counter()
         retry_triangulation = triangulate_polygon(
             outer,
@@ -1794,6 +1813,7 @@ def _run_quality_path(
             interior_points=retry_interior,
             backend=settings.backend,
             cancellation_check=cancellation_check,
+            protected_node_ids=retry_protected,
         )
         work_statistics["full_triangulations"] += 1
         triangulation_seconds += perf_counter() - retry_started
@@ -1818,6 +1838,7 @@ def _run_quality_path(
         )
         current = retry
         triangulation = retry_triangulation
+        native_protected = retry_protected
         if (
             _candidate_selection_key(
                 retry, prefer_growth=preserve_protected_cells
@@ -2404,6 +2425,7 @@ def mesh_planar_surface(
     _preserve_spatial_refinement: bool = False,
     _boundary_is_seeded: bool = False,
     _polish_quality_candidates: bool = False,
+    _protected_node_ids: Mapping[int, int] | None = None,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -2465,6 +2487,8 @@ def mesh_planar_surface(
         perf_counter() - preparation_started
     )
     if settings.target_size is not None:
+        if _protected_node_ids is not None and not _boundary_is_seeded:
+            raise MeshError("protected input rows require authoritative preseeded boundaries")
         densification_started = perf_counter()
         if not _boundary_is_seeded:
             planar_outer = _densify_loop(planar_outer, settings.target_size)
@@ -2530,6 +2554,7 @@ def mesh_planar_surface(
             cancellation_check,
             polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
                             settings.native_options.point_placement == "legacy_lattice"),
+            protected_node_ids=_protected_node_ids,
         )
     candidate_paths = [baseline_path]
     native_v2_report: dict[str, Any] | None = None
@@ -2573,6 +2598,7 @@ def mesh_planar_surface(
         and settings.recombine
         and _evaluate_boundary_alignment
         and settings.native_options.point_placement == "legacy_lattice"
+        and _protected_node_ids is None
     ):
         collar_preparation_cache: dict[str, Any] = {}
         outer_layer_variants = (3,)
@@ -2697,6 +2723,7 @@ def mesh_planar_surface(
             cancellation_check,
             polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
                             settings.native_options.point_placement == "legacy_lattice"),
+            protected_node_ids=_protected_node_ids,
         )
         dominant_path["lattice_statistics"] = dominant_statistics
         candidate_paths.append(dominant_path)
@@ -2722,6 +2749,7 @@ def mesh_planar_surface(
                     cancellation_check,
                     polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
                                     settings.native_options.point_placement == "legacy_lattice"),
+                    protected_node_ids=_protected_node_ids,
                 )
             )
     phase_seconds["alternate_candidate_generation"] = (
@@ -2925,6 +2953,15 @@ def mesh_planar_surface(
             cancellation_check("native surface quadratic promotion complete")
     validation_started = perf_counter()
     assert_valid_mesh(core)
+    output_origin = None
+    output_origin_entry = None
+    if _protected_node_ids is not None:
+        from ._row_provenance import bind_output_rows
+        output_origin = bind_output_rows(
+            core, best.points, triangulation,
+            set(map(int, _protected_node_ids.values())), plane.lift(best.points))
+        output_origin_entry = (output_origin.source_by_row,
+                               output_origin.source_to_row)
     quality_core = core
     if _preserve_spatial_refinement and _metric_to_physical is not None:
         parameters = core.node_coordinates[:, :2] if plane.dimension == 2 else plane.project(core.node_coordinates)
@@ -2985,6 +3022,12 @@ def mesh_planar_surface(
         )
     if cancellation_check is not None:
         cancellation_check("native surface validation complete")
+    if output_origin is not None:
+        if (getattr(core, "_output_row_provenance", None) is not output_origin
+                or (output_origin.source_by_row, output_origin.source_to_row)
+                != output_origin_entry):
+            raise MeshError("material output origin changed before return")
+        output_origin.validate(core)
     return core
 
 

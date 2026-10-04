@@ -1602,6 +1602,7 @@ def _mesh_native_face(
         recombine = False
     native_outer, native_holes = chart_outer, chart_holes
     native_constraints, native_pinned = chart_constraints, chart_pinned
+    protected_input_rows = None
     if _material_region_binding is not None:
         if _material_input_eligibility is None:
             raise MeshError('material input provenance requires route eligibility context')
@@ -1620,12 +1621,16 @@ def _mesh_native_face(
         receipt = _material_region_binding.input_provenance(
             mesh, boundary_registry, loops, region_pinned_ids,
             _material_input_eligibility, emitted, cancellation_check)
+        from ._row_provenance import material_input_rows
+        protected_input_rows = material_input_rows(receipt)
         records = getattr(component_seed_registry, '_material_input_provenance', None)
         if records is None:
             records = {}
             component_seed_registry._material_input_provenance = records
         records[face_id] = receipt
     surface_diagnostics: dict[str, Any] = {}
+    primary_output_origin = None
+    primary_output_entry = None
     if quality_options is None:
         core = mesh_planar_surface(
             native_outer,
@@ -1656,6 +1661,7 @@ def _mesh_native_face(
             _preserve_spatial_refinement=(cylindrical_chart is not None or analytic_chart is not None),
             _polish_quality_candidates=isinstance(face.surface, Plane),
             _boundary_is_seeded=seeded_general_chart,
+            _protected_node_ids=protected_input_rows,
             options=(
                 SurfaceMeshOptions(
                     target_size=chart_size, recombine=recombine, order=order,
@@ -1667,6 +1673,11 @@ def _mesh_native_face(
                 else None
             ),
         )
+        if _material_region_binding is not None:
+            primary_output_origin = getattr(core, '_output_row_provenance', None)
+            if primary_output_origin is not None:
+                primary_output_entry = (primary_output_origin.source_by_row,
+                                        primary_output_origin.source_to_row)
     else:
         quality_policy = quality_options.quality_policy
         face_edge_ids = {
@@ -1733,7 +1744,13 @@ def _mesh_native_face(
             _preserve_spatial_refinement=(cylindrical_chart is not None or analytic_chart is not None),
             _polish_quality_candidates=isinstance(face.surface, Plane),
             _boundary_is_seeded=seeded_general_chart,
+            _protected_node_ids=protected_input_rows,
         )
+        if _material_region_binding is not None:
+            primary_output_origin = getattr(core, '_output_row_provenance', None)
+            if primary_output_origin is not None:
+                primary_output_entry = (primary_output_origin.source_by_row,
+                                        primary_output_origin.source_to_row)
         if (
             isinstance(face.surface, Plane)
             and not np.allclose(chart_transform, np.eye(2), rtol=1.0e-12, atol=1.0e-14)
@@ -1741,6 +1758,8 @@ def _mesh_native_face(
                 "accepted", True
             )
         ):
+            if _material_region_binding is not None:
+                raise MeshError('material Plane parameter fallback has no output provenance')
             parameter_diagnostics: dict[str, Any] = {}
             parameter_core = mesh_planar_surface(
                 np.asarray(outer.uv, dtype=float),
@@ -1836,20 +1855,27 @@ def _mesh_native_face(
     _check_cancellation(cancellation_check, f"native face {face_id} lifting start")
     if cylindrical_chart is not None:
         _cylindrical_binding.validate()
+    region_core_to_global = None
+    if _material_region_binding is not None:
+        receipt.validate(cancellation_check)
+        output_origin = getattr(core, '_output_row_provenance', None)
+        if (output_origin is None or output_origin is not primary_output_origin
+                or (output_origin.source_by_row, output_origin.source_to_row)
+                != primary_output_entry):
+            raise MeshError('material primary output has no protected row provenance')
+        region_core_to_global = output_origin.validate(core)
     if analytic_chart is not None:
         from .surface_mesh import SurfaceMeshOptions as AnalyticQualityOptions
         settings = (AnalyticQualityOptions() if quality_options is None else surface_options)
         registered = np.asarray([mesh.nodes[node] for loop in loops for node in loop.node_ids])
         registered_rows = None
         if _material_region_binding is not None:
-            from ._material_region_binding import registered_core_rows
-            region_core_to_global = registered_core_rows(core, (
-                *[(point, node) for loop in loops for point, node in zip(loop.uv @ chart_transform, loop.node_ids)],
-                *zip(chart_pinned, region_pinned_ids)))
             registered_rows = {row: mesh.nodes[node] for row, node in region_core_to_global.items()}
             _material_region_binding.validate_constraints(core, mesh, boundary_registry, region_core_to_global)
         surface_diagnostics['analytic_physical_quality'] = analytic_chart.certify_core(
-            core, settings, registered, registered_rows=registered_rows)
+            core, settings,
+            registered if _material_region_binding is None else np.empty((0, 3)),
+            registered_rows=registered_rows)
         if _material_region_binding is not None:
             region_settings = getattr(component_seed_registry, '_material_region_quality_settings', {})
             region_settings[face_id] = settings
@@ -1861,9 +1887,9 @@ def _mesh_native_face(
     coordinates = np.asarray(core.node_coordinates, dtype=float)
     region_coordinates = (None if _material_region_binding is None else
                           analytic_chart.evaluate(coordinates[:, :2]))
-    if len(coordinates) < len(input_uv) or not np.allclose(
+    if _material_region_binding is None and (len(coordinates) < len(input_uv) or not np.allclose(
         coordinates[: len(input_uv), :2], input_uv, rtol=0.0, atol=2.0e-14
-    ):
+    )):
         raise MeshError(
             f"native face {face_id} changed its registered boundary ordering; "
             "conformal identity cannot be guaranteed"
@@ -1871,16 +1897,13 @@ def _mesh_native_face(
 
     core_to_global: dict[int, int] = {}
     offset = 0
-    for loop in loops:
-        for local, node_id in enumerate(loop.node_ids):
-            core_to_global[offset + local] = int(node_id)
-        offset += len(loop.node_ids)
-
-    if _material_region_binding is not None:
-        for row, node in region_core_to_global.items():
-            previous = core_to_global.setdefault(row, node)
-            if previous != node:
-                raise MeshError('material region pinned row conflicts with boundary identity')
+    if _material_region_binding is None:
+        for loop in loops:
+            for local, node_id in enumerate(loop.node_ids):
+                core_to_global[offset + local] = int(node_id)
+            offset += len(loop.node_ids)
+    else:
+        core_to_global.update(region_core_to_global)
 
     if quadratic:
         edge_midsides = _core_edge_midsides(core)

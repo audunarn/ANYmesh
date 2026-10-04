@@ -15,10 +15,28 @@ revision, serialized content, registry, input arrays and immutable entry
 signature. A missing retained-vertex mapping or node is refused before the
 interior helper can create one.
 
-This receipt does not follow tokens through native insertion, merging or row
-permutation. The chart matrix is checked for finite shape and consistency with
+The input receipt alone does not follow tokens through native insertion,
+merging or row permutation. The chart matrix is checked for finite shape and consistency with
 the emitted arrays, not independently certified against the physical surface
 evaluator. The separate Plane parameter fallback uses other arrays and is not
 covered. The receipt gives no permission to subdivide protected curved paths
 or publish a connected component. These gaps require separate owner-bound
 work before mixed-mesh acceptance can be claimed.
+
+## Opt-in output-row development candidate
+
+The subsequent unreviewed output slice forwards input global IDs to the
+triangulator's existing protected-row contract. It shifts constraint input
+indices past generated interior points, reconstructs lineage for quality
+retries, and keeps the selected triangulation's ID-to-row pairs through
+frontal insertion and recombination. The selected core receives a frozen
+source-by-row ledger; all other rows are marked generated. Before material
+lifting, every protected ID must occur once in active connectivity and the
+input receipt is freshly checked. Protected identity is never inferred from
+matching coordinates. Native shared-edge insertion still uses its separate
+explicit split records and does not turn a generated row into a pre-existing
+source station.
+
+This output slice has only focused Python/emulated checks so far. It does not
+certify the physical chart transform or the separate Plane parameter fallback,
+and it does not establish accepted connected mixed meshing or solver behavior.
