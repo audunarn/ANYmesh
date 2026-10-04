@@ -15,6 +15,7 @@ from .mesh import Mesh
 
 
 PREPARED_CURRENT_ASSOCIATIONS_SCHEMA = "anymesher.prepared-current-associations-v1"
+PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA = "anymesher.prepared-current-associations-v2"
 
 _KNOWN_MESH_FIELDS = (
     "geometry_model_id", "geometry_revision", "nodes", "quads", "tris", "beams",
@@ -67,10 +68,13 @@ class PreparedCurrentAssociationReceipt:
     source_reference_transfer_qualified: bool = False
     solver_admitted: bool = False
     publication_qualified: bool = False
+    # Version 2 only: exact original-chart UV for genuinely created nodes.
+    created_material_uv_by_root: tuple = ()
 
 
 def query_prepared_current_component_associations(
     geometry, component, mesh: Mesh, registry, cell_current_faces, *,
+    created_material_uv_by_root=None,
     cancellation_check=None,
 ) -> PreparedCurrentAssociationReceipt:
     """Reprove every supported current association and return a detached record.
@@ -90,8 +94,18 @@ def query_prepared_current_component_associations(
     before = _mesh_digest(mesh)
     proven = validate_authored_component_cells(
         geometry, component, mesh, registry, cell_current_faces,
+        created_material_uv_by_root=created_material_uv_by_root,
         cancellation_check=cancellation_check,
     )
+    created_uv = ()
+    if created_material_uv_by_root is not None:
+        created_uv = tuple(
+            (int(root), tuple(sorted((int(node), tuple(pair))
+                                    for node, pair in values.items())))
+            for root, values in sorted(created_material_uv_by_root.items())
+        )
+        if not any(values for _root, values in created_uv):
+            created_uv = ()
     vertices = query_prepared_vertex_preimages(
         geometry, cancellation_check=cancellation_check,
     )
@@ -131,13 +145,15 @@ def query_prepared_current_component_associations(
     if after != before:
         raise MeshError("prepared current association mesh changed during proof")
     return PreparedCurrentAssociationReceipt(
-        PREPARED_CURRENT_ASSOCIATIONS_SCHEMA, "prepared_current",
+        (PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA if created_uv
+         else PREPARED_CURRENT_ASSOCIATIONS_SCHEMA), "prepared_current",
         geometry.model_id, geometry.revision, before, component.owner_receipt,
         tuple(component.authored_face_ids), tuple(component.current_face_ids),
         tuple(component.sheet_ids), tuple(component.occurrence_correspondence),
         proven.cell_current_faces, proven.current_face_cells, proven.sheet_cells,
         proven.face_use_cells, proven.edge_chains, proven.vertex_nodes,
         proven.joint_chains, tuple(source_chains), edge_ancestry, vertex_preimages,
+        created_material_uv_by_root=created_uv,
     )
 
 
@@ -148,8 +164,19 @@ def validate_prepared_current_component_associations(
     """Rederive complete contents; a digest alone never validates owner truth."""
     if type(receipt) is not PreparedCurrentAssociationReceipt:
         raise MeshError("prepared current associations need a versioned receipt")
+    if receipt.schema not in (PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
+                              PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA):
+        raise MeshError("prepared current associations have an unsupported schema")
+    if (receipt.schema == PREPARED_CURRENT_ASSOCIATIONS_SCHEMA) != (
+        receipt.created_material_uv_by_root == ()
+    ):
+        raise MeshError("prepared current association schema and created UV disagree")
+    created = (None if not receipt.created_material_uv_by_root
+               else {root: dict(values)
+                     for root, values in receipt.created_material_uv_by_root})
     expected = query_prepared_current_component_associations(
         geometry, component, mesh, registry, cell_current_faces,
+        created_material_uv_by_root=created,
         cancellation_check=cancellation_check,
     )
     if receipt != expected:

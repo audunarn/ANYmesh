@@ -82,6 +82,10 @@ def validate_authored_component_cells(
         raise MeshError("authored component cells need one current face per shell")
     face_cells = {face: [] for face in current.current_face_ids}
     shell_segments = set()
+    face_root = {int(face): int(correspondence.authored_definition.face_id)
+                 for correspondence in current.boundary_correspondences
+                 for face in correspondence.descendants}
+    segment_roots = defaultdict(set)
     active_nodes = set()
     for cell_id, connection in shells.items():
         corners = 3 if cell_id in mesh.tris else 4
@@ -93,7 +97,9 @@ def validate_authored_component_cells(
         active_nodes.update(int(node) for node in connection)
         for index in range(corners):
             a, b = int(connection[index]), int(connection[(index + 1) % corners])
-            shell_segments.add((min(a, b), max(a, b)))
+            edge = (min(a, b), max(a, b))
+            shell_segments.add(edge)
+            segment_roots[edge].add(face_root[int(cell_current_faces[cell_id])])
     if any(not ids for ids in face_cells.values()):
         raise MeshError("authored component has a current face without cells")
     expected_faces = {face: sorted(ids) for face, ids in face_cells.items()}
@@ -166,6 +172,9 @@ def validate_authored_component_cells(
     if (len(mesh.declared_plate_junction_edges) != len(joint_segments)
             or set(mesh.declared_plate_junction_edges) != joint_segments):
         raise MeshError("authored component joint declaration changed")
+    if any(segment_roots[edge] != set(current.authored_face_ids)
+           for edge in joint_segments):
+        raise MeshError("authored component joint lacks shell incidence from both roots")
 
     if created_material_uv_by_root is None:
         created_material_uv_by_root = {
@@ -174,6 +183,8 @@ def validate_authored_component_cells(
         }
     if (not isinstance(created_material_uv_by_root, Mapping)
             or set(created_material_uv_by_root) != set(current.authored_face_ids)
+            or any(isinstance(root, bool) or not isinstance(root, Integral)
+                   for root in created_material_uv_by_root)
             or any(not isinstance(values, Mapping)
                    for values in created_material_uv_by_root.values())):
         raise MeshError("authored component created UV needs every original root")

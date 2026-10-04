@@ -103,6 +103,24 @@ def test_missing_current_cell_edge_vertex_and_joint_associations_refuse():
         prove(value)
 
 
+def test_coincident_duplicate_joint_node_cannot_fake_shared_root_incidence():
+    geometry, component, mesh, registry, cell_faces = candidate()
+    joint = tuple(mesh.nodes_of_edge[component.joint_edge_id])
+    second_root = set(component.boundary_correspondences[1].descendants)
+    adjacent = [cell for cell, nodes in mesh.tris.items()
+                if set(joint) <= set(nodes) and cell_faces[cell] in second_root]
+    assert adjacent
+    duplicate = max(mesh.nodes) + 1
+    mesh.nodes[duplicate] = mesh.nodes[joint[0]].copy()
+    for cell in adjacent:
+        mesh.tris[cell] = tuple(duplicate if node == joint[0] else node
+                                for node in mesh.tris[cell])
+    with pytest.raises(MeshError, match="joint lacks shell incidence"):
+        validate_authored_component_cells(
+            geometry, component, mesh, registry, cell_faces,
+        )
+
+
 def test_unsupported_offset_or_altered_material_coordinate_refuses():
     value = candidate()
     value[2].offset_nodes_of_edge[value[1].joint_edge_id] = [1]
@@ -115,7 +133,7 @@ def test_unsupported_offset_or_altered_material_coordinate_refuses():
         prove(value)
 
 
-def test_created_interior_node_requires_exact_root_uv_and_owner_xyz():
+def created_candidate():
     from anygeometry import evaluate_prepared_authored_face
     from anymesher._authored_planar_stations import plan_authored_planar_stations
 
@@ -153,6 +171,11 @@ def test_created_interior_node_requires_exact_root_uv_and_owner_xyz():
             )
     roots = {root: {} for root in component.authored_face_ids}
     roots[correspondence.authored_definition.face_id][new_node] = centre
+    return geometry, component, mesh, registry, cell_faces, roots, new_node
+
+
+def test_created_interior_node_requires_exact_root_uv_and_owner_xyz():
+    geometry, component, mesh, registry, cell_faces, roots, new_node = created_candidate()
     validated = validate_authored_component_cells(
         geometry, component, mesh, registry, cell_faces,
         created_material_uv_by_root=roots,

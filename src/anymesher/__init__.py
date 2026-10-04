@@ -84,6 +84,7 @@ from .recovery import (
 )
 from .mesh import Coupling, Mesh
 from .prepared_current_associations import (
+    PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA,
     PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
     PreparedCurrentAssociationReceipt,
     query_prepared_current_component_associations,
@@ -239,6 +240,7 @@ __all__ = [
     "ComponentSeedRegistry",
     "QuadMeshingOptions",
     "PREPARED_CURRENT_ASSOCIATIONS_SCHEMA",
+    "PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA",
     "PreparedCurrentAssociationReceipt",
     "QUAD_MESHING_OPTIONS_SCHEMA",
     "MeshingStrategy",

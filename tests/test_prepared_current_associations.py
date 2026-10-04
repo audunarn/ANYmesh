@@ -3,8 +3,9 @@
 from dataclasses import replace
 import pytest
 
-from test_authored_component_cells import candidate
+from test_authored_component_cells import candidate, created_candidate
 from anymesher import (
+    PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA,
     PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
     query_prepared_current_component_associations,
     validate_prepared_current_component_associations,
@@ -52,3 +53,28 @@ def test_forged_receipt_changed_mesh_and_unsupported_metadata_refuse():
     args[2].seeding = object()
     with pytest.raises(MeshError, match="unsupported associations"):
         query_prepared_current_component_associations(*args)
+
+
+def test_created_node_receipt_is_versioned_and_rechecks_exact_uv():
+    geometry, component, mesh, registry, faces, created, node = created_candidate()
+    receipt = query_prepared_current_component_associations(
+        geometry, component, mesh, registry, faces,
+        created_material_uv_by_root=created,
+    )
+    assert receipt.schema == PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA
+    assert receipt.created_material_uv_by_root
+    assert receipt.source_reference_transfer_qualified is False
+    assert receipt.publication_qualified is False
+    validate_prepared_current_component_associations(
+        geometry, receipt, component, mesh, registry, faces,
+    )
+    with pytest.raises(MeshError, match="schema and created UV disagree"):
+        validate_prepared_current_component_associations(
+            geometry, replace(receipt, schema=PREPARED_CURRENT_ASSOCIATIONS_SCHEMA),
+            component, mesh, registry, faces,
+        )
+    mesh.nodes[node] = mesh.nodes[node] + (0., 0., .01)
+    with pytest.raises(MeshError, match="left owner support"):
+        validate_prepared_current_component_associations(
+            geometry, receipt, component, mesh, registry, faces,
+        )

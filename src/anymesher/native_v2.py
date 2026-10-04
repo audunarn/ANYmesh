@@ -296,6 +296,27 @@ class ComponentSeedRegistry:
                 raise MeshError("component seed resolution is already active")
             return tuple(sorted(self._values.values()))
 
+    def _reserve_unshared_nodes(self, count: int) -> tuple[int, ...]:
+        """Reserve staged interior IDs without inventing shared-edge keys.
+
+        Only a detached authored-component stage calls this. A failed stage is
+        discarded with its detached reservation pool; the source is untouched.
+        """
+        if isinstance(count, bool) or not isinstance(count, Integral) or count < 0:
+            raise MeshError("staged interior node count must be nonnegative")
+        with self._resolution_lock:
+            if self._resolving:
+                raise MeshError("component seed resolution is already active")
+            result = []
+            for _ in range(int(count)):
+                node_id = (self._next if self._node_id_allocator is None
+                           else int(self._node_id_allocator()))
+                if node_id < self._next or node_id in self._values.values() or node_id in result:
+                    raise MeshError("staged interior node allocator returned a reused identity")
+                result.append(node_id)
+                self._next = node_id + 1
+            return tuple(result)
+
     @property
     def reservation_pool(self) -> ComponentNodeReservationPool | None:
         return self._reservation_pool

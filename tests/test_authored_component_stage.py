@@ -113,6 +113,21 @@ def test_component_pool_fork_keeps_outstanding_reservations_detached():
     assert registry.parameters(edge) == (0.,)
 
 
+def test_detached_interior_ids_share_allocator_without_touching_source_pool():
+    mesh, registry, _seeds, _edge = inputs()
+    pool = ComponentNodeReservationPool(mesh)
+    seeds = ComponentSeedRegistry(2, reservation_pool=pool)
+    stage = AuthoredComponentStage(mesh, registry, seeds)
+    assert stage.reserve_interior_nodes(2) == (2, 3)
+    assert stage.seed_registry.committed_snapshot()[0] == 4
+    assert stage.seed_registry.reservation_pool.snapshot().reserved_ids == (2, 3)
+    assert pool.snapshot().reserved_ids == ()
+    stage.abort()
+    with pytest.raises(MeshError, match="already closed"):
+        stage.reserve_interior_nodes(1)
+    assert seeds.committed_snapshot()[0] == 2
+
+
 def test_reservation_fork_rejects_stale_snapshot():
     mesh, _registry, _seeds, _edge = inputs()
     pool = ComponentNodeReservationPool(mesh)

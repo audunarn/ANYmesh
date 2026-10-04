@@ -62,6 +62,15 @@ class AuthoredComponentStage:
         )
         self._closed = False
 
+    def reserve_interior_nodes(self, count):
+        if self._closed:
+            raise MeshError("authored component stage is already closed")
+        ids = self.seed_registry._reserve_unshared_nodes(count)
+        if any(node in self.mesh.nodes for node in ids):
+            self.abort()
+            raise MeshError("authored component interior ID overlaps staged mesh")
+        return ids
+
     def finish(self, validate):
         if self._closed:
             raise MeshError("authored component stage is already closed")
