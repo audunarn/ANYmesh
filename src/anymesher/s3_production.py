@@ -42,6 +42,7 @@ __all__ = [
     "QUALIFIED_S3_PRODUCTION_CONTRACT_ID",
     "S3OwnerAuthorityError",
     "prepare_qualified_s3_mesh",
+    "prepare_source_bound_qualified_s3_mesh",
 ]
 
 
@@ -391,4 +392,105 @@ def prepare_qualified_s3_mesh(
         "schema": "anymesher.qualified-s3-production-preparation-v2",
         "status": "ADMITTED",
     }
+    return made, record
+
+
+def prepare_source_bound_qualified_s3_mesh(
+    source_mesh: Mesh,
+    source_geometry: GeometryModel,
+    prepared_geometry: GeometryModel,
+    current_mesh: Mesh,
+    association_receipt,
+    association_component,
+    association_registry,
+    cell_current_faces,
+    *,
+    cancellation_check=None,
+) -> tuple[Mesh, dict[str, Any]]:
+    """Qualify a detached, source-bound T3 mesh without changing its cells.
+
+    The CURRENT receipt is revalidated against the live prepared owner first.
+    Physical cell IDs, connectivity, nodes, and oriented owner normals must
+    agree with the SOURCE-bound mesh.  Source FaceUse/Sheet authority and S3
+    admission are then derived afresh from the live source model.  This does
+    not prove application reference transfer or grant publication permission.
+    """
+    from .prepared_current_associations import (
+        validate_prepared_current_component_associations,
+    )
+
+    if type(source_mesh) is not Mesh or type(current_mesh) is not Mesh:
+        raise TypeError("source-bound S3 preparation requires canonical Mesh inputs")
+    if not isinstance(source_geometry, GeometryModel) or not isinstance(
+        prepared_geometry, GeometryModel
+    ):
+        raise TypeError("source-bound S3 preparation requires live owner models")
+    if (source_mesh.geometry_model_id != source_geometry.model_id
+            or source_mesh.geometry_revision != source_geometry.revision):
+        raise S3OwnerAuthorityError("source-bound S3 mesh has stale source geometry identity")
+    if source_mesh.structural_preparation.get("qualified_s3") is not None:
+        raise S3OwnerAuthorityError("source-bound S3 mesh already has S3 authority")
+    validate_prepared_current_component_associations(
+        prepared_geometry, association_receipt, association_component,
+        current_mesh, association_registry, cell_current_faces,
+        cancellation_check=cancellation_check,
+    )
+    if (source_mesh.order != current_mesh.order or source_mesh.order != "linear"
+            or source_mesh.tris != current_mesh.tris
+            or source_mesh.quads != current_mesh.quads
+            or source_mesh.beams != current_mesh.beams
+            or source_mesh.declared_plate_junction_edges
+            != current_mesh.declared_plate_junction_edges
+            or set(source_mesh.nodes) != set(current_mesh.nodes)
+            or any(not np.array_equal(source_mesh.nodes[node], current_mesh.nodes[node])
+                   for node in source_mesh.nodes)):
+        raise S3OwnerAuthorityError(
+            "source-bound S3 physical cells differ from the validated CURRENT mesh"
+        )
+    current_normals, _ = _shell_owner_authority(prepared_geometry, current_mesh)
+    source_normals, _ = _shell_owner_authority(source_geometry, source_mesh)
+    source_face_cells = {
+        int(face): tuple(int(cell) for cell in cells)
+        for face, cells in source_mesh.elements_of_face.items()
+    }
+    if (any(face not in source_geometry.faces or len(cells) != len(set(cells))
+            for face, cells in source_face_cells.items())
+            or any(len(cells) != len(set(cells))
+                   for cells in source_mesh.elements_of_sheet.values())):
+        raise S3OwnerAuthorityError("source-bound S3 ownership has invalid face or sheet cells")
+    expected_sheets: dict[int, set[int]] = {}
+    for use in source_geometry.face_uses.values():
+        if int(use.face_id) in source_face_cells:
+            expected_sheets.setdefault(int(use.sheet_id), set()).update(
+                source_face_cells[int(use.face_id)]
+            )
+    if (set(source_mesh.elements_of_sheet) != set(expected_sheets)
+            or any(set(source_mesh.elements_of_sheet[sheet]) != cells
+                   for sheet, cells in expected_sheets.items())):
+        raise S3OwnerAuthorityError(
+            "source-bound S3 sheet ownership disagrees with source FaceUse authority"
+        )
+    if set(source_normals) != set(current_normals) or any(
+        float(np.dot(source_normals[cell], current_normals[cell])) < 1.0 - 1.0e-10
+        for cell in source_normals
+    ):
+        raise S3OwnerAuthorityError(
+            "source-bound S3 physical normals disagree with prepared Sheet/FaceUse authority"
+        )
+    made, record = prepare_qualified_s3_mesh(
+        source_mesh, source_geometry, target_policy=None,
+    )
+    if (made.tris != source_mesh.tris or made.quads != source_mesh.quads
+            or set(made.nodes) != set(source_mesh.nodes)
+            or any(not np.array_equal(made.nodes[node], source_mesh.nodes[node])
+                   for node in source_mesh.nodes)):
+        raise S3OwnerAuthorityError(
+            "source-bound S3 qualification requires a mesh repair before reference transfer"
+        )
+    record["authority_model"].update({
+        "source_model_id": str(source_geometry.model_id),
+        "source_revision": int(source_geometry.revision),
+    })
+    made.structural_preparation = dict(made.structural_preparation)
+    made.structural_preparation["qualified_s3"] = record
     return made, record

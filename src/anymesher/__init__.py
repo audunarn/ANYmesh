@@ -151,6 +151,7 @@ from .s3_production import (
     QUALIFIED_S3_PRODUCTION_CONTRACT_ID,
     S3OwnerAuthorityError,
     prepare_qualified_s3_mesh,
+    prepare_source_bound_qualified_s3_mesh,
 )
 from .s3_repair import (
     DEFAULT_S3_REPAIR_POLICY,
@@ -330,6 +331,7 @@ __all__ = [
     "plan_structured_layout",
     "prepare_structural_closure",
     "prepare_qualified_s3_mesh",
+    "prepare_source_bound_qualified_s3_mesh",
     "query_prepared_current_component_associations",
     "refine_around",
     "refine_at",
