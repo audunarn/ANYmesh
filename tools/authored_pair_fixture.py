@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import json
+from typing import Callable
 
 import anygeometry as owner
 import numpy as np
@@ -80,7 +81,7 @@ class AuthoredPairFixture:
         }
 
 
-def _source_component():
+def _default_source_factory():
     geometry = owner.GeometryModel()
     root = geometry.add_plate(geometry.add_points(
         ((0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0))
@@ -93,19 +94,52 @@ def _source_component():
     ))
     geometry.add_sheet((root,), name="source root")
     geometry.add_sheet((cutter,), name="source cutter")
+    return geometry, (root, cutter)
+
+
+def _source_component(source_factory):
+    """Call a process-bound factory before any owner intersection preparation.
+
+    The factory owns an isolated, live *working* GeometryModel and returns
+    its two mapped authored face IDs. Preparation mutates that same object.
+    The caller must supply its witnessed live extraction, not rebuild a
+    snapshot; this helper never reconstructs source state.
+    """
+    supplied = source_factory()
+    if (type(supplied) is not tuple or len(supplied) != 2
+            or type(supplied[0]) is not owner.GeometryModel
+            or type(supplied[1]) is not tuple or len(supplied[1]) != 2
+            or any(type(root) is not int for root in supplied[1])):
+        raise ValueError("source_factory must return live GeometryModel and two root IDs")
+    geometry, roots = supplied
+    if len(set(roots)) != 2 or set(geometry.faces) != set(roots):
+        raise ValueError("source_factory needs exactly two unprepared authored faces")
+    sheet_by_root = {}
+    for sheet_id, sheet in geometry.sheets.items():
+        for use_id in sheet.face_use_ids:
+            face = geometry.face_uses[use_id].face_id
+            if face in roots:
+                if face in sheet_by_root:
+                    raise ValueError("source_factory repeats declared Sheet ownership")
+                sheet_by_root[face] = sheet_id
+    if set(sheet_by_root) != set(roots) or len(set(sheet_by_root.values())) != 2:
+        raise ValueError("source_factory needs separate declared Sheets for both roots")
     owner.apply_intersections(
         geometry,
-        owner.plan_intersections(geometry, tuple(geometry.faces), policy="connect"),
+        owner.plan_intersections(geometry, roots, policy="connect"),
         policy="connect",
     )
     correspondences = tuple(
         owner.query_prepared_authored_boundary_correspondence(geometry, face)
-        for face in (root, cutter)
+        for face in roots
     )
     joint = correspondences[0].interior_incidence[0][0]
     component = bind_authored_sheet_joint_component(
-        geometry, joint, correspondences, (root, cutter)
+        geometry, joint, correspondences, roots
     )
+    if {(root, sheet) for sheet, root, _use, _current in
+            component.occurrence_correspondence} != set(sheet_by_root.items()):
+        raise ValueError("prepared component changed declared Sheet ownership")
     return geometry, component, correspondences
 
 
@@ -165,11 +199,22 @@ def _source_state(geometry, component, correspondences):
     return mesh, registry, ComponentSeedRegistry(max(mesh.nodes) + 1)
 
 
-def build_fixture(variant: str = "size2") -> AuthoredPairFixture:
-    """Build ``legacy14``, corrected ``size2`` or created-UV ``interior``."""
+def build_fixture(
+    variant: str = "size2", *,
+    source_factory: Callable[[], tuple[object, tuple[int, int]]] | None = None,
+) -> AuthoredPairFixture:
+    """Build ``legacy14``, corrected ``size2`` or created-UV ``interior``.
+
+    ``source_factory`` runs once before ``plan_intersections``. ANYfem may use
+    a closure over its witnessed Project extraction to return its isolated
+    working GeometryModel and mapped root IDs, with separate declared Sheets.
+    The returned fixture retains that exact live geometry and its receipt.
+    """
     if variant not in ("legacy14", "size2", "interior"):
         raise ValueError("fixture variant must be legacy14, size2 or interior")
-    geometry, component, correspondences = _source_component()
+    geometry, component, correspondences = _source_component(
+        _default_source_factory if source_factory is None else source_factory
+    )
     mesh, registry, seeds = _source_state(geometry, component, correspondences)
     if variant == "size2":
         prepared = prepare_authored_component_boundary_stations(
