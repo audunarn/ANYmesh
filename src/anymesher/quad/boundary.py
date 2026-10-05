@@ -1,10 +1,10 @@
 """Canonical target-size boundary stations for planar quad domains."""
 from __future__ import annotations
 from dataclasses import dataclass
-from math import ceil, floor
+from math import ceil, floor, isfinite
 from numbers import Integral
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 from anygeometry.model import GeometryModel
 from anygeometry.curves import Arc
 from ..errors import MeshError
@@ -50,6 +50,7 @@ class BoundaryStationRegistry:
         *,
         size_field: SizeField | None = None,
         overrides: Mapping[int, int] | None = None,
+        _canonical_stations: Mapping[int, Sequence[float]] | None = None,
         _independent_refined_counts: bool = False,
         _adaptive_independent_counts: bool = False,
     ) -> "BoundaryStationRegistry":
@@ -69,6 +70,34 @@ class BoundaryStationRegistry:
         for edge_id, count in selected_overrides.items():
             if isinstance(count, bool) or not isinstance(count, Integral) or count < 1:
                 raise MeshError(f"edge {edge_id} override must be a positive integer division count")
+        # Private opt-in: pin exact nonuniform station parameters on selected
+        # edges (owner-certified member carrier stations).  Absent the option,
+        # every route keeps its existing seeding behaviour unchanged.
+        canonical_stations: dict[int, tuple[float, ...]] = {}
+        for raw_edge_id, raw_parameters in (_canonical_stations or {}).items():
+            edge_id = int(raw_edge_id)
+            if edge_id not in edge_ids:
+                raise MeshError(
+                    f"canonical station override references unknown edge {edge_id}"
+                )
+            parameters = tuple(float(value) for value in tuple(raw_parameters))
+            if (
+                len(parameters) < 2
+                or parameters[0] != 0.0
+                or parameters[-1] != 1.0
+                or any(not isfinite(value) for value in parameters)
+                or any(not 0.0 <= value <= 1.0 for value in parameters)
+                or any(second <= first for first, second in zip(parameters, parameters[1:]))
+            ):
+                raise MeshError(
+                    f"edge {edge_id} canonical stations must be increasing finite "
+                    "parameters from 0 to 1"
+                )
+            if edge_id in selected_overrides and int(selected_overrides[edge_id]) != len(parameters) - 1:
+                raise MeshError(
+                    f"edge {edge_id} division override conflicts with its canonical stations"
+                )
+            canonical_stations[edge_id] = parameters
         curved_edges = {
             edge_id for domain in domains if isinstance(domain, CylindricalQuadDomain)
             for loop in (domain.edge_uses, *domain.hole_edge_uses)
@@ -144,12 +173,17 @@ class BoundaryStationRegistry:
                         1, int(round(edge_demand(geometry, edge_id, field))),
                         curved_minimums.get(edge_id, 1),
                     )
+        for edge_id, parameters in canonical_stations.items():
+            counts[edge_id] = len(parameters) - 1
         chains: dict[int, tuple[BoundaryStation, ...]] = {}
         for edge_id in edge_ids:
             edge = geometry.edges[edge_id]
             divisions = int(counts[edge_id])
-            interior = tuple(float(v) for v in edge_distribution(geometry, edge_id, divisions, field))
-            params = (0.0, *interior, 1.0)
+            if edge_id in canonical_stations:
+                params = canonical_stations[edge_id]
+            else:
+                interior = tuple(float(v) for v in edge_distribution(geometry, edge_id, divisions, field))
+                params = (0.0, *interior, 1.0)
             xyz = geometry.sample_edge(edge_id, params)
             stations: list[BoundaryStation] = []
             for ordinal, (parameter, point) in enumerate(zip(params, xyz)):

@@ -3694,6 +3694,7 @@ def _quad_first_execute(
     order: str = "linear",
     refinements: tuple[Refinement, ...] = (),
     overrides: Mapping[int, int] | None = None,
+    _canonical_stations: "Mapping[int, Sequence[float]] | None" = None,
     layout_policy: str = "existing",
     cancellation_check: "Callable[[str], None] | None" = None,
 ) -> "HybridMeshResult":
@@ -3778,6 +3779,7 @@ def _quad_first_execute(
     registry = timed_quad_call("boundary_stations", BoundaryStationRegistry.for_domains,
         geometry, domains, h, size_field=quad_size_field,
         overrides=overrides,
+        _canonical_stations=_canonical_stations,
         _independent_refined_counts=not quad_size_field.is_uniform,
         _adaptive_independent_counts=layout_policy == "adaptive",
     )
