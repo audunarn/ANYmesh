@@ -16,13 +16,22 @@ from anygeometry.structural import (
 )
 
 from anymesher import generate_hybrid_mesh_result
+import anygeometry
 from anymesher.component_parallel import (
     ParallelOptions,
     generate_hybrid_mesh_result_parallel,
-    plan_independent_components,
+)
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(anygeometry, "plan_independent_components"),
+    reason="needs ANYgeometry with plan_independent_components",
 )
 
 TARGET = 0.25
+
+
+def plan(model, *, separation):
+    return anygeometry.plan_independent_components(model, separation=separation)
 
 
 def _stiffened_plate(model: GeometryModel, x: float, y: float = 0.0) -> int:
@@ -103,32 +112,67 @@ def _signature(mesh):
     }
 
 
-def test_planner_separates_distant_components_and_keeps_structure_together():
-    plan = plan_independent_components(_model(3, spacing=10.0), pad=TARGET)
-    assert plan.parallel
-    assert len(plan.components) == 3
-    for component in plan.components:
-        assert len(component.faces) == len(component.members) == 1
-        assert len(component.attachments) == 1 and len(component.sheets) == 1
+def test_owner_planner_separates_distant_components_and_keeps_structure_together():
+    partition = plan(_model(3, spacing=10.0), separation=TARGET / 2)
+    assert partition.certified
+    assert len(partition.components) == 3
+    for component in partition.components:
+        assert len(component.face_ids) == len(component.member_ids) == 1
 
 
-def test_planner_fails_closed_inside_the_padding_distance():
-    # 0.1 m gap between plates; padding 0.25 m must merge them.
-    plan = plan_independent_components(_model(2, spacing=2.1), pad=TARGET)
-    assert len(plan.components) == 1
-    far = plan_independent_components(_model(2, spacing=2.1), pad=0.05)
-    assert len(far.components) == 2
+def test_owner_planner_merges_inside_twice_the_separation():
+    # 0.1 m gap: a separation of 0.125 (gap up to 0.25 merges) must merge,
+    # 0.025 (gap up to 0.05) must not.
+    assert len(plan(_model(2, spacing=2.1), separation=TARGET / 2).components) == 1
+    assert len(plan(_model(2, spacing=2.1), separation=0.025).components) == 2
 
 
-def test_planner_unites_components_sharing_a_vertex():
+def test_owner_planner_unites_components_sharing_a_vertex():
     model = GeometryModel()
     shared = model.add_points(((1.0, 0.0, 0.0), (1.0, 1.0, 0.0)))
     first = model.add_points(((0.0, 0.0, 0.0), (0.0, 1.0, 0.0)))
     second = model.add_points(((2.0, 0.0, 0.0), (2.0, 1.0, 0.0)))
     model.add_plate((first[0], shared[0], shared[1], first[1]))
     model.add_plate((shared[0], second[0], second[1], shared[1]))
-    plan = plan_independent_components(model, pad=1.0e-9)
-    assert len(plan.components) == 1
+    assert len(plan(model, separation=1.0e-9).components) == 1
+
+
+def test_close_components_fall_back_to_serial_with_a_reason():
+    # Gap 0.1 < target size 0.25: the mesher merges them, leaving one component.
+    result = generate_hybrid_mesh_result_parallel(
+        _model(2, spacing=2.1), target_size=TARGET
+    )
+    assert result.mesh.hybrid_diagnostics["parallel"] == {
+        "used": False, "reason": "1 component(s)",
+    }
+
+
+def test_refused_partition_falls_back_to_serial(monkeypatch):
+    class Refusal:
+        reason = "face support family lacks certified full trim-domain conservative bounds"
+
+    class Refused:
+        certified = False
+        components = ()
+        merge_reasons = ()
+        refusals = (Refusal(),)
+
+    monkeypatch.setattr(anygeometry, "plan_independent_components", lambda *a, **k: Refused())
+    result = generate_hybrid_mesh_result_parallel(
+        _model(2, spacing=10.0), target_size=TARGET
+    )
+    info = result.mesh.hybrid_diagnostics["parallel"]
+    assert info["used"] is False and info["reason"].startswith("partition refused: face support")
+
+
+def test_missing_owner_planner_falls_back_to_serial(monkeypatch):
+    monkeypatch.delattr(anygeometry, "plan_independent_components")
+    result = generate_hybrid_mesh_result_parallel(
+        _model(2, spacing=10.0), target_size=TARGET
+    )
+    assert result.mesh.hybrid_diagnostics["parallel"] == {
+        "used": False, "reason": "ANYgeometry has no plan_independent_components",
+    }
 
 
 def test_parallel_result_matches_serial_up_to_numbering(pool):
@@ -253,8 +297,7 @@ def test_a_dead_worker_is_reported_as_a_mesh_error():
 def test_package_exports_the_parallel_entry_points():
     import anymesher
 
-    for name in ("generate_hybrid_mesh_result_parallel", "ParallelOptions",
-                 "plan_independent_components"):
+    for name in ("generate_hybrid_mesh_result_parallel", "ParallelOptions"):
         assert name in anymesher.__all__ and hasattr(anymesher, name)
 
 

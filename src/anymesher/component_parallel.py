@@ -2,14 +2,17 @@
 
 Status: research prototype (see ``docs/PARALLEL_MESHING_STUDY.md``).
 
-The planner here is a stand-in for an ANYgeometry independence planner.  Two
-selections are *independent* when they share no vertex, no declared structural
-relation (sheet, attachment, junction) and their padded conservative bounding
-boxes do not overlap.  Independent components share no mesh node, so a join is
-an id offset plus a handle remap, with no interface reconciliation.
+Independence is decided by ANYgeometry's ``plan_independent_components``
+(conservative, read-only, dependency-complete; see ANYgeometry
+``docs/PARALLEL_COMPONENT_HANDOFF.md``), not here.  A certified partition's
+components share no vertex, declared relation or grown support box, so they
+share no mesh node; the join is an id offset plus a handle remap with no
+interface reconciliation.  Components travel to workers as
+``ModelClosure.to_transport()`` messages.
 
-Anything the planner cannot prove falls back to the serial pipeline, and the
-reason is recorded on the result (``mesh.hybrid_diagnostics["parallel"]``).
+Anything not certified (older ANYgeometry without the planner, a refused
+partition, one component, unsupported options) runs on the serial pipeline and
+the reason is recorded on the result (``mesh.hybrid_diagnostics["parallel"]``).
 """
 
 from __future__ import annotations
@@ -23,9 +26,12 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from anygeometry import GeometryModel, from_dict, to_dict
+import anygeometry
+from anygeometry import GeometryModel
 
 from .boundary import GlobalEdgeBoundaryRegistry
+from anygeometry.errors import GeometryError
+
 from .errors import MeshError
 from .hybrid import (
     CertificationMode,
@@ -40,12 +46,9 @@ from .structural_pipeline import (
 )
 
 __all__ = [
-    "ComponentPlan",
     "ParallelOptions",
-    "ParallelPlan",
     "generate_hybrid_mesh_result_parallel",
     "merge_component_meshes",
-    "plan_independent_components",
 ]
 
 
@@ -55,231 +58,16 @@ class ParallelOptions:
 
     ``workers`` of ``None`` uses ``min(components, cpu_count)``.  ``executor``
     lets a caller reuse a warm spawn pool (worker start-up is 0.5-0.9 s).
-    ``pad_factor`` scales the separation, in multiples of ``target_size``, that
-    two components must keep to be treated as independent.
+    ``pad_factor`` is the gap, in multiples of ``target_size``, below which two
+    components are merged: ANYgeometry grows each support box by half of it
+    (plus any caller-declared beam offset reach), so a gap up to
+    ``pad_factor * target_size`` merges.
     """
 
     workers: int | None = None
     min_components: int = 2
     pad_factor: float = 1.0
     executor: Executor | None = None
-
-
-@dataclass(frozen=True)
-class ComponentPlan:
-    faces: tuple[int, ...]
-    members: tuple[int, ...]
-    beam_edges: tuple[int, ...]
-    sheets: tuple[int, ...]
-    attachments: tuple[int, ...]
-    junctions: tuple[int, ...]
-    bounds: tuple[float, ...] | None
-
-    @property
-    def handles(self) -> tuple[tuple[str, int], ...]:
-        return (
-            *(("face", i) for i in self.faces),
-            *(("edge", i) for i in self.beam_edges),
-            *(("sheet", i) for i in self.sheets),
-            *(("member", i) for i in self.members),
-            *(("attachment", i) for i in self.attachments),
-            *(("junction", i) for i in self.junctions),
-        )
-
-
-@dataclass(frozen=True)
-class ParallelPlan:
-    components: tuple[ComponentPlan, ...]
-    pad: float
-    fallback_reason: str | None = None
-
-    @property
-    def parallel(self) -> bool:
-        return self.fallback_reason is None and len(self.components) >= 2
-
-
-class _Union:
-    def __init__(self, count: int) -> None:
-        self.parent = list(range(count))
-
-    def find(self, item: int) -> int:
-        while self.parent[item] != item:
-            self.parent[item] = self.parent[self.parent[item]]
-            item = self.parent[item]
-        return item
-
-    def union(self, first: int, second: int) -> None:
-        a, b = self.find(first), self.find(second)
-        if a != b:
-            self.parent[max(a, b)] = min(a, b)
-
-
-def _sweep_overlaps(
-    boxes: Sequence[tuple[float, ...] | None], pad: float
-) -> Iterable[tuple[int, int]]:
-    """Pairs of boxes whose ``pad``-grown extents overlap (sort and sweep on x)."""
-
-    order = sorted(
-        (i for i, box in enumerate(boxes) if box is not None),
-        key=lambda i: boxes[i][0],
-    )
-    active: list[int] = []
-    for i in order:
-        box = boxes[i]
-        active = [j for j in active if boxes[j][3] + pad >= box[0] - 0.0]
-        for j in active:
-            other = boxes[j]
-            if (
-                other[1] - pad <= box[4]
-                and box[1] - pad <= other[4]
-                and other[2] - pad <= box[5]
-                and box[2] - pad <= other[5]
-            ):
-                yield j, i
-        active.append(i)
-
-
-def plan_independent_components(
-    geometry: GeometryModel,
-    *,
-    pad: float,
-    face_ids: Iterable[int] | None = None,
-    member_ids: Iterable[int] | None = None,
-    beam_edges: Iterable[int] = (),
-) -> ParallelPlan:
-    """Partition the meshed selection into provably independent components."""
-
-    if face_ids is not None or member_ids is not None:
-        return ParallelPlan((), pad, "partial face/member selection")
-    view = GeometryMeshingView(geometry)
-    faces = tuple(sorted(int(i) for i in geometry.faces))
-    members = tuple(sorted(int(i) for i in view.members))
-    explicit_edges = {int(i) for i in beam_edges}
-
-    units: list[tuple[str, int]] = [("face", f) for f in faces]
-    units += [("member", m) for m in members]
-    member_edge_ids = {
-        m: tuple(int(use.edge_id) for use in view.edge_uses_for_member(m))
-        for m in members
-    }
-    owned = {e for edges in member_edge_ids.values() for e in edges}
-    units += [("edge", e) for e in sorted(explicit_edges - owned)]
-    index = {unit: i for i, unit in enumerate(units)}
-    union = _Union(len(units))
-
-    unit_edges: list[tuple[int, ...]] = []
-    for kind, ident in units:
-        if kind == "face":
-            face = geometry.faces[ident]
-            unit_edges.append(
-                tuple(int(u.edge) for loop in (face.loop, *face.holes) for u in loop)
-            )
-        elif kind == "member":
-            unit_edges.append(member_edge_ids[ident])
-        else:
-            unit_edges.append((ident,))
-    edge_units: dict[int, list[int]] = {}
-    vertex_unit: dict[int, int] = {}
-    for i, edges in enumerate(unit_edges):
-        for edge_id in edges:
-            edge_units.setdefault(edge_id, []).append(i)
-            edge = geometry.edges[edge_id]
-            for vertex in (edge.start, edge.end):
-                first = vertex_unit.setdefault(int(vertex), i)
-                union.union(first, i)
-    for owners in edge_units.values():
-        for other in owners[1:]:
-            union.union(owners[0], other)
-
-    for sheet_id in view.sheets:
-        sheet_faces = [index[("face", f)] for f in view.faces_for_sheet(sheet_id)
-                       if ("face", f) in index]
-        for other in sheet_faces[1:]:
-            union.union(sheet_faces[0], other)
-
-    sheet_units = {
-        sheet_id: [index[("face", f)] for f in view.faces_for_sheet(sheet_id)
-                   if ("face", f) in index]
-        for sheet_id in view.sheets
-    }
-    for attachment in view.attachments.values():
-        if attachment.member_id is None:
-            continue
-        member_unit = index.get(("member", int(attachment.member_id)))
-        if member_unit is None:
-            continue
-        # Declared relation: unite regardless of distance.
-        if attachment.target_kind.name == "FACE":
-            target = [index.get(("face", int(attachment.target_id)))]
-        else:
-            target = list(edge_units.get(int(attachment.target_id), ()))
-        for other in target:
-            if other is not None:
-                union.union(member_unit, other)
-    for junction in view.junctions.values():
-        participants = [
-            index[("member", int(use.member_id))]
-            for use in junction.member_uses
-            if ("member", int(use.member_id)) in index
-        ]
-        for sheet_id in junction.sheet_ids:
-            participants.extend(sheet_units.get(int(sheet_id), ()))
-        for other in participants[1:]:
-            union.union(participants[0], other)
-
-    boxes: list[tuple[float, ...] | None] = []
-    for i, (kind, ident) in enumerate(units):
-        entity_keys = (
-            [("face", ident)]
-            if kind == "face"
-            else [("edge", e) for e in unit_edges[i]]
-        )
-        boxes.append(geometry.bounds(entity_keys))
-        if boxes[-1] is None:
-            return ParallelPlan((), pad, f"no bounds for {kind} {ident}")
-    for a, b in _sweep_overlaps(boxes, pad):
-        union.union(a, b)
-
-    groups: dict[int, list[int]] = {}
-    for i in range(len(units)):
-        groups.setdefault(union.find(i), []).append(i)
-
-    components: list[ComponentPlan] = []
-    for root in sorted(groups):
-        part = groups[root]
-        faces_g = tuple(sorted(units[i][1] for i in part if units[i][0] == "face"))
-        members_g = tuple(sorted(units[i][1] for i in part if units[i][0] == "member"))
-        edges_g = tuple(sorted(units[i][1] for i in part if units[i][0] == "edge"))
-        face_set, member_set = set(faces_g), set(members_g)
-        sheets_g = tuple(
-            sorted(
-                s for s in view.sheets
-                if face_set.intersection(view.faces_for_sheet(s))
-            )
-        )
-        attachments_g = tuple(
-            sorted(
-                a.id for a in view.attachments.values()
-                if a.member_id is not None and int(a.member_id) in member_set
-            )
-        )
-        junctions_g = tuple(
-            sorted(
-                j.id for j in view.junctions.values()
-                if any(int(u.member_id) in member_set for u in j.member_uses)
-                or face_set.intersection(
-                    f for s in j.sheet_ids for f in view.faces_for_sheet(int(s))
-                )
-            )
-        )
-        merged = [boxes[i] for i in part]
-        arr = np.asarray(merged, dtype=float)
-        bounds = (*arr[:, :3].min(axis=0), *arr[:, 3:].max(axis=0))
-        components.append(
-            ComponentPlan(faces_g, members_g, edges_g, sheets_g, attachments_g,
-                          junctions_g, bounds)
-        )
-    return ParallelPlan(tuple(components), pad)
 
 
 # --------------------------------------------------------------------------
@@ -299,7 +87,9 @@ class _ComponentOutput:
 
 def _mesh_component(payload: Mapping[str, Any]) -> _ComponentOutput:
     started = time.perf_counter()
-    model = from_dict(payload["model"])
+    from anygeometry.closure import ModelClosure
+
+    model = ModelClosure.from_transport(payload["closure"]).working_model
     result = generate_hybrid_mesh_result(model, **payload["options"])
     mesh = result.mesh
     registry = getattr(mesh, "boundary_registry", None)
@@ -528,33 +318,49 @@ def generate_hybrid_mesh_result_parallel(
         return _serial(geometry, options, "mutation policy is not read_only")
 
     started = time.perf_counter()
-    pad = parallel.pad_factor * float(target_size)
+    planner = getattr(anygeometry, "plan_independent_components", None)
+    if planner is None:
+        return _serial(geometry, options, "ANYgeometry has no plan_independent_components")
+    # Each support box is grown by this amount, so a gap up to twice it merges.
+    # Beam offset reach is caller-declared mesh input the planner cannot see;
+    # both neighbours may reach out by it.
+    reach = 0.0
     offsets = options.get("beam_offsets") or {}
     if offsets:
-        pad += max(
-            float(np.max(np.abs(np.asarray(v, dtype=float))))
-            for v in offsets.values()
+        reach = max(
+            float(np.max(np.abs(np.asarray(v, dtype=float)))) for v in offsets.values()
         )
-    plan = plan_independent_components(
-        geometry, pad=pad, beam_edges=options.get("beam_edges", ())
-    )
+    separation = 0.5 * parallel.pad_factor * float(target_size) + reach
+    try:
+        partition = planner(
+            geometry,
+            edge_ids=tuple(int(e) for e in options.get("beam_edges", ())),
+            separation=separation,
+            expected_revision=geometry.revision,
+        )
+    except GeometryError as error:
+        return _serial(geometry, options, f"component planning failed: {error}")
     plan_seconds = time.perf_counter() - started
-    if plan.fallback_reason or len(plan.components) < max(2, parallel.min_components):
-        return _serial(
-            geometry, options,
-            plan.fallback_reason or f"{len(plan.components)} component(s)",
-        )
+    if not partition.certified:
+        reasons = "; ".join(sorted({r.reason for r in partition.refusals}))
+        return _serial(geometry, options, f"partition refused: {reasons}")
+    if len(partition.components) < max(2, parallel.min_components):
+        return _serial(geometry, options, f"{len(partition.components)} component(s)")
 
-    closures = [geometry.extract_model_closure(c.handles) for c in plan.components]
+    closures = [
+        geometry.extract_model_closure(component.handles)
+        for component in partition.components
+    ]
     maps = [_id_maps(c) for c in closures]
     payloads = []
-    for component, closure, by_kind in zip(plan.components, closures, maps):
+    for component, closure, by_kind in zip(partition.components, closures, maps):
         inverse = {kind: {s: w for w, s in table.items()} for kind, table in by_kind.items()}
         local = dict(options)
-        local["face_ids"] = tuple(sorted(inverse["face"][f] for f in component.faces))
-        local["member_ids"] = tuple(sorted(inverse["member"][m] for m in component.members)
-                                    ) if component.members else ()
-        local["beam_edges"] = tuple(inverse["edge"][e] for e in component.beam_edges)
+        local["face_ids"] = tuple(sorted(inverse["face"][f] for f in component.face_ids))
+        local["member_ids"] = tuple(
+            sorted(inverse["member"][m] for m in component.member_ids)
+        )
+        local["beam_edges"] = tuple(inverse["edge"][e] for e in component.edge_ids)
         for name in ("overrides", "beam_offsets"):
             table = options.get(name)
             if table:
@@ -563,7 +369,7 @@ def generate_hybrid_mesh_result_parallel(
                     if int(e) in inverse["edge"]
                 }
         local.pop("cancellation_check", None)
-        payloads.append({"model": to_dict(closure.working_model), "options": local})
+        payloads.append({"closure": closure.to_transport(), "options": local})
     covered = {name: sum(len(p["options"].get(name) or ()) for p in payloads)
                for name in ("overrides", "beam_offsets")}
     for name, total in covered.items():
@@ -665,7 +471,8 @@ def generate_hybrid_mesh_result_parallel(
             "used": True,
             "components": len(outputs),
             "workers": workers,
-            "pad": pad,
+            "separation": separation,
+            "merge_reasons": len(partition.merge_reasons),
             "plan_seconds": plan_seconds,
             "prepare_seconds": prepare_seconds,
             "mesh_seconds": run_seconds,

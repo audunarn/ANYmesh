@@ -135,7 +135,52 @@ worker-death -> `MeshError`, worker cap 61 (Windows), serial-equivalent
 `hybrid_diagnostics` keys, tests for refinements, quadratic order,
 diagnostics, dead pool, exports; CHANGELOG entry.
 
-## ANYgeometry request (independence planner)
+## Step 3: ANYgeometry's planner integrated (2026-10-06)
+
+ANYgeometry implemented requests 1-3 on `codex/parallel-handoff` (3ba1bf4, based
+on c6dc426; `docs/PARALLEL_COMPONENT_HANDOFF.md`, `PARALLEL_PREPARATION_EVIDENCE.md`
+there). It was not on local main when checked; the owner has since been told to
+merge it into main. Everything below was measured against a pinned read-only
+`git archive` of 3ba1bf4; re-verify against main after the merge.
+
+What ANYmesher changed:
+
+- The stand-in planner is deleted. `generate_hybrid_mesh_result_parallel` calls
+  `anygeometry.plan_independent_components(model, edge_ids=beam_edges,
+  separation=0.5*pad_factor*target_size + beam_offset_reach,
+  expected_revision=...)`. The owner's `separation` grows each box, so a gap up
+  to twice it merges; `pad_factor * target_size` keeps the old meaning. Beam
+  offset reach is caller input the planner cannot see, so it is added.
+- A refused or missing planner, or a stale/invalid model, falls back to the
+  serial route with the reason recorded (`partition refused: ...`,
+  `ANYgeometry has no plan_independent_components`, `component planning
+  failed: ...`). The module still imports against ANYgeometry main without the
+  planner; the 20 parallel tests skip there.
+- Transport is `ModelClosure.to_transport()` / `from_transport()` instead of
+  `to_dict`/`from_dict` plus my own map; the parent keeps its closure for the
+  work-to-source id maps.
+- `plan_independent_components` is no longer exported from `anymesher`.
+
+Checks:
+
+- The owner planner returned the same components as the stand-in on five
+  fixtures (8 extruded-wall components, 3 far, 2 within padding, 2 split with
+  small padding, 2 pierced plates). The 20 parallel tests pass with it.
+- Serial connected crossing grid, ANYgeometry main vs branch: meshes identical
+  (same digests at 16/32/48 members). Alternating runs at 32 members: 9.74,
+  8.72, 8.81 s (main) vs 8.09, 8.45, 8.02 s (branch), about 10%, matching their
+  preparation-only claim of 9-12%; noisy machine.
+- Parallel route (exp6, owner planner, single runs): 32 components serial
+  6.5 s, 16 workers 2.7 s cold / 0.68 s warm; 64 components serial 15.2 s,
+  3.5 s cold / 1.3 s warm. The serial baseline is lower than in the first
+  measurement (29 s at 64), so the speedup is smaller (warm 9.6x and 11.6x,
+  cold 2.4x and 4.4x at 16 workers). That drop was not isolated to ANYgeometry
+  versus machine load; repeat before quoting a ratio.
+- Not adopted: `query_trimmed_surface_charts_by_face` in `preparation.py`. The
+  owner measured about 1.5% over their improved individual-query path, which
+  does not justify editing a shared file.
+
+## ANYgeometry request (independence planner) - implemented, see Step 3
 
 Replace the ANYmesher stand-in with an owner API, e.g.
 `plan_independent_components(model, *, face_ids=None, member_ids=None,

@@ -71,7 +71,6 @@ from .mapped import ELEMENT_ORDERS, coons_grid, nodal_normals
 from .component_parallel import (
     ParallelOptions,
     generate_hybrid_mesh_result_parallel,
-    plan_independent_components,
 )
 from .hybrid import (
     CertificationMode,
@@ -316,7 +315,6 @@ __all__ = [
     "generate_hybrid_mesh_result",
     "generate_hybrid_mesh_result_parallel",
     "ParallelOptions",
-    "plan_independent_components",
     "generate_automatic_mesh_result",
     "MeshAutomationOptions",
     "MeshRecoveryIncomplete",
