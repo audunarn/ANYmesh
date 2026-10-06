@@ -180,6 +180,17 @@ Checks:
   owner measured about 1.5% over their improved individual-query path, which
   does not justify editing a shared file.
 
+### Re-verified against ANYgeometry main (2026-10-07)
+
+The planner is on ANYgeometry main (3ba1bf4 merged; main at 7cdb0b4). The main
+checkout had someone else's uncommitted edits (`edge_attachment_remapping.py`
+and its test), so the checks used a `git archive` of committed 7cdb0b4, not the
+live tree. Results: 35 tests pass (20 parallel, none skipped, plus 15 structural
+pipeline); serial 32-member crossing grid digest `1d7d9854cc1df11d` (identical
+to before), 7.5 s; parallel route at 16 workers, warm pool: 32 components 6.2 s
+serial -> 0.60 s (10.3x), 64 components 14.2 s -> 1.26 s (11.3x); cold 2.5 s and
+3.1 s. Same within noise as the branch snapshot. The Step 3 numbers above stand.
+
 ## ANYgeometry request (independence planner) - implemented, see Step 3
 
 Replace the ANYmesher stand-in with an owner API, e.g.
