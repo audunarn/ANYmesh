@@ -112,6 +112,29 @@ they are not qualification evidence.
   with only node and coupling ids offset; numbering differs from the serial run;
   not wired into any public entry point.
 
+## Step 1 done: junction connectivity scan (f27d86b)
+
+`StructuralMeshingPipeline._connect_junction` rebuilt the set of all shell
+nodes per junction, and `_replace_beam_nodes` rescanned every shell and beam.
+The shell-node set is now computed once per `apply_connectivity` (lazily, only
+when a junction row is connected) and the prune step tests only replaced nodes.
+Exp 7 (A/B, main checkout vs worktree): crossing grid n=16/32/48 connectivity
+0.12/1.19/5.69 s -> 0.06/0.25/0.59 s; wall 25.8 -> 20.9 s at n=48; digest of
+nodes, elements and couplings identical (numbering-exact) and the same action
+count. Two new endpoint-junction tests pass on old and new code.
+Not covered: the remaining preparation cost, which is ANYgeometry's.
+
+## Step 2 done: opt-in public entry point
+
+`anymesher.generate_hybrid_mesh_result_parallel`, `ParallelOptions`,
+`plan_independent_components` are exported from the package root. It is a
+separate function, not a keyword on `generate_hybrid_mesh_result`: that keeps
+`hybrid.py` untouched while other work is landing there and avoids a circular
+import. A `parallel=` keyword can be added later as a thin dispatch. Added:
+worker-death -> `MeshError`, worker cap 61 (Windows), serial-equivalent
+`hybrid_diagnostics` keys, tests for refinements, quadratic order,
+diagnostics, dead pool, exports; CHANGELOG entry.
+
 ## ANYgeometry request (independence planner)
 
 Replace the ANYmesher stand-in with an owner API, e.g.
@@ -146,6 +169,6 @@ changed.
 - Design C: split one large face (hole plate: 193 s for 44k elements) with
   fixed interface divisions and join on shared edge nodes; needs ANYgeometry
   cut-curve/partition support.
-- Serial hot spots for connected models (repeated `to_dict`/`validate_topology`,
-  `_connect_junction` scan).
+- Serial hot spots for connected models in ANYgeometry preparation (repeated
+  `to_dict`/`validate_topology`, per-sheet `arrange_material`): handoff only.
 - Whether the flows that call the mesher (ANYfem/GUI) can hold a warm pool.

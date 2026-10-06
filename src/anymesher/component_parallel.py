@@ -17,6 +17,7 @@ from __future__ import annotations
 import multiprocessing
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -570,7 +571,15 @@ def generate_hybrid_mesh_result_parallel(
             return _serial(geometry, options, f"{name} not owned by a component")
     prepare_seconds = time.perf_counter() - started - plan_seconds
 
-    workers = parallel.workers or min(len(payloads), multiprocessing.cpu_count())
+    # ProcessPoolExecutor on Windows cannot exceed 61 workers.
+    workers = max(
+        1,
+        min(
+            parallel.workers or multiprocessing.cpu_count(),
+            len(payloads),
+            61,
+        ),
+    )
     owned = parallel.executor is None
     pool = parallel.executor or ProcessPoolExecutor(
         max_workers=workers, mp_context=multiprocessing.get_context("spawn")
@@ -580,7 +589,13 @@ def generate_hybrid_mesh_result_parallel(
     try:
         futures = {pool.submit(_mesh_component, p): i for i, p in enumerate(payloads)}
         for future in as_completed(futures):
-            outputs[futures[future]] = future.result()
+            try:
+                outputs[futures[future]] = future.result()
+            except BrokenProcessPool as error:
+                raise MeshError(
+                    "a component worker process died; no mesh was produced "
+                    f"(component {futures[future]} of {len(payloads)})"
+                ) from error
             if cancellation is not None:
                 cancellation("parallel component complete")
     finally:
@@ -619,8 +634,33 @@ def generate_hybrid_mesh_result_parallel(
     for output in outputs:
         for name, value in output.mesh.hybrid_diagnostics.get("phase_seconds", {}).items():
             phase_totals[name] = phase_totals.get(name, 0.0) + float(value)
+    component_diagnostics = [o.mesh.hybrid_diagnostics for o in outputs]
+    complex_parts = [d.get("complex_geometry", {}) for d in component_diagnostics]
     mesh.hybrid_diagnostics = {
+        "requested_target_size": float(target_size),
+        "complex_geometry": {
+            "strategy_ladder": next(
+                (c["strategy_ladder"] for c in complex_parts if "strategy_ladder" in c), []
+            ),
+            **{
+                key: sum(int(c.get(key, 0)) for c in complex_parts)
+                for key in (
+                    "source_face_count",
+                    "final_face_count",
+                    "declared_junction_edge_count",
+                )
+            },
+        },
+        "strategy_by_face": dict(strategy),
+        "triangulation_backend_by_face": backend,
+        "geometry_model_id": str(geometry.model_id),
+        "geometry_revision": int(geometry.revision),
+        "certification_mode": "none",
+        "certifiable": False,
+        "preflight_count": len(preflight),
+        "reused_prepared_working_copy": False,
         "phase_seconds": phase_totals,
+        "completed_phases": sorted(phase_totals),
         "parallel": {
             "used": True,
             "components": len(outputs),

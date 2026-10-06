@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add opt-in component-parallel meshing: `generate_hybrid_mesh_result_parallel`
+  meshes geometrically independent components (no shared vertex, declared
+  relation or padded bounding-box overlap) in separate processes and joins
+  them. Anything it cannot prove independent runs on the serial route, with the
+  reason in `mesh.hybrid_diagnostics["parallel"]`. Node and element numbering
+  differs from the serial run and no audit or structural-preparation report is
+  produced. `ParallelOptions.executor` accepts a warm spawn pool. See
+  `docs/PARALLEL_MESHING_STUDY.md`.
+- Compute the shell-node set once per connectivity pass instead of once per
+  junction. Results are identical; the connectivity phase of a 48-member
+  crossing grid drops from 5.7 s to 0.6 s.
 - Speed up the experimental quad-first route and the shared pure-Python
   triangulator. Results are unchanged. Five whole-mesh scans are gone:
   - Bowyer-Watson now finds cavity candidates through a uniform grid instead

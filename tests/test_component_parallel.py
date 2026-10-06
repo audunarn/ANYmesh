@@ -192,6 +192,72 @@ def test_eccentric_stiffener_couplings_survive_the_join(pool):
     assert parallel.connectivity.connected == serial.connectivity.connected
 
 
+def test_refinements_and_quadratic_order_match_serial(pool):
+    from anymesher.refinement import Refinement
+
+    model = _model(2, spacing=10.0)
+    options = {
+        "order": "quadratic",
+        "refinements": (
+            Refinement(size=0.1, radius=0.5, center=(0.5, 0.5, 0.0), growth=1.5, name="r"),
+        ),
+    }
+    serial = generate_hybrid_mesh_result(model, target_size=TARGET, **options)
+    parallel = generate_hybrid_mesh_result_parallel(
+        model, target_size=TARGET, parallel=ParallelOptions(executor=pool), **options
+    )
+    assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
+    assert parallel.mesh.order == "quadratic"
+    assert _signature(parallel.mesh) == _signature(serial.mesh)
+
+
+def test_diagnostics_carry_the_keys_consumers_read(pool):
+    model = _model(2, spacing=10.0)
+    serial = generate_hybrid_mesh_result(model, target_size=TARGET).mesh.hybrid_diagnostics
+    parallel = generate_hybrid_mesh_result_parallel(
+        model, target_size=TARGET, parallel=ParallelOptions(executor=pool)
+    ).mesh.hybrid_diagnostics
+    for key in (
+        "requested_target_size", "strategy_by_face", "geometry_model_id",
+        "geometry_revision", "certification_mode", "certifiable", "preflight_count",
+    ):
+        assert parallel[key] == serial[key], key
+    assert parallel["complex_geometry"]["source_face_count"] == (
+        serial["complex_geometry"]["source_face_count"]
+    )
+    assert set(parallel["triangulation_backend_by_face"]) == set(
+        serial["triangulation_backend_by_face"]
+    )
+
+
+def test_a_dead_worker_is_reported_as_a_mesh_error():
+    from concurrent.futures import Future
+    from concurrent.futures.process import BrokenProcessPool
+
+    from anymesher.errors import MeshError
+
+    class DeadPool:
+        def submit(self, *_args, **_kwargs):
+            future = Future()
+            future.set_exception(BrokenProcessPool("worker died"))
+            return future
+
+    with pytest.raises(MeshError, match="worker process died"):
+        generate_hybrid_mesh_result_parallel(
+            _model(2, spacing=10.0),
+            target_size=TARGET,
+            parallel=ParallelOptions(executor=DeadPool()),
+        )
+
+
+def test_package_exports_the_parallel_entry_points():
+    import anymesher
+
+    for name in ("generate_hybrid_mesh_result_parallel", "ParallelOptions",
+                 "plan_independent_components"):
+        assert name in anymesher.__all__ and hasattr(anymesher, name)
+
+
 def test_merged_ids_are_unique_and_references_resolve(pool):
     model = _model(3, spacing=10.0)
     mesh = generate_hybrid_mesh_result_parallel(
