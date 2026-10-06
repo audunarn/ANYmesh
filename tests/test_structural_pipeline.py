@@ -327,3 +327,71 @@ def test_damage_updates_only_local_sides_and_reuses_bvh() -> None:
     activity.sync_bvh(bvh)
     assert bvh.locate((1.5, 0.5, 0.0)).element_id == 2  # type: ignore[union-attr]
 
+
+
+def _endpoint_junction_case(shell_at_second: bool):
+    """Two member ends meet at (1, 0, 0) with distinct beam node ids there."""
+
+    from anygeometry.structural import JunctionKind, JunctionMemberUse
+
+    geometry = GeometryModel()
+    a0, a1, b1 = geometry.add_points(((0, 0, 0), (1, 0, 0), (2, 0, 0)))
+    first = geometry.add_member((geometry.add_line(a0, a1),))
+    second = geometry.add_member((geometry.add_line(a1, b1),))
+    geometry.add_junction(
+        JunctionKind.ENDPOINT,
+        (
+            JunctionMemberUse(first, ParameterRange.point(1.0)),
+            JunctionMemberUse(second, ParameterRange.point(0.0)),
+        ),
+    )
+    mesh = Mesh()
+    mesh.nodes.update(
+        {
+            1: np.asarray((0.0, 1.0, 0.0)),
+            2: np.asarray((1.0, 1.0, 0.0)),
+            3: np.asarray((0.0, 0.0, 0.0)),
+            4: np.asarray((2.0, 1.0, 0.0)),
+            5: np.asarray((0.0, 0.0, 0.0)),
+            6: np.asarray((1.0, 0.0, 0.0)),  # first member end
+            7: np.asarray((1.0, 0.0, 0.0)),  # second member start
+            8: np.asarray((2.0, 0.0, 0.0)),
+        }
+    )
+    mesh.quads[10] = (3, 7, 2, 1) if shell_at_second else (3, 6, 2, 1)
+    view = GeometryMeshingView(geometry)
+    edges = [use.edge_id for m in (first, second) for use in view.edge_uses_for_member(m)]
+    mesh.beams[11] = (5, 6)
+    mesh.beams[12] = (7, 8)
+    mesh.nodes_of_edge[edges[0]] = [5, 6]
+    mesh.nodes_of_edge[edges[1]] = [7, 8]
+    mesh.elements_of_edge[edges[0]] = [11]
+    mesh.elements_of_edge[edges[1]] = [12]
+    pipeline = StructuralMeshingPipeline(
+        view, overlap_policy="connect_declared", mutation_policy="working_copy"
+    )
+    return mesh, pipeline, edges
+
+
+def test_endpoint_junction_merges_beam_nodes_and_prunes_unreferenced_ones() -> None:
+    mesh, pipeline, edges = _endpoint_junction_case(shell_at_second=False)
+    report = pipeline.apply_connectivity(mesh)
+    assert not report.issues
+    # The shell uses node 6 at the junction: it is the master, node 7 is replaced.
+    assert [(a.kind, a.source, a.target) for a in report.actions] == [
+        ("junction-shared-node", ("node", 7), ("node", 6))
+    ]
+    assert mesh.beams == {11: (5, 6), 12: (6, 8)}
+    assert mesh.nodes_of_edge[edges[1]] == [6, 8]
+    assert 7 not in mesh.nodes and {5, 6, 8} <= set(mesh.nodes)
+
+
+def test_endpoint_junction_prefers_the_shell_node_as_master() -> None:
+    mesh, pipeline, edges = _endpoint_junction_case(shell_at_second=True)
+    report = pipeline.apply_connectivity(mesh)
+    assert not report.issues
+    # The shell uses node 7 at the junction, so node 6 is replaced by it.
+    assert [(a.source, a.target) for a in report.actions] == [(("node", 6), ("node", 7))]
+    assert mesh.beams == {11: (5, 7), 12: (7, 8)}
+    assert mesh.nodes_of_edge[edges[0]] == [5, 7]
+    assert 6 not in mesh.nodes and {5, 7, 8} <= set(mesh.nodes)

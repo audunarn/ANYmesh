@@ -7,7 +7,7 @@ Attachment/Junction intent from ANYgeometry.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from threading import Lock
@@ -816,7 +816,27 @@ class StructuralMeshingPipeline:
         )
 
     @staticmethod
-    def _replace_beam_nodes(mesh: Mesh, replacements: Mapping[int, int]) -> None:
+    def _shell_node_set(mesh: Mesh) -> set[int]:
+        return {
+            int(node)
+            for table in (mesh.quads, mesh.tris)
+            for connectivity in table.values()
+            for node in connectivity
+        }
+
+    @staticmethod
+    def _replace_beam_nodes(
+        mesh: Mesh,
+        replacements: Mapping[int, int],
+        shell_nodes: set[int] | None = None,
+    ) -> None:
+        """Rewrite beam nodes; ``shell_nodes`` spares a rescan of every shell.
+
+        Callers that already hold the shell-node set (shell connectivity is
+        not changed here) pass it so the cost does not grow with the shell
+        count for every junction.
+        """
+
         if not replacements:
             return
         for element, nodes in tuple(mesh.beams.items()):
@@ -830,23 +850,37 @@ class StructuralMeshingPipeline:
                 mesh.couplings[identifier] = replace(
                     coupling, beam_node=replacements[coupling.beam_node]
                 )
-        referenced = {
-            int(node)
-            for connectivity in (*mesh.shells.values(), *mesh.beams.values())
-            for node in connectivity
-        }
-        referenced.update(
-            int(node)
-            for coupling in mesh.couplings.values()
-            for node in (coupling.beam_node, *coupling.plate_nodes)
-        )
+        # Only the replaced nodes can become unreferenced, so test just those
+        # instead of collecting every node of the mesh.
+        candidates = {int(node) for node in replacements}
+        referenced = set()
+        if shell_nodes is None:
+            shell_nodes = StructuralMeshingPipeline._shell_node_set(mesh)
+        referenced.update(candidates & shell_nodes)
+        for connectivity in mesh.beams.values():
+            referenced.update(candidates.intersection(map(int, connectivity)))
+        for coupling in mesh.couplings.values():
+            referenced.update(
+                candidates.intersection(
+                    map(int, (coupling.beam_node, *coupling.plate_nodes))
+                )
+            )
         for node in replacements:
             if node not in referenced:
                 mesh.nodes.pop(node, None)
 
     def _connect_junction(
-        self, mesh: Mesh, junction: object
+        self,
+        mesh: Mesh,
+        junction: object,
+        shell_nodes: Callable[[], set[int]] | None = None,
     ) -> tuple[list[ConnectivityAction], list[PreflightIssue]]:
+        """Connect one declared junction.
+
+        ``shell_nodes`` optionally supplies the shell-node set lazily; it is
+        only requested if a station row is actually connected.
+        """
+
         actions: list[ConnectivityAction] = []
         issues: list[PreflightIssue] = []
         if junction.kind is JunctionKind.OVERLAP:
@@ -889,9 +923,7 @@ class StructuralMeshingPipeline:
                     point_nodes.append(((use.member_range.start, node),))
             rows = zip(*point_nodes) if point_nodes else ()
 
-        shell_nodes = {
-            int(node) for connectivity in mesh.shells.values() for node in connectivity
-        }
+        shell_set: set[int] | None = None
         for row in rows:
             nodes = [int(item[1]) for item in row]
             if len(set(nodes)) < 2:
@@ -911,9 +943,13 @@ class StructuralMeshingPipeline:
                     )
                 )
                 continue
-            master = min(nodes, key=lambda node: (node not in shell_nodes, node))
+            if shell_set is None:
+                shell_set = (
+                    self._shell_node_set(mesh) if shell_nodes is None else shell_nodes()
+                )
+            master = min(nodes, key=lambda node: (node not in shell_set, node))
             replacements = {node: master for node in nodes if node != master}
-            self._replace_beam_nodes(mesh, replacements)
+            self._replace_beam_nodes(mesh, replacements, shell_set)
             for old in sorted(replacements):
                 actions.append(
                     ConnectivityAction(
@@ -1010,9 +1046,17 @@ class StructuralMeshingPipeline:
             if component.key in ready
             for identifier in component.junction_ids
         }
+        shell_cache: list[set[int]] = []
+
+        def shell_nodes() -> set[int]:
+            # Shell connectivity is read-only during connectivity application.
+            if not shell_cache:
+                shell_cache.append(self._shell_node_set(mesh))
+            return shell_cache[0]
+
         for identifier in sorted(junction_ids):
             made_actions, made_issues = self._connect_junction(
-                mesh, self.view.junctions[identifier]
+                mesh, self.view.junctions[identifier], shell_nodes
             )
             actions.extend(made_actions)
             issues.extend(made_issues)
