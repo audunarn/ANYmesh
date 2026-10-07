@@ -394,6 +394,126 @@ def _win_apply_below_normal_priority() -> tuple[bool, int | None]:
     return applied, actual
 
 
+#: POSIX nice floor requested for every pool worker at startup.  Nice values
+#: only ever lower scheduling priority as they grow, so a floor both caps the
+#: worker's impact on the GUI/parent and can never raise an already-lowered
+#: process back up.
+_POSIX_NICE_FLOOR = 5
+
+
+def _posix_apply_nice_floor(
+    floor: int = _POSIX_NICE_FLOOR,
+) -> tuple[bool, int | None, dict[str, Any]]:
+    """Best-effort POSIX nice floor for this worker process.
+
+    Reads the current nice value, requests ``max(current, floor)`` and only
+    calls ``os.setpriority`` when the measured nice value is below the floor, so
+    an already-lowered process is never touched and repeated calls (warm
+    reuse) never accumulate increments.  ``applied`` is True only when the
+    effective nice value was *measured* at or above the floor; a no-op on an
+    already-lowered process reports status ``already_lowered`` rather than
+    claiming a syscall.  Missing APIs, permission refusals and readback
+    failures are reported explicitly; no nice value is ever invented.
+
+    Returns ``(applied, priority_class, controls)``; ``priority_class`` is
+    always ``None`` here (there is no Windows priority class on POSIX), and
+    ``controls`` carries the measured before/requested/effective nice values,
+    the mechanism, a status and an error message.
+    """
+
+    controls: dict[str, Any] = {
+        "mechanism": "posix_nice_floor",
+        "status": "error",
+        "error": None,
+        "nice_before": None,
+        "nice_requested": None,
+        "nice_effective": None,
+    }
+    getpriority = getattr(os, "getpriority", None)
+    if getpriority is None or not hasattr(os, "PRIO_PROCESS"):
+        controls["status"] = "unsupported"
+        controls["error"] = (
+            "os.getpriority/os.PRIO_PROCESS unavailable on this runtime"
+        )
+        return False, None, controls
+    try:
+        before = int(getpriority(os.PRIO_PROCESS, 0))
+    except Exception as error:
+        controls["error"] = f"getpriority failed: {error!r}"
+        return False, None, controls
+    controls["nice_before"] = before
+    requested = max(before, int(floor))
+    controls["nice_requested"] = requested
+    if before >= int(floor):
+        # Measured already at/under the floor: verified without a syscall.
+        controls["status"] = "already_lowered"
+        controls["nice_effective"] = before
+        return True, None, controls
+    setpriority = getattr(os, "setpriority", None)
+    if setpriority is None:
+        controls["status"] = "unsupported"
+        controls["error"] = "os.setpriority unavailable on this runtime"
+        return False, None, controls
+    try:
+        setpriority(os.PRIO_PROCESS, 0, requested)
+    except PermissionError as error:
+        controls["status"] = "permission_denied"
+        controls["error"] = f"setpriority denied: {error!r}"
+        return False, None, controls
+    except Exception as error:
+        controls["error"] = f"setpriority failed: {error!r}"
+        return False, None, controls
+    try:
+        effective = int(getpriority(os.PRIO_PROCESS, 0))
+    except Exception as error:
+        controls["status"] = "readback_failed"
+        controls["error"] = f"getpriority readback failed: {error!r}"
+        return False, None, controls
+    controls["nice_effective"] = effective
+    if effective >= int(floor):
+        controls["status"] = "applied"
+        return True, None, controls
+    controls["status"] = "not_verified"
+    controls["error"] = (
+        f"readback nice {effective} did not reach the floor {int(floor)}"
+    )
+    return False, None, controls
+
+
+def _apply_worker_priority() -> tuple[bool, int | None, dict[str, Any]]:
+    """Worker startup priority, dispatched per platform.
+
+    Windows keeps the existing ``_win_apply_below_normal_priority`` semantics
+    and legacy ``(applied, class)`` fields unchanged.  POSIX applies the nice
+    floor helper.  The returned ``controls`` payload carries the measured
+    mechanism/status/error and nice values (``None`` where not measured);
+    it is exposed only under ``parallel.runtime.worker_controls``.
+    """
+
+    if sys.platform == "win32":
+        applied, actual = _win_apply_below_normal_priority()
+        return applied, actual, {
+            "mechanism": "windows_priority_class",
+            "status": "applied" if applied else "failed",
+            "error": None if applied else (
+                "SetPriorityClass(BELOW_NORMAL_PRIORITY_CLASS) failed"
+            ),
+            "nice_before": None,
+            "nice_requested": None,
+            "nice_effective": None,
+        }
+    if os.name == "posix":
+        return _posix_apply_nice_floor()
+    return False, None, {
+        "mechanism": "unsupported",
+        "status": "unsupported",
+        "error": "no worker priority mechanism on this platform",
+        "nice_before": None,
+        "nice_requested": None,
+        "nice_effective": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # worker
 
@@ -611,11 +731,12 @@ def _serve_tasks(
     # Test-only crash injection hooks (never set outside the test suite).
     if os.environ.get("_ANYMESHER_PARALLEL_TEST_CRASH_AT_START") == "1":
         os._exit(3)
-    priority_applied, priority_actual = _win_apply_below_normal_priority()
+    priority_applied, priority_actual, priority_controls = _apply_worker_priority()
     startup = {
         "containment": containment,  # Windows: job object, verified by parent
         "priority_applied": priority_applied,
         "priority_class": priority_actual,
+        "priority_controls": priority_controls,
         "thread_env": _worker_thread_env(),
         "threadpool": _worker_threadpool_info(),
     }

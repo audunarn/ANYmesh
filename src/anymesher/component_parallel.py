@@ -816,19 +816,31 @@ def generate_hybrid_mesh_result_parallel(
             f"{TERMINATION_DEADLINE_SECONDS}s termination deadline; "
             "no mesh was published"
         )
-    worker_controls = {
-        index: {
+    worker_controls: dict[int, dict[str, Any]] = {}
+    for index, info in startup_info.items():
+        detail = info.get("priority_controls")
+        if not isinstance(detail, dict):
+            detail = {}
+        worker_controls[index] = {
             "containment": pool.containment_kind,
             "priority_requested": "below_normal",
             "priority_applied": info.get("priority_applied"),
             "priority_class": _priority_name(info.get("priority_class")),
+            # Cross-platform startup priority evidence: measured POSIX nice
+            # before/requested/effective (None where unmeasured, never
+            # invented), plus mechanism and explicit status/error.  Windows
+            # keeps the legacy priority-class semantics above unchanged.
+            "nice_before": detail.get("nice_before"),
+            "nice_requested": detail.get("nice_requested"),
+            "nice_effective": detail.get("nice_effective"),
+            "priority_mechanism": detail.get("mechanism"),
+            "priority_status": detail.get("status"),
+            "priority_error": detail.get("error"),
             "thread_env": info.get("thread_env"),
             # Actual per-library thread counts measured in the worker, or
             # None when no runtime introspection was available there.
             "threadpool": info.get("threadpool"),
         }
-        for index, info in startup_info.items()
-    }
     runtime: dict[str, Any] = {
         "pool": pool_kind,
         "workers": pool.worker_count,
