@@ -110,6 +110,12 @@ __all__ = [
 ]
 
 
+# The planar chart metric below applies when the *model* has several faces, so
+# a component meshed alone (component_parallel) must be told what the whole
+# model looked like or it would mesh differently from the whole-model run.
+_WHOLE_MODEL_HAS_SEVERAL_FACES = False
+
+
 class MeshingStrategy(str, Enum):
     """Face-discretization policy for the production orchestrator."""
 
@@ -1425,7 +1431,9 @@ def _mesh_native_face(
             cylindrical_chart.circumferential_length,
             cylindrical_chart.axial_length,
         ))
-    if isinstance(face.surface, Plane) and len(geometry.faces) > 1:
+    if isinstance(face.surface, Plane) and (
+        len(geometry.faces) > 1 or _WHOLE_MODEL_HAS_SEVERAL_FACES
+    ):
         u_vector = np.asarray(face.surface.u_vector, dtype=float)
         v_vector = np.asarray(face.surface.v_vector, dtype=float)
         metric = np.asarray(

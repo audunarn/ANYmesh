@@ -301,6 +301,36 @@ def test_package_exports_the_parallel_entry_points():
         assert name in anymesher.__all__ and hasattr(anymesher, name)
 
 
+def _plain_plates(count: int) -> GeometryModel:
+    model = GeometryModel()
+    for index in range(count):
+        x = index * 10.0
+        vertices = model.add_points(
+            ((x, 0.0, 0.0), (x + 2.0, 0.0, 0.0), (x + 2.0, 1.0, 0.0), (x, 1.0, 0.0))
+        )
+        model.add_sheet((model.add_plate(vertices),))
+    return model
+
+
+def test_native_strategy_single_face_components_match_the_whole_model_run(pool):
+    """The planar chart metric depends on the model's face count; a component
+    meshed alone must still produce the whole-model mesh."""
+
+    model = _plain_plates(3)
+    serial = generate_hybrid_mesh_result(model, target_size=TARGET, strategy="native")
+    alone = generate_hybrid_mesh_result(
+        _plain_plates(1), target_size=TARGET, strategy="native"
+    )
+    parallel = generate_hybrid_mesh_result_parallel(
+        model, target_size=TARGET, strategy="native",
+        parallel=ParallelOptions(executor=pool),
+    )
+    assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
+    # Premise: a plate meshed alone differs from the same plate in a larger model.
+    assert alone.mesh.num_elements * 3 != serial.mesh.num_elements
+    assert _signature(parallel.mesh) == _signature(serial.mesh)
+
+
 def test_merged_ids_are_unique_and_references_resolve(pool):
     model = _model(3, spacing=10.0)
     mesh = generate_hybrid_mesh_result_parallel(
@@ -336,16 +366,74 @@ def test_overrides_are_routed_to_their_component(pool):
 @pytest.mark.parametrize(
     "extra, reason",
     [
-        ({"face_ids": (1,)}, "unsupported option face_ids"),
-        ({"certification_mode": "interactive"}, "certification requested"),
-        ({"mutation_policy": "working_copy"}, "mutation policy is not read_only"),
+        ({"face_ids": (1,)}, "partial face selection"),
+        ({"member_ids": ()}, "partial member selection"),
+        ({"certification_mode": "strict"}, "certification requested"),
+        ({"change_set": object()}, "unsupported option change_set"),
     ],
 )
-def test_unsupported_options_fall_back_to_serial_with_a_reason(extra, reason):
+def test_unsupported_options_fall_back_to_serial_with_a_reason(extra, reason, monkeypatch):
+    import anymesher.component_parallel as module
+
+    seen = []
+
+    def record(geometry, options, why):
+        seen.append(why)
+        return "serial"
+
+    monkeypatch.setattr(module, "_serial", record)
     model = _model(2, spacing=10.0)
-    result = generate_hybrid_mesh_result_parallel(model, target_size=TARGET, **extra)
-    info = result.mesh.hybrid_diagnostics["parallel"]
-    assert info == {"used": False, "reason": reason}
+    assert generate_hybrid_mesh_result_parallel(model, target_size=TARGET, **extra) == "serial"
+    assert seen == [reason]
+
+
+def test_interactive_certification_without_a_change_set_runs_in_parallel(pool):
+    """ANYfem's default mode."""
+
+    model = _model(2, spacing=10.0)
+    options = {"certification_mode": "interactive"}
+    serial = generate_hybrid_mesh_result(model, target_size=TARGET, **options)
+    parallel = generate_hybrid_mesh_result_parallel(
+        model, target_size=TARGET, parallel=ParallelOptions(executor=pool), **options
+    )
+    assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
+    assert parallel.certification_mode == serial.certification_mode
+    assert parallel.certifiable == serial.certifiable
+    assert parallel.mesh.hybrid_diagnostics["certification_mode"] == "interactive"
+    assert _signature(parallel.mesh) == _signature(serial.mesh)
+
+
+def test_working_copy_and_full_selections_run_in_parallel(pool):
+    """ANYfem calls the mesher with exactly these arguments."""
+
+    model = _model(3, spacing=10.0)
+    options = {
+        "mutation_policy": "working_copy",
+        "face_ids": tuple(sorted(model.faces)),
+        "member_ids": tuple(sorted(model.members)),
+    }
+    serial = generate_hybrid_mesh_result(model.clone(), target_size=TARGET, **options)
+    parallel = generate_hybrid_mesh_result_parallel(
+        model.clone(), target_size=TARGET, parallel=ParallelOptions(executor=pool),
+        **options,
+    )
+    assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
+    assert _signature(parallel.mesh) == _signature(serial.mesh)
+
+
+def test_precomputed_seeding_is_split_per_component(pool):
+    from anymesher import solve_seeding
+
+    model = _model(3, spacing=10.0)
+    seeding = solve_seeding(model, target_size=TARGET)
+    serial = generate_hybrid_mesh_result(model, target_size=TARGET, seeding=seeding)
+    parallel = generate_hybrid_mesh_result_parallel(
+        model, target_size=TARGET, seeding=seeding,
+        parallel=ParallelOptions(executor=pool),
+    )
+    assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
+    assert _signature(parallel.mesh) == _signature(serial.mesh)
+    assert parallel.mesh.seeding.divisions == serial.mesh.seeding.divisions
 
 
 def test_single_component_falls_back_to_serial():

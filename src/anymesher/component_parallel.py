@@ -89,8 +89,16 @@ def _mesh_component(payload: Mapping[str, Any]) -> _ComponentOutput:
     started = time.perf_counter()
     from anygeometry.closure import ModelClosure
 
+    from . import hybrid
+
     model = ModelClosure.from_transport(payload["closure"]).working_model
-    result = generate_hybrid_mesh_result(model, **payload["options"])
+    # Planar faces mesh with a chart metric only in multi-face models; a
+    # one-face component must behave as it does inside the whole model.
+    hybrid._WHOLE_MODEL_HAS_SEVERAL_FACES = bool(payload["whole_has_several_faces"])
+    try:
+        result = generate_hybrid_mesh_result(model, **payload["options"])
+    finally:
+        hybrid._WHOLE_MODEL_HAS_SEVERAL_FACES = False
     mesh = result.mesh
     registry = getattr(mesh, "boundary_registry", None)
     entries: list[tuple[int, float, Any, int | None]] = []
@@ -271,13 +279,10 @@ def _offset_connectivity(report: Any, m: _IdMaps) -> tuple[Any, ...] | None:
 # driver
 
 _UNSUPPORTED = (
-    ("seeding", None),
     ("quad_options", None),
     ("quad_face_ids", None),
     ("change_set", None),
     ("audit_policy", None),
-    ("member_ids", None),
-    ("face_ids", None),
 )
 
 
@@ -310,12 +315,32 @@ def generate_hybrid_mesh_result_parallel(
     for name, empty in _UNSUPPORTED:
         if options.get(name, empty) is not empty:
             return _serial(geometry, options, f"unsupported option {name}")
-    if str(getattr(options.get("certification_mode"), "value",
-                   options.get("certification_mode", "none"))) != "none":
+    # ``interactive`` only audits a supplied change set (refused above), so
+    # without one it changes nothing here and workers receive the same mode.
+    # ``strict`` audits the whole model and certifies published results.
+    certification = str(getattr(options.get("certification_mode"), "value",
+                                options.get("certification_mode", "none")))
+    if certification not in ("none", "interactive"):
         return _serial(geometry, options, "certification requested")
+    # ``working_copy`` declares the caller's model is already an isolated job
+    # closure that may be finalised in place; this route never mutates it, and
+    # workers mesh their own extracted copies, so both policies are equivalent.
     if str(getattr(options.get("mutation_policy"), "value",
-                   options.get("mutation_policy", "read_only"))) != "read_only":
-        return _serial(geometry, options, "mutation policy is not read_only")
+                   options.get("mutation_policy", "read_only"))) not in (
+        "read_only", "working_copy"
+    ):
+        return _serial(geometry, options, "unsupported mutation policy")
+    # Selections that name everything are the default selection.
+    selected_faces = options.get("face_ids")
+    if selected_faces is not None and {int(i) for i in selected_faces} != {
+        int(i) for i in geometry.faces
+    }:
+        return _serial(geometry, options, "partial face selection")
+    selected_members = options.get("member_ids")
+    if selected_members is not None and {int(i) for i in selected_members} != {
+        int(i) for i in geometry.members
+    }:
+        return _serial(geometry, options, "partial member selection")
 
     started = time.perf_counter()
     planner = getattr(anygeometry, "plan_independent_components", None)
@@ -368,8 +393,34 @@ def generate_hybrid_mesh_result_parallel(
                     inverse["edge"][int(e)]: v for e, v in table.items()
                     if int(e) in inverse["edge"]
                 }
+        seeding = options.get("seeding")
+        if seeding is not None:
+            # Independent components share no edge, so a global seeding
+            # restricts exactly to each component's own edges.
+            from .seeding import Seeding
+
+            local["seeding"] = Seeding(
+                divisions={
+                    inverse["edge"][int(e)]: v
+                    for e, v in seeding.divisions.items()
+                    if int(e) in inverse["edge"]
+                },
+                sweeps=int(seeding.sweeps),
+                classes={
+                    inverse["edge"][int(e)]: v
+                    for e, v in seeding.classes.items()
+                    if int(e) in inverse["edge"]
+                },
+                size_field=seeding.size_field,
+            )
         local.pop("cancellation_check", None)
-        payloads.append({"closure": closure.to_transport(), "options": local})
+        payloads.append(
+            {
+                "closure": closure.to_transport(),
+                "options": local,
+                "whole_has_several_faces": len(geometry.faces) > 1,
+            }
+        )
     covered = {name: sum(len(p["options"].get(name) or ()) for p in payloads)
                for name in ("overrides", "beam_offsets")}
     for name, total in covered.items():
@@ -461,7 +512,7 @@ def generate_hybrid_mesh_result_parallel(
         "triangulation_backend_by_face": backend,
         "geometry_model_id": str(geometry.model_id),
         "geometry_revision": int(geometry.revision),
-        "certification_mode": "none",
+        "certification_mode": certification,
         "certifiable": False,
         "preflight_count": len(preflight),
         "reused_prepared_working_copy": False,
@@ -491,6 +542,6 @@ def generate_hybrid_mesh_result_parallel(
         preflight=tuple(preflight),
         connectivity=connectivity,
         audit_report=None,
-        certification_mode=CertificationMode.NONE,
+        certification_mode=CertificationMode(certification),
         certifiable=False,
     )

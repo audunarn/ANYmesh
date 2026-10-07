@@ -191,6 +191,47 @@ to before), 7.5 s; parallel route at 16 workers, warm pool: 32 components 6.2 s
 serial -> 0.60 s (10.3x), 64 components 14.2 s -> 1.26 s (11.3x); cold 2.5 s and
 3.1 s. Same within noise as the branch snapshot. The Step 3 numbers above stand.
 
+## ANYfem check (2026-10-07)
+
+Merged ANYmesher (local main, fast-forward to 1ce220a) was checked in ANYfem
+(`exp8_anyfem_project.py`, PYTHONPATH = ANYfem src, ANYmesher, a `git archive`
+of ANYgeometry main 7cdb0b4, ANYloads).
+
+- ANYfem meshing tests (12 files, 105 tests): 2 failed / 93 passed / 10 skipped
+  with the merged ANYmesher and identically (same two failures) with the
+  pre-merge baseline 7182cb3. The failures are an ANYfem work-in-progress
+  attribute (`_require_trusted_pressure_code`) and the known `finite hull
+  triangulation legality did not converge` in the three-plate junction test.
+- ANYfem's "mapped fast path" (`Project.generate_mesh` on already-structured
+  plates) never calls the hybrid mesher: 8 plates mesh in 0.05 s and the
+  parallel route is not involved.
+- The whole-project hybrid call (`strategy="native"`) passes explicit
+  `face_ids`/`member_ids`, `mutation_policy="working_copy"`,
+  `certification_mode="interactive"`, `seeding`, `native_options`,
+  `qualified_s3`, `structural_preparation`. The first version of the parallel
+  route refused those. It now accepts selections that name everything,
+  `working_copy`, `interactive` without a change set, and splits a precomputed
+  seeding per component; `strict` certification, partial selections and
+  `change_set`/`audit_policy`/`quad_options` still fall back.
+- **Finding:** `hybrid._mesh_native_face` applies a planar chart metric only
+  when the *model* has more than one face (`len(geometry.faces) > 1`). A plate
+  meshed alone gets 32 elements, the same plate in a 2-plate model 73. Without
+  correction the parallel route produced a different mesh from the serial run
+  (256 vs 584 elements at 8 plates). Workers are now told whether the whole
+  model has several faces (`hybrid._WHOLE_MODEL_HAS_SEVERAL_FACES`, default
+  False, so serial behaviour is unchanged), and a regression test fails without
+  it. Worth deciding separately whether that face-count dependence is intended.
+- Result through ANYfem's `Project.generate_mesh(strategy="native")`, calling the
+  parallel function in place of `generate_hybrid_mesh`, cold pool per call,
+  meshes identical up to numbering: tiny plates (about 70 elements each) are
+  slower in parallel (n=32: 2.5 s serial vs 6.5 s, spawn cost); plates of about
+  700 elements: 16 plates 17.7 s -> 5.6 s (3.1x), 32 plates 35.6 s -> 9.7 s
+  (3.7x). A warm executor would remove most of the start-up cost.
+- ANYfem was **not modified** (it has other workers' uncommitted changes); the
+  routing was a monkeypatch in the experiment. Using the route there needs an
+  ANYfem-side call and a policy for the pool (warm executor, worker priority,
+  threshold on component size).
+
 ## ANYgeometry request (independence planner) - implemented, see Step 3
 
 Replace the ANYmesher stand-in with an owner API, e.g.

@@ -10,6 +10,8 @@
   runs on the serial route, with the reason in
   `mesh.hybrid_diagnostics["parallel"]`. Node and element numbering differs from
   the serial run and no audit or structural-preparation report is produced.
+  The route accepts `working_copy`, selections naming every face and member,
+  `interactive` certification without a change set, and a precomputed seeding.
   `ParallelOptions.executor` accepts a warm spawn pool. See
   `docs/PARALLEL_MESHING_STUDY.md`.
 - Compute the shell-node set once per connectivity pass instead of once per
