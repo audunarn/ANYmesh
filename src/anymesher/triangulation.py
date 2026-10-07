@@ -75,10 +75,14 @@ def incircle(
         -blift * (ax * cy - ay * cx),
         clift * (ax * by - ay * bx),
     ))
+    # Bound the products before subtracting them: almost collinear stations
+    # can cancel within each cross product. Using the already-cancelled terms
+    # understates roundoff and can certify opposite diagonal flips as illegal
+    # simultaneously. Ambiguous signs retain the existing exact fallback.
     scale = (
-        abs(alift * (bx * cy - by * cx))
-        + abs(blift * (ax * cy - ay * cx))
-        + abs(clift * (ax * by - ay * bx))
+        alift * (abs(bx * cy) + abs(by * cx))
+        + blift * (abs(ax * cy) + abs(ay * cx))
+        + clift * (abs(ax * by) + abs(ay * bx))
     )
     if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale:
         with localcontext() as context:
