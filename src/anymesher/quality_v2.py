@@ -244,20 +244,105 @@ def quad_quality(
     return ElementQuality(ids, *(values[:, column] for column in range(6)))
 
 
-def validate_mesh(
+def _certified_linear_validity(
     mesh: MeshCore,
-    *,
-    tolerance: float | None = None,
-    raise_on_error: bool = False,
-    declared_plate_junction_edges: Iterable[Sequence[int]] = (),
+    tolerance: float | None,
+    declared: tuple[Sequence[int], ...],
+) -> ValidityReport | None:
+    """Vectorized certification of a fully valid linear mesh.
+
+    Returns an empty :class:`ValidityReport` only when the scanning
+    validator below would find no errors.  Any failure, uncertainty,
+    quadratic active element, or declared junction returns ``None`` so
+    the original validator stays the authority for the report.
+    """
+
+    if declared:
+        return None
+    try:
+        if mesh.active_triangle_count and mesh.triangle_connectivity.shape[1] != 3:
+            return None
+        if mesh.active_quad_count and mesh.quad_connectivity.shape[1] != 4:
+            return None
+        triangles = mesh.triangle_connectivity[np.flatnonzero(mesh.triangle_active)]
+        quads = mesh.quad_connectivity[np.flatnonzero(mesh.quad_active)]
+        node_count = mesh.num_nodes
+        # Edge codes min*n + max stay inside int64 only below this bound.
+        if node_count > 3037000499:
+            return None
+        for cells in (triangles, quads):
+            if len(cells):
+                ordered = np.sort(cells, axis=1)
+                if np.any(ordered[:, 1:] == ordered[:, :-1]):
+                    return None
+                if len(np.unique(ordered, axis=0)) != len(cells):
+                    return None
+        edge_parts = []
+        for cells, width in ((triangles, 3), (quads, 4)):
+            if len(cells):
+                for index in range(width):
+                    pair = np.sort(
+                        np.stack(
+                            (cells[:, index], cells[:, (index + 1) % width]),
+                            axis=1,
+                        ),
+                        axis=1,
+                    )
+                    edge_parts.append(pair[:, 0] * node_count + pair[:, 1])
+        if edge_parts:
+            _, counts = np.unique(np.concatenate(edge_parts), return_counts=True)
+            if np.any(counts > 2):
+                return None
+        extent = max(
+            float(np.ptp(mesh.node_coordinates, axis=0).max()) if node_count else 0.0,
+            1.0,
+        )
+        area_tolerance = (
+            extent * extent * 1.0e-14 if tolerance is None else float(tolerance)
+        )
+        if len(triangles):
+            rows = np.flatnonzero(mesh.triangle_active)
+            metrics = triangle_quality(
+                mesh.node_coordinates,
+                mesh.triangle_connectivity[rows],
+                mesh.triangle_ids[rows],
+            )
+            if not (
+                np.all(np.isfinite(metrics.area))
+                and np.all(metrics.area > area_tolerance)
+                and np.all(metrics.scaled_jacobian > 0.0)
+            ):
+                return None
+        if len(quads):
+            rows = np.flatnonzero(mesh.quad_active)
+            metrics = quad_quality(
+                mesh.node_coordinates,
+                mesh.quad_connectivity[rows],
+                mesh.quad_ids[rows],
+            )
+            if not (
+                np.all(np.isfinite(metrics.area))
+                and np.all(metrics.area > area_tolerance)
+                and np.all(np.isfinite(metrics.scaled_jacobian))
+                and np.all(metrics.scaled_jacobian > 0.0)
+            ):
+                return None
+    except Exception:
+        return None
+    return ValidityReport(())
+
+
+def _scan_mesh_validity(
+    mesh: MeshCore,
+    tolerance: float | None,
+    raise_on_error: bool,
+    declared: tuple[Sequence[int], ...],
 ) -> ValidityReport:
-    if not isinstance(mesh, MeshCore):
-        raise TypeError("validate_mesh expects MeshCore")
     extent = max(float(np.ptp(mesh.node_coordinates, axis=0).max()) if mesh.num_nodes else 0.0, 1.0)
     area_tolerance = extent * extent * 1.0e-14 if tolerance is None else float(tolerance)
     errors: list[str] = []
     declared_junctions: set[tuple[int, int]] = set()
-    for raw_edge in declared_plate_junction_edges:
+    for raw_edge in declared:
         edge = tuple(int(value) for value in raw_edge)
         if len(edge) != 2 or edge[0] == edge[1]:
             raise MeshError(
@@ -336,6 +421,26 @@ def validate_mesh(
     if raise_on_error and not report.valid:
         raise MeshValidityError("; ".join(report.errors))
     return report
+
+
+def validate_mesh(
+    mesh: MeshCore,
+    *,
+    tolerance: float | None = None,
+    raise_on_error: bool = False,
+    declared_plate_junction_edges: Iterable[Sequence[int]] = (),
+) -> ValidityReport:
+    if not isinstance(mesh, MeshCore):
+        raise TypeError("validate_mesh expects MeshCore")
+    # Materialize the outer iterable once so single-use generators are
+    # consumed exactly once; the scanning authority converts and validates
+    # each edge after evaluating tolerance, preserving the original
+    # error priority.
+    declared = tuple(declared_plate_junction_edges)
+    certified = _certified_linear_validity(mesh, tolerance, declared)
+    if certified is not None:
+        return certified
+    return _scan_mesh_validity(mesh, tolerance, raise_on_error, declared)
 
 
 def assert_valid_mesh(

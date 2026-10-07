@@ -229,7 +229,8 @@ def _densify_loop(values: np.ndarray, size: float) -> np.ndarray:
     return _densify_open(closed, size)[:-1]
 
 
-def _inside(point: np.ndarray, ring: np.ndarray) -> bool:
+def _inside_scalar(point: np.ndarray, ring: np.ndarray) -> bool:
+    """Original scalar even-odd ray cast; authority for odd ring inputs."""
     inside = False
     x, y = point
     for first, second in zip(ring, np.vstack((ring[1:], ring[:1]))):
@@ -238,6 +239,36 @@ def _inside(point: np.ndarray, ring: np.ndarray) -> bool:
             if crossing > x:
                 inside = not inside
     return inside
+
+
+def _inside(point: np.ndarray, ring: np.ndarray) -> bool:
+    x, y = point
+    try:
+        array = np.asarray(ring)
+    except (ValueError, TypeError):
+        return _inside_scalar(point, ring)
+    # Conservative eligibility: only float64 rings take the vector path.
+    # Every other ring representation keeps the original scalar authority
+    # so NumPy promotion rules cannot change any verdict.
+    if (
+        array.dtype != np.dtype(np.float64)
+        or array.ndim != 2
+        or array.shape[1] < 2
+    ):
+        return _inside_scalar(point, ring)
+    second = np.vstack((array[1:], array[:1]))
+    crossing_rows = (array[:, 1] > y) != (second[:, 1] > y)
+    if not crossing_rows.any():
+        return False
+    # Divisions run only on crossing edges, with the original arithmetic
+    # order and the original strict boundary inequalities.
+    crossings = (
+        array[crossing_rows, 0]
+        + (y - array[crossing_rows, 1])
+        * (second[crossing_rows, 0] - array[crossing_rows, 0])
+        / (second[crossing_rows, 1] - array[crossing_rows, 1])
+    )
+    return bool(np.count_nonzero(crossings > x) % 2)
 
 
 def _segment_distance(point: np.ndarray, first: np.ndarray, second: np.ndarray) -> float:

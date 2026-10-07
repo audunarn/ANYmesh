@@ -8,6 +8,11 @@ from enum import StrEnum
 
 import numpy as np
 
+from ._runtime_counters import (
+    MESHER_BVH_BUILDS,
+    MESHER_BVH_LOOKUPS,
+    add_operation_count,
+)
 from .errors import MeshError
 from .mesh import Mesh
 
@@ -285,7 +290,16 @@ def normalized_element_filter(
 
 
 class MeshElementBVH:
-    """A static AABB hierarchy over shell elements with a mutable active mask."""
+    """A static AABB hierarchy over shell elements with a mutable active mask.
+
+    The public constructor eagerly snapshots every selected shell's
+    coordinates and builds the tree: later mesh mutations never change
+    query results, and malformed coordinates fail at construction, exactly
+    as before.  The private :meth:`_connectivity_only` constructor performs
+    the same shell-input validation but defers the coordinate records and
+    the tree to the first locating operation, for internal connectivity
+    paths that may never locate a point.
+    """
 
     def __init__(
         self,
@@ -295,6 +309,39 @@ class MeshElementBVH:
         tolerance: float = 1.0e-9,
         leaf_size: int = 8,
     ) -> None:
+        self._init_shell_state(mesh, element_ids, tolerance, leaf_size)
+        self._ensure_built()
+
+    @classmethod
+    def _connectivity_only(
+        cls,
+        mesh: Mesh,
+        *,
+        element_ids: Iterable[int] | None = None,
+        tolerance: float = 1.0e-9,
+        leaf_size: int = 8,
+    ) -> "MeshElementBVH":
+        """PRIVATE deferred constructor for connectivity-only pipelines.
+
+        Shell-input validation (duplicate shell IDs, unsupported
+        connectivity lengths, missing nodes, malformed node coordinates)
+        stays eager with the same rejections as the public constructor.
+        The per-element AABB records and the tree are built lazily by
+        the first locating operation, so a pipeline that never locates
+        a point never pays for a tree.
+        """
+
+        self = cls.__new__(cls)
+        self._init_shell_state(mesh, element_ids, tolerance, leaf_size)
+        return self
+
+    def _init_shell_state(
+        self,
+        mesh: Mesh,
+        element_ids: Iterable[int] | None,
+        tolerance: float,
+        leaf_size: int,
+    ) -> None:
         self.mesh = mesh
         self.tolerance = float(tolerance)
         if not np.isfinite(self.tolerance) or self.tolerance < 0.0:
@@ -302,10 +349,11 @@ class MeshElementBVH:
         if int(leaf_size) <= 0:
             raise MeshError("BVH leaf size must be positive")
         selected = None if element_ids is None else {int(value) for value in element_ids}
-        records: dict[int, _Record] = {}
         overlap = set(mesh.quads).intersection(mesh.tris)
         if overlap:
             raise MeshError(f"shell element IDs occur as both quad and triangle: {sorted(overlap)}")
+        shells: dict[int, tuple[ElementType, tuple[int, ...]]] = {}
+        coordinates: dict[int, np.ndarray] = {}
         for source, linear, quadratic in (
             (mesh.quads, ElementType.Q4, ElementType.Q8),
             (mesh.tris, ElementType.T3, ElementType.T6),
@@ -320,25 +368,47 @@ class MeshElementBVH:
                         f"element {element_id} has unsupported connectivity length "
                         f"{len(node_ids)}"
                     )
-                try:
-                    coordinates = np.asarray(
-                        [mesh.nodes[node] for node in node_ids], dtype=float
-                    )
-                except KeyError as error:
-                    raise MeshError(
-                        f"element {element_id} references missing node {error.args[0]}"
-                    ) from error
-                records[int(element_id)] = _Record(
-                    int(element_id),
-                    kind,
-                    node_ids,
-                    coordinates,
-                    coordinates.min(axis=0),
-                    coordinates.max(axis=0),
+                for node in node_ids:
+                    if node not in mesh.nodes:
+                        raise MeshError(
+                            f"element {element_id} references missing node {node}"
+                        )
+                # Eager per-element coordinate construction keeps the
+                # historical rejection of ragged or non-numeric node
+                # coordinates on every construction path, without building
+                # the records or the tree.
+                coordinates[int(element_id)] = np.asarray(
+                    [mesh.nodes[node] for node in node_ids], dtype=float
                 )
+                shells[int(element_id)] = (kind, node_ids)
+        self._shells = shells
+        self._shell_coordinates = coordinates
+        self._records: dict[int, _Record] | None = None
+        self._active = set(shells)
+        self._root: _Node | None = None
+        self._leaf_size = int(leaf_size)
+
+    def _ensure_built(self) -> dict[int, _Record]:
+        """Build the element records and the AABB tree once, on first need."""
+
+        records = self._records
+        if records is not None:
+            return records
+        records = {}
+        for element_id, (kind, node_ids) in self._shells.items():
+            coordinates = self._shell_coordinates[element_id]
+            records[element_id] = _Record(
+                element_id,
+                kind,
+                node_ids,
+                coordinates,
+                coordinates.min(axis=0),
+                coordinates.max(axis=0),
+            )
         self._records = records
-        self._active = set(records)
-        self._root = self._build(tuple(sorted(records)), int(leaf_size))
+        self._root = self._build(tuple(sorted(records)), self._leaf_size)
+        add_operation_count(MESHER_BVH_BUILDS)
+        return records
 
     def _build(self, identifiers: tuple[int, ...], leaf_size: int) -> _Node | None:
         if not identifiers:
@@ -366,7 +436,7 @@ class MeshElementBVH:
 
     @property
     def element_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(self._records))
+        return tuple(sorted(self._shells))
 
     @property
     def active_elements(self) -> frozenset[int]:
@@ -374,7 +444,7 @@ class MeshElementBVH:
 
     def set_active(self, element_ids: Iterable[int], active: bool = True) -> None:
         identifiers = {int(value) for value in element_ids}
-        unknown = identifiers - set(self._records)
+        unknown = identifiers - set(self._shells)
         if unknown:
             raise MeshError(f"BVH has no shell elements {sorted(unknown)}")
         if active:
@@ -384,7 +454,7 @@ class MeshElementBVH:
 
     def replace_active(self, element_ids: Iterable[int]) -> None:
         identifiers = {int(value) for value in element_ids}
-        unknown = identifiers - set(self._records)
+        unknown = identifiers - set(self._shells)
         if unknown:
             raise MeshError(f"BVH has no shell elements {sorted(unknown)}")
         self._active = identifiers
@@ -395,11 +465,9 @@ class MeshElementBVH:
     ) -> bool:
         return bool(np.all(node.upper >= lower) and np.all(node.lower <= upper))
 
-    def query_bounds(self, lower: object, upper: object) -> tuple[int, ...]:
-        made_lower = np.asarray(lower, dtype=float)
-        made_upper = np.asarray(upper, dtype=float)
-        if made_lower.shape != (3,) or made_upper.shape != (3,):
-            raise MeshError("BVH bounds must be 3-vectors")
+    def _traverse_bounds(
+        self, made_lower: np.ndarray, made_upper: np.ndarray
+    ) -> tuple[int, ...]:
         found: list[int] = []
 
         def visit(node: _Node | None) -> None:
@@ -414,12 +482,26 @@ class MeshElementBVH:
         visit(self._root)
         return tuple(sorted(found))
 
-    def candidates(self, point: object, tolerance: float | None = None) -> tuple[int, ...]:
+    def query_bounds(self, lower: object, upper: object) -> tuple[int, ...]:
+        made_lower = np.asarray(lower, dtype=float)
+        made_upper = np.asarray(upper, dtype=float)
+        if made_lower.shape != (3,) or made_upper.shape != (3,):
+            raise MeshError("BVH bounds must be 3-vectors")
+        self._ensure_built()
+        add_operation_count(MESHER_BVH_LOOKUPS)
+        return self._traverse_bounds(made_lower, made_upper)
+
+    def _candidate_ids(self, point: object, tolerance: float | None) -> tuple[int, ...]:
         made = np.asarray(point, dtype=float)
         if made.shape != (3,) or not np.all(np.isfinite(made)):
             raise MeshError("BVH query point must be a finite 3-vector")
         pad = self.tolerance if tolerance is None else float(tolerance)
-        return self.query_bounds(made - pad, made + pad)
+        return self._traverse_bounds(made - pad, made + pad)
+
+    def candidates(self, point: object, tolerance: float | None = None) -> tuple[int, ...]:
+        self._ensure_built()
+        add_operation_count(MESHER_BVH_LOOKUPS)
+        return self._candidate_ids(point, tolerance)
 
     query_point = candidates
 
@@ -440,12 +522,14 @@ class MeshElementBVH:
             allowed = element_ids
         else:
             allowed = {int(value) for value in element_ids}
-        candidates = self.candidates(made_point, made_tolerance)
+        records = self._ensure_built()
+        add_operation_count(MESHER_BVH_LOOKUPS)
+        candidates = self._candidate_ids(made_point, made_tolerance)
         hits: list[ElementHit] = []
         for element_id in candidates:
             if allowed is not None and element_id not in allowed:
                 continue
-            record = self._records[element_id]
+            record = records[element_id]
             inverse = inverse_interpolate(
                 record.element_type,
                 record.coordinates,
