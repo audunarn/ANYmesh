@@ -70,6 +70,9 @@ from .geometry import (
 from .mapped import ELEMENT_ORDERS, coons_grid, nodal_normals
 from .component_parallel import (
     ParallelOptions,
+    ParallelPoolLease,
+    create_parallel_pool,
+    generate_hybrid_mesh_parallel,
     generate_hybrid_mesh_result_parallel,
 )
 from .hybrid import (
@@ -314,7 +317,10 @@ __all__ = [
     "generate_hybrid_mesh",
     "generate_hybrid_mesh_result",
     "generate_hybrid_mesh_result_parallel",
+    "generate_hybrid_mesh_parallel",
     "ParallelOptions",
+    "ParallelPoolLease",
+    "create_parallel_pool",
     "generate_automatic_mesh_result",
     "MeshAutomationOptions",
     "MeshRecoveryIncomplete",

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
-
 import numpy as np
 import pytest
 from anygeometry import GeometryModel
@@ -17,10 +14,17 @@ from anygeometry.structural import (
 
 from anymesher import generate_hybrid_mesh_result
 import anygeometry
-from anymesher.component_parallel import (
+from anygeometry.errors import GeometryError
+from anymesher import (
+    Mesh,
     ParallelOptions,
-    generate_hybrid_mesh_result_parallel,
+    ParallelPoolLease,
+    create_parallel_pool,
+    generate_hybrid_mesh_parallel,
 )
+from anymesher.component_parallel import generate_hybrid_mesh_result_parallel
+from anymesher._parallel_pool import _pid_alive
+from anymesher.errors import MeshError
 
 pytestmark = pytest.mark.skipif(
     not hasattr(anygeometry, "plan_independent_components"),
@@ -85,11 +89,9 @@ def _model(count: int, spacing: float) -> GeometryModel:
 
 @pytest.fixture(scope="module")
 def pool():
-    executor = ProcessPoolExecutor(
-        max_workers=2, mp_context=multiprocessing.get_context("spawn")
-    )
-    yield executor
-    executor.shutdown(wait=True, cancel_futures=True)
+    lease = create_parallel_pool(2)
+    yield lease
+    lease.close()
 
 
 def _signature(mesh):
@@ -143,7 +145,7 @@ def test_close_components_fall_back_to_serial_with_a_reason():
         _model(2, spacing=2.1), target_size=TARGET
     )
     assert result.mesh.hybrid_diagnostics["parallel"] == {
-        "used": False, "reason": "1 component(s)",
+        "used": False, "route": "serial", "reason": "1 component(s)",
     }
 
 
@@ -171,7 +173,8 @@ def test_missing_owner_planner_falls_back_to_serial(monkeypatch):
         _model(2, spacing=10.0), target_size=TARGET
     )
     assert result.mesh.hybrid_diagnostics["parallel"] == {
-        "used": False, "reason": "ANYgeometry has no plan_independent_components",
+        "used": False, "route": "serial",
+        "reason": "ANYgeometry has no plan_independent_components",
     }
 
 
@@ -179,7 +182,7 @@ def test_parallel_result_matches_serial_up_to_numbering(pool):
     model = _model(3, spacing=10.0)
     serial = generate_hybrid_mesh_result(model, target_size=TARGET)
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool)
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool)
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert parallel.mesh.hybrid_diagnostics["parallel"]["components"] == 3
@@ -212,7 +215,7 @@ def test_pierced_plate_components_match_serial(pool):
         _pierced_plate(model, index * 10.0)
     serial = generate_hybrid_mesh_result(model, target_size=TARGET)
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool)
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool)
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert _signature(parallel.mesh) == _signature(serial.mesh)
@@ -226,7 +229,7 @@ def test_eccentric_stiffener_couplings_survive_the_join(pool):
     options = {"beam_offsets": offsets}
     serial = generate_hybrid_mesh_result(model, target_size=TARGET, **options)
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool), **options
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool), **options
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert len(serial.mesh.couplings) > 0
@@ -248,7 +251,7 @@ def test_refinements_and_quadratic_order_match_serial(pool):
     }
     serial = generate_hybrid_mesh_result(model, target_size=TARGET, **options)
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool), **options
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool), **options
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert parallel.mesh.order == "quadratic"
@@ -259,7 +262,7 @@ def test_diagnostics_carry_the_keys_consumers_read(pool):
     model = _model(2, spacing=10.0)
     serial = generate_hybrid_mesh_result(model, target_size=TARGET).mesh.hybrid_diagnostics
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool)
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool)
     ).mesh.hybrid_diagnostics
     for key in (
         "requested_target_size", "strategy_by_face", "geometry_model_id",
@@ -274,30 +277,35 @@ def test_diagnostics_carry_the_keys_consumers_read(pool):
     )
 
 
-def test_a_dead_worker_is_reported_as_a_mesh_error():
-    from concurrent.futures import Future
-    from concurrent.futures.process import BrokenProcessPool
+def test_a_dead_worker_is_reported_as_a_mesh_error(monkeypatch):
+    """An actual worker crash mid-job is a MeshError; the lease invalidates."""
 
-    from anymesher.errors import MeshError
-
-    class DeadPool:
-        def submit(self, *_args, **_kwargs):
-            future = Future()
-            future.set_exception(BrokenProcessPool("worker died"))
-            return future
-
-    with pytest.raises(MeshError, match="worker process died"):
-        generate_hybrid_mesh_result_parallel(
-            _model(2, spacing=10.0),
-            target_size=TARGET,
-            parallel=ParallelOptions(executor=DeadPool()),
-        )
+    monkeypatch.setenv("_ANYMESHER_PARALLEL_TEST_CRASH", "1")
+    lease = create_parallel_pool(2)
+    try:
+        with pytest.raises(MeshError, match="worker process died"):
+            generate_hybrid_mesh_result_parallel(
+                _model(2, spacing=10.0),
+                target_size=TARGET,
+                parallel=ParallelOptions(pool_lease=lease),
+            )
+        assert not lease.valid
+        assert not any(_pid_alive(pid) for pid in lease.worker_pids)
+    finally:
+        monkeypatch.delenv("_ANYMESHER_PARALLEL_TEST_CRASH", raising=False)
+        lease.close()
 
 
 def test_package_exports_the_parallel_entry_points():
     import anymesher
 
-    for name in ("generate_hybrid_mesh_result_parallel", "ParallelOptions"):
+    for name in (
+        "generate_hybrid_mesh_result_parallel",
+        "generate_hybrid_mesh_parallel",
+        "ParallelOptions",
+        "ParallelPoolLease",
+        "create_parallel_pool",
+    ):
         assert name in anymesher.__all__ and hasattr(anymesher, name)
 
 
@@ -323,7 +331,7 @@ def test_native_strategy_single_face_components_match_the_whole_model_run(pool):
     )
     parallel = generate_hybrid_mesh_result_parallel(
         model, target_size=TARGET, strategy="native",
-        parallel=ParallelOptions(executor=pool),
+        parallel=ParallelOptions(pool_lease=pool),
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     # Premise: a plate meshed alone differs from the same plate in a larger model.
@@ -334,7 +342,7 @@ def test_native_strategy_single_face_components_match_the_whole_model_run(pool):
 def test_merged_ids_are_unique_and_references_resolve(pool):
     model = _model(3, spacing=10.0)
     mesh = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool)
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool)
     ).mesh
     tables = (mesh.quads, mesh.tris, mesh.beams, mesh.couplings)
     element_ids = [key for table in tables for key in table]
@@ -357,7 +365,7 @@ def test_overrides_are_routed_to_their_component(pool):
     options = {"overrides": {edge: 12}}
     serial = generate_hybrid_mesh_result(model, target_size=TARGET, **options)
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool), **options
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool), **options
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert _signature(parallel.mesh) == _signature(serial.mesh)
@@ -394,7 +402,7 @@ def test_interactive_certification_without_a_change_set_runs_in_parallel(pool):
     options = {"certification_mode": "interactive"}
     serial = generate_hybrid_mesh_result(model, target_size=TARGET, **options)
     parallel = generate_hybrid_mesh_result_parallel(
-        model, target_size=TARGET, parallel=ParallelOptions(executor=pool), **options
+        model, target_size=TARGET, parallel=ParallelOptions(pool_lease=pool), **options
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert parallel.certification_mode == serial.certification_mode
@@ -414,7 +422,7 @@ def test_working_copy_and_full_selections_run_in_parallel(pool):
     }
     serial = generate_hybrid_mesh_result(model.clone(), target_size=TARGET, **options)
     parallel = generate_hybrid_mesh_result_parallel(
-        model.clone(), target_size=TARGET, parallel=ParallelOptions(executor=pool),
+        model.clone(), target_size=TARGET, parallel=ParallelOptions(pool_lease=pool),
         **options,
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
@@ -429,7 +437,7 @@ def test_precomputed_seeding_is_split_per_component(pool):
     serial = generate_hybrid_mesh_result(model, target_size=TARGET, seeding=seeding)
     parallel = generate_hybrid_mesh_result_parallel(
         model, target_size=TARGET, seeding=seeding,
-        parallel=ParallelOptions(executor=pool),
+        parallel=ParallelOptions(pool_lease=pool),
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
     assert _signature(parallel.mesh) == _signature(serial.mesh)
@@ -454,6 +462,6 @@ def test_cancellation_check_is_honoured_between_components(pool):
         generate_hybrid_mesh_result_parallel(
             _model(3, spacing=10.0),
             target_size=TARGET,
-            parallel=ParallelOptions(executor=pool),
+            parallel=ParallelOptions(pool_lease=pool),
             cancellation_check=stop,
         )

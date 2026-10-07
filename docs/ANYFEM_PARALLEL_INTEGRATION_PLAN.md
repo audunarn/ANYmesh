@@ -1,5 +1,12 @@
 # Plan: using the parallel component route from ANYfem
 
+Implementation checkpoint2026-10-07: ANYmesh's opt-in public pool/lease
+prerequisites are implemented and reviewed. Current API, focused Windows/WSL
+evidence and unresolved application acceptance boundaries are in
+[PARALLEL_POOL_LIFECYCLE.md](PARALLEL_POOL_LIFECYCLE.md). The original proposal
+below remains historical context; ANYfem integration proceeds in its own
+checkout, with parallel execution off by default.
+
 Date 2026-10-07. Status: **plan only; nothing in ANYfem was changed** (it has
 other workers' uncommitted edits). Written from ANYmesher; the ANYfem owner
 decides. Evidence and background: `docs/PARALLEL_MESHING_STUDY.md`,
