@@ -266,6 +266,24 @@ class _Node:
     right: "_Node | None" = None
 
 
+class _NormalizedElementFilter(frozenset):
+    """PRIVATE trusted element-ID filter for repeated internal queries.
+
+    Members are already ``int`` element IDs.  Only this exact type skips
+    the public per-member ``int`` coercion in
+    :meth:`MeshElementBVH.locate_all`; every other iterable, including
+    plain frozensets, is coerced member by member.
+    """
+
+
+def normalized_element_filter(
+    element_ids: Iterable[int],
+) -> _NormalizedElementFilter:
+    """Return a private trusted filter of coerced element IDs (internal)."""
+
+    return _NormalizedElementFilter(int(value) for value in element_ids)
+
+
 class MeshElementBVH:
     """A static AABB hierarchy over shell elements with a mutable active mask."""
 
@@ -414,7 +432,14 @@ class MeshElementBVH:
     ) -> tuple[ElementHit, ...]:
         made_point = np.asarray(point, dtype=float)
         made_tolerance = self.tolerance if tolerance is None else float(tolerance)
-        allowed = None if element_ids is None else {int(value) for value in element_ids}
+        if element_ids is None:
+            allowed = None
+        elif type(element_ids) is _NormalizedElementFilter:
+            # Private trusted filters already contain int element IDs and
+            # are reused by callers that query one target repeatedly.
+            allowed = element_ids
+        else:
+            allowed = {int(value) for value in element_ids}
         candidates = self.candidates(made_point, made_tolerance)
         hits: list[ElementHit] = []
         for element_id in candidates:

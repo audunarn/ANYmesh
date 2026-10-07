@@ -21,7 +21,11 @@ from anygeometry.transactions import ChangeSet
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .errors import MeshError
 from .mesh import Coupling, Mesh
-from .mesh_bvh import MeshElementBVH, inverse_interpolate
+from .mesh_bvh import (
+    MeshElementBVH,
+    inverse_interpolate,
+    normalized_element_filter,
+)
 from .meshing_view import GeometryMeshingView, StaleMeshingViewError
 
 __all__ = [
@@ -266,6 +270,113 @@ class ConnectivityReport:
     @property
     def connected(self) -> int:
         return len(self.actions)
+
+
+class _FaceTargetIndex:
+    """Invocation-local index of one attachment target face.
+
+    Shell connectivity and node coordinates are read-only while connectivity
+    is applied, so the cached element filter, node membership, and effective
+    tolerance hold for the whole application.
+    """
+
+    __slots__ = ("elements", "filter", "member_nodes", "tolerance")
+
+    def __init__(
+        self,
+        elements: tuple[int, ...],
+        member_nodes: frozenset[int],
+        tolerance: float,
+    ) -> None:
+        self.elements = elements
+        self.filter = normalized_element_filter(elements)
+        self.member_nodes = member_nodes
+        self.tolerance = float(tolerance)
+
+
+class _ConnectivityIndex:
+    """Coupling indexes whose lifetime is one ``apply_connectivity`` call.
+
+    The target-face and target-edge indexes are shell-scoped: shell
+    connectivity is not mutated during connectivity application, so they
+    cannot go stale.  The junction phase rewrites beam node identifiers, so
+    the beam-node coupling index is invalidated there and rebuilt lazily if
+    it is needed again; a shell or junction mutation therefore never leaks a
+    stale coupling index into a later application.
+    """
+
+    def __init__(self, mesh: Mesh, pipeline: "StructuralMeshingPipeline") -> None:
+        self._mesh = mesh
+        self._pipeline = pipeline
+        self._faces: dict[int, _FaceTargetIndex] = {}
+        self._edge_filters: dict[int, frozenset[int]] = {}
+        self._beam_couplings: dict[int, Coupling] | None = None
+
+    def face(self, face_id: int) -> _FaceTargetIndex:
+        key = int(face_id)
+        index = self._faces.get(key)
+        if index is None:
+            mesh = self._mesh
+            elements = tuple(mesh.elements_of_face.get(key, ()))
+            member_nodes = frozenset(
+                int(node)
+                for element in elements
+                for node in (
+                    *mesh.quads.get(element, ()),
+                    *mesh.tris.get(element, ()),
+                )
+            )
+            if elements:
+                points = np.asarray(
+                    [
+                        mesh.nodes[node]
+                        for element in elements
+                        for node in mesh.corners_of(element)
+                    ],
+                    dtype=float,
+                )
+                extent = float(np.max(np.ptp(points, axis=0)))
+            else:
+                extent = 0.0
+            index = _FaceTargetIndex(
+                elements,
+                member_nodes,
+                self._pipeline.view.effective_length(extent),
+            )
+            self._faces[key] = index
+        return index
+
+    def edge_filter(self, edge_id: int) -> frozenset[int]:
+        key = int(edge_id)
+        allowed = self._edge_filters.get(key)
+        if allowed is None:
+            allowed = normalized_element_filter(
+                self._pipeline._target_elements_for_edge(self._mesh, key)
+            )
+            self._edge_filters[key] = allowed
+        return allowed
+
+    def coupling_for_beam_node(self, beam_node: int) -> Coupling | None:
+        """Return the first coupling record of ``beam_node``, if any.
+
+        The index preserves insertion order, so the first record wins
+        exactly as the previous linear scan did.
+        """
+
+        index = self._beam_couplings
+        if index is None:
+            index = {}
+            for record in self._mesh.couplings.values():
+                index.setdefault(int(record.beam_node), record)
+            self._beam_couplings = index
+        return index.get(int(beam_node))
+
+    def record_coupling(self, beam_node: int, record: Coupling) -> None:
+        if self._beam_couplings is not None:
+            self._beam_couplings.setdefault(int(beam_node), record)
+
+    def invalidate_beam_couplings(self) -> None:
+        self._beam_couplings = None
 
 
 class StructuralMeshingPipeline:
@@ -654,6 +765,7 @@ class StructuralMeshingPipeline:
         member_parameter: float,
         beam_node: int,
         next_record: list[int],
+        index: _ConnectivityIndex,
     ) -> tuple[ConnectivityAction | None, PreflightIssue | None]:
         actual = np.asarray(mesh.nodes[beam_node], dtype=float)
         if attachment.target_kind is AttachmentTargetKind.EDGE:
@@ -689,10 +801,9 @@ class StructuralMeshingPipeline:
                 weights = (1.0,)
                 projected = np.asarray(mesh.nodes[master], dtype=float)
             else:
-                allowed = self._target_elements_for_edge(mesh, attachment.target_id)
                 hit = bvh.locate(
                     point,
-                    element_ids=allowed,
+                    element_ids=index.edge_filter(attachment.target_id),
                     tolerance=self.view.effective_length(
                         self.view.edge_length(attachment.target_id)
                     ),
@@ -743,14 +854,10 @@ class StructuralMeshingPipeline:
                 member_parameter, attachment.member_range, attachment.target_parameters[1]
             )
             point = self.view.face_point(target_face_id, u, v)
-            allowed = tuple(mesh.elements_of_face.get(target_face_id, ()))
-            face_points = np.asarray(
-                [mesh.nodes[node] for element in allowed for node in mesh.corners_of(element)],
-                dtype=float,
-            )
-            extent = 0.0 if not len(face_points) else float(np.max(np.ptp(face_points, axis=0)))
-            base_tolerance = self.view.effective_length(extent)
-            if (any(beam_node in mesh.quads.get(element,mesh.tris.get(element,())) for element in allowed)
+            face_index = index.face(target_face_id)
+            allowed = face_index.elements
+            base_tolerance = face_index.tolerance
+            if (beam_node in face_index.member_nodes
                     and float(np.linalg.norm(actual-point)) <= base_tolerance):
                 # Exact prepared topology already supplies this shell station.
                 # Shape-function roundoff at a corner must not create a
@@ -759,7 +866,7 @@ class StructuralMeshingPipeline:
                     ('member',int(attachment.member_id)),('face',target_face_id)),None)
             hit = bvh.locate(
                 point,
-                element_ids=allowed,
+                element_ids=face_index.filter,
                 tolerance=base_tolerance,
             )
             if hit is None and mesh.is_quadratic:
@@ -789,22 +896,24 @@ class StructuralMeshingPipeline:
                 plate_nodes, weights = hit.node_ids, hit.weights
                 projected = np.asarray(hit.point, dtype=float)
 
-        for record in mesh.couplings.values():
-            if int(record.beam_node) == beam_node:
-                if tuple(record.plate_nodes) == tuple(plate_nodes):
-                    return None, None
-                return None, PreflightIssue(
-                    "coupling-conflict",
-                    f"mesh node {beam_node} already has a different coupling",
-                    (("attachment", int(attachment.id)),),
-                )
+        record = index.coupling_for_beam_node(beam_node)
+        if record is not None:
+            if tuple(record.plate_nodes) == tuple(plate_nodes):
+                return None, None
+            return None, PreflightIssue(
+                "coupling-conflict",
+                f"mesh node {beam_node} already has a different coupling",
+                (("attachment", int(attachment.id)),),
+            )
         next_record[0] += 1
-        mesh.couplings[next_record[0]] = Coupling(
+        made_coupling = Coupling(
             beam_node=beam_node,
             plate_nodes=tuple(int(value) for value in plate_nodes),
             weights=tuple(float(value) for value in weights),
             eccentricity=tuple(float(value) for value in actual - projected),
         )
+        mesh.couplings[next_record[0]] = made_coupling
+        index.record_coupling(beam_node, made_coupling)
         return (
             ConnectivityAction(
                 "attachment-coupling",
@@ -874,6 +983,7 @@ class StructuralMeshingPipeline:
         mesh: Mesh,
         junction: object,
         shell_nodes: Callable[[], set[int]] | None = None,
+        index: _ConnectivityIndex | None = None,
     ) -> tuple[list[ConnectivityAction], list[PreflightIssue]]:
         """Connect one declared junction.
 
@@ -950,6 +1060,10 @@ class StructuralMeshingPipeline:
             master = min(nodes, key=lambda node: (node not in shell_set, node))
             replacements = {node: master for node in nodes if node != master}
             self._replace_beam_nodes(mesh, replacements, shell_set)
+            if index is not None:
+                # Beam node identifiers were rewritten; the beam-node
+                # coupling index must not survive this mutation.
+                index.invalidate_beam_couplings()
             for old in sorted(replacements):
                 actions.append(
                     ConnectivityAction(
@@ -992,6 +1106,7 @@ class StructuralMeshingPipeline:
             else float(np.max(np.ptp(np.asarray(list(mesh.nodes.values())), axis=0)))
         )
         bvh = MeshElementBVH(mesh, tolerance=tolerance)
+        index = _ConnectivityIndex(mesh, self)
         next_record = [max((0, *mesh.quads, *mesh.tris, *mesh.beams, *mesh.couplings))]
         actions: list[ConnectivityAction] = []
 
@@ -1034,6 +1149,7 @@ class StructuralMeshingPipeline:
                     member_parameter,
                     beam_node,
                     next_record,
+                    index,
                 )
                 if action is not None:
                     actions.append(action)
@@ -1056,7 +1172,7 @@ class StructuralMeshingPipeline:
 
         for identifier in sorted(junction_ids):
             made_actions, made_issues = self._connect_junction(
-                mesh, self.view.junctions[identifier], shell_nodes
+                mesh, self.view.junctions[identifier], shell_nodes, index
             )
             actions.extend(made_actions)
             issues.extend(made_issues)

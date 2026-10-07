@@ -255,14 +255,26 @@ def test_selected_fallback_does_not_publish_stale_nonnull_admission(monkeypatch)
 
     def stale_recursive_candidate(*args, **kwargs):
         result = real_generate(*args, **kwargs)
+        # Deferred recursive candidates carry the record on the private
+        # candidate context; eager results keep it on the mesh payload.
+        carrier = isinstance(result, hybrid._HybridCandidateContext)
+        record = None
         if result.mesh.tris:
-            record = deepcopy(result.mesh.structural_preparation.get("qualified_s3"))
-            if record is not None:
-                record["element_ids"] = [-999999]
-                record["authority_model"]["source_revision"] = -1
-                record["junction_review_stale"] = True
+            if carrier:
+                record = deepcopy(result.qualified_s3_record)
+            else:
+                record = deepcopy(
+                    result.mesh.structural_preparation.get("qualified_s3")
+                )
+        if record is not None:
+            record["element_ids"] = [-999999]
+            record["authority_model"]["source_revision"] = -1
+            record["junction_review_stale"] = True
+            if carrier:
+                result.qualified_s3_record = record
+            else:
                 result.mesh.structural_preparation["qualified_s3"] = record
-                injected.append(_connectivity(result.mesh))
+            injected.append(_connectivity(result.mesh))
         return result
 
     # Capture the outer callable before replacing only recursive candidate calls.
@@ -421,7 +433,16 @@ def test_real_s3_flip_obeys_requested_growth_at_public_fallback(
     checks = []
 
     def candidate(*args, **kwargs):
-        return replace(template, mesh=mesh_from_dict(deepcopy(patch_before)))
+        # Recursive fallback candidates are deferred carriers.  Fabricate
+        # one by generating the real deferred candidate and swapping in
+        # the pinned patch mesh.  The fabricated candidate stays
+        # unqualified so the selected-fallback S3 branch stays under test.
+        kwargs = {**kwargs, "qualified_s3": False}
+        result = real_generate(*args, **kwargs)
+        fabricated = mesh_from_dict(deepcopy(patch_before))
+        if isinstance(result, hybrid._HybridCandidateContext):
+            return result.with_mesh(fabricated)
+        return replace(template, mesh=fabricated)
 
     def route_and_measure(mesh, selected_options):
         measured = real_quality(mesh, selected_options)

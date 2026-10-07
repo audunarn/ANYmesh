@@ -34,6 +34,7 @@ except ImportError:  # Older supported ANYgeometry builds predate schema 6.
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
 from .errors import MeshError, StructuredQualityRejected
+from ._hybrid_candidate import _HybridCandidateContext
 from ._mapped_fold import mapped_face_folds
 from .mapped import (
     ELEMENT_ORDERS,
@@ -4219,6 +4220,332 @@ def _quad_first_execute(
         publish=lambda published: published,
     )
 
+def _candidate_s3_record_is_stale(
+    record: Mapping[str, Any],
+    mesh: Mesh,
+    source_geometry: GeometryModel,
+) -> bool:
+    """Return whether a candidate's qualified-S3 record no longer matches it.
+
+    A selected candidate's admission record is publishable only when it
+    describes exactly the mesh being published: candidate swaps, shell
+    repairs, or any other mutation invalidate an earlier record.
+    """
+
+    try:
+        recorded_elements = sorted(
+            int(value) for value in record["element_ids"]
+        )
+        recorded_revision = int(
+            (record.get("authority_model") or {})["source_revision"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return True
+    return (
+        recorded_elements != sorted(int(value) for value in mesh.tris)
+        or recorded_revision != int(source_geometry.revision)
+    )
+
+
+def _finalize_hybrid_candidate(
+    candidate: _HybridCandidateContext,
+    *,
+    structured_layout: StructuredLayoutReport | None = None,
+    structured_options: StructuredMeshingOptions | None = None,
+    publication_stage: str = "hybrid generation complete",
+    runtime: Mapping[str, Any] | None = None,
+    phase_sources: Sequence[Mapping[str, float]] | None = None,
+    cancellation_check: Callable[[str], None] | None = None,
+) -> HybridMeshResult:
+    """Finalize and publish exactly one selected hybrid mesh candidate.
+
+    Connectivity is applied here, once, to the candidate's own working mesh;
+    every selected shell repair (deferred-S3 qualification, junction
+    growth repair) has already been completed on that mesh, so the
+    published couplings refer to the repaired coordinates and elements
+    and no S3 shell edit occurs after the final couplings or the final
+    quality validation.
+    Source-association remapping, final quality/admission validation, and the
+    publication freshness check all run before the result is returned, so no
+    incomplete candidate can escape the public API.
+    """
+
+    mesh = candidate.mesh
+    geometry = candidate.working_geometry
+    source_geometry = candidate.source_geometry
+    phase_seconds = candidate.phase_seconds
+    track = candidate.runtime if runtime is None else dict(runtime)
+    qualified_s3_record = candidate.qualified_s3_record
+    if candidate.defer_qualified_s3:
+        # Qualify in working geometry BEFORE connectivity: no S3 shell
+        # edit may occur after the final couplings or after the final
+        # quality validation, so this is the last shell mutation of
+        # finalization.
+        qualified_s3_started = perf_counter()
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation start"
+        )
+        mesh, qualified_s3_record = prepare_qualified_s3_mesh(
+            mesh, geometry
+        )
+        qualified_s3_record["authority_model"].update(
+            {
+                "source_model_id": str(source_geometry.model_id),
+                "source_revision": int(source_geometry.revision),
+            }
+        )
+        _check_cancellation(
+            cancellation_check, "qualified S3 production preparation complete"
+        )
+        phase_seconds["qualified_s3_preparation"] = (
+            perf_counter() - qualified_s3_started
+        )
+    connectivity_started = perf_counter()
+    _check_cancellation(cancellation_check, "hybrid connectivity start")
+    for element_id in (*mesh.quads, *mesh.tris, *mesh.beams):
+        mesh.activity.setdefault(int(element_id), 1.0)
+    connectivity = candidate.pipeline.apply_connectivity(mesh)
+    if candidate.structured_report is not None or structured_layout is not None:
+        # Connectivity reports retain the established first-record conflict
+        # and refusal diagnostics. Publication requires that every equation
+        # actually materialized belongs to the final repaired mesh.
+        beam_nodes = {node for nodes in mesh.beams.values() for node in nodes}
+        shell_nodes = {node for nodes in mesh.shells.values() for node in nodes}
+        for record_id, coupling in mesh.couplings.items():
+            if (
+                coupling.beam_node not in beam_nodes
+                or not set(coupling.plate_nodes).issubset(shell_nodes)
+            ):
+                raise MeshError(
+                    f"selected hybrid candidate coupling {record_id} "
+                    "does not reference the final beam and shell mesh"
+                )
+    phase_seconds["structural_connectivity"] = (
+        perf_counter() - connectivity_started
+    )
+    track["connectivity_application_count"] = (
+        int(track.get("connectivity_application_count", 0)) + 1
+    )
+    candidate.view.assert_current(geometry)
+    audit_report, certifiable = _audit_geometry(
+        geometry,
+        candidate.certification_mode,
+        change_set=candidate.change_set,
+        policy=candidate.audit_policy,
+    )
+    mapped_working_elements = {
+        int(element_id)
+        for face_id in candidate.mapped_faces
+        for element_id in mesh.elements_of_face.get(face_id, ())
+    }
+    if candidate.preparation_report is not None:
+        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
+            mesh,
+            candidate.preparation_report,
+            candidate.prepared_to_final_edges,
+        )
+    if (
+        candidate.preparation_report is not None
+        or candidate.structured_report is not None
+    ):
+        working_backend_diagnostics = candidate.triangulation_backend_by_face
+        remap_prepared_mesh_associations(
+            mesh,
+            source_geometry,
+            geometry,
+            source_to_working_faces=candidate.source_to_final_faces,
+            source_to_working_edges=candidate.source_to_final_edges,
+        )
+        triangulation_backend_by_face = _source_backend_diagnostics(
+            {
+                face_id: candidate.source_to_final_faces[face_id]
+                for face_id in candidate.source_faces
+            },
+            candidate.source_strategies,
+            working_backend_diagnostics,
+        )
+        boundary_registry = _published_boundary_registry(source_geometry, mesh)
+    else:
+        triangulation_backend_by_face = candidate.triangulation_backend_by_face
+        boundary_registry = candidate.boundary_registry
+    mesh.declared_plate_junction_edges = tuple(
+        sorted(
+            set(mesh.declared_plate_junction_edges)
+            | set(_topology_plate_junction_edges(mesh, source_geometry))
+        )
+    )
+    if candidate.preparation_report is not None:
+        mesh.automatic_intersections = (
+            candidate.preparation_report.face_connections
+        )
+        mesh.automatic_beam_connections = len(connectivity.actions)
+    structured_report = candidate.structured_report
+    if structured_report is not None:
+        quality = _structured_quality_report(
+            mesh,
+            structured_report.plan.options,
+        )
+        metrics = regularity_metrics(
+            mesh,
+            target_size=candidate.target_size,
+            minimum_size_ratio=(
+                structured_report.plan.options.minimum_size_ratio
+            ),
+            maximum_size_ratio=(
+                structured_report.plan.options.maximum_size_ratio
+            ),
+            mapped_element_ids=mapped_working_elements,
+        )
+        structured_report = replace(
+            structured_report,
+            quality=quality,
+            metrics=metrics,
+        )
+        if not quality["accepted"]:
+            raise MeshError(
+                "structured quality regressed between candidate selection "
+                f"and publication: {_quality_rejection_message(quality)}"
+            )
+    else:
+        structured_report = structured_layout
+        if structured_layout is not None and structured_options is not None:
+            final_quality = _structured_quality_report(
+                mesh, structured_options
+            )
+            if not final_quality["accepted"]:
+                raise MeshError(
+                    "selected fallback violates the structured quality "
+                    "policy after finalization: "
+                    f"{_quality_rejection_message(final_quality)}"
+                )
+    if (
+        qualified_s3_record is not None
+        and _candidate_s3_record_is_stale(
+            qualified_s3_record, mesh, source_geometry
+        )
+    ):
+        # Invariant: the published admission record describes exactly
+        # the final shell.  Deferred-S3 qualification, junction repair,
+        # and every other shell mutation completed before connectivity,
+        # so a stale record here is an impossible state, not a repair
+        # opportunity.
+        raise MeshError(
+            "qualified-S3 admission record does not describe the "
+            "published shell"
+        )
+    preparation_payload = _preparation_payload(
+        candidate.preparation_report,
+        structured_report,
+        candidate.source_to_final_faces,
+        candidate.source_to_final_edges,
+        source_model_id=str(source_geometry.model_id),
+    )
+    if qualified_s3_record is not None:
+        preparation_payload["qualified_s3"] = qualified_s3_record
+    mesh.structural_preparation = preparation_payload
+    strategies = dict(candidate.source_strategies)
+    result = HybridMeshResult(
+        mesh=mesh,
+        strategy_by_face=strategies,
+        triangulation_backend_by_face=triangulation_backend_by_face,
+        preflight=candidate.preflight,
+        connectivity=connectivity,
+        audit_report=audit_report,
+        certification_mode=candidate.certification_mode,
+        certifiable=certifiable,
+        structured_layout=structured_report,
+        structural_preparation=candidate.preparation_report,
+    )
+    runtime_phase_seconds: dict[str, float] = {}
+    for source in (
+        (phase_seconds,) if phase_sources is None else tuple(phase_sources)
+    ):
+        for key, value in source.items():
+            runtime_phase_seconds[key] = (
+                runtime_phase_seconds.get(key, 0.0) + float(value)
+            )
+    for key, value in track.get("phase_seconds", {}).items():
+        runtime_phase_seconds[key] = (
+            runtime_phase_seconds.get(key, 0.0) + float(value)
+        )
+    mesh.hybrid_diagnostics = {
+        "requested_target_size": candidate.target_size,
+        "complex_geometry": {
+            "strategy_ladder": [
+                "mapped_or_structured",
+                "native",
+                "detached_decomposition",
+                "qualified_gmsh",
+            ],
+            "component_candidate_budget": 6,
+            "source_face_count": len(candidate.source_faces),
+            "final_face_count": len(candidate.faces),
+            "declared_junction_edge_count": len(
+                candidate.final_declared_junction_edges
+            ),
+            "source_strategy_by_face": {
+                str(face_id): candidate.source_strategies[face_id]
+                for face_id in sorted(candidate.source_strategies)
+            },
+        },
+        "strategy_by_face": dict(strategies),
+        "triangulation_backend_by_face": {
+            int(face_id): _stable_diagnostic_record(values)
+            for face_id, values in triangulation_backend_by_face.items()
+        },
+        "geometry_model_id": str(source_geometry.model_id),
+        "geometry_revision": int(source_geometry.revision),
+        "certification_mode": candidate.certification_mode.value,
+        "certifiable": bool(certifiable),
+        "preflight_count": len(candidate.preflight),
+        "structured_layout_status": (
+            None if structured_report is None else structured_report.status
+        ),
+        "structured_plan_hash": (
+            None if structured_report is None
+            else structured_report.plan.plan_hash
+        ),
+        "structured_quality": (
+            None if structured_report is None
+            else structured_report.to_dict()["quality"]
+        ),
+        "structural_preparation_hash": (
+            None
+            if candidate.preparation_report is None
+            else candidate.preparation_report.preparation_hash
+        ),
+        "qualified_s3_preparation": (
+            None
+            if qualified_s3_record is None
+            else {
+                "contract_id": qualified_s3_record["contract_id"],
+                "element_count": len(qualified_s3_record["element_ids"]),
+                "formulation_id": qualified_s3_record["formulation_id"],
+                "legacy_fallback": qualified_s3_record["legacy_fallback"],
+                "status": qualified_s3_record["status"],
+            }
+        ),
+        "reused_prepared_working_copy": candidate.reuse_prepared_working_copy,
+        "phase_seconds": dict(phase_seconds),
+        "completed_phases": sorted(phase_seconds),
+        "runtime": {
+            "candidate_count": int(track.get("candidate_count", 1)),
+            "connectivity_application_count": int(
+                track.get("connectivity_application_count", 0)
+            ),
+            "phase_seconds": runtime_phase_seconds,
+        },
+    }
+    mesh.hybrid_diagnostics.update(candidate.extra_diagnostics)
+    if candidate.final_cylindrical_repairs:
+        mesh.hybrid_diagnostics[
+            'cylindrical_shared_boundary_final_repair'
+        ] = candidate.final_cylindrical_repairs
+    mesh.boundary_registry = boundary_registry
+    candidate.publication_guard(publication_stage)
+    return result
+
+
 def generate_hybrid_mesh_result(
     geometry: GeometryModel,
     *,
@@ -4252,7 +4579,8 @@ def generate_hybrid_mesh_result(
     _native_surface_options: StructuredMeshingOptions | None = None,
     _evaluate_declared_junction_alignment: bool = True,
     _refine_declared_junction_transition: bool = False,
-) -> HybridMeshResult:
+    _defer_finalization: bool = False,
+) -> HybridMeshResult | _HybridCandidateContext:
     """Generate a model-bound mapped/native mesh from an explicit ownership policy.
 
     ``cancellation_check`` receives diagnostic safe-phase names. Cancellation is
@@ -5192,12 +5520,15 @@ def generate_hybrid_mesh_result(
     # contain hundreds of poor triangles while the deterministic native
     # fallback is admissible without repair.  The recursive fallback has no
     # structured report and therefore reaches the S3 gate normally.
+    selection_quality: dict[str, Any] | None = None
+    if structured_report is not None:
+        selection_quality = _structured_quality_report(
+            mesh, structured_report.plan.options
+        )
     defer_qualified_s3 = bool(
         qualified_s3
         and structured_report is not None
-        and not _structured_quality_report(
-            mesh, structured_report.plan.options
-        )["accepted"]
+        and not selection_quality["accepted"]
     )
     if qualified_s3 and not defer_qualified_s3:
         qualified_s3_started = perf_counter()
@@ -5218,94 +5549,195 @@ def generate_hybrid_mesh_result(
             perf_counter() - qualified_s3_started
         )
 
-    connectivity_started = perf_counter()
-    _check_cancellation(cancellation_check, "hybrid connectivity start")
-    for element_id in (*mesh.quads, *mesh.tris, *mesh.beams):
-        mesh.activity.setdefault(int(element_id), 1.0)
-    connectivity = pipeline.apply_connectivity(mesh)
-    phase_seconds["structural_connectivity"] = perf_counter() - connectivity_started
-    view.assert_current(geometry)
-    audit_report, certifiable = _audit_geometry(
-        geometry,
-        certification_mode,
+    candidate = _HybridCandidateContext(
+        source_geometry=source_geometry,
+        working_geometry=geometry,
+        view=view,
+        pipeline=pipeline,
+        publication_guard=finish_publication,
+        mesh=mesh,
+        preflight=preflight,
+        preparation_report=preparation_report,
+        structured_report=structured_report,
+        source_faces=source_faces,
+        faces=faces,
+        mapped_faces=mapped_faces,
+        source_to_final_faces=source_to_final_faces,
+        source_to_final_edges=source_to_final_edges,
+        prepared_to_final_edges=prepared_to_final_edges,
+        source_strategies=source_strategies,
+        triangulation_backend_by_face=triangulation_backend_by_face,
+        boundary_registry=boundary_registry,
+        final_declared_junction_edges=final_declared_junction_edges,
+        final_cylindrical_repairs=final_cylindrical_repairs,
+        target_size=target_size,
+        certification_mode=certification_mode,
         change_set=change_set,
-        policy=audit_policy,
+        audit_policy=audit_policy,
+        qualified_s3_record=qualified_s3_record,
+        defer_qualified_s3=defer_qualified_s3,
+        reuse_prepared_working_copy=reuse_prepared_working_copy,
+        phase_seconds=phase_seconds,
+    )
+    if _defer_finalization:
+        # Deferred candidate generation: the caller owns candidate selection
+        # and applies connectivity exactly once, to the selected candidate
+        # only.  The carrier propagates this candidate's own working
+        # geometry, view, pipeline, ownership maps, and diagnostics even
+        # though its structured_report is None.
+        return candidate
+
+    if structured_report is None:
+        # Standalone native/mapped routes stay eager: one candidate is
+        # generated and finalized immediately.
+        return _finalize_hybrid_candidate(
+            candidate, cancellation_check=cancellation_check
+        )
+
+    if qualified_s3 and not defer_qualified_s3:
+        # Qualified-S3 preparation may have repaired the candidate, so the
+        # selection gate must judge the prepared mesh.  Without preparation
+        # the mesh is unchanged and the selection report is already exact.
+        gate_quality = _structured_quality_report(
+            mesh, structured_report.plan.options
+        )
+    else:
+        gate_quality = selection_quality
+    assert gate_quality is not None
+    if gate_quality["accepted"]:
+        return _finalize_hybrid_candidate(
+            candidate, cancellation_check=cancellation_check
+        )
+
+    # The structured candidate was rejected.  Search the established
+    # structured -> native -> refined -> conservative chain with deferred
+    # candidates; connectivity is applied once, after a candidate is
+    # selected and all of its shell repairs are complete.
+    message = _quality_rejection_message(gate_quality)
+    if strategy is MeshingStrategy.MAPPED:
+        raise MeshError(
+            f"explicit mapped strategy rejected: {message}. "
+            "Relax the documented quality policy only after reviewing "
+            "the reported stable element IDs."
+        )
+    _check_cancellation(
+        cancellation_check,
+        "structured quality rejected; native fallback start",
     )
     mapped_working_elements = {
         int(element_id)
         for face_id in mapped_faces
         for element_id in mesh.elements_of_face.get(face_id, ())
     }
-    if preparation_report is not None:
-        mesh.declared_plate_junction_edges = _prepared_plate_junction_edges(
-            mesh,
-            preparation_report,
-            prepared_to_final_edges,
-        )
-    if preparation_report is not None or structured_report is not None:
-        working_backend_diagnostics = triangulation_backend_by_face
-        remap_prepared_mesh_associations(
-            mesh,
-            source_geometry,
-            geometry,
-            source_to_working_faces=source_to_final_faces,
-            source_to_working_edges=source_to_final_edges,
-        )
-        triangulation_backend_by_face = _source_backend_diagnostics(
-            {
-                face_id: source_to_final_faces[face_id]
-                for face_id in source_faces
-            },
-            source_strategies,
-            working_backend_diagnostics,
-        )
-        boundary_registry = _published_boundary_registry(source_geometry, mesh)
-    mesh.declared_plate_junction_edges = tuple(
-        sorted(
-            set(mesh.declared_plate_junction_edges)
-            | set(_topology_plate_junction_edges(mesh, source_geometry))
-        )
+    metrics = regularity_metrics(
+        mesh,
+        target_size=target_size,
+        minimum_size_ratio=(
+            structured_report.plan.options.minimum_size_ratio
+        ),
+        maximum_size_ratio=(
+            structured_report.plan.options.maximum_size_ratio
+        ),
+        mapped_element_ids=mapped_working_elements,
     )
-    if preparation_report is not None:
-        mesh.automatic_intersections = preparation_report.face_connections
-        mesh.automatic_beam_connections = len(connectivity.actions)
-    if structured_report is not None:
-        quality = _structured_quality_report(
-            mesh,
-            structured_report.plan.options,
+    chain_phase_sources: list[dict] = [phase_seconds]
+    chain_candidate_count = 1
+
+    def _adopt(child: _HybridCandidateContext) -> _HybridCandidateContext:
+        nonlocal chain_candidate_count
+        chain_candidate_count += int(child.runtime.get("candidate_count", 1))
+        chain_phase_sources.append(child.phase_seconds)
+        child_runtime_phases = dict(child.runtime.get("phase_seconds") or {})
+        if child_runtime_phases:
+            chain_phase_sources.append(child_runtime_phases)
+        return child
+
+    fallback = _adopt(generate_hybrid_mesh_result(
+        source_geometry,
+        target_size=target_size,
+        strategy=MeshingStrategy.AUTO,
+        native_options=native_options,
+        overrides=overrides,
+        beam_edges=requested_beam_edges,
+        beam_offsets=beam_offsets,
+        member_ids=requested_member_ids,
+        face_ids=requested_face_ids,
+        seeding=requested_seeding,
+        refinements=requested_refinements,
+        order=order,
+        recombine=recombine,
+        native_backend=native_backend,
+        structured_options=None,
+        structural_preparation=structural_preparation,
+        qualified_s3=qualified_s3,
+        overlap_policy=overlap_policy,
+        mutation_policy=mutation_policy,
+        certification_mode=certification_mode,
+        change_set=change_set,
+        audit_policy=audit_policy,
+        cancellation_check=cancellation_check,
+        _native_surface_options=structured_report.plan.options,
+        _defer_finalization=True,
+    ))
+    fallback_quality = _structured_quality_report(
+        fallback.mesh,
+        structured_report.plan.options,
+    )
+    if (
+        not fallback_quality["accepted"]
+        and _evaluate_declared_junction_alignment
+        and fallback.mesh.declared_plate_junction_edges
+    ):
+        aligned_quality = fallback_quality
+        fallback_source_diagnostics = _source_backend_diagnostics(
+            {
+                face_id: fallback.source_to_final_faces[face_id]
+                for face_id in fallback.source_faces
+            },
+            fallback.source_strategies,
+            fallback.triangulation_backend_by_face,
         )
-        mapped_elements = {
-            element_id for element_id in mapped_working_elements
-        }
-        metrics = regularity_metrics(
-            mesh,
-            target_size=target_size,
-            minimum_size_ratio=(
-                structured_report.plan.options.minimum_size_ratio
-            ),
-            maximum_size_ratio=(
-                structured_report.plan.options.maximum_size_ratio
-            ),
-            mapped_element_ids=mapped_elements,
-        )
-        structured_report = replace(
-            structured_report,
-            quality=quality,
-            metrics=metrics,
-        )
-        if not quality["accepted"]:
-            message = _quality_rejection_message(quality)
-            if strategy is MeshingStrategy.MAPPED:
-                raise MeshError(
-                    f"explicit mapped strategy rejected: {message}. "
-                    "Relax the documented quality policy only after reviewing "
-                    "the reported stable element IDs."
-                )
-            _check_cancellation(
-                cancellation_check,
-                "structured quality rejected; native fallback start",
+        aligned_strategies = {
+            str(working_face_id): working_values.get(
+                "quality_optimization", {}
+            ).get("selected_strategy")
+            for _face_id, values in sorted(
+                fallback_source_diagnostics.items()
             )
-            fallback = generate_hybrid_mesh_result(
+            if isinstance(values, Mapping)
+            for working_face_id, working_values in zip(
+                values.get("working_face_ids", ()),
+                values.get("working_face_diagnostics", ()),
+            )
+        }
+        repaired_mesh, repaired_quality, repair_diagnostics = (
+            _junction_growth_repair(
+                fallback.working_geometry,
+                fallback.mesh,
+                aligned_quality,
+                structured_report.plan.options,
+            )
+        )
+        if repaired_mesh is not None:
+            # with_mesh invalidates any earlier qualified-S3 record:
+            # the repair moved candidate nodes, so the record no longer
+            # describes the repaired shell.
+            fallback = fallback.with_mesh(repaired_mesh)
+            fallback.extra_diagnostics[
+                "alignment_candidate_repaired"
+            ] = {
+                "reason": "declared_junction_growth_transition",
+                "aligned_selected_strategy_by_face": aligned_strategies,
+                "initial_quality": aligned_quality,
+                "accepted_quality": repaired_quality,
+                "repair": dict(repair_diagnostics),
+            }
+            fallback.extra_diagnostics[
+                "junction_growth_repair"
+            ] = dict(repair_diagnostics)
+            fallback_quality = repaired_quality
+        else:
+            refined = _adopt(generate_hybrid_mesh_result(
                 source_geometry,
                 target_size=target_size,
                 strategy=MeshingStrategy.AUTO,
@@ -5322,7 +5754,6 @@ def generate_hybrid_mesh_result(
                 native_backend=native_backend,
                 structured_options=None,
                 structural_preparation=structural_preparation,
-                qualified_s3=qualified_s3,
                 overlap_policy=overlap_policy,
                 mutation_policy=mutation_policy,
                 certification_mode=certification_mode,
@@ -5330,423 +5761,232 @@ def generate_hybrid_mesh_result(
                 audit_policy=audit_policy,
                 cancellation_check=cancellation_check,
                 _native_surface_options=structured_report.plan.options,
-            )
-            fallback_quality = _structured_quality_report(
-                fallback.mesh,
+                _refine_declared_junction_transition=True,
+                _defer_finalization=True,
+            ))
+            refined_quality = _structured_quality_report(
+                refined.mesh,
                 structured_report.plan.options,
             )
-            if (
-                not fallback_quality["accepted"]
-                and _evaluate_declared_junction_alignment
-                and fallback.mesh.declared_plate_junction_edges
-            ):
-                aligned_quality = fallback_quality
-                aligned_strategies = {
-                    str(working_face_id): working_values.get(
-                        "quality_optimization", {}
-                    ).get("selected_strategy")
-                    for _face_id, values in sorted(
-                        fallback.triangulation_backend_by_face.items()
-                    )
-                    if isinstance(values, Mapping)
-                    for working_face_id, working_values in zip(
-                        values.get("working_face_ids", ()),
-                        values.get("working_face_diagnostics", ()),
-                    )
+            if refined_quality["accepted"]:
+                refined.extra_diagnostics[
+                    "alignment_candidate_repaired"
+                ] = {
+                    "reason": "local_collar_transition_refinement",
+                    "aligned_selected_strategy_by_face": aligned_strategies,
+                    "initial_quality": aligned_quality,
+                    "accepted_quality": refined_quality,
                 }
-                repaired_mesh, repaired_quality, repair_diagnostics = (
-                    _junction_growth_repair(
-                        source_geometry,
-                        fallback.mesh,
-                        aligned_quality,
-                        structured_report.plan.options,
-                    )
+                fallback = refined
+                fallback_quality = refined_quality
+            else:
+                conservative = _adopt(generate_hybrid_mesh_result(
+                    source_geometry,
+                    target_size=target_size,
+                    strategy=MeshingStrategy.AUTO,
+                    native_options=native_options,
+                    overrides=overrides,
+                    beam_edges=requested_beam_edges,
+                    beam_offsets=beam_offsets,
+                    member_ids=requested_member_ids,
+                    face_ids=requested_face_ids,
+                    seeding=requested_seeding,
+                    refinements=requested_refinements,
+                    order=order,
+                    recombine=recombine,
+                    native_backend=native_backend,
+                    structured_options=None,
+                    structural_preparation=structural_preparation,
+                    overlap_policy=overlap_policy,
+                    mutation_policy=mutation_policy,
+                    certification_mode=certification_mode,
+                    change_set=change_set,
+                    audit_policy=audit_policy,
+                    cancellation_check=cancellation_check,
+                    _native_surface_options=structured_report.plan.options,
+                    _evaluate_declared_junction_alignment=False,
+                    _defer_finalization=True,
+                ))
+                conservative_quality = _structured_quality_report(
+                    conservative.mesh,
+                    structured_report.plan.options,
                 )
-                if repaired_mesh is not None:
-                    fallback = replace(fallback, mesh=repaired_mesh)
-                    fallback.mesh.hybrid_diagnostics[
-                        "alignment_candidate_repaired"
+                if conservative_quality["accepted"]:
+                    conservative.extra_diagnostics[
+                        "alignment_candidate_rejected"
                     ] = {
-                        "reason": "declared_junction_growth_transition",
-                        "aligned_selected_strategy_by_face": aligned_strategies,
-                        "initial_quality": aligned_quality,
-                        "accepted_quality": repaired_quality,
+                        "reason": "whole_mesh_quality_regression",
+                        "aligned_selected_strategy_by_face": (
+                            aligned_strategies
+                        ),
+                        "aligned_quality": aligned_quality,
+                        "refined_aligned_quality": refined_quality,
+                        "accepted_baseline_quality": conservative_quality,
+                        "comparison": _quality_rejection_details(
+                            refined_quality, conservative_quality
+                        ),
                         "repair": dict(repair_diagnostics),
                     }
-                    fallback.mesh.hybrid_diagnostics[
-                        "junction_growth_repair"
-                    ] = dict(repair_diagnostics)
-                    fallback_quality = repaired_quality
-                else:
-                    refined = generate_hybrid_mesh_result(
-                        source_geometry,
-                        target_size=target_size,
-                        strategy=MeshingStrategy.AUTO,
-                        native_options=native_options,
-                        overrides=overrides,
-                        beam_edges=requested_beam_edges,
-                        beam_offsets=beam_offsets,
-                        member_ids=requested_member_ids,
-                        face_ids=requested_face_ids,
-                        seeding=requested_seeding,
-                        refinements=requested_refinements,
-                        order=order,
-                        recombine=recombine,
-                        native_backend=native_backend,
-                        structured_options=None,
-                        structural_preparation=structural_preparation,
-                        overlap_policy=overlap_policy,
-                        mutation_policy=mutation_policy,
-                        certification_mode=certification_mode,
-                        change_set=change_set,
-                        audit_policy=audit_policy,
-                        cancellation_check=cancellation_check,
-                        _native_surface_options=structured_report.plan.options,
-                        _refine_declared_junction_transition=True,
-                    )
-                    refined_quality = _structured_quality_report(
-                        refined.mesh,
-                        structured_report.plan.options,
-                    )
-                    if refined_quality["accepted"]:
-                        refined.mesh.hybrid_diagnostics[
-                            "alignment_candidate_repaired"
-                        ] = {
-                            "reason": "local_collar_transition_refinement",
-                            "aligned_selected_strategy_by_face": aligned_strategies,
-                            "initial_quality": aligned_quality,
-                            "accepted_quality": refined_quality,
-                        }
-                        fallback = refined
-                        fallback_quality = refined_quality
-                    else:
-                        conservative = generate_hybrid_mesh_result(
-                            source_geometry,
-                            target_size=target_size,
-                            strategy=MeshingStrategy.AUTO,
-                            native_options=native_options,
-                            overrides=overrides,
-                            beam_edges=requested_beam_edges,
-                            beam_offsets=beam_offsets,
-                            member_ids=requested_member_ids,
-                            face_ids=requested_face_ids,
-                            seeding=requested_seeding,
-                            refinements=requested_refinements,
-                            order=order,
-                            recombine=recombine,
-                            native_backend=native_backend,
-                            structured_options=None,
-                            structural_preparation=structural_preparation,
-                            overlap_policy=overlap_policy,
-                            mutation_policy=mutation_policy,
-                            certification_mode=certification_mode,
-                            change_set=change_set,
-                            audit_policy=audit_policy,
-                            cancellation_check=cancellation_check,
-                            _native_surface_options=structured_report.plan.options,
-                            _evaluate_declared_junction_alignment=False,
-                        )
-                        conservative_quality = _structured_quality_report(
-                            conservative.mesh,
-                            structured_report.plan.options,
-                        )
-                        if conservative_quality["accepted"]:
-                            conservative.mesh.hybrid_diagnostics[
-                                "alignment_candidate_rejected"
-                            ] = {
-                                "reason": "whole_mesh_quality_regression",
-                                "aligned_selected_strategy_by_face": (
-                                    aligned_strategies
-                                ),
-                                "aligned_quality": aligned_quality,
-                                "refined_aligned_quality": refined_quality,
-                                "accepted_baseline_quality": conservative_quality,
-                                "comparison": _quality_rejection_details(
-                                    refined_quality, conservative_quality
-                                ),
-                                "repair": dict(repair_diagnostics),
-                            }
-                            fallback = conservative
-                            fallback_quality = conservative_quality
-            if not fallback_quality["accepted"]:
-                repaired_mesh, repaired_quality, repair_diagnostics = (
-                    _junction_growth_repair(
-                    source_geometry,
-                    fallback.mesh,
-                    fallback_quality,
-                    structured_report.plan.options,
-                    )
-                )
-                if repaired_mesh is None:
-                    fallback_message = _quality_rejection_message(fallback_quality)
-                    raise StructuredQualityRejected(
-                        f"{message}; automatic native fallback also rejected: "
-                        f"{fallback_message}; declared-junction transition repair "
-                        "did not produce an accepted candidate"
-                    )
-                fallback = replace(fallback, mesh=repaired_mesh)
-                fallback.mesh.hybrid_diagnostics["junction_growth_repair"] = dict(
-                    repair_diagnostics
-                )
-                fallback_quality = repaired_quality
-                _check_cancellation(
-                    cancellation_check,
-                    "declared-junction transition repair accepted",
-                )
-            fallback_metrics = regularity_metrics(
+                    fallback = conservative
+                    fallback_quality = conservative_quality
+    if not fallback_quality["accepted"]:
+        repaired_mesh, repaired_quality, repair_diagnostics = (
+            _junction_growth_repair(
+                fallback.working_geometry,
                 fallback.mesh,
-                target_size=target_size,
-                minimum_size_ratio=(
-                    structured_report.plan.options.minimum_size_ratio
-                ),
-                maximum_size_ratio=(
-                    structured_report.plan.options.maximum_size_ratio
-                ),
-                mapped_element_ids=(),
+                fallback_quality,
+                structured_report.plan.options,
             )
-            structured_report = replace(
-                structured_report,
-                diagnostics=(*structured_report.diagnostics, message),
-                metrics={
-                    "rejected_candidate": dict(metrics),
-                    "accepted_fallback": fallback_metrics,
-                },
-                quality={
-                    "accepted": True,
-                    "selected_mesh": "native_fallback",
-                    "rejected_candidate": quality,
-                    "accepted_fallback": fallback_quality,
-                },
-                status="rejected_fallback",
+        )
+        if repaired_mesh is None:
+            fallback_message = _quality_rejection_message(fallback_quality)
+            raise StructuredQualityRejected(
+                f"{message}; automatic native fallback also rejected: "
+                f"{fallback_message}; declared-junction transition repair "
+                "did not produce an accepted candidate"
             )
-            fallback_preparation = fallback.structural_preparation
-            fallback_faces = (
-                {
-                    face_id: (face_id,)
-                    for face_id in source_geometry.faces
-                }
-                if fallback_preparation is None
-                else dict(fallback_preparation.source_to_working_faces)
-            )
-            fallback_edges = (
-                {
-                    edge_id: (edge_id,)
-                    for edge_id in source_geometry.edges
-                }
-                if fallback_preparation is None
-                else dict(fallback_preparation.source_to_working_edges)
-            )
-            fallback_qualified_s3 = fallback.mesh.structural_preparation.get(
-                "qualified_s3"
-            )
-            if qualified_s3 and fallback_qualified_s3 is None:
-                # Alignment/refinement is allowed to replace the first native
-                # fallback.  Those candidates are intentionally generated
-                # without qualified-S3 preparation so they can be compared by
-                # the whole-mesh policy first.  Qualify the candidate that was
-                # actually selected; never publish an accepted fallback with
-                # a missing (or candidate-stale) solver admission record.
-                qualified_s3_started = perf_counter()
-                _check_cancellation(
-                    cancellation_check,
-                    "selected fallback qualified S3 preparation start",
-                )
-                selected_seeding = fallback.mesh.seeding
-                qualifying_mesh = mesh_from_dict(mesh_to_dict(fallback.mesh))
-                fallback_mesh, fallback_qualified_s3 = prepare_qualified_s3_mesh(
-                    qualifying_mesh,
-                    source_geometry,
-                )
-                fallback_mesh.seeding = selected_seeding
-                fallback_qualified_s3["authority_model"].update(
-                    {
-                        "source_model_id": str(source_geometry.model_id),
-                        "source_revision": int(source_geometry.revision),
-                    }
-                )
-                _check_cancellation(
-                    cancellation_check,
-                    "selected fallback qualified S3 policy validation start",
-                )
-                repaired_fallback_quality = _structured_quality_report(
-                    fallback_mesh, structured_report.plan.options
-                )
-                if not repaired_fallback_quality["accepted"]:
-                    raise MeshError(
-                        "native fallback violates structured quality policy "
-                        "after qualified S3 preparation: "
-                        f"{repaired_fallback_quality}"
-                    )
-                repaired_fallback_metrics = regularity_metrics(
-                    fallback_mesh,
-                    target_size=target_size,
-                    minimum_size_ratio=(
-                        structured_report.plan.options.minimum_size_ratio
-                    ),
-                    maximum_size_ratio=(
-                        structured_report.plan.options.maximum_size_ratio
-                    ),
-                    mapped_element_ids=(),
-                )
-                _check_cancellation(
-                    cancellation_check,
-                    "selected fallback qualified S3 policy validation complete",
-                )
-                structured_report = replace(
-                    structured_report,
-                    metrics={
-                        **dict(structured_report.metrics),
-                        "pre_s3_fallback": fallback_metrics,
-                        "accepted_fallback": repaired_fallback_metrics,
-                    },
-                    quality={
-                        **dict(structured_report.quality),
-                        "pre_s3_fallback": fallback_quality,
-                        "accepted_fallback": repaired_fallback_quality,
-                    },
-                )
-                fallback = replace(fallback, mesh=fallback_mesh)
-                fallback.mesh.hybrid_diagnostics[
-                    "qualified_s3_preparation"
-                ] = True
-                fallback.mesh.hybrid_diagnostics.setdefault(
-                    "phase_seconds", {}
-                )["qualified_s3_preparation"] = (
-                    perf_counter() - qualified_s3_started
-                )
-                _check_cancellation(
-                    cancellation_check,
-                    "selected fallback qualified S3 preparation complete",
-                )
-            fallback_payload = _preparation_payload(
-                fallback_preparation,
-                structured_report,
-                fallback_faces,
-                fallback_edges,
-                source_model_id=str(source_geometry.model_id),
-            )
-            if fallback_qualified_s3 is not None:
-                fallback_payload["qualified_s3"] = fallback_qualified_s3
-            fallback.mesh.structural_preparation = fallback_payload
-            fallback.mesh.hybrid_diagnostics.update(
-                {
-                    "structured_layout_status": structured_report.status,
-                    "structured_plan_hash": structured_report.plan.plan_hash,
-                    "structured_quality": structured_report.to_dict()["quality"],
-                }
-            )
-            finish_publication("structured quality fallback accepted")
-            return replace(fallback, structured_layout=structured_report)
-    if defer_qualified_s3:
-        # Reaching this point means the later authoritative quality check did
-        # not take the fallback return.  Qualify the retained, now-published
-        # mesh against the source-side associations.
+        # with_mesh invalidates any earlier qualified-S3 record: the
+        # repair moved candidate nodes, so the record no longer describes
+        # the repaired shell.
+        fallback = fallback.with_mesh(repaired_mesh)
+        fallback.extra_diagnostics["junction_growth_repair"] = dict(
+            repair_diagnostics
+        )
+        fallback_quality = repaired_quality
+        _check_cancellation(
+            cancellation_check,
+            "declared-junction transition repair accepted",
+        )
+    fallback_metrics = regularity_metrics(
+        fallback.mesh,
+        target_size=target_size,
+        minimum_size_ratio=(
+            structured_report.plan.options.minimum_size_ratio
+        ),
+        maximum_size_ratio=(
+            structured_report.plan.options.maximum_size_ratio
+        ),
+        mapped_element_ids=(),
+    )
+    structured_report = replace(
+        structured_report,
+        diagnostics=(*structured_report.diagnostics, message),
+        metrics={
+            "rejected_candidate": dict(metrics),
+            "accepted_fallback": fallback_metrics,
+        },
+        quality={
+            "accepted": True,
+            "selected_mesh": "native_fallback",
+            "rejected_candidate": gate_quality,
+            "accepted_fallback": fallback_quality,
+        },
+        status="rejected_fallback",
+    )
+    fallback_qualified_s3 = fallback.qualified_s3_record
+    if (
+        qualified_s3
+        and fallback_qualified_s3 is not None
+        and _candidate_s3_record_is_stale(
+            fallback_qualified_s3, fallback.mesh, source_geometry
+        )
+    ):
+        # Never publish an accepted fallback with a candidate-stale
+        # solver admission record; re-qualify the selected mesh.
+        fallback.qualified_s3_record = None
+        fallback_qualified_s3 = None
+    if qualified_s3 and fallback_qualified_s3 is None:
+        # Alignment/refinement is allowed to replace the first native
+        # fallback.  Those candidates are intentionally generated
+        # without qualified-S3 preparation so they can be compared by
+        # the whole-mesh policy first.  Qualify the candidate that was
+        # actually selected; never publish an accepted fallback with
+        # a missing (or candidate-stale) solver admission record.
         qualified_s3_started = perf_counter()
         _check_cancellation(
-            cancellation_check, "qualified S3 production preparation start"
+            cancellation_check,
+            "selected fallback qualified S3 preparation start",
         )
-        mesh, qualified_s3_record = prepare_qualified_s3_mesh(
-            mesh, source_geometry
+        selected_seeding = fallback.mesh.seeding
+        qualifying_mesh = mesh_from_dict(mesh_to_dict(fallback.mesh))
+        fallback_mesh, fallback_qualified_s3 = prepare_qualified_s3_mesh(
+            qualifying_mesh,
+            fallback.working_geometry,
         )
-        qualified_s3_record["authority_model"].update(
+        fallback_mesh.seeding = selected_seeding
+        fallback_qualified_s3["authority_model"].update(
             {
                 "source_model_id": str(source_geometry.model_id),
                 "source_revision": int(source_geometry.revision),
             }
         )
         _check_cancellation(
-            cancellation_check, "qualified S3 production preparation complete"
+            cancellation_check,
+            "selected fallback qualified S3 policy validation start",
         )
-        phase_seconds["qualified_s3_preparation"] = (
+        repaired_fallback_quality = _structured_quality_report(
+            fallback_mesh, structured_report.plan.options
+        )
+        if not repaired_fallback_quality["accepted"]:
+            raise MeshError(
+                "native fallback violates structured quality policy "
+                "after qualified S3 preparation: "
+                f"{repaired_fallback_quality}"
+            )
+        repaired_fallback_metrics = regularity_metrics(
+            fallback_mesh,
+            target_size=target_size,
+            minimum_size_ratio=(
+                structured_report.plan.options.minimum_size_ratio
+            ),
+            maximum_size_ratio=(
+                structured_report.plan.options.maximum_size_ratio
+            ),
+            mapped_element_ids=(),
+        )
+        _check_cancellation(
+            cancellation_check,
+            "selected fallback qualified S3 policy validation complete",
+        )
+        structured_report = replace(
+            structured_report,
+            metrics={
+                **dict(structured_report.metrics),
+                "pre_s3_fallback": fallback_metrics,
+                "accepted_fallback": repaired_fallback_metrics,
+            },
+            quality={
+                **dict(structured_report.quality),
+                "pre_s3_fallback": fallback_quality,
+                "accepted_fallback": repaired_fallback_quality,
+            },
+        )
+        fallback = fallback.with_mesh(
+            fallback_mesh, qualified_s3_record=fallback_qualified_s3
+        )
+        fallback.extra_diagnostics[
+            "qualified_s3_preparation"
+        ] = True
+        fallback.phase_seconds["qualified_s3_preparation"] = (
             perf_counter() - qualified_s3_started
         )
-    preparation_payload = _preparation_payload(
-        preparation_report,
-        structured_report,
-        source_to_final_faces,
-        source_to_final_edges,
-        source_model_id=str(source_geometry.model_id),
-    )
-    if qualified_s3_record is not None:
-        preparation_payload["qualified_s3"] = qualified_s3_record
-    mesh.structural_preparation = preparation_payload
-    strategies = dict(source_strategies)
-    result = HybridMeshResult(
-        mesh=mesh,
-        strategy_by_face=strategies,
-        triangulation_backend_by_face=triangulation_backend_by_face,
-        preflight=preflight,
-        connectivity=connectivity,
-        audit_report=audit_report,
-        certification_mode=certification_mode,
-        certifiable=certifiable,
+        _check_cancellation(
+            cancellation_check,
+            "selected fallback qualified S3 preparation complete",
+        )
+    return _finalize_hybrid_candidate(
+        fallback,
         structured_layout=structured_report,
-        structural_preparation=preparation_report,
+        structured_options=structured_report.plan.options,
+        publication_stage="structured quality fallback accepted",
+        runtime={
+            "candidate_count": chain_candidate_count,
+            "connectivity_application_count": 0,
+            "phase_seconds": {},
+        },
+        phase_sources=tuple(chain_phase_sources),
+        cancellation_check=cancellation_check,
     )
-    mesh.hybrid_diagnostics = {
-        "requested_target_size": target_size,
-        "complex_geometry": {
-            "strategy_ladder": [
-                "mapped_or_structured",
-                "native",
-                "detached_decomposition",
-                "qualified_gmsh",
-            ],
-            "component_candidate_budget": 6,
-            "source_face_count": len(source_faces),
-            "final_face_count": len(faces),
-            "declared_junction_edge_count": len(
-                final_declared_junction_edges
-            ),
-            "source_strategy_by_face": {
-                str(face_id): source_strategies[face_id]
-                for face_id in sorted(source_strategies)
-            },
-        },
-        "strategy_by_face": dict(strategies),
-        "triangulation_backend_by_face": {
-            int(face_id): _stable_diagnostic_record(values)
-            for face_id, values in triangulation_backend_by_face.items()
-        },
-        "geometry_model_id": str(source_geometry.model_id),
-        "geometry_revision": int(source_geometry.revision),
-        "certification_mode": certification_mode.value,
-        "certifiable": bool(certifiable),
-        "preflight_count": len(preflight),
-        "structured_layout_status": (
-            None if structured_report is None else structured_report.status
-        ),
-        "structured_plan_hash": (
-            None if structured_report is None else structured_report.plan.plan_hash
-        ),
-        "structured_quality": (
-            None if structured_report is None else structured_report.to_dict()["quality"]
-        ),
-        "structural_preparation_hash": (
-            None
-            if preparation_report is None
-            else preparation_report.preparation_hash
-        ),
-        "qualified_s3_preparation": (
-            None
-            if qualified_s3_record is None
-            else {
-                "contract_id": qualified_s3_record["contract_id"],
-                "element_count": len(qualified_s3_record["element_ids"]),
-                "formulation_id": qualified_s3_record["formulation_id"],
-                "legacy_fallback": qualified_s3_record["legacy_fallback"],
-                "status": qualified_s3_record["status"],
-            }
-        ),
-        "reused_prepared_working_copy": reuse_prepared_working_copy,
-        "phase_seconds": dict(phase_seconds),
-        "completed_phases": sorted(phase_seconds),
-    }
-    if final_cylindrical_repairs:
-        mesh.hybrid_diagnostics['cylindrical_shared_boundary_final_repair']=final_cylindrical_repairs
-    mesh.boundary_registry = boundary_registry
-    finish_publication("hybrid generation complete")
-    return result
 
 
 def generate_hybrid_mesh(geometry: GeometryModel, **options: Any) -> Mesh:
