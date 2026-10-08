@@ -132,12 +132,12 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.3,<0.5"]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.6,<0.5"]
     assert project["optional-dependencies"]["planar"] == []
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "26e7e3c98ac1a5573e19643d6658d00094bff0bc"
+    geometry_ref = "a534b0d3782af9007b71edb30b923fc96232be67"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
@@ -145,14 +145,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         encoding="utf-8"
     )
 
-    # CI tests deliberately newer owners than the release pin: six jobs use the
-    # corner-binding owner and the development smoke job uses the verified owner.
-    # The release bundle stays on geometry_ref.
-    ci_owner = "830220b1d1c742bc1eb9c9b40a774b0dc77278bc"
-    ci_smoke_owner = "2879048bbe5f779992220ad44c2cd2f4e3edd3cb"
     assert ci.count("repository: audunarn/ANYgeometry") == 7
-    assert ci.count(f"ref: {ci_owner}") == 6
-    assert ci.count(f"ref: {ci_smoke_owner}") == 1
+    assert ci.count(f"ref: {geometry_ref}") == 7
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {geometry_ref}") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci

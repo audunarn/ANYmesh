@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 26e7e3c98ac1a5573e19643d6658d00094bff0bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -126,7 +126,7 @@ jobs:
 
           expected_base_requirements = {
               ("numpy", ">=1.26", ()),
-              ("anygeometry", "<0.5,>=0.4.3", ("planar",)),
+              ("anygeometry", "<0.5,>=0.4.6", ("planar",)),
           }
           expected_license_files = {
               "LICENSE",

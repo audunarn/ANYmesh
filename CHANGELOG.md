@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Require ANYgeometry 0.4.6, the release of ANYgeometry commit a534b0d. The
+  authored-root and material-surface paths import owner APIs that the earlier
+  pins (26e7e3c, 830220b, 2879048) do not provide. The release wheel check and
+  all CI jobs now pin that same commit.
+
 - Declare threadpoolctl as the optional `diagnostics` extra for the per-worker
   thread-count report. Without it the report records the counts as unknown.
   The private authored-project adapter no longer imports ANYfem; its two ANYfem
