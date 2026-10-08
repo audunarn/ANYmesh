@@ -33,6 +33,11 @@ from anygeometry.policies import ConnectionIntent
 from anygeometry.predicates import IntersectionKind
 from anygeometry.surfaces import Cylinder, Plane, CoonsSurface, Cone, RuledSurface
 
+from ._runtime_counters import (
+    MESHER_CHART_QUERY_BATCHES,
+    MESHER_CHART_QUERY_FACES,
+    add_operation_count,
+)
 from .errors import MeshError
 
 __all__ = [
@@ -329,6 +334,60 @@ def _shared_boundary_edges(
             }
         )
     )
+
+
+def _face_chart_errors(
+    working: GeometryModel,
+    faces: Sequence[int],
+    cancellation_check: CancellationCheck | None,
+    expected_revision: int | None,
+) -> dict[int, str | None]:
+    """Return each face's trimmed-chart qualification error, or None.
+
+    One public ``query_trimmed_surface_charts_by_face`` call serves every
+    selected face of this unchanged preparation state, preserving the
+    per-face error rows.  The caller's cancellation check and expected
+    revision pass through to the owner query, so cancellation and
+    concurrent raw mutation abort the whole preparation exactly as the
+    per-face route does.  Nothing is cached across preparation states.
+    Older supported geometry without the batch API keeps the original
+    per-face query loop with the same controls.
+    """
+
+    import anygeometry
+
+    errors: dict[int, str | None] = {}
+    if not faces:
+        return errors
+    batched = getattr(anygeometry, "query_trimmed_surface_charts_by_face", None)
+    if batched is not None:
+        handles = tuple(working.handle("face", face) for face in faces)
+        rows = batched(
+            working,
+            handles,
+            expected_revision=expected_revision,
+            cancellation_check=cancellation_check,
+        )
+        add_operation_count(MESHER_CHART_QUERY_BATCHES)
+        add_operation_count(MESHER_CHART_QUERY_FACES, len(faces))
+        for row in rows.results:
+            errors[int(row.face.id)] = None if row.error is None else str(row.error)
+        return errors
+    from anygeometry import query_trimmed_surface_charts
+
+    for face in faces:
+        try:
+            query_trimmed_surface_charts(
+                working,
+                (working.handle("face", face),),
+                expected_revision=expected_revision,
+                cancellation_check=cancellation_check,
+            )
+        except GeometryError as error:
+            errors[face] = str(error)
+        else:
+            errors[face] = None
+    return errors
 
 
 def _shared_transverse_plate_edges(
@@ -842,18 +901,25 @@ def prepare_structural_closure(
         operands = (*[working.handle("face",face) for face in faces],
                     *[working.handle("member",member) for member in members])
         legacy_curved_only = False
+        chart_errors: dict[int, str | None] | None = None
+        if not members and len(faces) > 1:
+            # One batched qualification serves every branch below for this
+            # unchanged preparation state; nothing is cached beyond it.
+            # The isolated single-face route never queries charts.
+            chart_errors = _face_chart_errors(
+                working, faces, cancellation_check, working.revision
+            )
         if not members and len(faces)>1 and all(isinstance(working.faces[face].surface,
                 (CoonsSurface, Cone, RuledSurface)) for face in faces):
-            from anygeometry import query_trimmed_surface_charts
             unavailable = set()
             for face in faces:
-                try:
-                    query_trimmed_surface_charts(working, (working.handle("face", face),))
-                except GeometryError as error:
-                    if str(error) not in (f"face {face} has curved Coons boundaries",
-                            f"face {face} is not planar", f"face {face} has an unsupported intersection surface"):
-                        raise
-                    unavailable.add(face)
+                error = chart_errors.get(face)
+                if error is None:
+                    continue
+                if error not in (f"face {face} has curved Coons boundaries",
+                        f"face {face} is not planar", f"face {face} has an unsupported intersection surface"):
+                    raise GeometryError(error)
+                unavailable.add(face)
             legacy_curved_only = len(unavailable) == len(faces)
         if legacy_curved_only:
             if policy.automatic_face_connections:
@@ -871,15 +937,14 @@ def prepare_structural_closure(
         elif not members:
             # Existing curved-boundary welds remain a supported compatibility
             # path. General interior Coons intersections are not inferred.
-            from anygeometry import query_trimmed_surface_charts,query_intersection
+            from anygeometry import query_intersection
             retained=[]
             for face_id in faces:
-                try:
-                    query_trimmed_surface_charts(working,(working.handle('face',face_id),))
-                except GeometryError as error:
-                    if str(error) not in (f'face {face_id} has curved Coons boundaries',
+                error = chart_errors.get(face_id)
+                if error is not None:
+                    if error not in (f'face {face_id} has curved Coons boundaries',
                                           f'face {face_id} is not planar'):
-                        raise
+                        raise GeometryError(error)
                     compatible=True
                     for other in faces:
                         if other==face_id:continue

@@ -431,6 +431,9 @@ class StructuralMeshingPipeline:
         )
         self.boundaries = GlobalEdgeBoundaryRegistry(view)
         self.members = MemberRegistry(view)
+        # Invocation-local cache of edge-node coordinates; one apply_connectivity
+        # invocation owns it and merges invalidate it (see _connect_junction).
+        self._edge_coordinate_cache: dict[tuple[int, tuple[int, ...]], np.ndarray] | None = None
         self.cache: ComponentGenerationCache[object] = ComponentGenerationCache(
             view.model_id, view.revision
         )
@@ -603,6 +606,91 @@ class StructuralMeshingPipeline:
         self.cache.invalidate(affected)
         return affected
 
+    # Screening slack for the vectorized nearest-node batch, in units of
+    # relative machine epsilon.  Batch and scalar norms of the same 3-vector
+    # differ by only a few ulps, so every candidate that could win the exact
+    # scalar comparison lies within this margin of the batch minimum.
+    _EDGE_SCREEN_MARGIN_ULPS = 64.0
+
+    def _edge_node_coordinates(
+        self, mesh: Mesh, edge_id: int, candidates: tuple[int, ...]
+    ) -> np.ndarray:
+        """Return candidate coordinates, cached for this invocation."""
+
+        cache = self._edge_coordinate_cache
+        if cache is None:
+            return np.asarray([mesh.nodes[node] for node in candidates], dtype=float)
+        key = (int(edge_id), candidates)
+        coordinates = cache.get(key)
+        if coordinates is None:
+            coordinates = np.asarray(
+                [mesh.nodes[node] for node in candidates], dtype=float
+            )
+            cache[key] = coordinates
+        return coordinates
+
+    @staticmethod
+    def _scalar_edge_distances(
+        mesh: Mesh, candidates: tuple[int, ...], expected: object
+    ) -> list[float]:
+        return [
+            float(np.linalg.norm(mesh.nodes[node] - expected)) for node in candidates
+        ]
+
+    def _nearest_edge_node(
+        self,
+        mesh: Mesh,
+        edge_id: int,
+        expected: object,
+        candidates: tuple[int, ...],
+    ) -> tuple[int, float]:
+        """Return the nearest candidate index and its exact scalar distance.
+
+        A vectorized batch norm only screens the candidates.  The original
+        scalar ``np.linalg.norm`` distances of the screened nodes decide the
+        winner and the tolerance, preserving the original node-order tie
+        behavior; batch and scalar norms differ by ulps, so the batch never
+        decides the winner directly.  Nonfinite or otherwise uncertain input
+        falls back to the full original scalar scan.
+        """
+
+        coordinates = self._edge_node_coordinates(mesh, edge_id, candidates)
+        made_expected = np.asarray(expected, dtype=float)
+        if (
+            not np.all(np.isfinite(coordinates))
+            or made_expected.shape != (3,)
+            or not np.all(np.isfinite(made_expected))
+        ):
+            distances = self._scalar_edge_distances(mesh, candidates, expected)
+            index = int(np.argmin(distances))
+            return index, distances[index]
+        differences = coordinates - made_expected
+        batch = np.sqrt(np.einsum("ij,ij->i", differences, differences))
+        if not np.all(np.isfinite(batch)):
+            distances = self._scalar_edge_distances(mesh, candidates, expected)
+            index = int(np.argmin(distances))
+            return index, distances[index]
+        best = float(np.min(batch))
+        margin = (
+            self._EDGE_SCREEN_MARGIN_ULPS
+            * float(np.finfo(float).eps)
+            * max(1.0, abs(best))
+        )
+        winner = -1
+        winner_distance = float("inf")
+        for position in np.flatnonzero(batch <= best + margin):
+            distance = float(
+                np.linalg.norm(mesh.nodes[candidates[position]] - expected)
+            )
+            if distance < winner_distance:
+                winner = int(position)
+                winner_distance = distance
+        if winner < 0:
+            distances = self._scalar_edge_distances(mesh, candidates, expected)
+            winner = int(np.argmin(distances))
+            winner_distance = distances[winner]
+        return winner, winner_distance
+
     def _edge_node(
         self, mesh: Mesh, edge_id: int, parameter: float, owner: Hashable
     ) -> int | None:
@@ -610,10 +698,9 @@ class StructuralMeshingPipeline:
         candidates = tuple(mesh.nodes_of_edge.get(edge_id, ()))
         if not candidates:
             return None
-        distances = [float(np.linalg.norm(mesh.nodes[node] - expected)) for node in candidates]
-        index = int(np.argmin(distances))
+        index, distance = self._nearest_edge_node(mesh, edge_id, expected, candidates)
         tolerance = self.view.effective_length(self.view.edge_length(edge_id))
-        if distances[index] > tolerance:
+        if distance > tolerance:
             return None
         node = int(candidates[index])
         self.boundaries.register(
@@ -1060,6 +1147,9 @@ class StructuralMeshingPipeline:
             master = min(nodes, key=lambda node: (node not in shell_set, node))
             replacements = {node: master for node in nodes if node != master}
             self._replace_beam_nodes(mesh, replacements, shell_set)
+            # Merged stations rewrote beam node identifiers and may have
+            # removed nodes; cached edge coordinates must not survive it.
+            self._edge_coordinate_cache = {}
             if index is not None:
                 # Beam node identifiers were rewritten; the beam-node
                 # coupling index must not survive this mutation.
@@ -1105,78 +1195,83 @@ class StructuralMeshingPipeline:
             if not mesh.nodes
             else float(np.max(np.ptp(np.asarray(list(mesh.nodes.values())), axis=0)))
         )
-        bvh = MeshElementBVH(mesh, tolerance=tolerance)
-        index = _ConnectivityIndex(mesh, self)
-        next_record = [max((0, *mesh.quads, *mesh.tris, *mesh.beams, *mesh.couplings))]
-        actions: list[ConnectivityAction] = []
+        bvh = MeshElementBVH._connectivity_only(mesh, tolerance=tolerance)
+        previous_edge_cache = self._edge_coordinate_cache
+        self._edge_coordinate_cache = {}
+        try:
+            index = _ConnectivityIndex(mesh, self)
+            next_record = [max((0, *mesh.quads, *mesh.tris, *mesh.beams, *mesh.couplings))]
+            actions: list[ConnectivityAction] = []
 
-        attachment_ids = {
-            identifier
-            for component in self.components
-            if component.key in ready
-            for identifier in component.attachment_ids
-        }
-        for identifier in sorted(attachment_ids):
-            attachment = self.view.attachments[identifier]
-            if attachment.member_id is None:
-                continue
-            if attachment.member_range.is_point:
-                node = self._member_node(
-                    mesh, attachment.member_id, attachment.member_range.start
-                )
-                stations = () if node is None else ((attachment.member_range.start, node),)
-            else:
-                stations = self._member_stations(
-                    mesh,
-                    attachment.member_id,
-                    attachment.member_range.start,
-                    attachment.member_range.end,
-                )
-            if not stations:
-                issues.append(
-                    PreflightIssue(
-                        "missing-attachment-station",
-                        f"attachment {identifier} has no member mesh station",
-                        (("attachment", identifier),),
+            attachment_ids = {
+                identifier
+                for component in self.components
+                if component.key in ready
+                for identifier in component.attachment_ids
+            }
+            for identifier in sorted(attachment_ids):
+                attachment = self.view.attachments[identifier]
+                if attachment.member_id is None:
+                    continue
+                if attachment.member_range.is_point:
+                    node = self._member_node(
+                        mesh, attachment.member_id, attachment.member_range.start
                     )
+                    stations = () if node is None else ((attachment.member_range.start, node),)
+                else:
+                    stations = self._member_stations(
+                        mesh,
+                        attachment.member_id,
+                        attachment.member_range.start,
+                        attachment.member_range.end,
+                    )
+                if not stations:
+                    issues.append(
+                        PreflightIssue(
+                            "missing-attachment-station",
+                            f"attachment {identifier} has no member mesh station",
+                            (("attachment", identifier),),
+                        )
+                    )
+                    continue
+                for member_parameter, beam_node in stations:
+                    action, issue = self._add_attachment_coupling(
+                        mesh,
+                        bvh,
+                        attachment,
+                        member_parameter,
+                        beam_node,
+                        next_record,
+                        index,
+                    )
+                    if action is not None:
+                        actions.append(action)
+                    if issue is not None:
+                        issues.append(issue)
+
+            junction_ids = {
+                identifier
+                for component in self.components
+                if component.key in ready
+                for identifier in component.junction_ids
+            }
+            shell_cache: list[set[int]] = []
+
+            def shell_nodes() -> set[int]:
+                # Shell connectivity is read-only during connectivity application.
+                if not shell_cache:
+                    shell_cache.append(self._shell_node_set(mesh))
+                return shell_cache[0]
+
+            for identifier in sorted(junction_ids):
+                made_actions, made_issues = self._connect_junction(
+                    mesh, self.view.junctions[identifier], shell_nodes, index
                 )
-                continue
-            for member_parameter, beam_node in stations:
-                action, issue = self._add_attachment_coupling(
-                    mesh,
-                    bvh,
-                    attachment,
-                    member_parameter,
-                    beam_node,
-                    next_record,
-                    index,
-                )
-                if action is not None:
-                    actions.append(action)
-                if issue is not None:
-                    issues.append(issue)
-
-        junction_ids = {
-            identifier
-            for component in self.components
-            if component.key in ready
-            for identifier in component.junction_ids
-        }
-        shell_cache: list[set[int]] = []
-
-        def shell_nodes() -> set[int]:
-            # Shell connectivity is read-only during connectivity application.
-            if not shell_cache:
-                shell_cache.append(self._shell_node_set(mesh))
-            return shell_cache[0]
-
-        for identifier in sorted(junction_ids):
-            made_actions, made_issues = self._connect_junction(
-                mesh, self.view.junctions[identifier], shell_nodes, index
-            )
-            actions.extend(made_actions)
-            issues.extend(made_issues)
-        return ConnectivityReport(tuple(actions), tuple(issues), states)
+                actions.extend(made_actions)
+                issues.extend(made_issues)
+            return ConnectivityReport(tuple(actions), tuple(issues), states)
+        finally:
+            self._edge_coordinate_cache = previous_edge_cache
 
     connect = apply_connectivity
 

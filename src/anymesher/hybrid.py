@@ -34,7 +34,13 @@ except ImportError:  # Older supported ANYgeometry builds predate schema 6.
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
 from .errors import MeshError, StructuredQualityRejected
-from ._hybrid_candidate import _HybridCandidateContext
+from ._hybrid_candidate import _HybridCandidateContext, new_candidate_runtime
+from ._runtime_counters import (
+    geometry_runtime_diagnostics,
+    merge_operation_counts,
+    new_operation_counts,
+    operation_counts_scope,
+)
 from ._mapped_fold import mapped_face_folds
 from .mapped import (
     ELEMENT_ORDERS,
@@ -4304,7 +4310,12 @@ def _finalize_hybrid_candidate(
     _check_cancellation(cancellation_check, "hybrid connectivity start")
     for element_id in (*mesh.quads, *mesh.tris, *mesh.beams):
         mesh.activity.setdefault(int(element_id), 1.0)
-    connectivity = candidate.pipeline.apply_connectivity(mesh)
+    connectivity_counts = new_operation_counts()
+    with operation_counts_scope(connectivity_counts):
+        connectivity = candidate.pipeline.apply_connectivity(mesh)
+    merge_operation_counts(
+        track.setdefault("operation_counts", {}), connectivity_counts
+    )
     if candidate.structured_report is not None or structured_layout is not None:
         # Connectivity reports retain the established first-record conflict
         # and refusal diagnostics. Publication requires that every equation
@@ -4533,6 +4544,7 @@ def _finalize_hybrid_candidate(
             "connectivity_application_count": int(
                 track.get("connectivity_application_count", 0)
             ),
+            "operation_counts": dict(track.get("operation_counts") or {}),
             "phase_seconds": runtime_phase_seconds,
         },
     }
@@ -4591,6 +4603,7 @@ def generate_hybrid_mesh_result(
     """
 
     phase_seconds: dict[str, float] = {}
+    operation_counts = new_operation_counts()
     _check_cancellation(cancellation_check, "hybrid generation start")
     target_size = float(target_size)
     if not np.isfinite(target_size) or target_size <= 0.0:
@@ -4984,14 +4997,17 @@ def generate_hybrid_mesh_result(
     reuse_prepared_working_copy = (
         mutation_policy is GeometryMutationPolicy.WORKING_COPY
     )
-    geometry, preparation_report = prepare_structural_closure(
-        source_geometry,
-        face_ids=source_faces,
-        beam_edges=source_beams,
-        options=structural_preparation,
-        cancellation_check=cancellation_check,
-        reuse_working_copy=reuse_prepared_working_copy,
-    )
+    with geometry_runtime_diagnostics() as geometry_counts:
+        with operation_counts_scope(operation_counts):
+            geometry, preparation_report = prepare_structural_closure(
+                source_geometry,
+                face_ids=source_faces,
+                beam_edges=source_beams,
+                options=structural_preparation,
+                cancellation_check=cancellation_check,
+                reuse_working_copy=reuse_prepared_working_copy,
+            )
+    merge_operation_counts(operation_counts, geometry_counts, prefix="geometry.")
     phase_seconds["structural_preparation"] = perf_counter() - preparation_started
     if preparation_report is None:
         source_to_prepared_faces = {
@@ -5549,6 +5565,8 @@ def generate_hybrid_mesh_result(
             perf_counter() - qualified_s3_started
         )
 
+    candidate_runtime = new_candidate_runtime()
+    candidate_runtime["operation_counts"] = operation_counts
     candidate = _HybridCandidateContext(
         source_geometry=source_geometry,
         working_geometry=geometry,
@@ -5578,6 +5596,7 @@ def generate_hybrid_mesh_result(
         defer_qualified_s3=defer_qualified_s3,
         reuse_prepared_working_copy=reuse_prepared_working_copy,
         phase_seconds=phase_seconds,
+        runtime=candidate_runtime,
     )
     if _defer_finalization:
         # Deferred candidate generation: the caller owns candidate selection
@@ -5642,10 +5661,16 @@ def generate_hybrid_mesh_result(
     )
     chain_phase_sources: list[dict] = [phase_seconds]
     chain_candidate_count = 1
+    chain_operation_counts: dict[str, int] = dict(
+        candidate.runtime.get("operation_counts") or {}
+    )
 
     def _adopt(child: _HybridCandidateContext) -> _HybridCandidateContext:
         nonlocal chain_candidate_count
         chain_candidate_count += int(child.runtime.get("candidate_count", 1))
+        merge_operation_counts(
+            chain_operation_counts, child.runtime.get("operation_counts") or {}
+        )
         chain_phase_sources.append(child.phase_seconds)
         child_runtime_phases = dict(child.runtime.get("phase_seconds") or {})
         if child_runtime_phases:
@@ -5982,6 +6007,7 @@ def generate_hybrid_mesh_result(
         runtime={
             "candidate_count": chain_candidate_count,
             "connectivity_application_count": 0,
+            "operation_counts": chain_operation_counts,
             "phase_seconds": {},
         },
         phase_sources=tuple(chain_phase_sources),

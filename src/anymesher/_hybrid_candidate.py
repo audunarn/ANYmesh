@@ -22,6 +22,7 @@ def new_candidate_runtime() -> dict[str, Any]:
         "candidate_count": 1,
         "connectivity_application_count": 0,
         "phase_seconds": {},
+        "operation_counts": {},
     }
 
 

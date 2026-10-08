@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
+
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from math import floor, fsum, hypot, isfinite, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -75,30 +78,39 @@ def incircle(
         -blift * (ax * cy - ay * cx),
         clift * (ax * by - ay * bx),
     ))
+    # Bound the products before subtracting them: almost collinear stations
+    # can cancel within each cross product. Using the already-cancelled terms
+    # understates roundoff and can certify opposite diagonal flips as illegal
+    # simultaneously. Ambiguous signs use exact binary-input arithmetic.
     scale = (
-        abs(alift * (bx * cy - by * cx))
-        + abs(blift * (ax * cy - ay * cx))
-        + abs(clift * (ax * by - ay * bx))
+        alift * (abs(bx * cy) + abs(by * cx))
+        + blift * (abs(ax * cy) + abs(ay * cx))
+        + clift * (abs(ax * by) + abs(ay * bx))
     )
     if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale:
-        with localcontext() as context:
-            context.prec = 80
-            point_x, point_y = _decimal(point[0]), _decimal(point[1])
-            dax = _decimal(first[0]) - point_x
-            day = _decimal(first[1]) - point_y
-            dbx = _decimal(second[0]) - point_x
-            dby = _decimal(second[1]) - point_y
-            dcx = _decimal(third[0]) - point_x
-            dcy = _decimal(third[1]) - point_y
-            da = dax * dax + day * day
-            db = dbx * dbx + dby * dby
-            dc = dcx * dcx + dcy * dcy
-            exact = (
-                da * (dbx * dcy - dby * dcx)
-                - db * (dax * dcy - day * dcx)
-                + dc * (dax * dby - day * dbx)
-            )
-        determinant = float(exact)
+        # Fixed decimal precision can leave a signed rounding residue even
+        # for an exactly cocircular binary-coordinate rectangle. Such a
+        # residue permits both diagonal flips and prevents convergence.
+        (fax, fay), (fbx, fby), (fcx, fcy), (px, py) = (
+            (Fraction(float(coordinates[0])), Fraction(float(coordinates[1])))
+            for coordinates in (first, second, third, point)
+        )
+        dax, day = fax - px, fay - py
+        dbx, dby = fbx - px, fby - py
+        dcx, dcy = fcx - px, fcy - py
+        da = dax * dax + day * day
+        db = dbx * dbx + dby * dby
+        dc = dcx * dcx + dcy * dcy
+        exact = (
+            da * (dbx * dcy - dby * dcx)
+            - db * (dax * dcy - day * dcx)
+            + dc * (dax * dby - day * dbx)
+        )
+        try:
+            determinant = float(exact)
+        except OverflowError:
+            # Match Decimal-to-float conversion for extreme finite inputs.
+            determinant = float("inf") if exact > 0 else -float("inf")
     if orient2d(first, second, third) < 0.0:
         determinant = -determinant
     return determinant
@@ -953,31 +965,102 @@ def _finite_hull_seed(points: np.ndarray,
     # Strict positivity prevents cocircular flip cycles. The work bound is an
     # algorithmic convergence guard, not an operand-count restriction.
     limit = max(64, 32 * len(triangles) ** 2)
+    # A flip decision depends only on the two incident cells and on whether
+    # the alternate edge exists. Maintain the incidence map incrementally and
+    # re-check only the edges one flip can affect: the quadrilateral sides,
+    # the new diagonal, and the edges whose alternate edge just disappeared.
+    # The pending queue holds edges believed flippable in sorted order and
+    # every popped edge is re-verified, so each flip is the first flippable
+    # edge of the full sorted scan.
+    incidence = _edge_incidence(triangles)
+    vertex_edges: dict[int, set[tuple[int, int]]] = {}
+    for edge in incidence:
+        vertex_edges.setdefault(edge[0], set()).add(edge)
+        vertex_edges.setdefault(edge[1], set()).add(edge)
+    believed: set[tuple[int, int]] = set()
+    pending: list[tuple[int, int]] = []
+
+    def flippable(edge: tuple[int, int], rows: Sequence[int]) -> bool:
+        if len(rows) != 2:
+            return False
+        first = triangles[rows[0]]
+        second = triangles[rows[1]]
+        a = next(node for node in first if node not in edge)
+        b = next(node for node in second if node not in edge)
+        return (_normal_edge(a, b) not in incidence
+                and _proper_intersection(points[edge[0]], points[edge[1]], points[a], points[b])
+                and incircle(*(points[node] for node in first), points[b]) > 0.0)
+
+    def examine(edge: tuple[int, int]) -> None:
+        if cancellation_check is not None:
+            cancellation_check("python triangulation finite hull edge")
+        if edge in believed:
+            return
+        if flippable(edge, incidence[edge]):
+            believed.add(edge)
+            heapq.heappush(pending, edge)
+
+    for edge in sorted(incidence):
+        examine(edge)
     for _ in range(limit):
         if cancellation_check is not None:
             cancellation_check("python triangulation finite hull legality")
-        incidence = _edge_incidence(triangles)
-        changed = False
-        for edge, rows in sorted(incidence.items()):
+        edge = None
+        while pending:
+            candidate = heapq.heappop(pending)
+            if candidate not in believed:
+                continue
             if cancellation_check is not None:
                 cancellation_check("python triangulation finite hull edge")
-            if len(rows) != 2:
+            if not flippable(candidate, incidence[candidate]):
+                believed.discard(candidate)
                 continue
-            first, second = (triangles[row] for row in rows)
-            a = next(node for node in first if node not in edge)
-            b = next(node for node in second if node not in edge)
-            if (_normal_edge(a, b) not in incidence
-                    and _proper_intersection(points[edge[0]], points[edge[1]], points[a], points[b])
-                    and incircle(*(points[node] for node in first), points[b]) > 0.0):
-                triangles[rows[0]] = _canonical_triangle((a, b, edge[0]), points)
-                triangles[rows[1]] = _canonical_triangle((b, a, edge[1]), points)
-                changed = True
-                break
-        if not changed:
+            edge = candidate
+            break
+        if edge is None:
             result = sorted(triangles)
             if not _complete_hull_seed(points, result, cancellation_check):
                 raise MeshError("finite hull triangulation is incomplete")
             return result
+        rows = incidence[edge]
+        first = triangles[rows[0]]
+        second = triangles[rows[1]]
+        a = next(node for node in first if node not in edge)
+        b = next(node for node in second if node not in edge)
+        e0, e1 = edge
+        triangles[rows[0]] = _canonical_triangle((a, b, e0), points)
+        triangles[rows[1]] = _canonical_triangle((b, a, e1), points)
+        believed.discard(edge)
+        del incidence[edge]
+        vertex_edges[e0].discard(edge)
+        vertex_edges[e1].discard(edge)
+        diagonal = _normal_edge(a, b)
+        incidence[diagonal] = [rows[0], rows[1]]
+        vertex_edges.setdefault(a, set()).add(diagonal)
+        vertex_edges.setdefault(b, set()).add(diagonal)
+        for side, old_row, new_row in (
+            (_normal_edge(a, e1), rows[0], rows[1]),
+            (_normal_edge(b, e0), rows[1], rows[0]),
+        ):
+            side_rows = incidence[side]
+            side_rows[side_rows.index(old_row)] = new_row
+            side_rows.sort()
+        for side in (_normal_edge(a, e0), _normal_edge(a, e1),
+                     _normal_edge(b, e0), _normal_edge(b, e1), diagonal):
+            examine(side)
+        # Edges whose alternate edge was the removed diagonal can only now be
+        # flippable; each of them lies opposite a cell that still contains e0.
+        for near in vertex_edges[e0]:
+            for row in incidence[near]:
+                triangle = triangles[row]
+                x = near[0] if near[1] == e0 else near[1]
+                w = next(node for node in triangle if node not in near)
+                far = _normal_edge(x, w)
+                far_rows = incidence[far]
+                if len(far_rows) == 2:
+                    other = far_rows[0] if far_rows[1] == row else far_rows[1]
+                    if e1 in triangles[other]:
+                        examine(far)
     raise MeshError("finite hull triangulation legality did not converge")
 
 

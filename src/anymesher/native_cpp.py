@@ -624,6 +624,41 @@ def native_mutable_t3_insert(
     )
 
 
+def _orientation_rows(
+    points: np.ndarray,
+    rows: np.ndarray,
+    oracle: Any,
+) -> np.ndarray:
+    """Per-row orient2d values with the exact oracle on uncertain rows.
+
+    Reproduces the oracle's own fast-path arithmetic (same operations,
+    same order), so decided rows equal the oracle bit for bit and only
+    uncertain rows are resolved by the exact fallback.
+    """
+
+    if len(rows) == 0:
+        return np.zeros(0, dtype=np.float64)
+    a = points[rows[:, 0]]
+    b = points[rows[:, 1]]
+    c = points[rows[:, 2]]
+    # Screening only: this mirrors the oracle's Python-float fast path
+    # operation for operation, so decided rows match it bit for bit.  Any
+    # overflow/underflow/invalid outcome fails the certainty test and is
+    # resolved by the exact oracle below; NumPy floating-point errors are
+    # ignored so strict np.errstate settings cannot raise first.
+    with np.errstate(all="ignore"):
+        ax = a[:, 0] - c[:, 0]
+        ay = a[:, 1] - c[:, 1]
+        bx = b[:, 0] - c[:, 0]
+        by = b[:, 1] - c[:, 1]
+        determinant = ax * by - ay * bx
+        error = 8.0 * np.finfo(np.float64).eps * (np.abs(ax * by) + np.abs(ay * bx))
+        uncertain = ~(np.abs(determinant) > error)
+    for index in np.flatnonzero(uncertain):
+        determinant[index] = oracle(a[index], b[index], c[index])
+    return determinant
+
+
 def native_local_edge_flip(
     points: Any,
     triangles: Any,
@@ -687,16 +722,31 @@ def native_local_edge_flip(
     changed_rows = int(np.count_nonzero(np.any(rows != made_triangles, axis=1)))
     if changed_rows > 2 * flip_count:
         raise MeshError("native local-edge-flip row changes exceed its flip count")
-    for row, triangle in enumerate(rows):
-        if len(set(map(int, triangle))) != 3:
-            raise MeshError(f"native local-edge-flip triangle {row} repeats a node")
-        first, second, third = made_points[triangle]
-        determinant = float(orientation_oracle(first, second, third))
-        if not determinant > 0.0:
-            raise MeshError(f"native local-edge-flip triangle {row} is not strict CCW")
-    triangle_keys = [tuple(sorted(map(int, triangle))) for triangle in rows]
-    if len(set(triangle_keys)) != len(triangle_keys):
-        raise MeshError("native local-edge-flip result contains duplicate triangles")
+    if len(rows):
+        ordered_rows = np.sort(rows, axis=1)
+        repeated = np.any(ordered_rows[:, 1:] == ordered_rows[:, :-1], axis=1)
+        certified = not repeated.any()
+        if certified:
+            determinants = _orientation_rows(
+                made_points, rows, orientation_oracle
+            )
+            certified = bool(np.all(determinants > 0.0)) and len(
+                np.unique(ordered_rows, axis=0)
+            ) == len(rows)
+        if not certified:
+            # Failed screening: the original row loop is the authority for
+            # diagnostic precedence (repeats before orientation per row,
+            # then the duplicate-triangle check).
+            for row, triangle in enumerate(rows):
+                if len(set(map(int, triangle))) != 3:
+                    raise MeshError(f"native local-edge-flip triangle {row} repeats a node")
+                first, second, third = made_points[triangle]
+                determinant = float(orientation_oracle(first, second, third))
+                if not determinant > 0.0:
+                    raise MeshError(f"native local-edge-flip triangle {row} is not strict CCW")
+            triangle_keys = [tuple(sorted(map(int, triangle))) for triangle in rows]
+            if len(set(triangle_keys)) != len(triangle_keys):
+                raise MeshError("native local-edge-flip result contains duplicate triangles")
 
     def edge_incidence(values: np.ndarray) -> dict[tuple[int, int], int]:
         incidence: dict[tuple[int, int], int] = {}
@@ -731,11 +781,16 @@ def native_local_edge_flip(
     ):
         raise MeshError("native local-edge-flip topology exceeds its flip count")
     before_area = sum(
-        float(orientation_oracle(*made_points[triangle]))
-        for triangle in made_triangles
+        float(value)
+        for value in _orientation_rows(
+            made_points, made_triangles, orientation_oracle
+        )
     )
     after_area = sum(
-        float(orientation_oracle(*made_points[triangle])) for triangle in rows
+        float(value)
+        for value in _orientation_rows(
+            made_points, rows, orientation_oracle
+        )
     )
     area_scale = max(1.0, abs(before_area), abs(after_area))
     if abs(after_area - before_area) > 1.0e-12 * area_scale:
@@ -880,27 +935,38 @@ def native_constrained_smoothing(
         )
     ):
         raise MeshError("native constrained-smoothing counters are inconsistent")
+    corner_cells: list[int] = []
+    corner_rows: list[tuple[int, int, int]] = []
     for cell_number, cell in enumerate(topology):
         for index in range(len(cell)):
-            previous = cell[(index - 1) % len(cell)]
-            current = cell[index]
-            following = cell[(index + 1) % len(cell)]
-            before = float(
-                orientation_oracle(
-                    made_points[previous], made_points[current], made_points[following]
+            corner_rows.append(
+                (
+                    cell[(index - 1) % len(cell)],
+                    cell[index],
+                    cell[(index + 1) % len(cell)],
                 )
             )
-            after = float(
-                orientation_oracle(
-                    result_points[previous],
-                    result_points[current],
-                    result_points[following],
-                )
+            corner_cells.append(cell_number)
+    if corner_rows:
+        triples = np.asarray(corner_rows, dtype=np.int64)
+        before_values = _orientation_rows(
+            made_points, triples, orientation_oracle
+        )
+        after_values = _orientation_rows(
+            result_points, triples, orientation_oracle
+        )
+        # The original decision multiplies Python floats; float64
+        # multiply is IEEE-identical, and ignoring errstate here keeps
+        # the original no-raise semantics for extreme finite values.
+        with np.errstate(all="ignore"):
+            inverted = (before_values == 0.0) | (
+                before_values * after_values <= 0.0
             )
-            if before == 0.0 or before * after <= 0.0:
-                raise MeshError(
-                    f"native constrained-smoothing inverted cell {cell_number}"
-                )
+        if inverted.any():
+            raise MeshError(
+                f"native constrained-smoothing inverted cell "
+                f"{corner_cells[int(np.argmax(inverted))]}"
+            )
     return result_points, moved, made_diagnostics
 
 
