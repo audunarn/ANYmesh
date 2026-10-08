@@ -126,20 +126,12 @@ def _mesh_component(
     started = time.perf_counter()
     from anygeometry.closure import ModelClosure
 
-    from . import hybrid
-
     if cancellation_check is not None:
         # The pool injects the shared per-job cooperative signal here so the
         # engine's own cancellation checkpoints honour it.
         payload["options"]["cancellation_check"] = cancellation_check
     model = ModelClosure.from_transport(payload["closure"]).working_model
-    # Planar faces mesh with a chart metric only in multi-face models; a
-    # one-face component must behave as it does inside the whole model.
-    hybrid._WHOLE_MODEL_HAS_SEVERAL_FACES = bool(payload["whole_has_several_faces"])
-    try:
-        result = generate_hybrid_mesh_result(model, **payload["options"])
-    finally:
-        hybrid._WHOLE_MODEL_HAS_SEVERAL_FACES = False
+    result = generate_hybrid_mesh_result(model, **payload["options"])
     mesh = result.mesh
     registry = getattr(mesh, "boundary_registry", None)
     entries: list[tuple[int, float, Any, int | None]] = []
@@ -655,13 +647,7 @@ def generate_hybrid_mesh_result_parallel(
                 size_field=seeding.size_field,
             )
         local.pop("cancellation_check", None)
-        payloads.append(
-            {
-                "closure": closure.to_transport(),
-                "options": local,
-                "whole_has_several_faces": len(geometry.faces) > 1,
-            }
-        )
+        payloads.append({"closure": closure.to_transport(), "options": local})
     covered = {name: sum(len(p["options"].get(name) or ()) for p in payloads)
                for name in ("overrides", "beam_offsets")}
     for name, total in covered.items():

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Mesh a planar face in its physical chart whatever else the model contains.
+  Previously a face that was the only face of its model was meshed in raw
+  parameter units, so a plate with sides other than one metre was sized
+  incorrectly (a 2 x 1 m plate had a mean edge of 0.29 m instead of 0.18 m as
+  in a larger model). The face-count condition and its parallel-route
+  workaround are removed. Unit-square plates and multi-face models are
+  unchanged.
+
 - Add opt-in component-parallel meshing: `generate_hybrid_mesh_result_parallel`
   meshes components that ANYgeometry's `plan_independent_components` certifies
   as independent in separate processes and joins them. Components travel as
