@@ -624,6 +624,62 @@ def _member_is_sheet_boundary(
     return bool(member_edges.intersection(boundary_edges))
 
 
+def _is_resolved_shared_member_vertex_touch(
+    geometry: GeometryModel,
+    first: int,
+    second: int,
+    result: Any,
+) -> bool:
+    """Accept only member touches already represented by the same vertex IDs."""
+    if result.kind is not IntersectionKind.TOUCH_POINT or not result.components:
+        return False
+    first_edges = set(_member_edge_ids(geometry, first))
+    second_edges = set(_member_edge_ids(geometry, second))
+    first_vertices = {
+        vertex
+        for edge_id in first_edges
+        for vertex in (geometry.edges[edge_id].start, geometry.edges[edge_id].end)
+    }
+    second_vertices = {
+        vertex
+        for edge_id in second_edges
+        for vertex in (geometry.edges[edge_id].start, geometry.edges[edge_id].end)
+    }
+    shared_vertices = first_vertices.intersection(second_vertices)
+    if not shared_vertices:
+        return False
+    for component in result.components:
+        first_subparent = component.first_subparent
+        second_subparent = component.second_subparent
+        if (
+            len(component.witnesses) != 1
+            or first_subparent is None
+            or second_subparent is None
+            or first_subparent.kind != "edge"
+            or second_subparent.kind != "edge"
+            or first_subparent.id not in first_edges
+            or second_subparent.id not in second_edges
+        ):
+            return False
+        first_edge = geometry.edges[first_subparent.id]
+        second_edge = geometry.edges[second_subparent.id]
+        candidate_vertices = shared_vertices.intersection(
+            (first_edge.start, first_edge.end),
+            (second_edge.start, second_edge.end),
+        )
+        witness = np.asarray(component.witnesses[0], dtype=float)
+        tolerance = max(
+            float(result.tolerance_used or 0.0),
+            64.0 * np.finfo(float).eps * max(1.0, float(np.linalg.norm(witness))),
+        )
+        if not any(
+            float(np.linalg.norm(witness - geometry.vertices[vertex].position)) <= tolerance
+            for vertex in candidate_vertices
+        ):
+            return False
+    return True
+
+
 def _apply_connection(
     geometry: GeometryModel,
     first_kind: str,
@@ -645,6 +701,14 @@ def _apply_connection(
             )
         ):
             return False, "exact shared vertex topology", ()
+        if (
+            first_kind == "member"
+            and second_kind == "member"
+            and _is_resolved_shared_member_vertex_touch(
+                geometry, first_id, second_id, result
+            )
+        ):
+            return False, "exact shared member vertex topology", ()
         plan = plan_imprint(
             geometry,
             result,
