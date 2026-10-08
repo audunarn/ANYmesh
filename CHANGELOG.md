@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Declare threadpoolctl as the optional `diagnostics` extra for the per-worker
+  thread-count report. Without it the report records the counts as unknown.
+  The private authored-project adapter no longer imports ANYfem; its two ANYfem
+  checks are passed in as a `ProjectReferenceScope`.
+
 - Keep stations that lie exactly on a hull edge in the boundary used by the
   finite-hull completeness check (`_convex_hull(..., retain_collinear=True)`).
   The monotone chain had dropped them, so the Python backend could not mesh
