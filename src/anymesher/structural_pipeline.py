@@ -296,9 +296,13 @@ class _FaceTargetIndex:
 
 # Residual tolerance of the parametric inversion in _linear_face_parameter_hit
 # is 1e-8.  A bilinear or linear image lies in the convex hull of its corners,
-# so a target farther than this margin outside an element's corner box can
-# never be accepted by that inversion.  The margin is two orders of magnitude
-# above the residual tolerance, so skipping such elements cannot change a result.
+# so a target farther than the screening margin outside an element's corner box
+# can never be accepted by that inversion.  The inversion also admits natural
+# coordinates out to max(1e-10, 1e-8 / extent), whose image reaches up to two
+# of those tolerances times the corner-box span beyond the box (the T3
+# barycentric gate is the widest), plus the residual ball.  The constant floor
+# below is two orders of magnitude above the residual tolerance;
+# _linear_face_parameter_hit widens it by that reach on large-span elements.
 _LINEAR_HIT_MARGIN = 1.0e-6
 
 
@@ -838,8 +842,10 @@ class StructuralMeshingPipeline:
         target face.  The resulting physical gap remains in the coupling
         eccentricity; it is never erased by a proximity weld.
 
-        Elements whose corner UV box lies more than ``_LINEAR_HIT_MARGIN`` from
-        the target are skipped before any inversion; they could not be accepted.
+        Elements whose corner UV box lies farther than the screening margin
+        from the target are skipped before any inversion; they could not be
+        accepted.  The margin is ``_LINEAR_HIT_MARGIN`` widened on large-span
+        elements to cover the inversion's own natural tolerance.
         ``index`` supplies cached face-local coordinates for one application.
         """
         candidates = []
@@ -859,8 +865,25 @@ class StructuralMeshingPipeline:
             else:
                 uv = np.asarray([index.face_local_uv(face_id, xyz) for xyz in coords], dtype=float)
             lower, upper = uv.min(axis=0), uv.max(axis=0)
-            if (np.any(target[:2] < lower - _LINEAR_HIT_MARGIN)
-                    or np.any(target[:2] > upper + _LINEAR_HIT_MARGIN)):
+            span = upper - lower
+            # Mirror the inversion's natural tolerance max(1e-10, 1e-8 /
+            # extent): on a large-span element its acceptance region reaches
+            # past the corner box by a multiple of that tolerance times the
+            # span, far beyond the constant floor.  The factor four and the
+            # doubled residual term cover Q4 and T3 natural/residual slack.
+            # Dot-product rounding depends on absolute UV coordinates as well
+            # as span, so translated charts need a separate allowance.
+            extent = max(float(span[0]), float(span[1]), 1.0)
+            natural_tolerance = max(1.0e-10, 1.0e-8 / extent)
+            roundoff = 32.0 * np.finfo(float).eps * np.maximum(
+                np.max(np.abs(uv), axis=0), 1.0
+            )
+            margin = np.maximum(
+                _LINEAR_HIT_MARGIN,
+                4.0 * natural_tolerance * span + 2.0e-8 + roundoff,
+            )
+            if (np.any(target[:2] < lower - margin)
+                    or np.any(target[:2] > upper + margin)):
                 continue
             parametric = np.column_stack((uv, np.zeros(len(nodes))))
             hit = inverse_interpolate(family, parametric, target, tolerance=1e-8)

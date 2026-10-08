@@ -174,6 +174,50 @@ def test_outside_target_is_rejected_before_any_inversion(monkeypatch):
     ) is None
 
 
+@pytest.mark.parametrize("family", ["Q4", "T3"])
+def test_translated_large_chart_matches_legacy(family):
+    mesh = _huge_span_mesh(family)
+    offset = np.array((1.0e12, 1.0e12, 0.0))
+    for node, xyz in mesh.nodes.items():
+        mesh.nodes[node] = xyz + offset
+    point = offset + np.array((2.5e5, 0.25, 0.0))
+    view = _PlanarView()
+    previous = _previous_routine(mesh, 1, point[0], point[1], point, [7], view)
+    assert previous is not None
+    stub = _Stub(view)
+    actual = StructuralMeshingPipeline._linear_face_parameter_hit(
+        stub, mesh, 1, point[0], point[1], point, [7], _ConnectivityIndex(mesh, stub),
+    )
+    assert actual is not None
+    assert actual[0] == previous[0]
+    assert actual[1] == previous[1]
+    np.testing.assert_array_equal(actual[2], previous[2])
+
+
+def test_large_translation_roundoff_reaches_original_inverter(monkeypatch):
+    mesh = _huge_span_mesh("Q4")
+    offset = np.array((1.0e12, 1.0e12, 0.0))
+    for node, xyz in mesh.nodes.items():
+        mesh.nodes[node] = xyz + offset
+    point = np.array((np.nextafter(offset[0], -np.inf), offset[1] + 0.5, 0.0))
+    import anymesher.structural_pipeline as module
+    calls = []
+    original = module.inverse_interpolate
+
+    def observed(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "inverse_interpolate", observed)
+    stub = _Stub(_PlanarView())
+    actual = StructuralMeshingPipeline._linear_face_parameter_hit(
+        stub, mesh, 1, point[0], point[1], point, [7], _ConnectivityIndex(mesh, stub),
+    )
+    previous = _previous_routine(mesh, 1, point[0], point[1], point, [7], stub.view)
+    assert calls, "Ambiguous roundoff-scale coordinates must use the original inverter"
+    assert (actual is None) == (previous is None)
+
+
 def test_face_local_coordinates_are_cached_for_one_application_only():
     rng = np.random.default_rng(3)
     mesh = _random_linear_mesh(rng, cells=4)
@@ -195,3 +239,53 @@ def test_face_local_coordinates_are_cached_for_one_application_only():
     fresh = _ConnectivityIndex(mesh, stub)
     StructuralMeshingPipeline._linear_face_parameter_hit(stub, mesh, 1, 2.1, 0.7, point, element_ids, fresh)
     assert view.calls == 2 * first_application
+
+def _huge_span_mesh(family: str) -> Mesh:
+    """One planar element whose face-local UV box spans 1e6 per axis."""
+
+    mesh = Mesh()
+    mesh.nodes.update({
+        1: np.array((0.0, 0.0, 0.0)),
+        2: np.array((1.0e6, 0.0, 0.0)),
+        3: np.array((1.0e6, 1.0e6, 0.0)),
+        4: np.array((0.0, 1.0e6, 0.0)),
+    })
+    if family == "Q4":
+        mesh.quads[7] = (1, 2, 3, 4)
+    else:
+        mesh.tris[7] = (1, 2, 4)
+    return mesh
+
+
+@pytest.mark.parametrize("family", ["Q4", "T3"])
+def test_large_span_target_just_outside_the_box_is_still_found(family):
+    # inverse_interpolate admits natural coordinates out to
+    # max(1e-10, 1e-8 / extent); on a 1e6-span element that acceptance reaches
+    # 1e-4 beyond the corner box, far past the constant 1e-6 margin, so the
+    # screen must widen with the span or it drops an accepted hit.
+    mesh = _huge_span_mesh(family)
+    point = np.array((-1.0e-5, 0.5, 0.0))
+    reference = _previous_routine(mesh, 1, -1.0e-5, 0.5, point, [7], _PlanarView())
+    assert reference is not None
+    stub = _Stub(_PlanarView())
+    current = StructuralMeshingPipeline._linear_face_parameter_hit(
+        stub, mesh, 1, -1.0e-5, 0.5, point, [7], _ConnectivityIndex(mesh, stub),
+    )
+    assert _same(reference, current)
+
+
+def test_large_span_target_far_outside_is_skipped_before_inversion(monkeypatch):
+    # The widened screen must stay a pure prefilter: a target beyond the
+    # inversion's own acceptance reach is still skipped without inverting.
+    mesh = _huge_span_mesh("Q4")
+    import anymesher.structural_pipeline as module
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("an element outside the target box must not be inverted")
+
+    monkeypatch.setattr(module, "inverse_interpolate", forbidden)
+    stub = _Stub(_PlanarView())
+    point = np.array((-1.0, 0.5, 0.0))
+    assert StructuralMeshingPipeline._linear_face_parameter_hit(
+        stub, mesh, 1, -1.0, 0.5, point, [7], _ConnectivityIndex(mesh, stub),
+    ) is None

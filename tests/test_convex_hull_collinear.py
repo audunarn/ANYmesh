@@ -78,3 +78,24 @@ def test_exactly_collinear_bottom_stations_are_all_retained():
 def test_strict_hull_still_has_only_strict_vertices():
     points = np.array([(0.0, 0.0), (0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
     assert set(_convex_hull(points)) == {0, 2, 3, 4}
+
+def test_squared_length_overflow_keeps_the_collinear_station():
+    # |edge|^2 = 2e308 overflows float64, which made the projection fraction
+    # -0.0 and dropped station 3 from the retained boundary.
+    points = np.array([(0.0, 0.0), (1.0e154, 1.0e154), (1.0e154, 0.0),
+                       (5.0e153, 5.0e153)])
+    hull = _convex_hull(points, retain_collinear=True)
+    assert set(hull) == _exact_boundary(points)
+    assert hull == [0, 2, 1, 3]
+
+
+def test_overflowed_edge_keeps_stations_in_order():
+    # Fractions 0.25, 0.75 and 1 - 1e-254 along the overflowed diagonal edge
+    # must appear in station order between the strict vertices 1 and 0; the
+    # last one rounds to 1.0 in float64, so the gate must be exact there.
+    points = np.array([(0.0, 0.0), (1.0e154, 1.0e154), (1.0e154, 0.0),
+                       (1.0e-100, 1.0e-100), (2.5e153, 2.5e153),
+                       (7.5e153, 7.5e153)])
+    hull = _convex_hull(points, retain_collinear=True)
+    assert set(hull) == _exact_boundary(points)
+    assert hull == [0, 2, 1, 5, 4, 3]

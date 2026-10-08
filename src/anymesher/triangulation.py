@@ -863,6 +863,27 @@ def _edge_incidence(triangles: Sequence[tuple[int, int, int]]) -> dict[tuple[int
     return result
 
 
+def _exact_edge_fraction(start: np.ndarray, end: np.ndarray,
+                         node: np.ndarray) -> Fraction | None:
+    """Exact projection fraction of node on the segment from start to end.
+
+    Squared segment lengths overflow float64 from 1e154-scale coordinates
+    onward, which silently drops retained collinear stations.  Rational
+    arithmetic on the stored coordinates cannot overflow; ``None`` marks a
+    degenerate segment with no interior stations.
+    """
+    start_x, start_y = Fraction(float(start[0])), Fraction(float(start[1]))
+    end_x, end_y = Fraction(float(end[0])), Fraction(float(end[1]))
+    delta_x, delta_y = end_x - start_x, end_y - start_y
+    length2 = delta_x * delta_x + delta_y * delta_y
+    if length2 == 0:
+        return None
+    return (
+        (Fraction(float(node[0])) - start_x) * delta_x
+        + (Fraction(float(node[1])) - start_y) * delta_y
+    ) / length2
+
+
 def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
                  cancellation_check: Callable[[str], None] | None = None) -> list[int]:
     """Return the finite hull in CCW order using the adaptive predicate.
@@ -872,7 +893,9 @@ def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
     along that edge.  The monotone chain provides the strict vertices; collinear
     retention inside the chain dropped exactly collinear stations, so the edge
     stations are added here with exact orientation tests on the candidates that
-    a float prefilter selects.
+    a float prefilter selects.  Where the prefilter's or the projection's float
+    arithmetic overflows, rational fallback arithmetic supplies the screening
+    decision and the fraction; the orientation predicate is never approximated.
     """
     order = sorted(range(len(points)), key=lambda node: (*points[node], node))
     chains: list[list[int]] = []
@@ -903,8 +926,12 @@ def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
         relative = coordinates - coordinates[start_node]
         cross = direction[0] * relative[:, 1] - direction[1] * relative[:, 0]
         tolerance = 1.0e-9 * scale * max(float(np.sqrt(length2)), 1.0)
-        between: list[tuple[float, int]] = []
-        for candidate in np.flatnonzero(np.abs(cross) <= tolerance):
+        between: list[tuple[float | Fraction, int]] = []
+        # Screening and projection squares overflow from 1e154-scale
+        # coordinates; an overflowed value is handed to the exact predicate and
+        # the rational fraction instead of rejecting the station.
+        screen = (np.abs(cross) <= tolerance) | ~np.isfinite(cross)
+        for candidate in np.flatnonzero(screen):
             node = int(candidate)
             if node in vertex_set:
                 continue
@@ -912,8 +939,14 @@ def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
                 cancellation_check("python triangulation convex hull")
             if orient2d(points[start_node], points[end_node], points[node]) != 0.0:
                 continue
-            fraction = float(relative[node] @ direction) / length2
-            if 0.0 < fraction < 1.0:
+            numerator = float(relative[node] @ direction)
+            if isfinite(numerator) and isfinite(length2) and length2 > 0.0:
+                fraction = numerator / length2
+            else:
+                fraction = _exact_edge_fraction(
+                    coordinates[start_node], coordinates[end_node], coordinates[node]
+                )
+            if fraction is not None and 0.0 < fraction < 1.0:
                 between.append((fraction, node))
         result.extend(node for _, node in sorted(between))
     return result
