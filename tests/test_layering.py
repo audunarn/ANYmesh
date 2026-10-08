@@ -43,12 +43,14 @@ FORBIDDEN = frozenset(
     }
 )
 
-# Modules allowed one extra module-level import, because the feature is optional
-# and the module is only reached when the corresponding extra is installed.
-# Anything not listed here must be imported inside the function that needs it,
-# so that importing the package never requires an optional dependency.
+# Modules allowed one extra third-party import, because the feature is optional
+# and the module is only reached when the corresponding extra is installed.  The
+# import may sit at module level or inside the function that needs it.  Anything
+# not listed here must be imported inside the function that needs it, so that
+# importing the package never requires an optional dependency.
 OPTIONAL_IMPORT_EXCEPTIONS: dict[str, frozenset[str]] = {
     "backends/gmsh.py": frozenset({"gmsh"}),
+    "_parallel_pool.py": frozenset({"threadpoolctl"}),
 }
 
 

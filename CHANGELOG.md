@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Require ANYgeometry 0.4.5, the version that ANYgeometry commit a534b0d declares
+  in source and in its independently built wheel. The authored-root and
+  material-surface paths import owner APIs that the earlier pins (26e7e3c,
+  830220b, 2879048) do not provide. The release wheel check and all CI jobs
+  pin that same commit.
+
+- Declare threadpoolctl as the optional `diagnostics` extra for the per-worker
+  thread-count report. Without it the report records the counts as unknown.
+  The private authored-project adapter no longer imports ANYfem; its two ANYfem
+  checks are passed in as a `ProjectReferenceScope`.
+
+- Keep stations that lie exactly on a hull edge in the boundary used by the
+  finite-hull completeness check (`_convex_hull(..., retain_collinear=True)`).
+  The monotone chain had dropped them, so the Python backend could not mesh
+  the thin hybrid triangle case. The quad-first MCF expectations in
+  `tests/quad_first_planar/test_pq6_geometry_mcf.py` are re-baselined to the
+  complete 81-triangle seed; the public area stays 8.5. Four tests that need an
+  installed or pinned ANYgeometry wheel now skip with a stated reason when this
+  environment imports a source checkout.
+
+- Skip element candidates that cannot satisfy the parametric inversion when a
+  curved attachment station lies on a linear host face, and cache face-local
+  coordinates for one connectivity application. Results are identical; on the
+  15 m barge single pass the connectivity stage drops by about a fifth
+  (27.1 s -> 21.0 s wall, interleaved, identical mesh digest).
+
+- Mesh a planar face in its physical chart whatever else the model contains.
+  Previously a face that was the only face of its model was meshed in raw
+  parameter units, so a plate with sides other than one metre was sized
+  incorrectly (a 2 x 1 m plate had a mean edge of 0.29 m instead of 0.18 m as
+  in a larger model). The face-count condition and its parallel-route
+  workaround are removed. Unit-square plates and multi-face models are
+  unchanged.
+
 - Add opt-in component-parallel meshing: `generate_hybrid_mesh_result_parallel`
   meshes components that ANYgeometry's `plan_independent_components` certifies
   as independent in separate processes and joins them. Components travel as

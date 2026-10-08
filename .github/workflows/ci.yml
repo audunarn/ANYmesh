@@ -24,7 +24,7 @@ jobs:
           repository: audunarn/ANYgeometry
           # Exercise the current owner chart/recovery contracts. Historical
           # qualification jobs below retain their independently frozen inputs.
-          ref: 2879048bbe5f779992220ad44c2cd2f4e3edd3cb
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 830220b1d1c742bc1eb9c9b40a774b0dc77278bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - run: python -m pip install --upgrade pip
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 830220b1d1c742bc1eb9c9b40a774b0dc77278bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -105,7 +105,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 830220b1d1c742bc1eb9c9b40a774b0dc77278bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -136,7 +136,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 830220b1d1c742bc1eb9c9b40a774b0dc77278bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -175,7 +175,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 830220b1d1c742bc1eb9c9b40a774b0dc77278bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -208,7 +208,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 830220b1d1c742bc1eb9c9b40a774b0dc77278bc
+          ref: a534b0d3782af9007b71edb30b923fc96232be67
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5

@@ -29,6 +29,10 @@ def _fixture():
     return module.build_fixture("size2")
 
 
+@pytest.mark.skipif(
+    '.whl' not in str(anygeometry.__file__).lower(),
+    reason='needs the exact pinned ANYgeometry wheel imported (tools/authored_pair_fixture.py); this environment imports a source checkout',
+)
 def test_source_bound_s3_preparation_uses_fresh_owner_and_preserves_cells(monkeypatch):
     fixture = _fixture()
     staged = fixture.staged

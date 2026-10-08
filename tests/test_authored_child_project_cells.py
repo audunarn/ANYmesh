@@ -1,5 +1,7 @@
 """Literal child membership is separate from complete mesh admission."""
 
+from functools import partial
+
 import numpy as np
 import pytest
 
@@ -9,16 +11,27 @@ from anyfem import Project
 from anyfem.model.attributes import LineLoad
 from anyfem.model.regions import ManualRegion, Region, RegionDomain, RegionRef
 from anyfem.prepared_reference_scope import (
-    PreparedReferenceScopeError, query_prepared_project_reference_scope,
+    PreparedReferenceScopeError, assert_authored_root_face_scope,
+    query_prepared_project_reference_scope,
+    validate_prepared_project_reference_scope,
 )
 from anymesher._authored_component_stage import AuthoredComponentPublication
-from anymesher._authored_project_references import validate_authored_child_project_cells
+from anymesher import _authored_project_references as references
 from anymesher._authored_scope_binding import BoundAuthoredRootInputs
 from anymesher.boundary import GlobalEdgeBoundaryRegistry
 from anymesher.errors import MeshError
 from anymesher.mesh import Mesh
 from anymesher.meshing_view import GeometryMeshingView
 from anymesher.native_v2 import ComponentSeedRegistry
+
+# The adapter takes ANYfem's two checks as an argument; bind them once here.
+ANYFEM_REFERENCE_SCOPE = references.ProjectReferenceScope(
+    validate=validate_prepared_project_reference_scope,
+    assert_face_scope=assert_authored_root_face_scope,
+)
+validate_authored_child_project_cells = partial(
+    references.validate_authored_child_project_cells, reference_scope=ANYFEM_REFERENCE_SCOPE,
+)
 
 
 def child_pressure_candidate():
