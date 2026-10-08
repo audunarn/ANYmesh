@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Skip element candidates that cannot satisfy the parametric inversion when a
+  curved attachment station lies on a linear host face, and cache face-local
+  coordinates for one connectivity application. Results are identical; on the
+  15 m barge single pass the connectivity stage drops by about a fifth
+  (27.1 s -> 21.0 s wall, interleaved, identical mesh digest).
+
 - Add opt-in component-parallel meshing: `generate_hybrid_mesh_result_parallel`
   meshes components that ANYgeometry's `plan_independent_components` certifies
   as independent in separate processes and joins them. Components travel as

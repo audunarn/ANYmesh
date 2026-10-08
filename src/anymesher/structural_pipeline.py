@@ -294,6 +294,14 @@ class _FaceTargetIndex:
         self.tolerance = float(tolerance)
 
 
+# Residual tolerance of the parametric inversion in _linear_face_parameter_hit
+# is 1e-8.  A bilinear or linear image lies in the convex hull of its corners,
+# so a target farther than this margin outside an element's corner box can
+# never be accepted by that inversion.  The margin is two orders of magnitude
+# above the residual tolerance, so skipping such elements cannot change a result.
+_LINEAR_HIT_MARGIN = 1.0e-6
+
+
 class _ConnectivityIndex:
     """Coupling indexes whose lifetime is one ``apply_connectivity`` call.
 
@@ -311,6 +319,24 @@ class _ConnectivityIndex:
         self._faces: dict[int, _FaceTargetIndex] = {}
         self._edge_filters: dict[int, frozenset[int]] = {}
         self._beam_couplings: dict[int, Coupling] | None = None
+        self._face_uv: dict[tuple[int, float, float, float], np.ndarray] = {}
+
+    def face_local_uv(self, face_id: int, xyz: np.ndarray) -> np.ndarray:
+        """Face-local coordinates of one node, cached for this application.
+
+        The view and the node coordinates are fixed while connectivity is applied,
+        so the result depends only on the face and the coordinates.  Entries live
+        exactly as long as this index, i.e. one ``apply_connectivity`` call.
+        """
+
+        key = (int(face_id), float(xyz[0]), float(xyz[1]), float(xyz[2]))
+        value = self._face_uv.get(key)
+        if value is None:
+            value = np.asarray(
+                self._pipeline.view.face_local_uv(face_id, xyz), dtype=float
+            )
+            self._face_uv[key] = value
+        return value
 
     def face(self, face_id: int) -> _FaceTargetIndex:
         key = int(face_id)
@@ -803,6 +829,7 @@ class StructuralMeshingPipeline:
     def _linear_face_parameter_hit(
         self, mesh: Mesh, face_id: int, u: float, v: float,
         point: np.ndarray, element_ids: Iterable[int],
+        index: "_ConnectivityIndex | None" = None,
     ) -> tuple[tuple[int, ...], tuple[float, ...], np.ndarray] | None:
         """Locate a curved source station on its declared linear host face.
 
@@ -810,6 +837,10 @@ class StructuralMeshingPipeline:
         Its source UV, however, must belong to an element on the declared
         target face.  The resulting physical gap remains in the coupling
         eccentricity; it is never erased by a proximity weld.
+
+        Elements whose corner UV box lies more than ``_LINEAR_HIT_MARGIN`` from
+        the target are skipped before any inversion; they could not be accepted.
+        ``index`` supplies cached face-local coordinates for one application.
         """
         candidates = []
         target = np.array((float(u), float(v), 0.0))
@@ -823,7 +854,14 @@ class StructuralMeshingPipeline:
                 continue
             nodes = tuple(int(node) for node in body)
             coords = np.asarray([mesh.nodes[node] for node in nodes], dtype=float)
-            uv = np.asarray([self.view.face_local_uv(face_id, xyz) for xyz in coords])
+            if index is None:
+                uv = np.asarray([self.view.face_local_uv(face_id, xyz) for xyz in coords], dtype=float)
+            else:
+                uv = np.asarray([index.face_local_uv(face_id, xyz) for xyz in coords], dtype=float)
+            lower, upper = uv.min(axis=0), uv.max(axis=0)
+            if (np.any(target[:2] < lower - _LINEAR_HIT_MARGIN)
+                    or np.any(target[:2] > upper + _LINEAR_HIT_MARGIN)):
+                continue
             parametric = np.column_stack((uv, np.zeros(len(nodes))))
             hit = inverse_interpolate(family, parametric, target, tolerance=1e-8)
             if hit is None:
@@ -969,7 +1007,8 @@ class StructuralMeshingPipeline:
             linear_hit = None
             if hit is None and not mesh.is_quadratic:
                 linear_hit = self._linear_face_parameter_hit(
-                    mesh, target_face_id, u, v, np.asarray(point, dtype=float), allowed
+                    mesh, target_face_id, u, v, np.asarray(point, dtype=float), allowed,
+                    index,
                 )
             if hit is None and linear_hit is None:
                 return None, PreflightIssue(
