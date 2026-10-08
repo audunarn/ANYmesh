@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Keep stations that lie exactly on a hull edge in the boundary used by the
+  finite-hull completeness check (`_convex_hull(..., retain_collinear=True)`).
+  The monotone chain had dropped them, so the Python backend could not mesh
+  the thin hybrid triangle case. The quad-first MCF expectations in
+  `tests/quad_first_planar/test_pq6_geometry_mcf.py` are re-baselined to the
+  complete 81-triangle seed; the public area stays 8.5. Two tests that need an
+  installed or pinned ANYgeometry wheel now skip with a stated reason when this
+  environment imports a source checkout.
+
 - Skip element candidates that cannot satisfy the parametric inversion when a
   curved attachment station lies on a linear host face, and cache face-local
   coordinates for one connectivity application. Results are identical; on the

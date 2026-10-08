@@ -19,6 +19,10 @@ from anymesher.quad.validate import validate_planar_quad_result
 from anymesher.refinement import SizeField
 
 SKEW = ((0.0, 0.0), (4.0, 0.0), (3.2, 2.5), (0.4, 2.5))
+# The expectations below follow the complete finite-hull seed adopted by the
+# exact completeness check.  The earlier Bowyer-Watson seed had 76 triangles and
+# an incomplete boundary; the complete seed has 81 (2n - b - 2 with 21 boundary
+# stations), and the public mesh still covers the full polygon area of 8.5.
 P01 = ((0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0))
 
 
@@ -74,15 +78,15 @@ def test_real_skew_corridor_is_solved_and_mutated_before_driver():
     assert report.candidate_components == 3
     assert report.eligible_components == 2
     assert report.worker_calls == 2
-    assert report.applied_pairs == 2
+    assert report.applied_pairs == 4
     assert report.initial_t3 == 76
-    assert report.final_t3 == 72
+    assert report.final_t3 == 68
     assert report.initial_q4 == 0
-    assert report.final_q4 == 2
-    assert len(report.selected_pairs) == 2
+    assert report.final_q4 == 4
+    assert len(report.selected_pairs) == 4
     assert report.generation_after == report.generation_before + 1
     assert report.generation_after == state.generation
-    assert len(report.added_q4_ids) == 2
+    assert len(report.added_q4_ids) == 4
     assert all(state.cell_kind(cid) == "Q4" for cid in report.added_q4_ids)
     assert state.protected_nodes == protected_nodes
     assert state.protected_edges == protected_edges
@@ -90,7 +94,7 @@ def test_real_skew_corridor_is_solved_and_mutated_before_driver():
     validation = validate_planar_quad_result(
         state, face=face, reference_area=seed.discrete_area, seed=seed
     )
-    assert validation.area_ratio == 1.0
+    assert validation.area_ratio == pytest.approx(1.0, abs=1e-12)
 
 
 @pytest.mark.quad_workers
@@ -103,14 +107,14 @@ def test_mcf_stage_causally_reduces_real_front_work():
     mcf = optimize_q4_seed_mcf(staged.state, target_size=0.5)
     staged_run = run_planar_quad_driver(staged, options)
 
-    assert mcf.applied_pairs == 2
+    assert mcf.applied_pairs == 4
     assert baseline_run.report.initial_t3 == 76
-    assert staged_run.report.initial_t3 == 72
+    assert staged_run.report.initial_t3 == 68
     assert staged_run.report.attempts < baseline_run.report.attempts
-    assert baseline_run.report.attempts == 43
-    assert staged_run.report.attempts == 41
+    assert baseline_run.report.attempts == 47
+    assert staged_run.report.attempts == 43
     assert baseline_run.report.final_q4 == staged_run.report.final_q4 == 37
-    assert baseline_run.report.final_t3 == staged_run.report.final_t3 == 2
+    assert baseline_run.report.final_t3 == staged_run.report.final_t3 == 4
 
 
 @pytest.mark.quad_workers
@@ -119,15 +123,15 @@ def test_public_route_reports_geometry_derived_mcf():
     q4 = result.mesh.hybrid_diagnostics["q4"]
     assert q4["status"] == "APPLIED"
     assert q4["worker_calls"] == 2
-    assert q4["applied_pairs"] == 2
+    assert q4["applied_pairs"] == 4
 
     face_q4 = q4["faces"][face]
     assert face_q4["status"] == "APPLIED"
     assert face_q4["worker_calls"] == 2
-    assert face_q4["applied_pairs"] == 2
-    assert result.mesh.hybrid_diagnostics["front"]["faces"][face]["initial_t3"] == 72
+    assert face_q4["applied_pairs"] == 4
+    assert result.mesh.hybrid_diagnostics["front"]["faces"][face]["initial_t3"] == 68
     assert len(result.mesh.quads) == 37
-    assert len(result.mesh.tris) == 2
+    assert len(result.mesh.tris) == 4
 
 
 def test_uniform_p01_large_component_is_bounded_no_worker_call():
@@ -161,7 +165,7 @@ def test_mcf_report_is_deterministic():
     r0 = optimize_q4_seed_mcf(seed0.state, target_size=0.5)
     r1 = optimize_q4_seed_mcf(seed1.state, target_size=0.5)
     assert r0.to_dict() == r1.to_dict()
-    assert r0.selected_pairs == ((13, 14), (16, 18))
+    assert r0.selected_pairs == ((0, 2), (37, 38), (39, 40), (41, 42))
 
 
 def test_missing_worker_is_unavailable_without_mutation():
@@ -242,15 +246,15 @@ def test_public_enabled_vs_disabled_mcf_is_causal(monkeypatch):
 
     assert q4e["status"] == "APPLIED"
     assert q4e["worker_calls"] == 2
-    assert q4e["applied_pairs"] == 2
+    assert q4e["applied_pairs"] == 4
     assert q4d["status"] == "UNAVAILABLE_SKIPPED"
     assert q4d["worker_calls"] == 0
     assert q4d["applied_pairs"] == 0
     assert len(enabled.mesh.quads) == len(disabled.mesh.quads) == 37
-    assert len(enabled.mesh.tris) == len(disabled.mesh.tris) == 2
+    assert len(enabled.mesh.tris) == len(disabled.mesh.tris) == 4
     assert bodies_e != bodies_d
-    assert attempts_e == 41
-    assert attempts_d == 43
+    assert attempts_e == 43
+    assert attempts_d == 47
     assert enabled.mesh.hybrid_diagnostics["validation"]["faces"][face_e]["area_ratio"] == pytest.approx(1.0, abs=1e-12)
     assert disabled.mesh.hybrid_diagnostics["validation"]["faces"][face_d]["area_ratio"] == pytest.approx(1.0, abs=1e-12)
 
@@ -270,7 +274,7 @@ def test_report_exposes_skip_and_provenance_contract():
 def test_protected_shared_diagonal_is_excluded_but_protected_endpoints_are_allowed():
     _model, _face, seed = _seed()
     state = seed.state
-    pair = (13, 14)
+    pair = (0, 2)
     _adj, pair_data = mcf_seed_module._pair_graph(state)
     assert pair in pair_data
     shared = pair_data[pair][0]

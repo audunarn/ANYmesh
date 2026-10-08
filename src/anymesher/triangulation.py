@@ -865,7 +865,15 @@ def _edge_incidence(triangles: Sequence[tuple[int, int, int]]) -> dict[tuple[int
 
 def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
                  cancellation_check: Callable[[str], None] | None = None) -> list[int]:
-    """Return the finite hull in CCW order using the adaptive predicate."""
+    """Return the finite hull in CCW order using the adaptive predicate.
+
+    Without ``retain_collinear`` only strictly convex vertices are returned.  With
+    it, every station lying exactly on a hull edge is also returned, in order
+    along that edge.  The monotone chain provides the strict vertices; collinear
+    retention inside the chain dropped exactly collinear stations, so the edge
+    stations are added here with exact orientation tests on the candidates that
+    a float prefilter selects.
+    """
     order = sorted(range(len(points)), key=lambda node: (*points[node], node))
     chains: list[list[int]] = []
     for sequence in (order, reversed(order)):
@@ -875,12 +883,40 @@ def _convex_hull(points: np.ndarray, *, retain_collinear: bool = False,
                 cancellation_check("python triangulation convex hull")
             while len(chain) > 1:
                 turn = orient2d(points[chain[-2]], points[chain[-1]], points[node])
-                if turn > 0.0 or (retain_collinear and turn == 0.0):
+                if turn > 0.0:
                     break
                 chain.pop()
             chain.append(node)
         chains.append(chain[:-1])
-    return chains[0] + chains[1]
+    vertices = chains[0] + chains[1]
+    if not retain_collinear or len(vertices) < 3:
+        return vertices
+    coordinates = np.asarray(points, dtype=float)
+    scale = max(float(np.max(np.abs(coordinates))), 1.0)
+    vertex_set = set(vertices)
+    result: list[int] = []
+    for position, start_node in enumerate(vertices):
+        end_node = vertices[(position + 1) % len(vertices)]
+        result.append(start_node)
+        direction = coordinates[end_node] - coordinates[start_node]
+        length2 = float(direction @ direction)
+        relative = coordinates - coordinates[start_node]
+        cross = direction[0] * relative[:, 1] - direction[1] * relative[:, 0]
+        tolerance = 1.0e-9 * scale * max(float(np.sqrt(length2)), 1.0)
+        between: list[tuple[float, int]] = []
+        for candidate in np.flatnonzero(np.abs(cross) <= tolerance):
+            node = int(candidate)
+            if node in vertex_set:
+                continue
+            if cancellation_check is not None:
+                cancellation_check("python triangulation convex hull")
+            if orient2d(points[start_node], points[end_node], points[node]) != 0.0:
+                continue
+            fraction = float(relative[node] @ direction) / length2
+            if 0.0 < fraction < 1.0:
+                between.append((fraction, node))
+        result.extend(node for _, node in sorted(between))
+    return result
 
 
 def _complete_hull_seed(points: np.ndarray, triangles: Sequence[tuple[int, int, int]],
