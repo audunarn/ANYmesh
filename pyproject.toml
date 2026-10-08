@@ -44,6 +44,9 @@ gui3d = ["ANYtk3D>=0.2.1,<0.3"]
 # Deprecated compatibility backend.  It is never selected automatically and
 # remains outside the production dependency path.
 gmsh = ["gmsh>=4.11"]
+# Optional runtime introspection of BLAS/OpenMP thread counts in parallel workers.
+# Without it the worker reports those counts as unknown.
+diagnostics = ["threadpoolctl>=3.0"]
 dev = [
   "build>=1.2",
   "pytest>=8",

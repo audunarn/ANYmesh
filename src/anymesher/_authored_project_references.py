@@ -1,9 +1,13 @@
-"""Private consumer of ANYfem's preparation-bound reference visibility.
+"""Private checks for ANYfem's preparation-bound reference visibility.
+
+ANYmesher does not import ANYfem (tests/test_layering.py forbids it).  The two
+ANYfem checks used here arrive as a ProjectReferenceScope argument.
 
 This does not qualify child/cell membership or activate authored-root meshing.
 Root-only association is refused when the project has a child-local reference.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from numbers import Integral
 
@@ -13,6 +17,19 @@ from ._authored_scope_binding import BoundAuthoredRootInputs
 from ._authored_associations import AuthoredRootAssociations
 from .boundary import GlobalEdgeBoundaryRegistry
 from .errors import MeshError
+
+
+@dataclass(frozen=True)
+class ProjectReferenceScope:
+    """ANYfem's prepared-reference checks, supplied by the caller.
+
+    ``validate`` and ``assert_face_scope`` wrap
+    ``anyfem.prepared_reference_scope.validate_prepared_project_reference_scope``
+    and ``assert_authored_root_face_scope``.
+    """
+
+    validate: Callable[..., None]
+    assert_face_scope: Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -45,20 +62,16 @@ class AuthoredChildMembershipEvidence:
 
 def bind_authored_project_references(
     project, prepared_geometry, bound: BoundAuthoredRootInputs, manifest,
-    *, closure=None,
+    *, reference_scope: ProjectReferenceScope, closure=None,
 ) -> BoundAuthoredProjectReferences:
     """Require complete fresh input scope before planning root associations."""
     try:
-        from anyfem.prepared_reference_scope import (
-            assert_authored_root_face_scope,
-            validate_prepared_project_reference_scope,
-        )
         from anygeometry import validate_prepared_model_scope_binding
     except ImportError as error:
-        raise MeshError("prepared project reference capability is unavailable") from error
+        raise MeshError("prepared model scope capability is unavailable") from error
     if not isinstance(bound, BoundAuthoredRootInputs):
         raise MeshError("authored project references need a bound owner root")
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, manifest, closure=closure,
     )
     validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
@@ -71,7 +84,7 @@ def bind_authored_project_references(
     )
     if descendants is None or tuple(descendants) != bound.descendants:
         raise MeshError("project references do not cover the complete authored root")
-    assert_authored_root_face_scope(
+    reference_scope.assert_face_scope(
         manifest, bound.authored_face, bound.descendants,
     )
     source_rows = tuple(
@@ -80,7 +93,7 @@ def bind_authored_project_references(
     if len(source_rows) != 1:
         raise MeshError("authored root lacks one explicit project source identity")
     _root, namespace, source_face = source_rows[0]
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, manifest, closure=closure,
     )
     return BoundAuthoredProjectReferences(
@@ -92,16 +105,13 @@ def bind_authored_project_references(
 
 def validate_required_project_constraints(
     project, prepared_geometry, binding: BoundAuthoredProjectReferences,
-    mesh, boundary_registry: GlobalEdgeBoundaryRegistry, *, closure=None,
+    mesh, boundary_registry: GlobalEdgeBoundaryRegistry, *,
+    reference_scope: ProjectReferenceScope, closure=None,
 ) -> None:
     """Check exact retained edge chains and vertices, not inferred proximity."""
-    try:
-        from anyfem.prepared_reference_scope import validate_prepared_project_reference_scope
-    except ImportError as error:
-        raise MeshError("prepared project reference capability is unavailable") from error
     if not isinstance(binding, BoundAuthoredProjectReferences):
         raise MeshError("required project constraints need a bound manifest")
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, binding.manifest, closure=closure,
     )
 
@@ -160,7 +170,7 @@ def validate_required_project_constraints(
                 or np.linalg.norm(xyz - prepared_geometry.vertex_position(vertex_id))
                 > boundary_registry.view.effective_length()):
             raise MeshError(f"required project vertex {vertex_id} has altered coordinates")
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, binding.manifest, closure=closure,
     )
 
@@ -168,7 +178,7 @@ def validate_required_project_constraints(
 def validate_authored_project_stage(
     project, prepared_geometry, bound: BoundAuthoredRootInputs, manifest,
     associations: AuthoredRootAssociations, mesh, boundary_registry,
-    *, closure=None,
+    *, reference_scope: ProjectReferenceScope, closure=None,
 ) -> None:
     """Preflight source scope immediately before a separate full mesh gate.
 
@@ -177,12 +187,12 @@ def validate_authored_project_stage(
     limits before using an atomic publication holder.
     """
     try:
-        from anyfem.prepared_reference_scope import validate_prepared_project_reference_scope
         from anygeometry import validate_prepared_model_scope_binding
     except ImportError as error:
-        raise MeshError("prepared project reference capability is unavailable") from error
+        raise MeshError("prepared model scope capability is unavailable") from error
     reference = bind_authored_project_references(
-        project, prepared_geometry, bound, manifest, closure=closure,
+        project, prepared_geometry, bound, manifest,
+        reference_scope=reference_scope, closure=closure,
     )
     if (reference.source_namespace != "project_authored"
             or reference.source_face != bound.authored_face):
@@ -207,10 +217,10 @@ def validate_authored_project_stage(
         raise MeshError("authored project stage lacks exact root-local source associations")
     validate_required_project_constraints(
         project, prepared_geometry, reference, mesh, boundary_registry,
-        closure=closure,
+        reference_scope=reference_scope, closure=closure,
     )
     validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, manifest, closure=closure,
     )
 
@@ -218,7 +228,8 @@ def validate_authored_project_stage(
 def validate_authored_child_project_cells(
     project, prepared_geometry, bound: BoundAuthoredRootInputs, manifest,
     correspondence, mesh, boundary_registry, element_to_child,
-    node_authored_uv, *, closure=None, cancellation_check=None,
+    node_authored_uv, *, reference_scope: ProjectReferenceScope,
+    closure=None, cancellation_check=None,
 ) -> AuthoredChildMembershipEvidence:
     """Prove the literal planar child partition of linear root-owned cells.
 
@@ -228,7 +239,6 @@ def validate_authored_child_project_cells(
     mesh-publication authority.
     """
     try:
-        from anyfem.prepared_reference_scope import validate_prepared_project_reference_scope
         from anygeometry import (
             evaluate_prepared_authored_face,
             validate_prepared_authored_boundary_correspondence_binding,
@@ -240,7 +250,7 @@ def validate_authored_child_project_cells(
         raise MeshError("authored child coverage capability is unavailable") from error
     if not isinstance(bound, BoundAuthoredRootInputs):
         raise MeshError("authored child cells need a bound owner root")
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, manifest, closure=closure,
     )
     validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
@@ -355,10 +365,10 @@ def validate_authored_child_project_cells(
     )
     validate_required_project_constraints(
         project, prepared_geometry, reference, mesh, boundary_registry,
-        closure=closure,
+        reference_scope=reference_scope, closure=closure,
     )
     validate_prepared_model_scope_binding(prepared_geometry, bound.scope)
-    validate_prepared_project_reference_scope(
+    reference_scope.validate(
         project, prepared_geometry, manifest, closure=closure,
     )
     return AuthoredChildMembershipEvidence(

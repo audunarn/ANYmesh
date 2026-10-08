@@ -1,6 +1,7 @@
 """ANYfem input visibility is a prerequisite, not authored-root permission."""
 
 from dataclasses import replace
+from functools import partial
 
 import numpy as np
 import pytest
@@ -11,12 +12,11 @@ from anyfem import Project
 from anyfem.model.attributes import LineLoad
 from anyfem.model.regions import ManualRegion, Region, RegionDomain, RegionRef
 from anyfem.prepared_reference_scope import (
-    PreparedReferenceScopeError, query_prepared_project_reference_scope,
+    PreparedReferenceScopeError, assert_authored_root_face_scope,
+    query_prepared_project_reference_scope,
+    validate_prepared_project_reference_scope,
 )
-from anymesher._authored_project_references import (
-    bind_authored_project_references, validate_authored_project_stage,
-    validate_required_project_constraints,
-)
+from anymesher import _authored_project_references as references
 from anymesher._authored_associations import plan_authored_root_associations
 from anymesher._authored_component_stage import AuthoredComponentPublication
 from anymesher._authored_scope_binding import (
@@ -27,6 +27,21 @@ from anymesher.errors import MeshError
 from anymesher.mesh import Mesh
 from anymesher.meshing_view import GeometryMeshingView
 from anymesher.native_v2 import ComponentSeedRegistry
+
+# The adapter takes ANYfem's two checks as an argument; bind them once here.
+ANYFEM_REFERENCE_SCOPE = references.ProjectReferenceScope(
+    validate=validate_prepared_project_reference_scope,
+    assert_face_scope=assert_authored_root_face_scope,
+)
+bind_authored_project_references = partial(
+    references.bind_authored_project_references, reference_scope=ANYFEM_REFERENCE_SCOPE,
+)
+validate_authored_project_stage = partial(
+    references.validate_authored_project_stage, reference_scope=ANYFEM_REFERENCE_SCOPE,
+)
+validate_required_project_constraints = partial(
+    references.validate_required_project_constraints, reference_scope=ANYFEM_REFERENCE_SCOPE,
+)
 
 
 def simple_project(*, line_load=False):
