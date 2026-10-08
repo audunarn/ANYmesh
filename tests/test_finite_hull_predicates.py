@@ -17,6 +17,16 @@ QUAD = (
     (0.6992455092045259, 0.2712115739737215),
 )
 
+# Binary-coordinate rectangle captured from the schema6 849-point candidate.
+# Decimal arithmetic at fixed precision produced nonzero signs for this exact
+# cocircular input, allowing two opposite diagonal flips indefinitely.
+RECTANGLE = (
+    (0.7127416614545834, 0.0),
+    (0.6924154054183753, 0.020156360163291708),
+    (0.6924154054183753, 0.0),
+    (0.7127416614545834, 0.020156360163291708),
+)
+
 
 def exact_sign(a, b, c, d):
     (ax, ay), (bx, by), (cx, cy), (dx, dy) = (
@@ -37,3 +47,14 @@ def test_near_collinear_incircle_sign_matches_exact_binary_input(indices):
     points = tuple(QUAD[index] for index in indices)
     result = incircle(*points)
     assert int(result > 0) - int(result < 0) == exact_sign(*points)
+
+
+@pytest.mark.parametrize('indices', tuple(permutations(range(4))))
+def test_cocircular_incircle_is_exactly_zero_for_binary_rectangle(indices):
+    points = tuple(RECTANGLE[index] for index in indices)
+    assert exact_sign(*points) == 0
+    assert incircle(*points) == 0.0
+
+
+def test_cocircular_fallback_reads_only_the_two_planar_coordinates():
+    assert incircle(*(point + ("unused",) for point in RECTANGLE)) == 0.0
