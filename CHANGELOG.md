@@ -7,7 +7,7 @@
   The monotone chain had dropped them, so the Python backend could not mesh
   the thin hybrid triangle case. The quad-first MCF expectations in
   `tests/quad_first_planar/test_pq6_geometry_mcf.py` are re-baselined to the
-  complete 81-triangle seed; the public area stays 8.5. Two tests that need an
+  complete 81-triangle seed; the public area stays 8.5. Four tests that need an
   installed or pinned ANYgeometry wheel now skip with a stated reason when this
   environment imports a source checkout.
 
