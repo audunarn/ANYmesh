@@ -321,8 +321,7 @@ def _plain_plates(count: int) -> GeometryModel:
 
 
 def test_native_strategy_single_face_components_match_the_whole_model_run(pool):
-    """The planar chart metric depends on the model's face count; a component
-    meshed alone must still produce the whole-model mesh."""
+    """A component meshed alone must still produce the whole-model mesh."""
 
     model = _plain_plates(3)
     serial = generate_hybrid_mesh_result(model, target_size=TARGET, strategy="native")
@@ -334,8 +333,8 @@ def test_native_strategy_single_face_components_match_the_whole_model_run(pool):
         parallel=ParallelOptions(pool_lease=pool),
     )
     assert parallel.mesh.hybrid_diagnostics["parallel"]["used"] is True
-    # Premise: a plate meshed alone differs from the same plate in a larger model.
-    assert alone.mesh.num_elements * 3 != serial.mesh.num_elements
+    # Three identical plates: each meshes exactly as one plate alone does.
+    assert alone.mesh.num_elements * 3 == serial.mesh.num_elements
     assert _signature(parallel.mesh) == _signature(serial.mesh)
 
 
