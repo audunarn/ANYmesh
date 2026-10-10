@@ -295,6 +295,68 @@ def _native_chart_uv(geometry: GeometryModel, face: Any, face_id: int, point: An
     return geometry.face_local_uv(face_id, point)
 
 
+def _native_planar_support(geometry: GeometryModel, face_id: int) -> Plane | None:
+    """The Plane whose affine coordinates are this face's own ``(u, v)``.
+
+    A face created without a surface carries a topology-backed Coons marker.
+    ``face_point`` blends its four sides, each parameterized by arc length.
+    When every side is one straight segment and the corners form a
+    parallelogram, that blend is exactly the affine map of a Plane through
+    the corners. Native meshing then uses the Plane's physical metric chart
+    instead of the unit parameter square, which would stretch every element
+    by the side-length ratio. Lifting still evaluates the owner face. Any
+    other support returns None and keeps its parameter chart.
+    """
+    face = geometry.faces[face_id]
+    surface = face.surface
+    if isinstance(surface, Plane):
+        return surface
+    if (
+        getattr(face, "parameterization", None) is not None
+        or not isinstance(surface, CoonsSurface)
+        or surface.has_boundaries
+        or len(face.corners) != 4
+    ):
+        return None
+    sides = face.sides()
+    corners = [
+        np.asarray(geometry.face_point(face_id, u, v), dtype=float)
+        for u, v in ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
+    ]
+    origin, first, second, opposite = corners
+    u_vector, v_vector = first - origin, second - origin
+    extent = max(float(np.linalg.norm(point - origin)) for point in corners)
+    tolerance = geometry.tolerance.effective_length(extent)
+    if float(np.linalg.norm(np.cross(u_vector, v_vector))) <= tolerance * extent:
+        return None
+    if float(np.linalg.norm(opposite - first - second + origin)) > tolerance:
+        return None
+    for side in sides:
+        if not side or any(
+            not isinstance(geometry.edges[item.edge].curve, Straight) for item in side
+        ):
+            return None
+        start = np.asarray(
+            geometry.vertex_position(geometry.oriented_start_vertex(side[0])), dtype=float
+        )
+        end = np.asarray(
+            geometry.vertex_position(geometry.oriented_end_vertex(side[-1])), dtype=float
+        )
+        lengths = [float(geometry.edge_length(item.edge)) for item in side]
+        total = sum(lengths)
+        travelled = 0.0
+        for item, length in zip(side[:-1], lengths):
+            travelled += length
+            joint = np.asarray(
+                geometry.vertex_position(geometry.oriented_end_vertex(item)), dtype=float
+            )
+            # Arc-length chains are linear only if each joint sits at its
+            # length fraction of one straight segment.
+            if float(np.linalg.norm(joint - (start + travelled / total * (end - start)))) > tolerance:
+                return None
+    return Plane(origin, u_vector, v_vector)
+
+
 def _blocked_preflight(states: Sequence[Any]) -> tuple[Any, ...]:
     blocked = []
     for state in states:
@@ -1347,6 +1409,7 @@ def _mesh_native_face(
     _cylindrical_binding: Any = None,
     _material_region_binding: Any = None,
     _material_input_eligibility: Any = None,
+    _respect_growth_limit: bool = False,
 ) -> dict[str, Any]:
     if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
         from ._cylindrical_recombine import assert_face_open
@@ -1355,6 +1418,7 @@ def _mesh_native_face(
     boundary_started = perf_counter()
     _check_cancellation(cancellation_check, f"native face {face_id} boundary start")
     face = geometry.faces[face_id]
+    planar_support = _native_planar_support(geometry, face_id)
     quadratic = order == "quadratic"
     if _material_region_binding is not None:
         _material_region_binding.validate(cancellation_check)
@@ -1434,11 +1498,11 @@ def _mesh_native_face(
             cylindrical_chart.circumferential_length,
             cylindrical_chart.axial_length,
         ))
-    if isinstance(face.surface, Plane):
+    if planar_support is not None:
         # The chart is the physical metric of the plane, so the target size is
         # applied in metres whatever else the model contains.
-        u_vector = np.asarray(face.surface.u_vector, dtype=float)
-        v_vector = np.asarray(face.surface.v_vector, dtype=float)
+        u_vector = np.asarray(planar_support.u_vector, dtype=float)
+        v_vector = np.asarray(planar_support.v_vector, dtype=float)
         metric = np.asarray(
             (
                 (float(np.dot(u_vector, u_vector)), float(np.dot(u_vector, v_vector))),
@@ -1470,9 +1534,9 @@ def _mesh_native_face(
 
     require_analytic_choice()
     physical_jacobian = np.column_stack((
-        np.asarray(face.surface.u_vector, dtype=np.float64),
-        np.asarray(face.surface.v_vector, dtype=np.float64),
-    )) @ chart_inverse.T if isinstance(face.surface, Plane) else None
+        np.asarray(planar_support.u_vector, dtype=np.float64),
+        np.asarray(planar_support.v_vector, dtype=np.float64),
+    )) @ chart_inverse.T if planar_support is not None else None
     metric_to_physical = None
     if analytic_chart is not None:
         physical_jacobian = analytic_chart.jacobians
@@ -1480,10 +1544,10 @@ def _mesh_native_face(
     if cylindrical_chart is not None:
         physical_jacobian = cylindrical_chart.jacobians
         metric_to_physical = cylindrical_chart.evaluate
-    if isinstance(face.surface, Plane):
-        metric_origin = np.asarray(face.surface.origin, dtype=np.float64)
-        metric_u = np.asarray(face.surface.u_vector, dtype=np.float64)
-        metric_v = np.asarray(face.surface.v_vector, dtype=np.float64)
+    if planar_support is not None:
+        metric_origin = np.asarray(planar_support.origin, dtype=np.float64)
+        metric_u = np.asarray(planar_support.u_vector, dtype=np.float64)
+        metric_v = np.asarray(planar_support.v_vector, dtype=np.float64)
 
         def metric_to_physical(chart_points: np.ndarray) -> np.ndarray:
             parameter_points = np.asarray(chart_points, dtype=np.float64) @ chart_inverse
@@ -1693,9 +1757,10 @@ def _mesh_native_face(
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
             _preserve_spatial_refinement=(cylindrical_chart is not None or analytic_chart is not None),
-            _polish_quality_candidates=isinstance(face.surface, Plane),
+            _polish_quality_candidates=planar_support is not None,
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
+            _respect_growth_limit=_respect_growth_limit,
             options=(
                 SurfaceMeshOptions(
                     target_size=chart_size, recombine=recombine, order=order,
@@ -1776,9 +1841,10 @@ def _mesh_native_face(
             _component_seed_registry=component_seed_registry,
             _supplemental_metric_field=supplemental_metric_field,
             _preserve_spatial_refinement=(cylindrical_chart is not None or analytic_chart is not None),
-            _polish_quality_candidates=isinstance(face.surface, Plane),
+            _polish_quality_candidates=planar_support is not None,
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
+            _respect_growth_limit=_respect_growth_limit,
         )
         if _material_region_binding is not None:
             primary_output_origin = getattr(core, '_output_row_provenance', None)
@@ -1786,7 +1852,7 @@ def _mesh_native_face(
                 primary_output_entry = (primary_output_origin.source_by_row,
                                         primary_output_origin.source_to_row)
         if (
-            isinstance(face.surface, Plane)
+            planar_support is not None
             and not np.allclose(chart_transform, np.eye(2), rtol=1.0e-12, atol=1.0e-14)
             and not surface_diagnostics.get("quality_policy", {}).get(
                 "accepted", True
@@ -1816,6 +1882,7 @@ def _mesh_native_face(
                 _automatically_seeded_shared_segments=automatically_seeded_shared_segments,
                 _component_seed_registry=component_seed_registry,
                 _supplemental_metric_field=supplemental_metric_field,
+                _respect_growth_limit=_respect_growth_limit,
             )
             # The parameter chart may scale/shear lengths and angles. Its
             # apparent quality cannot replace a physically better candidate.
@@ -4588,6 +4655,7 @@ def generate_hybrid_mesh_result(
     _evaluate_declared_junction_alignment: bool = True,
     _refine_declared_junction_transition: bool = False,
     _defer_finalization: bool = False,
+    _respect_native_growth_limit: bool = False,
 ) -> HybridMeshResult | _HybridCandidateContext:
     """Generate a model-bound mapped/native mesh from an explicit ownership policy.
 
@@ -5450,6 +5518,7 @@ def generate_hybrid_mesh_result(
             _cylindrical_binding=None if quadratic_cylinder else cylindrical_bindings.get(face_id),
             _material_region_binding=material_region_binding,
             _material_input_eligibility=material_input_eligibility,
+            _respect_growth_limit=_respect_native_growth_limit,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
         if material_region_binding is not None:
@@ -5861,23 +5930,78 @@ def generate_hybrid_mesh_result(
         )
         if repaired_mesh is None:
             fallback_message = _quality_rejection_message(fallback_quality)
-            raise StructuredQualityRejected(
+            rejection = (
                 f"{message}; automatic native fallback also rejected: "
                 f"{fallback_message}; declared-junction transition repair "
                 "did not produce an accepted candidate"
             )
-        # with_mesh invalidates any earlier qualified-S3 record: the
-        # repair moved candidate nodes, so the record no longer describes
-        # the repaired shell.
-        fallback = fallback.with_mesh(repaired_mesh)
-        fallback.extra_diagnostics["junction_growth_repair"] = dict(
-            repair_diagnostics
-        )
-        fallback_quality = repaired_quality
-        _check_cancellation(
-            cancellation_check,
-            "declared-junction transition repair accepted",
-        )
+            if not fallback_quality["growth_violation_count"]:
+                raise StructuredQualityRejected(rejection)
+            # Native selection prefers boundary-collar candidates for their
+            # alignment even when their recombined cells break the growth
+            # limit this gate enforces. As the last candidate, let selection
+            # respect that limit; like the other alternates it is qualified
+            # for S3 only once selected, below.
+            growth_limited = _adopt(generate_hybrid_mesh_result(
+                source_geometry,
+                target_size=target_size,
+                strategy=MeshingStrategy.AUTO,
+                native_options=native_options,
+                overrides=overrides,
+                beam_edges=requested_beam_edges,
+                beam_offsets=beam_offsets,
+                member_ids=requested_member_ids,
+                face_ids=requested_face_ids,
+                seeding=requested_seeding,
+                refinements=requested_refinements,
+                order=order,
+                recombine=recombine,
+                native_backend=native_backend,
+                structured_options=None,
+                structural_preparation=structural_preparation,
+                overlap_policy=overlap_policy,
+                mutation_policy=mutation_policy,
+                certification_mode=certification_mode,
+                change_set=change_set,
+                audit_policy=audit_policy,
+                cancellation_check=cancellation_check,
+                _native_surface_options=structured_report.plan.options,
+                _defer_finalization=True,
+                _respect_native_growth_limit=True,
+            ))
+            growth_limited_quality = _structured_quality_report(
+                growth_limited.mesh,
+                structured_report.plan.options,
+            )
+            if not growth_limited_quality["accepted"]:
+                raise StructuredQualityRejected(
+                    f"{rejection}; growth-limited native candidate also "
+                    f"rejected: {_quality_rejection_message(growth_limited_quality)}"
+                )
+            growth_limited.extra_diagnostics["growth_limited_native_candidate"] = {
+                "reason": "native_fallback_element_growth",
+                "rejected_fallback_quality": fallback_quality,
+                "accepted_quality": growth_limited_quality,
+            }
+            fallback = growth_limited
+            fallback_quality = growth_limited_quality
+            _check_cancellation(
+                cancellation_check,
+                "growth-limited native candidate accepted",
+            )
+        else:
+            # with_mesh invalidates any earlier qualified-S3 record: the
+            # repair moved candidate nodes, so the record no longer describes
+            # the repaired shell.
+            fallback = fallback.with_mesh(repaired_mesh)
+            fallback.extra_diagnostics["junction_growth_repair"] = dict(
+                repair_diagnostics
+            )
+            fallback_quality = repaired_quality
+            _check_cancellation(
+                cancellation_check,
+                "declared-junction transition repair accepted",
+            )
     fallback_metrics = regularity_metrics(
         fallback.mesh,
         target_size=target_size,

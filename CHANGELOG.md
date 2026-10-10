@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Mesh a face created without a surface in its physical chart when its
+  topology Coons map is exactly affine (four straight sides, parallelogram
+  corners). Such a face with a neutral hole was meshed in its unit parameter
+  square, so a 2 x 0.5 m strip produced 4:1 stretched cells and qualified-S3
+  admission refused its slivers (minimum angles down to 5.7 degrees). The face
+  now meshes exactly like the same plate built with `add_plate`. Trapezoids,
+  curved sides and explicit Coons boundaries keep their parameter chart.
+
+- End the structured route's fallback chain with one growth-limited native
+  candidate. Native selection prefers a boundary-collar candidate for its
+  alignment even when its recombined cells break the element-growth limit;
+  the collar corners of rectangular plates reach growth 1.56-1.88. A plate
+  with a circular hole, which always goes native, was therefore often rejected
+  on growth (the 2 x 0.5 m strip at every size tried) although the baseline
+  candidate (growth about 1.2) was admissible. When the chain would otherwise
+  raise `StructuredQualityRejected` on growth, it now meshes once more with a
+  selection in which such a collar cannot outrank a baseline that meets the
+  limit, and accepts that candidate only if it passes the same gate.
+  `mesh.hybrid_diagnostics["growth_limited_native_candidate"]` records it.
+  Meshes the chain already accepted are unchanged. Candidate diagnostics also
+  report each candidate's `published_growth`.
+
+- Give `punch_circular_hole` patches the planar support of their parent: the
+  parent's Plane, or for a face without one a Plane in the validated face plane
+  that keeps the face orientation and covers the face. The patches previously
+  had topology Coons markers, which an arc side leaves without analytic or
+  bilinear support, so structural intersection planning refused any model with
+  more than one face.
+
 - Require ANYgeometry 0.4.5, the version that ANYgeometry commit a534b0d declares
   in source and in its independently built wheel. The authored-root and
   material-surface paths import owner APIs that the earlier pins (26e7e3c,

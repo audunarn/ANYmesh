@@ -1395,6 +1395,25 @@ def _candidate_selection_key(
 
 def _published_quality_report(core,settings,quality,threshold_report):
     """Report the actual mixed cells; retain discarded T3 evidence separately."""
+    maximum_growth,growth_poor=_published_growth(core,settings.max_element_growth)
+    poor=sorted(set(threshold_report['poor_element_ids'])|growth_poor)
+    counts=threshold_report['violation_counts'];worst=threshold_report['worst']
+    return {'quality_scope':'published_elements','invalid_element_count':0,
+        'elements_above_aspect_ratio_5':int(sum(np.count_nonzero(group.aspect_ratio>5.)
+            for group in (quality.triangles,quality.quadrilaterals))),
+        'quality_violation_count':len(poor),
+        'elements_below_minimum_angle':counts['minimum_angle'],
+        'elements_above_maximum_angle':counts['maximum_angle'],
+        'elements_below_minimum_scaled_jacobian':counts['scaled_jacobian'],
+        'elements_above_maximum_growth':len(growth_poor),
+        'max_aspect_ratio':worst['maximum_aspect_ratio'],
+        'min_scaled_jacobian':worst['minimum_scaled_jacobian'],
+        'min_angle':worst['minimum_angle'],'max_angle':worst['maximum_angle'],
+        'max_element_growth':maximum_growth,'poor_element_ids':poor,'repair_element_ids':poor}
+
+
+def _published_growth(core,limit):
+    """Largest adjacent mixed-cell size ratio and the cells above ``limit``."""
     # Read contiguous active corner rows once. Dictionary views allocate and
     # resolve stable IDs for each corner, making repeated local scoring costly.
     lengths,edges,owners,identifiers=[],[],[],[]
@@ -1426,22 +1445,9 @@ def _published_quality_report(core,settings,quality,threshold_report):
             ratios=np.where(np.minimum(lengths[first],lengths[second])>0,
                 np.maximum(lengths[first]/lengths[second],lengths[second]/lengths[first]),np.inf)
         maximum_growth=max(1.,float(np.max(ratios,initial=1.)))
-        failed=ratios>settings.max_element_growth
+        failed=ratios>limit
         growth_poor=set(map(int,identifiers[np.r_[first[failed],second[failed]]]))
-    poor=sorted(set(threshold_report['poor_element_ids'])|growth_poor)
-    counts=threshold_report['violation_counts'];worst=threshold_report['worst']
-    return {'quality_scope':'published_elements','invalid_element_count':0,
-        'elements_above_aspect_ratio_5':int(sum(np.count_nonzero(group.aspect_ratio>5.)
-            for group in (quality.triangles,quality.quadrilaterals))),
-        'quality_violation_count':len(poor),
-        'elements_below_minimum_angle':counts['minimum_angle'],
-        'elements_above_maximum_angle':counts['maximum_angle'],
-        'elements_below_minimum_scaled_jacobian':counts['scaled_jacobian'],
-        'elements_above_maximum_growth':len(growth_poor),
-        'max_aspect_ratio':worst['maximum_aspect_ratio'],
-        'min_scaled_jacobian':worst['minimum_scaled_jacobian'],
-        'min_angle':worst['minimum_angle'],'max_angle':worst['maximum_angle'],
-        'max_element_growth':maximum_growth,'poor_element_ids':poor,'repair_element_ids':poor}
+    return maximum_growth,growth_poor
 
 
 def _physical_quality_candidate(candidate, settings, evaluate_coordinates):
@@ -2202,6 +2208,18 @@ def _quality_not_worse(
     )
 
 
+def _growth_not_worse(
+    candidate: dict[str, Any],
+    baseline: dict[str, Any],
+) -> bool:
+    if not baseline["elements_above_maximum"]:
+        return not candidate["elements_above_maximum"]
+    return (
+        candidate["elements_above_maximum"] <= baseline["elements_above_maximum"]
+        and candidate["maximum"] <= baseline["maximum"] * (1.0 + 1.0e-12)
+    )
+
+
 def _active_connectivity_key(mesh: MeshCore) -> tuple[Any, ...]:
     triangles = tuple(
         tuple(map(int, mesh.triangle_connectivity[row, :3]))
@@ -2249,6 +2267,9 @@ def _prepare_recombined_path(
     report, quality = _qualified_recombination(
         core, triangulation.segments, settings, cancellation_check
     )
+    published_growth, growth_poor = _published_growth(
+        report.mesh, settings.max_element_growth
+    )
     outer_edges, hole_edges = _boundary_edge_groups(outer, holes)
     published = report.mesh
     if physical_evaluator is not None:
@@ -2269,6 +2290,10 @@ def _prepare_recombined_path(
             published, best.points, hole_edges
         ),
         "max_element_growth": float(best.report["max_element_growth"]),
+        "published_growth": {
+            "maximum": float(published_growth),
+            "elements_above_maximum": len(growth_poor),
+        },
         "seconds": perf_counter() - started,
     }
 
@@ -2457,11 +2482,15 @@ def mesh_planar_surface(
     _boundary_is_seeded: bool = False,
     _polish_quality_candidates: bool = False,
     _protected_node_ids: Mapping[int, int] | None = None,
+    _respect_growth_limit: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
     Cancellation phase names are diagnostic. The callback is checked only at
     safe boundaries, so latency is bounded by the current uninterrupted phase.
+    ``_respect_growth_limit`` keeps a boundary-collar candidate whose
+    recombined cells break ``max_element_growth`` from outranking a baseline
+    that meets it.
     """
 
     if cancellation_check is not None:
@@ -2810,6 +2839,13 @@ def mesh_planar_surface(
             value["quality_eligible"] = index == 0 or (
                 value["alignment_qualified"]
                 and _quality_not_worse(value["quality_policy"], baseline_policy)
+                and (
+                    not _respect_growth_limit
+                    or _growth_not_worse(
+                        value["published_growth"],
+                        baseline_published["published_growth"],
+                    )
+                )
             )
         selected_published = min(published_candidates, key=_recombined_path_key)
         selected = selected_published["path"]
@@ -2922,6 +2958,7 @@ def mesh_planar_surface(
                     "max_element_growth": float(
                         published["max_element_growth"]
                     ),
+                    "published_growth": dict(published["published_growth"]),
                 }
             )
     if cancellation_check is not None:

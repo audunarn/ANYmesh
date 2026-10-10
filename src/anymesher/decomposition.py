@@ -19,6 +19,7 @@ from anygeometry.entities import EntityRef, Face, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
 from anygeometry.operations import surface_point
+from anygeometry.surfaces import Plane
 
 from ._mapped_fold import mapped_face_folds
 
@@ -600,6 +601,7 @@ def punch_circular_hole(
         geometry.add_line(corner_vertices[index], ring_vertices[index])
         for index in range(4)
     ]
+    support = _patch_support(geometry, face, normal, origin)
 
     # Record only the semantic one-to-many replacement below.  Recording this
     # physical removal as a deletion first would make selection and attribute
@@ -616,7 +618,9 @@ def punch_circular_hole(
             OrientedEdge(spokes[index], False),
         )
         corners = (0, len(outer), len(outer) + 1, len(outer) + 2)
-        faces.append(geometry.add_face_from_loop(face_loop, corners))
+        faces.append(
+            geometry.add_face_from_loop(face_loop, corners, surface=support)
+        )
     geometry.record_replacement(
         EntityRef("face", face_id),
         tuple(EntityRef("face", made) for made in faces),
@@ -652,6 +656,39 @@ def _plane_of(
             "circle in any one plane. Punch the hole in a planar plate."
         )
     return normal, origin
+
+
+def _patch_support(
+    geometry: GeometryModel, face: Face, normal: np.ndarray, origin: np.ndarray
+) -> Plane:
+    """The planar support every butterfly patch shares with its parent.
+
+    Without an explicit surface a patch gets a topology Coons marker.  With
+    an arc among its sides that marker is neither bilinear nor a qualified
+    plane, so structural preparation refuses the patch.  A Plane parent is
+    kept as it is.  Otherwise the validated plane of the face is oriented
+    like the face and framed to cover its conservative bounds, because a
+    Plane face projects only onto its unit parameter square.
+    """
+    if isinstance(face.surface, Plane):
+        return face.surface
+    if float(np.asarray(geometry.face_normal(face.id, 0.5, 0.5)) @ normal) < 0.0:
+        normal = -normal
+    bounds = geometry.conservative_face_bounds(face.id)
+    if bounds is None:
+        raise GeometryError(f"face {face.id} has no bounds to frame its plane")
+    lower, upper = np.asarray(bounds[:3], dtype=float), np.asarray(bounds[3:], dtype=float)
+    box = np.array(
+        [[(upper if bit else lower)[axis] for axis, bit in enumerate(index)]
+         for index in np.ndindex(2, 2, 2)]
+    )
+    basis_u, basis_v = _plane_basis(normal)
+    first, second = (box - origin) @ basis_u, (box - origin) @ basis_v
+    return Plane(
+        origin + first.min() * basis_u + second.min() * basis_v,
+        (first.max() - first.min()) * basis_u,
+        (second.max() - second.min()) * basis_v,
+    )
 
 
 def _plane_basis(normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
