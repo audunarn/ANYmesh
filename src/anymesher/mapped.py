@@ -359,6 +359,48 @@ def _offset_target_faces(
     return tuple(sorted(face for face in faces if face in geometry.faces))
 
 
+def _owner_normals_around(
+    geometry: GeometryModel,
+    mesh: Mesh,
+    sequence: Sequence[int],
+    edge_id: int,
+) -> Dict[int, np.ndarray]:
+    """The owner face's normal for every shell element touching a beam line.
+
+    A scalar offset stands a stiffener off along the nodal normal.  Averaging raw
+    element normals would make its sign follow each element's winding, which
+    follows the face loop on one meshing route and the face's chart on another;
+    the fallback for a node without shell elements already uses the face normal.
+    Aligning every element with ``face_normal`` at its centroid makes the offset
+    side the face's normal side on every route, triangles included.
+    """
+
+    stations = set(int(node) for node in sequence)
+    owner_of = {
+        int(element): int(face_id)
+        for face_id, elements in mesh.elements_of_face.items()
+        for element in elements
+    }
+    owners: Dict[int, np.ndarray] = {}
+    for element_id, nodes in mesh.shells.items():
+        if not stations.intersection(int(node) for node in nodes):
+            continue
+        face_id = owner_of.get(int(element_id))
+        if face_id is None or face_id not in geometry.faces:
+            raise MeshError(
+                f"line {edge_id} has a scalar beam eccentricity but shell element "
+                f"{int(element_id)} at it has no owner face to orient its normal"
+            )
+        centroid = np.mean(
+            [mesh.nodes[node] for node in mesh.corners_of(element_id)], axis=0
+        )
+        _projected, uv, _distance = geometry.project_to_face(face_id, centroid)
+        owners[int(element_id)] = np.asarray(
+            geometry.face_normal(face_id, *uv), dtype=float
+        )
+    return owners
+
+
 def _attached_face_normal(
     geometry: GeometryModel,
     face_ids: Sequence[int],
@@ -423,7 +465,11 @@ def _build_offset_nodes(
     vector_offset = raw_offset if len(raw_offset) == 3 else None
     normals: Dict[int, np.ndarray] = {}
     if vector_offset is None:
-        normals = nodal_normals(mesh)
+        normals = nodal_normals(
+            mesh,
+            element_owner_normals=_owner_normals_around(geometry, mesh, sequence, edge_id),
+            include_triangles=True,
+        )
         for node in sequence:
             if node not in normals:
                 normals[node] = _attached_face_normal(
