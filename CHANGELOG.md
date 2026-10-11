@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Behaviour change.** A scalar beam eccentricity now stands a stiffener off on the side of its
+  plate's surface normal (`GeometryModel.face_normal`) on every meshing route. The nodal normal
+  averaged raw element normals, so the mapped route took the face loop's side, while nodes
+  without quads fell back to the face normal. A plate whose loop opposes its explicit surface
+  (for example a clockwise loop on a +z `Plane`) therefore got its stiffener on the opposite side
+  depending on the route. Element normals at a beam line are now aligned with their owner face's
+  normal, and triangles count. An element there without an owner face refuses. Vector
+  eccentricities are unchanged. See MIGRATION.md.
+
 - Mesh a face created without a surface in its physical chart when its
   topology Coons map is exactly affine (four straight sides, parallelogram
   corners). Such a face with a neutral hole was meshed in its unit parameter

@@ -1,5 +1,26 @@
 # Migration to ANYmesher
 
+## Scalar beam eccentricity follows the face normal (unreleased)
+
+A scalar `beam_offsets` value is now applied along the plate's surface normal
+(`GeometryModel.face_normal`) on every meshing route; vector offsets are unchanged.
+Only these models change:
+
+- Models with a scalar eccentricity on a plate whose loop winding opposes its surface normal
+  (typically an explicit `Plane` with a clockwise loop as seen from its normal). A mapped mesh
+  used to put the stiffener on the loop's side; it now goes on the normal's side.
+- Models where a beam line meets plates at an angle. Triangles now count in the average.
+
+What to do:
+
+- Remesh and re-solve affected models before reusing their results.
+- An archived mesh keeps the side it was made with.
+- To keep the old side, flip the plate's surface normal or the sign of the eccentricity, or give
+  an explicit offset vector.
+- Downstream code that compares archived meshes with new ones should check the actual offset
+  vectors. ANYfem submodelling does this and refuses an archived parent with the old side
+  (`SUBMODEL_OFFSET_SIDE`).
+
 ## Geometry authority extracted to ANYgeometry (2026-08-08)
 
 The reusable geometry kernel has moved again, this time to its final neutral
