@@ -68,11 +68,13 @@ from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.timing import record_quad_stage, timed_quad_call
 from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain
 from .quad.driver import run_planar_quad_driver
+from .quad import high_order as _high_order
 from .quad.high_order import (
     HighOrderBoundaryMidside,
     HighOrderGeometryReport,
     HighOrderMeshCertificate,
     ValidityStatus,
+    _certify_mapping_validity_batch,
     certify_mapping_validity,
     evaluate_mapping,
 )
@@ -2786,6 +2788,67 @@ def _quad_first_apply_qualified_s3(
     return replace(result, mesh=prepared_mesh)
 
 
+_PROMOTION_SCALAR_CERTIFIER = certify_mapping_validity
+
+
+def _validate_promoted_element_family(nodes, elements, family):
+    """Validate final shells in sorted order with bounded native-array chunks."""
+    def require_positive(element_id, report):
+        if report.status is not ValidityStatus.CERTIFIED_POSITIVE:
+            raise MeshError(
+                f"quadratic promotion final {family} element {element_id} is "
+                f"{report.status.value}"
+            )
+
+    # Do not prefetch custom coordinate conversions or custom evaluators past
+    # an earlier failing element. Native ndarray metadata checks have no user
+    # callbacks; malformed native values are handled in scalar consumption order.
+    native = (
+        certify_mapping_validity is _PROMOTION_SCALAR_CERTIFIER
+        and _high_order.certify_mapping_validity is certify_mapping_validity
+        and type(nodes) is dict and type(elements) is dict
+        and all(type(node) is int for node in nodes)
+        and all(type(element_id) is int for element_id in elements)
+        and all(type(value) is np.ndarray and value.dtype == np.dtype(np.float64)
+                and value.shape == (3,) for value in nodes.values())
+        and all(type(body) is tuple and len(body) == (8 if family == "Q8" else 6)
+                and all(type(node) is int for node in body)
+                for body in elements.values())
+    )
+    ordered = iter(sorted(elements.items()))
+    if not native:
+        for element_id, body in ordered:
+            coordinates = np.asarray([nodes[node] for node in body], dtype=float)
+            require_positive(element_id, certify_mapping_validity(coordinates, family))
+        return
+    while True:
+        records = []
+        gathering_error = None
+        for _ in range(256):
+            try:
+                element_id, body = next(ordered)
+            except StopIteration:
+                break
+            try:
+                coordinates = np.asarray([nodes[node] for node in body], dtype=float)
+            except Exception as error:
+                gathering_error = (element_id, body, error, error.__traceback__)
+                break
+            records.append((element_id, coordinates))
+        if records:
+            batch = np.stack([row for _, row in records])
+            for (element_id, _), report in zip(
+                records, _certify_mapping_validity_batch(batch, family),
+            ):
+                require_positive(element_id, report)
+        if gathering_error is not None:
+            # Earlier certificate failures have already been raised.
+            _, _, error, traceback = gathering_error
+            raise error.with_traceback(traceback)
+        if not records:
+            break
+
+
 def _promote_quad_first_quadratic(
     mesh: Mesh,
     geometry: GeometryModel,
@@ -3138,22 +3201,8 @@ def _promote_quad_first_quadratic(
 
     # Final strict CH1 validity gate on the exact connectivity to be published.
     strict_started = perf_counter()
-    for element_id, body in sorted(new_quads.items()):
-        coordinates = np.asarray([new_nodes[node] for node in body], dtype=float)
-        report = certify_mapping_validity(coordinates, "Q8")
-        if report.status is not ValidityStatus.CERTIFIED_POSITIVE:
-            raise MeshError(
-                f"quadratic promotion final Q8 element {element_id} is "
-                f"{report.status.value}"
-            )
-    for element_id, body in sorted(new_tris.items()):
-        coordinates = np.asarray([new_nodes[node] for node in body], dtype=float)
-        report = certify_mapping_validity(coordinates, "T6")
-        if report.status is not ValidityStatus.CERTIFIED_POSITIVE:
-            raise MeshError(
-                f"quadratic promotion final T6 element {element_id} is "
-                f"{report.status.value}"
-            )
+    _validate_promoted_element_family(new_nodes, new_quads, "Q8")
+    _validate_promoted_element_family(new_nodes, new_tris, "T6")
     record_quad_stage("strict_validation", perf_counter() - strict_started)
 
     boundary_records_by_face: dict[int, list[HighOrderBoundaryMidside]] = {int(fid): [] for fid in working.elements_of_face}

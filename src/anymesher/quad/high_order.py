@@ -18,9 +18,12 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from math import comb, copysign
+from time import perf_counter
 from typing import Callable, Iterable
 
 import numpy as np
+
+from .timing import record_quad_stage
 
 
 
@@ -759,6 +762,175 @@ def certify_mapping_validity(
         witness_value, witness_param = jfun(0.0, 0.0), (0.0, 0.0)
     return ValidityReport(status, method, global_lower, global_upper, float(tol), subdivisions, depth_reached, float(witness_value), witness_param)
 
+
+
+_BATCH_SCALAR_CERTIFIER = certify_mapping_validity
+_BATCH_ROOT_FUNCTIONS = (
+    _corner_reference_normal, _scale_tolerance, _jacobian_function,
+    _square_coefficients, _tri_coefficients, _square_witness, _tri_witness,
+    _certification_gradients, _point_gradients,
+)
+_CERTIFICATION_BATCH_SIZE = 256
+_BATCH_NUMPY_ERRORS = dict(divide="warn", over="warn", under="ignore", invalid="warn")
+
+
+def _batch_root_functions_unchanged() -> bool:
+    return _BATCH_ROOT_FUNCTIONS == (
+        _corner_reference_normal, _scale_tolerance, _jacobian_function,
+        _square_coefficients, _tri_coefficients, _square_witness, _tri_witness,
+        _certification_gradients, _point_gradients,
+    )
+
+
+@lru_cache(maxsize=2)
+def _batch_root_samples(fam: ElementFamily):
+    """Reference data only, with the scalar root's exact order and signed zeros."""
+    rows = {}
+    witnesses = []
+
+    def collect(a, b):
+        key = (float(a), float(b), copysign(1., a), copysign(1., b))
+        rows.setdefault(key, len(rows))
+        return 1.
+
+    def witness(a, b):
+        collect(a, b)
+        key = (float(a), float(b), copysign(1., a), copysign(1., b))
+        witnesses.append((rows[key], (float(a), float(b))))
+        return 1.
+
+    if fam is ElementFamily.Q8:
+        root = (-1., 1., -1., 1.)
+        _square_coefficients(collect, root, 1.)
+        _square_witness(witness, root)
+    else:
+        root = np.array([[0., 0.], [1., 0.], [0., 1.]])
+        _tri_coefficients(collect, root, 1.)
+        _tri_witness(witness, root)
+    return tuple(rows), rows, tuple(witnesses)
+
+
+def _batch_root_values(xyz: np.ndarray, fam: ElementFamily, normals: np.ndarray):
+    """Batch only the outer element loop of the same tiny vector products.
+
+    Each gradient is still a strided (nnode,) vector and each coordinate core
+    is the same C-contiguous (nnode, 3) matrix as scalar certification. No
+    sample/node dimensions are merged into a larger BLAS matrix. Normal dots
+    use the original scalar np.dot; the Python scalar cross is reproduced by
+    separate multiply/subtract ufuncs, without a fused reduction.
+    """
+    started = perf_counter()
+    keys, _, _ = _batch_root_samples(fam)
+    values = np.empty((len(keys), len(xyz)), dtype=np.float64)
+    for row, key in enumerate(keys):
+        g = _certification_gradients(fam, *key)
+        dx = g[:, 0] @ xyz
+        dy = g[:, 1] @ xyz
+        cross = np.column_stack((
+            dx[:, 1]*dy[:, 2] - dx[:, 2]*dy[:, 1],
+            dx[:, 2]*dy[:, 0] - dx[:, 0]*dy[:, 2],
+            dx[:, 0]*dy[:, 1] - dx[:, 1]*dy[:, 0],
+        ))
+        values[row] = [float(np.dot(c, n)) for c, n in zip(cross, normals)]
+    record_quad_stage("strict_validation_batched_root_products", perf_counter() - started)
+    return values
+
+
+def _root_report_from_batch(values, fam, scale2, tol):
+    _, indices, witnesses = _batch_root_samples(fam)
+
+    def jfun(a, b):
+        return float(values[indices[(a, b, copysign(1., a), copysign(1., b))]])
+
+    if fam is ElementFamily.Q8:
+        coeff, guard = _square_coefficients(jfun, (-1., 1., -1., 1.), scale2)
+        method = "bernstein-square-bicubic"
+    else:
+        coeff, guard = _tri_coefficients(
+            jfun, np.array([[0., 0.], [1., 0.], [0., 1.]]), scale2,
+        )
+        method = "bernstein-triangle-degree2"
+    lower = float(np.min(coeff) - guard)
+    upper = float(np.max(coeff) + guard)
+    direct, param = float("inf"), None
+    for row, point in witnesses:
+        value = float(values[row])
+        if value < direct:
+            direct, param = value, point
+    if direct <= -tol or direct == 0.:
+        status = ValidityStatus.INVALID
+    elif lower > tol:
+        status = ValidityStatus.CERTIFIED_POSITIVE
+    else:
+        return None  # Subdivision and its complete metadata remain scalar.
+    return ValidityReport(status, method, lower, upper, float(tol), 0, 0, direct, param)
+
+
+def _certify_mapping_validity_batch(
+    nodes, family, *, max_depth=6, max_subdivisions=4096, cancellation_check=None,
+):
+    """Yield scalar-identical reports, retaining at most one 256-element chunk.
+
+    This private final-gate route admits only native packed three-coordinate
+    Q8/T6 arrays, default NumPy error handling, and no callbacks. Every other
+    route calls the public scalar function in consumption order. Preparation
+    failures are deferred to that same scalar order, so a later bad element
+    cannot replace the caller's earlier invalid-certificate failure.
+    """
+    fam = _family(family)
+    options = dict(max_depth=max_depth, max_subdivisions=max_subdivisions,
+                   cancellation_check=cancellation_check)
+    admitted = (
+        certify_mapping_validity is _BATCH_SCALAR_CERTIFIER
+        and _batch_root_functions_unchanged()
+        and fam in (ElementFamily.Q8, ElementFamily.T6)
+        and type(nodes) is np.ndarray and nodes.dtype == np.dtype(np.float64)
+        and nodes.ndim == 3 and nodes.shape[1:] == (_NODE_COUNT[fam], 3)
+        and nodes.flags.c_contiguous and cancellation_check is None
+        and type(max_depth) is int and max_depth >= 0
+        and type(max_subdivisions) is int and max_subdivisions >= 0
+        and np.geterr() == _BATCH_NUMPY_ERRORS
+    )
+    if not admitted:
+        for row in nodes:
+            yield certify_mapping_validity(row, fam, **options)
+        return
+    for start in range(0, len(nodes), _CERTIFICATION_BATCH_SIZE):
+        if (np.geterr() != _BATCH_NUMPY_ERRORS
+                or certify_mapping_validity is not _BATCH_SCALAR_CERTIFIER
+                or not _batch_root_functions_unchanged()):
+            for row in nodes[start:]:
+                yield certify_mapping_validity(row, fam, **options)
+            return
+        source = nodes[start:start + _CERTIFICATION_BATCH_SIZE]
+        xyz = source.copy(order="C")
+        safe = np.isfinite(xyz).all() and np.max(np.abs(xyz), initial=0.) <= 2.**100
+        if safe:
+            try:
+                # Keep scalar normal, norm, diameter and tolerance reductions.
+                normals = np.array([_corner_reference_normal(row, fam) for row in xyz])
+                scales = [_scale_tolerance(row, fam) for row in xyz]
+            except ValueError:
+                safe = False
+        if not safe:
+            for row in source:
+                yield certify_mapping_validity(row, fam, **options)
+            continue
+        values = _batch_root_values(xyz, fam, normals)
+        for offset in range(len(source)):
+            row = nodes[start + offset]
+            # A caller may mutate an alias or error policy between yields.
+            # Neither coordinates nor certificates are retained across calls.
+            if (row.tobytes() != xyz[offset].tobytes()
+                    or np.geterr() != _BATCH_NUMPY_ERRORS
+                    or certify_mapping_validity is not _BATCH_SCALAR_CERTIFIER
+                    or not _batch_root_functions_unchanged()):
+                report = None
+            else:
+                report = _root_report_from_batch(values[:, offset], fam, *scales[offset])
+            if report is None:
+                report = certify_mapping_validity(row, fam, **options)
+            yield report
 
 
 __all__ = [
