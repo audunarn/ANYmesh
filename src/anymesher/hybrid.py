@@ -3271,6 +3271,35 @@ _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN = 0.05
 _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES = 5.0
 
 
+_REPAIR_NATIVE_MAPPING = evaluate_mapping
+
+
+def _repair_coordinates_only_safe(nodes, normal, family):
+    """Whether the fixed-grid mapping can be omitted when only nodes are used.
+
+    This is evaluation admission, not a quality/validity decision.  All actual
+    repair decisions still evaluate the complete mapping.  The finite bound
+    keeps even squared cross products below float64 overflow on the fixed
+    Q8/T6 grids; underflow must be unobservable.  Use the original normal norm
+    operation so a zero (including underflowed) normal follows the full refusal
+    route.  Unsupported inputs likewise retain the original evaluator.
+    """
+    if (evaluate_mapping is not _REPAIR_NATIVE_MAPPING
+            or np.geterr()["under"] != "ignore"
+            or family not in ("Q8", "T6")
+            or type(nodes) is not np.ndarray
+            or type(normal) is not np.ndarray
+            or nodes.dtype != np.dtype(float)
+            or normal.dtype != np.dtype(float)
+            or nodes.shape != ((8 if family == "Q8" else 6), 3)
+            or normal.shape != (3,)):
+        return False
+    if not (np.max(np.abs(nodes)) <= float(2**200)
+            and np.max(np.abs(normal)) <= float(2**200)):
+        return False
+    return float(np.linalg.norm(normal)) > 0.0
+
+
 def _repair_quad_first_quality(
     mesh, geometry, domains_by_face, cancellation_check=None,
     protected_interior_nodes=(),
@@ -3328,7 +3357,7 @@ def _repair_quad_first_quality(
 
     sampled_by_nodes: dict[int, tuple[np.ndarray, Any]] = {}
 
-    def trial(face_id, corners, family, samples):
+    def trial(face_id, corners, family, samples, *, coordinates_only=False):
         nodes = np.asarray([mesh.nodes[n] for n in corners] + [
             midpoint(face_id, corners[i], corners[(i+1) % len(corners)])
             for i in range(len(corners))], dtype=float)
@@ -3339,6 +3368,12 @@ def _repair_quad_first_quality(
             centre = np.mean(nodes[:len(corners)], axis=0)
             u, v = geometry.face_local_uv(face_id, centre)
             normal = geometry.face_normal(face_id, u, v)
+        # The aspect scan uses only the rebuilt coordinates.  Preserve every
+        # construction/conversion before admission and evaluate these same
+        # arrays on fallback, rather than invoking owner protocols twice.
+        if (coordinates_only and type(domain) is PlanarQuadDomain
+                and _repair_coordinates_only_safe(nodes, normal, family)):
+            return None, nodes, normal
         sampled = evaluate_mapping(nodes, family, samples, reference_normal=normal)
         quality = float(np.min(sampled.normalized_quality))
         # Keep the exact immutable trial array alive until its normal check.
@@ -3570,11 +3605,13 @@ def _repair_quad_first_quality(
             for node in body:
                 incident.setdefault(int(node), set()).add((face_id, element_id))
 
-    def quality(face_id, element_id):
+    def quality(face_id, element_id, *, coordinates_only=False):
         body = mesh.quads.get(element_id)
         if body is not None:
-            return trial(face_id, body, "Q8", quad_samples)
-        return trial(face_id, mesh.tris[element_id], "T6", tri_samples)
+            return trial(face_id, body, "Q8", quad_samples,
+                         coordinates_only=coordinates_only)
+        return trial(face_id, mesh.tris[element_id], "T6", tri_samples,
+                     coordinates_only=coordinates_only)
 
     gauss, gauss_weights = np.polynomial.legendre.leggauss(8)
 
@@ -3692,7 +3729,7 @@ def _repair_quad_first_quality(
                 body = mesh.quads.get(element_id)
                 if body is None:
                     body = mesh.tris[element_id]
-                _, nodes, _ = quality(face_id, element_id)
+                _, nodes, _ = quality(face_id, element_id, coordinates_only=True)
                 edge_lengths = lengths(nodes, len(body))
                 ratio = max(edge_lengths) / min(edge_lengths)
                 if ratio <= 20.0:
