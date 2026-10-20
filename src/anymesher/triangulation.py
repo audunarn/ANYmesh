@@ -18,6 +18,7 @@ from .native import (
     NativeBoundarySelection,
     run_native_triangulation,
     snapshot_native_boundary,
+    _run_reference_native_seed,
 )
 
 __all__ = [
@@ -1613,6 +1614,7 @@ def constrained_planar_triangulation(
     backend: str | NativeBoundary | None = "auto",
     cancellation_check: Callable[[str], None] | None = None,
     protected_node_ids: Mapping[int, int] | None = None,
+    _reference_native_seed: bool = False,
 ) -> PlanarTriangulation:
     """Triangulate a planar straight-line graph.
 
@@ -1712,9 +1714,24 @@ def constrained_planar_triangulation(
     if result_triangles is None:
         if cancellation_check is not None:
             cancellation_check("python triangulation insertion start")
-        triangles = _bowyer_watson(prepared.points)
+        triangles = None
+        if _reference_native_seed and chosen == "python":
+            triangles, fallback_reason = _run_reference_native_seed(
+                prepared.points, orient2d, incircle, cancellation_check
+            )
+            if triangles is not None:
+                used_backend = selected_backend = "anymesher-cpp17-reference-seed"
+                native_diagnostics = {"reference_native_seed": True}
+        if triangles is None:
+            triangles = _bowyer_watson(prepared.points)
         if not _complete_hull_seed(prepared.points, triangles, cancellation_check):
             triangles = _finite_hull_seed(prepared.points, cancellation_check)
+            if used_backend == "anymesher-cpp17-reference-seed":
+                used_backend = "python"
+                fallback_reason = "reference_seed_incomplete_hull"
+                native_diagnostics = {
+                    "reference_native_seed": True, "insertion_discarded": True,
+                }
         protected: set[tuple[int, int]] = set()
         # ``_recover_segment`` returns the triangles unchanged when the segment
         # is already an edge; test that against one edge set, rebuilt only
@@ -1768,6 +1785,7 @@ def triangulate_polygon(
     backend: str | NativeBoundary | None = "auto",
     cancellation_check: Callable[[str], None] | None = None,
     protected_node_ids: Mapping[int, int] | None = None,
+    _reference_native_seed: bool = False,
 ) -> PlanarTriangulation:
     """Coordinate-oriented wrapper around ``constrained_planar_triangulation``."""
 
@@ -1809,4 +1827,5 @@ def triangulate_polygon(
         backend=backend,
         cancellation_check=cancellation_check,
         protected_node_ids=protected_node_ids,
+        _reference_native_seed=_reference_native_seed,
     )

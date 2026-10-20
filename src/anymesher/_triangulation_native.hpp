@@ -346,6 +346,8 @@ inline bool point_in_ring(
 class Triangulator {
 public:
     using Cancellation = void (*)(void*, const char*);
+    using ReferencePredicate = double (*)(void*, const Point&, const Point&,
+                                          const Point&, const Point*, bool);
 
     Triangulator(
         std::vector<Point> points,
@@ -353,14 +355,31 @@ public:
         std::vector<Index> outer,
         std::vector<std::vector<Index>> holes,
         Cancellation cancellation,
-        void* cancellation_context)
+        void* cancellation_context,
+        ReferencePredicate reference_predicate = nullptr)
         : points_(std::move(points)),
           segments_(std::move(segments)),
           outer_(std::move(outer)),
           holes_(std::move(holes)),
           cancellation_(cancellation),
           cancellation_context_(cancellation_context),
+          reference_predicate_(reference_predicate),
           input_count_(static_cast<Index>(points_.size())) {}
+
+    // Only accelerate the reference insertion stage.  Finite-hull fallback,
+    // constraint recovery and domain finishing stay with the Python owner.
+    std::vector<std::array<Index, 3>> run_reference_seed() {
+        add_super_triangle();
+        insert_all_points();
+        remove_super_triangles();
+        std::vector<std::array<Index, 3>> result;
+        for (const Triangle& triangle : triangles_) {
+            if (triangle.alive) result.push_back(canonical(triangle.nodes));
+        }
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+        return result;
+    }
 
     std::vector<std::array<Index, 3>> run() {
         const auto insertion_start = Clock::now();
@@ -397,6 +416,38 @@ private:
 
     static double elapsed(const Clock::time_point& start) {
         return std::chrono::duration<double>(Clock::now() - start).count();
+    }
+
+    double reference_orientation(const Point& a, const Point& b, const Point& c) const {
+        if (reference_predicate_ == nullptr) return robust_orient(a, b, c);
+        const double ax = a.x-c.x, ay = a.y-c.y;
+        const double bx = b.x-c.x, by = b.y-c.y;
+        const double determinant = ax*by-ay*bx;
+        const double error = 8.0*std::numeric_limits<double>::epsilon()*
+                             (std::abs(ax*by)+std::abs(ay*bx));
+        if (std::abs(determinant)>error) return determinant;
+        return reference_predicate_(cancellation_context_, a, b, c, nullptr, false);
+    }
+
+    double reference_circle(const Point& a, const Point& b, const Point& c,
+                            const Point& p) const {
+        if (reference_predicate_ == nullptr) return robust_incircle(a, b, c, p);
+        const double ax=a.x-p.x, ay=a.y-p.y;
+        const double bx=b.x-p.x, by=b.y-p.y;
+        const double cx=c.x-p.x, cy=c.y-p.y;
+        const double alift=ax*ax+ay*ay, blift=bx*bx+by*by, clift=cx*cx+cy*cy;
+        const double determinant = alift*(bx*cy-by*cx)
+                                 - blift*(ax*cy-ay*cx)
+                                 + clift*(ax*by-ay*bx);
+        // A wider filter than Python's fsum-based filter permits ordinary
+        // native addition only when its SIGN is unambiguous.  All uncertain
+        // decisions, including exact cocircular ties, use the Python oracle.
+        const double scale = alift*(std::abs(bx*cy)+std::abs(by*cx))
+                           + blift*(std::abs(ax*cy)+std::abs(ay*cx))
+                           + clift*(std::abs(ax*by)+std::abs(ay*bx));
+        if (std::abs(determinant)>64.0*std::numeric_limits<double>::epsilon()*scale)
+            return determinant;
+        return reference_predicate_(cancellation_context_, a, b, c, &p, true);
     }
 
     void check_cancel(const char* phase) {
@@ -449,7 +500,7 @@ private:
     }
 
     Index add_triangle(Index a, Index b, Index c) {
-        const double orientation = robust_orient(
+        const double orientation = reference_orientation(
             points_[static_cast<std::size_t>(a)],
             points_[static_cast<std::size_t>(b)],
             points_[static_cast<std::size_t>(c)]);
@@ -457,7 +508,11 @@ private:
             throw std::runtime_error("native triangulation created a zero-area cell");
         }
         if (orientation < 0.0) {
-            std::swap(b, c);
+            // Reference insertion stores (second, first, point) on a
+            // clockwise boundary edge.  Preserve that exact cyclic start:
+            // predicate arithmetic, not just final canonical order, sees it.
+            if (reference_predicate_ != nullptr) std::swap(a, b);
+            else std::swap(b, c);
         }
         const Index identifier = static_cast<Index>(triangles_.size());
         triangles_.push_back(Triangle{{a, b, c}, true});
@@ -514,7 +569,7 @@ private:
             for (int local = 0; local < 3; ++local) {
                 const Index first = triangle.nodes[local];
                 const Index second = triangle.nodes[(local + 1) % 3];
-                if (robust_orient(points_[static_cast<std::size_t>(first)],
+                if (reference_orientation(points_[static_cast<std::size_t>(first)],
                                   points_[static_cast<std::size_t>(second)],
                                   point) < 0.0) {
                     const Index next = other_triangle(Edge(first, second), current);
@@ -584,11 +639,16 @@ private:
                 if (!triangle.alive) {
                     continue;
                 }
-                const double value = robust_incircle(
+                const double value = reference_circle(
                     points_[static_cast<std::size_t>(triangle.nodes[0])],
                     points_[static_cast<std::size_t>(triangle.nodes[1])],
                     points_[static_cast<std::size_t>(triangle.nodes[2])],
                     point);
+                if (reference_predicate_ != nullptr && identifier == containing && value <= 0.0) {
+                    // Python's rare all-containing-cells fallback is owned by
+                    // Python; never replace it with the native forced cavity.
+                    throw std::runtime_error("reference insertion requires containing-cell fallback");
+                }
                 if (identifier != containing && value <= 0.0) {
                     continue;
                 }
@@ -622,7 +682,7 @@ private:
             location_seed_ = -1;
             for (const auto& entry : boundary_counts) {
                 if (entry.second == 1) {
-                    if (robust_orient(points_[entry.first.first], points_[entry.first.second], point) == 0.0) {
+                    if (reference_orientation(points_[entry.first.first], points_[entry.first.second], point) == 0.0) {
                         continue;
                     }
                     const Index made =
@@ -946,6 +1006,7 @@ private:
     std::unordered_map<Edge, Incidence, EdgeHash> incidence_;
     Cancellation cancellation_ = nullptr;
     void* cancellation_context_ = nullptr;
+    ReferencePredicate reference_predicate_ = nullptr;
     Index input_count_ = 0;
     Index alive_count_ = 0;
     Index location_seed_ = -1;
@@ -1046,6 +1107,8 @@ struct CallbackContext {
     PyObject* callback = nullptr;
     PyThreadState** released_state = nullptr;
     bool failed = false;
+    PyObject* orientation = nullptr;
+    PyObject* circle = nullptr;
 };
 
 struct CallbackFailure {};
@@ -1068,6 +1131,101 @@ inline void invoke_callback(void* raw, const char* phase) {
     if (context->failed) {
         throw CallbackFailure{};
     }
+}
+
+inline double invoke_reference_predicate(
+    void* raw, const Point& a, const Point& b, const Point& c,
+    const Point* p, bool circle) {
+    auto* context = static_cast<CallbackContext*>(raw);
+    PyEval_RestoreThread(*context->released_state);
+    *context->released_state = nullptr;
+    PyObject* result = circle
+        ? PyObject_CallFunction(context->circle, "(dd)(dd)(dd)(dd)",
+                                a.x,a.y,b.x,b.y,c.x,c.y,p->x,p->y)
+        : PyObject_CallFunction(context->orientation, "(dd)(dd)(dd)",
+                                a.x,a.y,b.x,b.y,c.x,c.y);
+    double value = 0.0;
+    if (result == nullptr) {
+        context->failed = true;
+    } else {
+        value = PyFloat_AsDouble(result);
+        Py_DECREF(result);
+        context->failed = PyErr_Occurred() != nullptr;
+    }
+    *context->released_state = PyEval_SaveThread();
+    if (context->failed) throw CallbackFailure{};
+    if (!circle) {
+        // Decimal(prec=80) is the reference contract.  If it disagrees with
+        // exact geometry, connectivity of the native cavity is not proven;
+        // let Python perform its complete reference scan instead.
+        const int exact = expansion_sign(exact_orient_expansion(a,b,c));
+        const int reference = (value>0.0)-(value<0.0);
+        if (reference != exact)
+            throw std::runtime_error("reference orientation requires full-scan fallback");
+    }
+    return value;
+}
+
+inline PyObject* py_reference_delaunay(PyObject*, PyObject* args) {
+    PyObject *points_object=nullptr, *orientation=nullptr, *circle=nullptr, *callback=Py_None;
+    if (!PyArg_ParseTuple(args, "OOO|O:reference_delaunay",
+                          &points_object, &orientation, &circle, &callback)) return nullptr;
+    if (!PyCallable_Check(orientation) || !PyCallable_Check(circle) ||
+        (callback!=Py_None && !PyCallable_Check(callback))) {
+        PyErr_SetString(PyExc_TypeError, "reference predicates and cancellation must be callable");
+        return nullptr;
+    }
+    Buffer buffer;
+    if (!acquire_float64_matrix(points_object, buffer, "points")) return nullptr;
+    if (buffer.view.shape[0]<3) {
+        PyErr_SetString(PyExc_ValueError, "reference insertion needs at least three points");
+        return nullptr;
+    }
+    std::vector<Point> points;
+    try {
+        points.reserve(static_cast<std::size_t>(buffer.view.shape[0]));
+        for (Py_ssize_t row=0;row<buffer.view.shape[0];++row) {
+            const Point p{float64_at(buffer.view,row,0),float64_at(buffer.view,row,1)};
+            for (double v:{p.x,p.y}) {
+                if (!std::isfinite(v) || std::abs(v)>std::ldexp(1.0,64) ||
+                    (v!=0.0 && std::abs(v)<std::ldexp(1.0,-64))) {
+                    PyErr_SetString(PyExc_ValueError, "reference insertion coordinate range is unsupported");
+                    return nullptr;
+                }
+            }
+            points.push_back(p);
+        }
+    } catch (const std::bad_alloc&) { return PyErr_NoMemory(); }
+    PyThreadState* released_state=PyEval_SaveThread();
+    CallbackContext context{callback,&released_state,false,orientation,circle};
+    std::vector<std::array<Index,3>> triangles;
+    try {
+        Triangulator engine(std::move(points), {}, {}, {}, invoke_callback, &context,
+                            invoke_reference_predicate);
+        triangles=engine.run_reference_seed();
+    } catch (const CallbackFailure&) {
+        PyEval_RestoreThread(released_state);
+        return nullptr;
+    } catch (const std::bad_alloc&) {
+        PyEval_RestoreThread(released_state);
+        return PyErr_NoMemory();
+    } catch (const std::exception& error) {
+        PyEval_RestoreThread(released_state);
+        PyErr_SetString(PyExc_RuntimeError,error.what());
+        return nullptr;
+    }
+    PyEval_RestoreThread(released_state);
+    PyObject* result=PyList_New(static_cast<Py_ssize_t>(triangles.size()));
+    if (result==nullptr) return nullptr;
+    for (std::size_t row=0;row<triangles.size();++row) {
+        const auto& triangle=triangles[row];
+        PyObject* value=Py_BuildValue("(LLL)",static_cast<long long>(triangle[0]),
+                                     static_cast<long long>(triangle[1]),
+                                     static_cast<long long>(triangle[2]));
+        if (value==nullptr) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result,static_cast<Py_ssize_t>(row),value);
+    }
+    return result;
 }
 
 inline PyObject* py_constrained_triangulate(PyObject*, PyObject* args) {

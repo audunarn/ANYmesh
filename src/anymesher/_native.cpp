@@ -312,6 +312,8 @@ PyMethodDef methods[] = {
     {"triangle_adjacency", py_triangle_adjacency, METH_O, "Deterministic edge incidence for triangle connectivity."},
     {"constrained_triangulate", anymesher_native::py_constrained_triangulate, METH_VARARGS,
      "Deterministic constrained triangulation over canonical prepared PSLG buffers."},
+    {"reference_delaunay", anymesher_native::py_reference_delaunay, METH_VARARGS,
+     "Reference-compatible insertion with adaptive Python predicate oracles."},
     {"pslg_segment_memberships", anymesher_quality_native::py_pslg_segment_memberships, METH_VARARGS,
      "Batch deterministic point-on-segment memberships."},
     {"pslg_domain_classification", anymesher_quality_native::py_pslg_domain_classification, METH_VARARGS,

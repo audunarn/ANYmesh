@@ -51,11 +51,10 @@ class PlanarQuadSeed:
         return area
 
 
-# Seeds stay on the deterministic Python reference triangulation.  The
-# compiled triangulator breaks exactly cocircular ties (every rectangular
-# lattice cell) differently, so its seeds are valid but not byte-identical
-# outside the planar PQ4b parity corpus (e.g. the CH9 h=0.3 cone), which would
-# make quad-first output depend on how ANYmesher was installed.
+# Python owns the deterministic reference route.  A separately admitted native
+# insertion capability uses its adaptive predicate oracles and leaves finite
+# hull completion, constraint recovery and finishing with this same owner.
+# Older compiled constrained triangulators are never substituted here.
 _SEED_TRIANGULATION_BACKEND = "python"
 
 # Lattice points closer than this fraction of the local size to a boundary
@@ -678,6 +677,7 @@ def build_planar_quad_seed(
         constraints=constraints,
         interior_points=interior,
         backend=_SEED_TRIANGULATION_BACKEND,
+        _reference_native_seed=True,
         cancellation_check=cancellation_check,
     )
     targeted_reseed_count = 0
@@ -691,6 +691,7 @@ def build_planar_quad_seed(
                 np.asarray(outer, dtype=float), holes=hole_polys,
                 constraints=constraints, interior_points=interior,
                 backend=_SEED_TRIANGULATION_BACKEND,
+                _reference_native_seed=True,
                 cancellation_check=cancellation_check,
             )
     if len(triangulation.points) < len(outer) + sum(len(p) for p in hole_polys):

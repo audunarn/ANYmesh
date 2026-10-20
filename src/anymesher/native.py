@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from importlib import import_module
+from importlib.util import find_spec
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -193,3 +195,69 @@ def run_native_triangulation(
         raise MeshError("native triangulation result needs points and triangles")
     diagnostics = getattr(raw, "diagnostics", {})
     return NativeTriangulation(result_points, result_triangles, diagnostics)
+
+
+class _ReferenceSeedCallbackFailure(BaseException):
+    """Keep callback exceptions distinct from native construction refusal."""
+
+
+def _run_reference_native_seed(points, orientation, circle, cancellation_check):
+    """Optional insertion only; the Python caller owns all PSLG finishing.
+
+    The new function is the capability marker: an older installed extension
+    must never silently substitute its different constrained triangulator.
+    Registered third-party boundaries do not participate in this private
+    Python-reference acceleration route.
+    """
+    from types import BuiltinFunctionType
+
+    module_name = f"{__package__}._native"
+    if find_spec(module_name) is None:
+        return None, "reference_seed_capability_absent"
+    # A present but unloadable extension is a packaging failure, just as in
+    # native_cpp.py.  In particular, missing DLL imports must not be hidden.
+    extension = import_module(module_name)
+    kernel = getattr(extension, "reference_delaunay", None)
+    if type(kernel) is not BuiltinFunctionType:
+        return None, "reference_seed_capability_absent"
+    if (type(points) is not np.ndarray or points.dtype != np.dtype(np.float64)
+            or points.ndim != 2 or points.shape[1] != 2
+            or not points.flags.c_contiguous):
+        return None, "reference_seed_array_unsupported"
+    magnitudes = np.abs(points)
+    nonzero = magnitudes[magnitudes != 0.]
+    # This range also bounds the common binary denominator, so exact
+    # orientation expansions and degree-four predicates cannot under/overflow.
+    if (not np.isfinite(magnitudes).all()
+            or np.max(magnitudes, initial=0.) > 2.**64
+            or (len(nonzero) and np.min(nonzero) < 2.**-64)):
+        return None, "reference_seed_coordinate_range"
+    captured = []
+
+    def checked(function):
+        def invoke(*args):
+            try:
+                return function(*args)
+            except BaseException as error:
+                captured.append((error, error.__traceback__))
+                raise _ReferenceSeedCallbackFailure from None
+        return invoke
+
+    try:
+        raw = kernel(
+            points, checked(orientation), checked(circle),
+            checked(cancellation_check) if cancellation_check is not None else None,
+        )
+    except _ReferenceSeedCallbackFailure:
+        error, traceback = captured[0]
+        raise error.with_traceback(traceback)
+    except RuntimeError as error:
+        # A refused cavity/point-location attempt has published nothing.
+        # The unchanged full Python insertion remains authoritative.
+        return None, "reference_seed_native_refusal: " + str(error)
+    triangles = [tuple(map(int, row)) for row in raw]
+    if (triangles != sorted(set(triangles))
+            or any(len(row) != 3 or min(row) < 0 or max(row) >= len(points)
+                   for row in triangles)):
+        raise MeshError("reference insertion returned malformed connectivity")
+    return triangles, None
