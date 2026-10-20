@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from math import comb, copysign
 from typing import Callable, Iterable
 
@@ -367,6 +368,23 @@ def _corner_reference_normal(nodes: np.ndarray, fam: ElementFamily) -> np.ndarra
     return raw / norm
 
 
+@lru_cache(maxsize=32)
+def _mapping_reference_basis(fam: ElementFamily, parameter_bytes: bytes):
+    """Read-only basis tables for at most 256 reference samples per entry.
+
+    Exact parameter bytes preserve signed zeros and detach the cache from
+    mutable caller arrays.  Only reference data is retained, never geometry,
+    normals or mapping results.  The caller bounds both sample count and
+    coordinates and retains the uncached path for floating error handling.
+    """
+    params = np.frombuffer(parameter_bytes, dtype=np.float64).reshape(-1, 2)
+    values = np.asarray(shape_values(fam, params), dtype=np.float64)
+    gradients = np.asarray(shape_gradients(fam, params), dtype=np.float64)
+    values.flags.writeable = False
+    gradients.flags.writeable = False
+    return values, gradients
+
+
 def evaluate_mapping(
     nodes: np.ndarray | Iterable[Iterable[float]],
     family: ElementFamily | str,
@@ -377,8 +395,15 @@ def evaluate_mapping(
     fam = _family(family)
     xyz = _nodes_array(nodes, fam)
     p, _ = _params_array(params)
-    vals = np.asarray(shape_values(fam, p), dtype=np.float64)
-    grads = np.asarray(shape_gradients(fam, p), dtype=np.float64)
+    if (len(p) <= 256 and np.geterr()["under"] == "ignore"
+            and np.max(np.abs(p), initial=0.0) <= 1.0):
+        # These bounded reference coordinates cannot overflow the basis
+        # polynomials. Underflow remains observable on the uncached route
+        # whenever NumPy is configured to report or raise it.
+        vals, grads = _mapping_reference_basis(fam, p.tobytes())
+    else:
+        vals = np.asarray(shape_values(fam, p), dtype=np.float64)
+        grads = np.asarray(shape_gradients(fam, p), dtype=np.float64)
     points = vals @ xyz
     dxi = grads[:,:,0] @ xyz
     deta = grads[:,:,1] @ xyz
@@ -465,6 +490,11 @@ _BERN_NODES = np.linspace(0.0, 1.0, 4)
 _BERN_MATRIX = np.vstack([_bernstein_row_3(float(t)) for t in _BERN_NODES])
 # Exact inverse of the cubic Bernstein collocation matrix at t=(0,1/3,2/3,1).
 _BERN_MATRIX_INV = np.array([[1.,0.,0.,0.],[-5/6,3.,-3/2,1/3],[1/3,-3/2,3.,-5/6],[0.,0.,0.,1.]], dtype=np.float64)
+_BERN_CHECK_ROWS = tuple(
+    (t, _bernstein_row_3(t)) for t in (0.137, 0.389, 0.731)
+)
+for _t, _row in _BERN_CHECK_ROWS:
+    _row.flags.writeable = False
 
 
 def _square_coefficients(jfun, bounds: tuple[float,float,float,float], scale2: float) -> tuple[np.ndarray,float]:
@@ -473,13 +503,10 @@ def _square_coefficients(jfun, bounds: tuple[float,float,float,float], scale2: f
     ys = y0 + (y1-y0)*_BERN_NODES
     vals = np.array([[jfun(float(x),float(y)) for y in ys] for x in xs], dtype=np.float64)
     coeff = _BERN_MATRIX_INV @ vals @ _BERN_MATRIX_INV.T
-    check = (0.137, 0.389, 0.731)
     residual = 0.0
-    for t in check:
-        bt = _bernstein_row_3(t)
+    for t, bt in _BERN_CHECK_ROWS:
         x = x0 + (x1-x0)*t
-        for u in check:
-            bu = _bernstein_row_3(u)
+        for u, bu in _BERN_CHECK_ROWS:
             y = y0 + (y1-y0)*u
             residual = max(residual, abs(float(bt @ coeff @ bu) - jfun(float(x),float(y))))
     eps = np.finfo(np.float64).eps
@@ -570,6 +597,20 @@ def _point_gradients(fam: ElementFamily, x: float, y: float) -> np.ndarray:
     return np.array(rows, dtype=np.float64)
 
 
+@lru_cache(maxsize=4096)
+def _certification_gradients(
+    fam: ElementFamily, a: float, b: float, sign_a: float, sign_b: float
+) -> np.ndarray:
+    """Bounded, geometry-independent reference data shared by certificates.
+
+    The sign arguments keep signed zeros distinct in the cache key.  No mesh
+    coordinates, normals or Jacobian values survive a certification call.
+    """
+    gradients = _point_gradients(fam, a, b)
+    gradients.flags.writeable = False
+    return gradients
+
+
 def _jacobian_function(xyz: np.ndarray, fam: ElementFamily, nref: np.ndarray):
     # Subdivision revisits parameters (the root patch is expanded twice and
     # neighbouring patches share nodes); the value is a pure function of them.
@@ -580,7 +621,7 @@ def _jacobian_function(xyz: np.ndarray, fam: ElementFamily, nref: np.ndarray):
         value = memo.get(key)
         if value is not None:
             return value
-        g = _point_gradients(fam, float(a), float(b))
+        g = _certification_gradients(fam, float(a), float(b), key[2], key[3])
         dxi = g[:,0] @ xyz
         deta = g[:,1] @ xyz
         # ``np.cross`` of two 3-vectors: the same multiply-then-subtract.
@@ -652,7 +693,10 @@ def certify_mapping_validity(
             _check_certification_cancellation(cancellation_check, "high-order validity square patch")
             bounds, depth = stack.pop()
             depth_reached = max(depth_reached, depth)
-            coeff, guard = _square_coefficients(jfun, bounds, scale2)
+            coeff, guard = (
+                (root_coeff, root_guard) if depth == 0
+                else _square_coefficients(jfun, bounds, scale2)
+            )
             lower = float(np.min(coeff) - guard)
             upper = float(np.max(coeff) + guard)
             direct, param = _square_witness(jfun, bounds)
@@ -687,7 +731,10 @@ def certify_mapping_validity(
             _check_certification_cancellation(cancellation_check, "high-order validity triangle patch")
             tri, depth = stack_t.pop()
             depth_reached = max(depth_reached, depth)
-            coeff, guard = _tri_coefficients(jfun, tri, scale2)
+            coeff, guard = (
+                (root_coeff, root_guard) if depth == 0
+                else _tri_coefficients(jfun, tri, scale2)
+            )
             lower = float(np.min(coeff) - guard)
             upper = float(np.max(coeff) + guard)
             direct, param = _tri_witness(jfun, tri)
