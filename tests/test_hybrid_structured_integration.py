@@ -131,10 +131,25 @@ def test_caller_seeding_is_preserved_when_structured_preview_needs_no_partition(
     assert result.mesh.grid_of_face[face].size > 0
 
 
-def test_auto_uses_quality_gated_native_fallback() -> None:
+def test_auto_uses_quality_gated_native_fallback(monkeypatch) -> None:
+    from anymesher import hybrid
+
     geometry, face = _plate(
         ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.2, 1.0, 0.0))
     )
+
+    real_quality = hybrid._structured_quality_report
+    calls = 0
+
+    def reject_first(mesh, options, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        measured = real_quality(mesh, options, *args, **kwargs)
+        if calls == 1:
+            return {**measured, "accepted": False, "test_route": "fallback"}
+        return measured
+
+    monkeypatch.setattr(hybrid, "_structured_quality_report", reject_first)
 
     result = generate_hybrid_mesh_result(
         geometry,
@@ -150,7 +165,7 @@ def test_auto_uses_quality_gated_native_fallback() -> None:
     quality = result.mesh.structural_preparation["structured_layout"]["quality"]
     assert quality["accepted"] is True
     assert quality["selected_mesh"] == "native_fallback"
-    assert quality["rejected_candidate"]["growth_violation_count"] > 0
+    assert quality["rejected_candidate"]["test_route"] == "fallback"
     assert quality["accepted_fallback"]["growth_violation_count"] == 0
 
 
@@ -164,13 +179,22 @@ def test_recursive_native_fallback_retains_caller_options(monkeypatch) -> None:
         point_placement="frontal_delaunay", max_insertions=16
     )
     original = hybrid.generate_hybrid_mesh_result
+    real_quality = hybrid._structured_quality_report
     recursive_options = []
+    quality_calls = 0
+
+    def reject_first(mesh, options, *args, **kwargs):
+        nonlocal quality_calls
+        quality_calls += 1
+        measured = real_quality(mesh, options, *args, **kwargs)
+        return {**measured, "accepted": False} if quality_calls == 1 else measured
 
     def traced(*args, **kwargs):
         recursive_options.append(kwargs.get("native_options"))
         return original(*args, **kwargs)
 
     monkeypatch.setattr(hybrid, "generate_hybrid_mesh_result", traced)
+    monkeypatch.setattr(hybrid, "_structured_quality_report", reject_first)
     result = original(
         geometry, target_size=0.25, strategy="auto",
         structured_options={"max_element_growth": 1.27},
@@ -181,10 +205,19 @@ def test_recursive_native_fallback_retains_caller_options(monkeypatch) -> None:
     assert recursive_options and all(option is native for option in recursive_options)
 
 
-def test_explicit_mapped_rejects_structured_quality_failure() -> None:
+def test_explicit_mapped_rejects_structured_quality_failure(monkeypatch) -> None:
+    from anymesher import hybrid
+
     geometry, _face = _plate(
         ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.2, 1.0, 0.0))
     )
+
+    real_quality = hybrid._structured_quality_report
+
+    def reject_structured(mesh, options, *args, **kwargs):
+        return {**real_quality(mesh, options, *args, **kwargs), "accepted": False}
+
+    monkeypatch.setattr(hybrid, "_structured_quality_report", reject_structured)
 
     with pytest.raises(MeshError, match="explicit mapped strategy rejected"):
         generate_hybrid_mesh_result(

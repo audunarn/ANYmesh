@@ -151,6 +151,28 @@ def test_every_edge_gets_at_least_one_division():
     assert all(seeding[edge] >= 1 for edge in edges)
 
 
+def test_structured_spacing_keeps_a_short_edge_without_global_boundary_refinement():
+    model = GeometryModel()
+    edges, face = rectangle(model, 2.5, 0.125)
+    ordinary = solve_seeding(model, target_size=1.25)
+    localized = solve_seeding(
+        model, target_size=1.25, localized_structured_face_ids=(face,),
+    )
+
+    bottom, right, top, left = edges
+    assert ordinary[bottom] == ordinary[top] == 16
+    assert localized[bottom] == localized[top] == 7
+    assert ordinary[right] == ordinary[left] == 1
+    assert localized[right] == localized[left] == 1
+
+
+def test_structured_spacing_rejects_unknown_face():
+    model = GeometryModel()
+    rectangle(model, 1.0, 1.0)
+    with pytest.raises(SeedingConflict, match="unknown faces"):
+        solve_seeding(model, target_size=1.0, localized_structured_face_ids=(999,))
+
+
 def test_target_size_must_be_positive():
     model = GeometryModel()
     rectangle(model, 1.0, 1.0)

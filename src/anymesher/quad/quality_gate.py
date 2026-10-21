@@ -17,7 +17,7 @@ public diagnostics; they are not part of ``QuadMeshingOptions``.
 """
 from __future__ import annotations
 
-from math import acos, degrees, hypot
+from math import acos, degrees, hypot, isfinite
 from typing import Sequence
 
 from ..structured import MeshQualityPolicy
@@ -30,6 +30,7 @@ __all__ = [
     "policy_record",
     "quad_violation",
     "triangle_violation",
+    "validate_triangle_angle_rule",
 ]
 
 # Q4 admission: every corner in [20, 160] degrees (which implies a corner
@@ -113,12 +114,34 @@ def triangle_violation(
     return None
 
 
-def policy_record() -> dict[str, float]:
+def validate_triangle_angle_rule(minimum_angle: float, action: str) -> tuple[float, str]:
+    """Validate the additive residual-triangle angle control.
+
+    The fixed Q4 gates and positive-area/topology checks are not affected.
+    """
+    if isinstance(minimum_angle, bool):
+        raise ValueError("t3_minimum_angle must be a finite angle in (0, 60) degrees")
+    try:
+        angle = float(minimum_angle)
+    except (TypeError, ValueError) as error:
+        raise ValueError("t3_minimum_angle must be a finite angle in (0, 60) degrees") from error
+    if not isfinite(angle) or not 0.0 < angle < 60.0:
+        raise ValueError("t3_minimum_angle must be a finite angle in (0, 60) degrees")
+    if action not in ("error", "warning"):
+        raise ValueError("t3_angle_action must be 'error' or 'warning'")
+    return angle, action
+
+
+def policy_record(
+    t3_minimum_angle: float = QUAD_FIRST_T3_MIN_ANGLE,
+    t3_angle_action: str = "error",
+) -> dict[str, float | str]:
     """JSON-safe description of the active gates for diagnostics."""
     return {
         "q4_minimum_scaled_jacobian": QUAD_FIRST_Q4_POLICY.minimum_scaled_jacobian,
         "q4_minimum_angle": QUAD_FIRST_Q4_POLICY.minimum_angle,
         "q4_maximum_angle": QUAD_FIRST_Q4_POLICY.maximum_angle,
         "q4_maximum_aspect_ratio": QUAD_FIRST_Q4_POLICY.maximum_aspect_ratio,
-        "t3_minimum_angle": QUAD_FIRST_T3_MIN_ANGLE,
+        "t3_minimum_angle": t3_minimum_angle,
+        "t3_angle_action": t3_angle_action,
     }

@@ -1145,6 +1145,12 @@ def _actual_evidence(
             overrides=dict(plan.seed_overrides),
             max_divisions=plan.options.maximum_divisions_per_edge,
             maximum_adjacent_growth=plan.options.max_element_growth,
+            localized_structured_face_ids=(
+                face_id for decision in plan.faces
+                if decision.action == "mapped"
+                for face_id in face_mapping[decision.source_face_id]
+                if isinstance(working.faces[face_id].surface, Plane)
+            ),
             cancellation_check=cancellation_check,
         )
     except (SeedingConflict, ValueError) as error:

@@ -98,6 +98,50 @@ def test_real_skew_corridor_is_solved_and_mutated_before_driver():
 
 
 @pytest.mark.quad_workers
+def test_validated_mcf_solution_is_reused_only_across_completed_faces():
+    cache = {}
+    _model_a, _face_a, first = _seed()
+    _model_b, _face_b, second = _seed()
+    first_report = optimize_q4_seed_mcf(
+        first.state, target_size=0.5, validated_solution_cache=cache
+    )
+    second_report = optimize_q4_seed_mcf(
+        second.state, target_size=0.5, validated_solution_cache=cache
+    )
+    assert first_report.worker_calls == 2  # No within-face substitution.
+    assert second_report.worker_calls == 0
+    assert len(cache) == 2
+    assert second_report.selected_pairs == first_report.selected_pairs
+    assert second.state.nodes == first.state.nodes
+    assert second.state.cells == first.state.cells
+
+    _model_c, _face_c, cancelled = _seed()
+    def stop(stage):
+        if stage == "quad-first:q4-mcf-worker":
+            raise RuntimeError("cancelled cached worker")
+    with pytest.raises(RuntimeError, match="cancelled cached worker"):
+        optimize_q4_seed_mcf(
+            cancelled.state, target_size=0.5,
+            validated_solution_cache=cache, cancellation_check=stop,
+        )
+
+
+@pytest.mark.quad_workers
+def test_infeasible_mcf_response_is_not_cached(monkeypatch):
+    cache = {}
+    _model, _face, seed = _seed()
+    def infeasible(*args, **kwargs):
+        raise CountInfeasible("infeasible")
+    monkeypatch.setattr(mcf_seed_module, "solve_count_instance", infeasible)
+    report = optimize_q4_seed_mcf(
+        seed.state, target_size=0.5, validated_solution_cache=cache
+    )
+    assert report.status == "NO_MATCH"
+    assert report.worker_calls == 2
+    assert cache == {}
+
+
+@pytest.mark.quad_workers
 def test_mcf_stage_causally_reduces_real_front_work():
     options = QuadMeshingOptions(max_local_optimizations=0)
     _m0, _f0, baseline = _seed()

@@ -319,6 +319,7 @@ def test_apply_connectivity_restores_the_edge_cache_on_success() -> None:
     report = pipeline.apply_connectivity(mesh)
     assert not report.issues
     assert pipeline._edge_coordinate_cache is None
+    assert pipeline._member_station_projection_cache is None
     # A direct private station call after a completed invocation must use
     # current coordinates, never anything retained by the invocation.
     edge = next(iter(mesh.nodes_of_edge))
@@ -343,9 +344,31 @@ def test_failed_apply_connectivity_cleans_up_the_edge_cache(monkeypatch) -> None
     with pytest.raises(RuntimeError, match="injected connectivity failure"):
         pipeline.apply_connectivity(mesh)
     assert pipeline._edge_coordinate_cache is None
+    assert pipeline._member_station_projection_cache is None
     # Direct subsequent private station calls must not reuse coordinates
     # cached by the failed invocation.
     edge = next(iter(mesh.nodes_of_edge))
     mesh.nodes[1] = np.asarray((100.0, 0.0, 0.0))
     mesh.nodes[2] = np.asarray((1.0, 0.0, 0.0))
     assert pipeline._edge_node(mesh, edge, 0.5, ("test", "after-failure")) == 2
+
+
+def test_member_station_projection_reused_only_within_one_mesh_apply(monkeypatch) -> None:
+    mesh, pipeline = _edge_attachment_case()
+    member = next(iter(pipeline.view.members))
+    original = GeometryMeshingView.closest_edge_point
+    calls = []
+
+    def counted(self, edge_id, point):
+        calls.append(edge_id)
+        return original(self, edge_id, point)
+
+    monkeypatch.setattr(GeometryMeshingView, "closest_edge_point", counted)
+    pipeline._member_station_projection_cache = {}
+    first = pipeline._member_stations(mesh, member, 0., 1.)
+    assert pipeline._member_stations(mesh, member, 0., 1.) == first
+    pipeline._member_stations(mesh, member, 0., .5)
+    assert len(calls) == len(mesh.nodes_of_edge[next(iter(mesh.nodes_of_edge))])
+    pipeline._member_station_projection_cache = None
+    assert pipeline._member_stations(mesh, member, 0., 1.) == first
+    assert len(calls) == 2 * len(mesh.nodes_of_edge[next(iter(mesh.nodes_of_edge))])

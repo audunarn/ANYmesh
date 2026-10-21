@@ -1138,6 +1138,7 @@ def test_quad_first_beam_coupling_slice() -> None:
         quad_options=QuadMeshingOptions(),
     )
     mesh = result.mesh
+    assert min(mesh.nodes) > 0  # structural boundary ownership requires positive IDs
     diagnostics = mesh.hybrid_diagnostics
     assert diagnostics["route"] == "quad-first"
     assert diagnostics["q4"]["status"] == "APPLIED"

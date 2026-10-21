@@ -32,7 +32,7 @@ from anygeometry.structural import AttachmentTargetKind
 
 from ._mapped_fold import grid_folds
 from .errors import MeshError
-from .mesh import Coupling, Mesh
+from .mesh import Coupling, Mesh, _NATIVE_MESH_CLASS, _NATIVE_MESH_NAMESPACE
 from .refinement import Refinement, SizeField
 from .seeding import Seeding, edge_distribution, solve_seeding
 
@@ -222,7 +222,17 @@ def generate_mesh(
 
     offsets = dict(beam_offsets or {})
     offset_registry: dict[tuple[int, tuple[str, str, str]], int] = {}
+    # Shell connectivity is complete here. Native beam/offset builders append
+    # only nodes, beams and couplings, so one membership index is sufficient.
+    # Populate it lazily at the original first per-beam scan, preserving earlier
+    # validation/refusal order. Custom producers keep the original scan path.
+    shell_node_cache: list[set[int]] | None = (
+        [] if _native_beam_phase(geometry, mesh)
+        and all(_plain_offset(value) for value in offsets.values()) else None
+    )
     for edge_id in beam_edge_ids:
+        if shell_node_cache is not None and not _native_beam_phase(geometry, mesh):
+            shell_node_cache = None
         offset = offsets.get(edge_id, 0.0)
         offset_array = np.asarray(offset, dtype=float)
         if offset_array.ndim > 1 or offset_array.size not in (1, 3):
@@ -240,7 +250,11 @@ def generate_mesh(
                 next_node,
                 offset_registry,
             )
-        _build_beam(mesh, edge_id, next_element)
+        if shell_node_cache is not None and _native_beam_phase(geometry, mesh):
+            _build_beam(mesh, edge_id, next_element, _shell_node_cache=shell_node_cache)
+        else:
+            shell_node_cache = None
+            _build_beam(mesh, edge_id, next_element)
 
     return mesh
 
@@ -770,7 +784,10 @@ def _check_corners(
             )
 
 
-def _build_beam(mesh: Mesh, edge_id: int, next_element: _Counter) -> None:
+def _build_beam(
+    mesh: Mesh, edge_id: int, next_element: _Counter,
+    *, _shell_node_cache: list[set[int]] | None = None,
+) -> None:
     """Beam elements along a line, on the offset nodes when there are any."""
 
     plating = mesh.nodes_of_edge[edge_id]
@@ -786,11 +803,16 @@ def _build_beam(mesh: Mesh, edge_id: int, next_element: _Counter) -> None:
         element_ids.append(element_id)
     mesh.elements_of_edge[edge_id] = element_ids
 
-    shell_nodes = {
-        int(node)
-        for connectivity in (*mesh.quads.values(), *mesh.tris.values())
-        for node in connectivity
-    }
+    if _shell_node_cache:
+        shell_nodes = _shell_node_cache[0]
+    else:
+        shell_nodes = {
+            int(node)
+            for connectivity in (*mesh.quads.values(), *mesh.tris.values())
+            for node in connectivity
+        }
+        if _shell_node_cache is not None:
+            _shell_node_cache.append(shell_nodes)
     if sequence is not plating and all(node in shell_nodes for node in plating):
         # One coupling per station, tying the stiffener back to the plating.
         # A beam node here sits directly above its plate node, so the record has
@@ -804,3 +826,47 @@ def _build_beam(mesh: Mesh, edge_id: int, next_element: _Counter) -> None:
                 plate_node,
                 mesh.nodes[beam_node] - mesh.nodes[plate_node],
             )
+
+
+def _plain_offset(value: object) -> bool:
+    """No user conversion callbacks during the indexed beam phase."""
+    if type(value) in (int, float):
+        return True
+    if type(value) in (tuple, list):
+        return all(type(item) in (int, float) for item in value)
+    return (type(value) is np.ndarray and value.dtype.kind in 'biuf'
+            and value.dtype.fields is None and value.dtype.itemsize <= 8)
+
+
+def _native_beam_phase(geometry: GeometryModel, mesh: Mesh) -> bool:
+    """Closed native builders cannot edit shell connectivity during this phase."""
+    return (
+        _BEAM_PHASE_NATIVE_TYPES
+        and type(geometry) is _BEAM_PHASE_GEOMETRY
+        and type(mesh) is _BEAM_PHASE_MESH
+        and Mesh is _BEAM_PHASE_MESH and _Counter is _BEAM_PHASE_COUNTER
+        and len(vars(_BEAM_PHASE_MESH)) == len(_NATIVE_MESH_NAMESPACE)
+        and all(name in vars(_BEAM_PHASE_MESH) and vars(_BEAM_PHASE_MESH)[name] is value
+                for name, value in _NATIVE_MESH_NAMESPACE)
+        and type(mesh.quads) is dict and type(mesh.tris) is dict
+        and _Counter.next is _BEAM_PHASE_NEXT and _Counter.take is _BEAM_PHASE_TAKE
+        and all(globals().get(name) is method for name, method in _BEAM_PHASE_BUILDERS)
+    )
+
+
+_BEAM_PHASE_GEOMETRY = GeometryModel
+_BEAM_PHASE_MESH = _NATIVE_MESH_CLASS
+# An imported replacement class must not become its own native eligibility
+# anchor. Unknown implementations simply retain the original per-beam route.
+_BEAM_PHASE_NATIVE_TYPES = (
+    type(GeometryModel) is type and GeometryModel.__module__ == 'anygeometry.model'
+    and GeometryModel.__qualname__ == 'GeometryModel'
+)
+_BEAM_PHASE_COUNTER = _Counter
+_BEAM_PHASE_NEXT = _Counter.next
+_BEAM_PHASE_TAKE = _Counter.take
+_BEAM_PHASE_BUILDERS = tuple((name, globals()[name]) for name in (
+    '_build_vertex_nodes', '_build_edge_nodes', '_build_face', '_chain_nodes',
+    '_check_corners', '_build_offset_nodes', '_offset_target_faces',
+    '_owner_normals_around', '_attached_face_normal', 'nodal_normals', '_build_beam',
+))

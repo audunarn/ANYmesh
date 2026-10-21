@@ -104,9 +104,12 @@ _RECOVERABLE = (
 
 
 def _route_name(options: Mapping[str, Any]) -> str:
+    strategy = str(getattr(options.get("strategy", "auto"), "value", options.get("strategy", "auto")))
+    if strategy == "smart_mapped":
+        return strategy
     if options.get("quad_options") is not None:
         return "quad_first"
-    return str(getattr(options.get("strategy", "auto"), "value", options.get("strategy", "auto")))
+    return strategy
 
 
 def _missing_extruded_quadratic_certificate(
@@ -151,6 +154,12 @@ def _attempt_options(
         )
         if all(route != "native" or options.get("quad_options") is not None for route, options in routes):
             routes.append(("native", native))
+    if preferred == "smart_mapped":
+        for _method, options in routes[1:]:
+            # These controls belong to the preferred quad pipeline. Legacy
+            # recovery keeps its own unchanged quality policy and admission.
+            options.pop("quad_t3_minimum_angle", None)
+            options.pop("quad_t3_angle_action", None)
     return tuple(routes[:3])
 
 
