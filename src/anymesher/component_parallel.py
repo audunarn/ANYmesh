@@ -28,6 +28,7 @@ the serial route before submission.
 from __future__ import annotations
 
 import math
+import inspect
 import multiprocessing
 import time
 from concurrent.futures import Executor
@@ -568,14 +569,19 @@ def generate_hybrid_mesh_result_parallel(
             float(np.max(np.abs(np.asarray(v, dtype=float)))) for v in offsets.values()
         )
     separation = 0.5 * parallel.pad_factor * float(target_size) + reach
+    planner_options = dict(edge_ids=options["beam_edges"], separation=separation,
+        expected_revision=geometry.revision, cancellation_check=check)
+    # An older owner keeps its original full planner. **kwargs alone does not
+    # advertise the new noncertifying eligibility probe; never retry TypeError.
     try:
-        partition = planner(
-            geometry,
-            edge_ids=options["beam_edges"],
-            separation=separation,
-            expected_revision=geometry.revision,
-            cancellation_check=check,
-        )
+        parameter = inspect.signature(planner, follow_wrapped=False).parameters.get("stop_if_single_component")
+    except (TypeError, ValueError):
+        parameter = None
+    if parameter is not None and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+        planner_options["stop_if_single_component"] = True
+    try:
+        partition = planner(geometry, **planner_options)
     except GeometryError as error:
         return _serial(geometry, options, f"component planning failed: {error}")
     plan_seconds = time.perf_counter() - started

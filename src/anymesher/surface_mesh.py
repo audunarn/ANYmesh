@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from math import acos, ceil, degrees, sqrt
 from numbers import Integral
+from types import BuiltinFunctionType
 from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 
@@ -980,12 +981,58 @@ class _QualityCandidate:
     rounds: int = 0
 
 
+
+# Patch evidence is invocation-local. Custom quality/incidence services retain
+# their original per-trial calls (including callbacks and refusal timing).
+_PATCH_INCIDENCE_SERVICE = _native_cpp.triangle_edge_incidence
+_PATCH_QUALITY_SERVICE = _native_cpp.native_element_quality
+_PATCH_EXTENSION = _native_cpp._compiled
+_PATCH_ADJACENCY_KERNEL = getattr(_PATCH_EXTENSION, "triangle_adjacency", None)
+_PATCH_QUALITY_KERNEL = getattr(_PATCH_EXTENSION, "element_quality", None)
+try:
+    from numpy._core._ufunc_config import geterr as _PATCH_GETERR
+    from numpy._core.umath import maximum as _PATCH_MAXIMUM, minimum as _PATCH_MINIMUM
+except ImportError:  # Unknown NumPy layouts keep scalar growth arithmetic.
+    _PATCH_GETERR = _PATCH_MAXIMUM = _PATCH_MINIMUM = None
+
+
+def _quality_growth_bindings_available() -> bool:
+    # Check before geterr() or maximum.at: wrappers supported by the old
+    # arithmetic must not acquire a new callback or require a ufunc interface.
+    return (
+        _PATCH_GETERR is not None and np.geterr is _PATCH_GETERR
+        and np.maximum is _PATCH_MAXIMUM and type(_PATCH_MAXIMUM) is np.ufunc
+        and np.minimum is _PATCH_MINIMUM and type(_PATCH_MINIMUM) is np.ufunc
+    )
+
+
+def _quality_patch_reuse_available() -> bool:
+    return bool(
+        _native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE
+        and _native_cpp.triangle_edge_incidence is _PATCH_INCIDENCE_SERVICE
+        and _native_cpp.native_element_quality is _PATCH_QUALITY_SERVICE
+        and _native_cpp._compiled is _PATCH_EXTENSION
+        and getattr(_PATCH_EXTENSION, "triangle_adjacency", None) is _PATCH_ADJACENCY_KERNEL
+        and getattr(_PATCH_EXTENSION, "element_quality", None) is _PATCH_QUALITY_KERNEL
+        and type(_PATCH_ADJACENCY_KERNEL) is BuiltinFunctionType
+        and type(_PATCH_QUALITY_KERNEL) is BuiltinFunctionType
+        and getattr(_PATCH_INCIDENCE_SERVICE, "__module__", None) == _native_cpp.__name__
+        and getattr(_PATCH_QUALITY_SERVICE, "__module__", None) == _native_cpp.__name__
+        and getattr(getattr(_PATCH_INCIDENCE_SERVICE, "__code__", None), "co_filename", None) == _native_cpp.__file__
+        and getattr(getattr(_PATCH_QUALITY_SERVICE, "__code__", None), "co_filename", None) == _native_cpp.__file__
+    )
+
+
 def _triangle_quality(
     points: np.ndarray,
     triangles: np.ndarray,
     settings: SurfaceMeshOptions | None = None,
+    *,
+    _quality_patch: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], tuple[int, int, float, float, float], np.ndarray]:
     policy = settings or SurfaceMeshOptions()
+    if _quality_patch is not None and not _quality_patch_reuse_available():
+        _quality_patch = None
     made_points = np.ascontiguousarray(points, dtype=np.float64)
     made_triangles = np.ascontiguousarray(triangles, dtype=np.int64)
     scale = max(float(np.ptp(points, axis=0).max()), 1.0) if len(points) else 1.0
@@ -1117,77 +1164,88 @@ def _triangle_quality(
             minimum_angle_array[row] = min(angles)
             maximum_angle_array[row] = max(angles)
             jacobian_array[row] = min(corner_jacobians)
-        native_incidence = _native_cpp.triangle_edge_incidence(made_triangles)
-        native_incidence = np.asarray(native_incidence)
-        if (
-            native_incidence.ndim != 2
-            or native_incidence.shape[1:] != (4,)
-            or native_incidence.dtype.kind not in "iu"
-            or np.any(native_incidence[:, 0] > native_incidence[:, 1])
-            or np.any(native_incidence[:, :2] < 0)
-            or np.any(native_incidence[:, :2] >= len(made_points))
-            or np.any(native_incidence[:, 2] < 0)
-            or np.any(native_incidence[:, 2] >= len(made_triangles))
-            or np.any(native_incidence[:, 3] < -1)
-            or np.any(native_incidence[:, 3] >= len(made_triangles))
-            or int(
-                len(native_incidence)
-                + np.count_nonzero(native_incidence[:, 3] >= 0)
-            )
-            != 3 * len(made_triangles)
-        ):
-            raise MeshError("compiled triangle incidence returned malformed output")
-        if len(native_incidence) > 1:
-            previous_edges = native_incidence[:-1, :2]
-            following_edges = native_incidence[1:, :2]
-            if np.any(
-                (following_edges[:, 0] < previous_edges[:, 0])
-                | (
-                    (following_edges[:, 0] == previous_edges[:, 0])
-                    & (following_edges[:, 1] <= previous_edges[:, 1])
+        if (_quality_patch is not None
+                and _quality_patch.get("triangles") is triangles
+                and _quality_patch.get("point_count") == len(made_points)
+                and "adjacent_rows" in _quality_patch
+                and np.array_equal(_quality_patch["triangle_snapshot"], made_triangles)):
+            adjacent_rows = _quality_patch["adjacent_rows"]
+        else:
+            native_incidence = _native_cpp.triangle_edge_incidence(made_triangles)
+            native_incidence = np.asarray(native_incidence)
+            if (
+                native_incidence.ndim != 2
+                or native_incidence.shape[1:] != (4,)
+                or native_incidence.dtype.kind not in "iu"
+                or np.any(native_incidence[:, 0] > native_incidence[:, 1])
+                or np.any(native_incidence[:, :2] < 0)
+                or np.any(native_incidence[:, :2] >= len(made_points))
+                or np.any(native_incidence[:, 2] < 0)
+                or np.any(native_incidence[:, 2] >= len(made_triangles))
+                or np.any(native_incidence[:, 3] < -1)
+                or np.any(native_incidence[:, 3] >= len(made_triangles))
+                or int(
+                    len(native_incidence)
+                    + np.count_nonzero(native_incidence[:, 3] >= 0)
                 )
+                != 3 * len(made_triangles)
+            ):
+                raise MeshError("compiled triangle incidence returned malformed output")
+            if len(native_incidence) > 1:
+                previous_edges = native_incidence[:-1, :2]
+                following_edges = native_incidence[1:, :2]
+                if np.any(
+                    (following_edges[:, 0] < previous_edges[:, 0])
+                    | (
+                        (following_edges[:, 0] == previous_edges[:, 0])
+                        & (following_edges[:, 1] <= previous_edges[:, 1])
+                    )
+                ):
+                    raise MeshError(
+                        "compiled triangle incidence is not canonically ordered"
+                    )
+            for column in (2, 3):
+                attached = native_incidence[:, column]
+                selected = attached >= 0
+                if not np.any(selected):
+                    continue
+                cells = made_triangles[attached[selected]]
+                first_present = np.any(
+                    cells == native_incidence[selected, 0, None], axis=1
+                )
+                second_present = np.any(
+                    cells == native_incidence[selected, 1, None], axis=1
+                )
+                if not np.all(first_present & second_present):
+                    raise MeshError(
+                        "compiled triangle incidence does not match connectivity"
+                    )
+            paired = native_incidence[:, 3] >= 0
+            if np.any(native_incidence[paired, 2] == native_incidence[paired, 3]):
+                raise MeshError("compiled triangle incidence repeats an attachment")
+            attachments = np.concatenate(
+                (
+                    native_incidence[:, 2],
+                    native_incidence[paired, 3],
+                )
+            )
+            attachment_counts = np.bincount(
+                attachments, minlength=len(made_triangles)
+            )
+            if len(attachment_counts) != len(made_triangles) or np.any(
+                attachment_counts != 3
             ):
                 raise MeshError(
-                    "compiled triangle incidence is not canonically ordered"
+                    "compiled triangle incidence does not cover three distinct cell edges"
                 )
-        for column in (2, 3):
-            attached = native_incidence[:, column]
-            selected = attached >= 0
-            if not np.any(selected):
-                continue
-            cells = made_triangles[attached[selected]]
-            first_present = np.any(
-                cells == native_incidence[selected, 0, None], axis=1
+            adjacent_rows = np.ascontiguousarray(
+                native_incidence[native_incidence[:, 3] >= 0, 2:4],
+                dtype=np.int64,
             )
-            second_present = np.any(
-                cells == native_incidence[selected, 1, None], axis=1
-            )
-            if not np.all(first_present & second_present):
-                raise MeshError(
-                    "compiled triangle incidence does not match connectivity"
-                )
-        paired = native_incidence[:, 3] >= 0
-        if np.any(native_incidence[paired, 2] == native_incidence[paired, 3]):
-            raise MeshError("compiled triangle incidence repeats an attachment")
-        attachments = np.concatenate(
-            (
-                native_incidence[:, 2],
-                native_incidence[paired, 3],
-            )
-        )
-        attachment_counts = np.bincount(
-            attachments, minlength=len(made_triangles)
-        )
-        if len(attachment_counts) != len(made_triangles) or np.any(
-            attachment_counts != 3
-        ):
-            raise MeshError(
-                "compiled triangle incidence does not cover three distinct cell edges"
-            )
-        adjacent_rows = np.ascontiguousarray(
-            native_incidence[native_incidence[:, 3] >= 0, 2:4],
-            dtype=np.int64,
-        )
+            if _quality_patch is not None:
+                _quality_patch.update(adjacent_rows=adjacent_rows, triangles=triangles,
+                                      point_count=len(made_points),
+                                      triangle_snapshot=made_triangles.copy())
         invalid = int(
             np.count_nonzero(
                 (double_area <= area_tolerance) | (minimum_length <= 0.0)
@@ -1263,20 +1321,41 @@ def _triangle_quality(
         ).reshape((-1, 2))
     growth_array = np.ones(len(triangles), dtype=np.float64)
     growth_repair_rows: set[int] = set()
-    for first_row, second_row in adjacent_rows:
-        small = min(characteristic[first_row], characteristic[second_row])
-        ratio = (
-            float("inf")
-            if small <= 0.0
-            else max(characteristic[first_row], characteristic[second_row]) / small
-        )
-        growth_array[first_row] = max(growth_array[first_row], ratio)
-        growth_array[second_row] = max(growth_array[second_row], ratio)
-        if ratio > policy.max_element_growth:
-            if characteristic[first_row] > characteristic[second_row]:
-                growth_repair_rows.add(first_row)
-            elif characteristic[second_row] > characteristic[first_row]:
-                growth_repair_rows.add(second_row)
+    # Each edge uses the same max/min/divide as the scalar loop. Scatter-max
+    # changes no reduction arithmetic: finite positive ratios only select values.
+    # Keep unusual error policies/extreme characteristics on the original path.
+    batched_growth = (
+        _quality_patch is not None
+        and _quality_growth_bindings_available()
+        and np.geterr() == {"divide": "warn", "over": "warn", "under": "ignore", "invalid": "warn"}
+        and np.all(characteristic >= 2.0**-200)
+        and np.all(characteristic <= 2.0**200)
+    )
+    if batched_growth:
+        first_rows, second_rows = adjacent_rows.T
+        first_lengths = characteristic[first_rows]
+        second_lengths = characteristic[second_rows]
+        ratios = np.maximum(first_lengths, second_lengths) / np.minimum(first_lengths, second_lengths)
+        np.maximum.at(growth_array, first_rows, ratios)
+        np.maximum.at(growth_array, second_rows, ratios)
+        above = ratios > policy.max_element_growth
+        growth_repair_rows.update(map(int, first_rows[above & (first_lengths > second_lengths)]))
+        growth_repair_rows.update(map(int, second_rows[above & (second_lengths > first_lengths)]))
+    else:
+        for first_row, second_row in adjacent_rows:
+            small = min(characteristic[first_row], characteristic[second_row])
+            ratio = (
+                float("inf")
+                if small <= 0.0
+                else max(characteristic[first_row], characteristic[second_row]) / small
+            )
+            growth_array[first_row] = max(growth_array[first_row], ratio)
+            growth_array[second_row] = max(growth_array[second_row], ratio)
+            if ratio > policy.max_element_growth:
+                if characteristic[first_row] > characteristic[second_row]:
+                    growth_repair_rows.add(first_row)
+                elif characteristic[second_row] > characteristic[first_row]:
+                    growth_repair_rows.add(second_row)
     aspect_rows = np.flatnonzero(aspect_array > policy.max_aspect_ratio)
     jacobian_rows = np.flatnonzero(jacobian_array < policy.min_scaled_jacobian)
     minimum_angle_rows = np.flatnonzero(minimum_angle_array < policy.min_angle)
@@ -1335,6 +1414,9 @@ def _triangle_quality(
         -minimum_angle,
     )
     return report, score, aspect_array
+
+
+_REFERENCE_TRIANGLE_QUALITY = _triangle_quality
 
 
 def _make_candidate(
@@ -1515,7 +1597,24 @@ def _polish_quality_candidate(candidate, protected_edges, explicit_points, setti
         neighbours = sorted(set(map(int, rows[star].ravel())) - {node})
         patch = sorted(set().union(*(incident[other] for other in neighbours), incident[node]))
         radius = .1 * float(np.median(np.linalg.norm(points[neighbours]-points[node], axis=1)))
-        best_score = objective(_triangle_quality(points, rows[patch], policy)[0])
+        quality_patch = {} if (
+            _triangle_quality is _REFERENCE_TRIANGLE_QUALITY
+            and type(points) is np.ndarray and points.dtype == np.dtype(np.float64)
+            and type(rows) is np.ndarray and rows.dtype == np.dtype(np.int64)
+            and type(policy) is SurfaceMeshOptions
+            and _quality_patch_reuse_available()
+        ) else None
+        patch_rows = rows[patch] if quality_patch is not None else None
+        if patch_rows is not None:
+            patch_rows.flags.writeable = False
+
+        def patch_quality():
+            if (quality_patch is not None and _triangle_quality is _REFERENCE_TRIANGLE_QUALITY
+                    and _quality_patch_reuse_available()):
+                return _triangle_quality(points, patch_rows, policy, _quality_patch=quality_patch)
+            return _triangle_quality(points, rows[patch], policy)
+
+        best_score = objective(patch_quality()[0])
         best_position = points[node].copy()
         original = points[node].copy()
         corners = points[rows[star]]
@@ -1531,7 +1630,7 @@ def _polish_quality_candidate(candidate, protected_edges, explicit_points, setti
                 first, second = corners[:, 1]-corners[:, 0], corners[:, 2]-corners[:, 0]
                 areas = first[:, 0]*second[:, 1] - first[:, 1]*second[:, 0]
                 if np.all(areas*signed > 0.):
-                    score = objective(_triangle_quality(points, rows[patch], policy)[0])
+                    score = objective(patch_quality()[0])
                     if score < best_score:
                         best_score, best_position = score, points[node].copy()
             if work > 64*len(rows):
@@ -2449,6 +2548,87 @@ def insert_midside_nodes(
 to_quadratic = insert_midside_nodes
 
 
+def _cartesian_rectangle_points(outer, max_points, cancellation_check):
+    """Interior station product of four compatible straight rectangular sides.
+
+    Admission uses floating evaluation bounds, not a geometric snapping rule:
+    boundary values are never changed. The owner separately certifies straight
+    planar geometry. Unsupported station layouts retain the original candidate.
+    """
+    if type(outer) is not np.ndarray or outer.ndim != 2 or outer.shape[1] != 2:
+        return None
+    if len(outer) < 4 or not np.isfinite(outer).all():
+        return None
+    edges = np.roll(outer, -1, axis=0) - outer
+    lengths = np.linalg.norm(edges, axis=1)
+    if np.any(lengths == 0.):
+        return None
+    directions = edges / lengths[:, None]
+    previous = np.roll(directions, 1, axis=0)
+    cross = previous[:, 0]*directions[:, 1] - previous[:, 1]*directions[:, 0]
+    bound = 64.*np.finfo(float).eps
+    corners = np.flatnonzero(np.abs(cross) > bound)
+    if len(corners) != 4:
+        return None
+    turns = cross[corners]
+    if not (np.all(turns > 0.) or np.all(turns < 0.)):
+        return None
+    ring = np.roll(outer, -int(corners[0]), axis=0)
+    indices = (corners - corners[0]) % len(outer)
+    vertices = ring[indices]
+    axes = np.roll(vertices, -1, axis=0)-vertices
+    sizes = np.linalg.norm(axes, axis=1)
+    unit = axes/sizes[:, None]
+    if (np.any(np.abs(np.sum(unit*np.roll(unit, -1, axis=0), axis=1)) > bound)
+            or np.any(np.abs(unit[:2]+unit[2:]) > bound)):
+        return None
+    parameters = []
+    for side in range(4):
+        start = int(indices[side])
+        end = int(indices[side+1]) if side < 3 else len(ring)
+        points = np.vstack((ring[start:end], vertices[(side+1)%4]))
+        delta = points-vertices[side]
+        t = (delta @ unit[side])/sizes[side]
+        transverse = delta[:, 0]*unit[side, 1]-delta[:, 1]*unit[side, 0]
+        scale = max(float(np.max(np.abs(outer))), float(sizes[side]), 1.)
+        if np.any(np.abs(transverse) > bound*scale) or np.any(np.diff(t) <= 0.):
+            return None
+        parameters.append(t)
+    for first, second in ((0, 2), (1, 3)):
+        if (len(parameters[first]) != len(parameters[second]) or
+                np.any(np.abs(parameters[first]-(1.-parameters[second][::-1])) > bound)):
+            return None
+    xs, ys = parameters[0][1:-1], 1.-parameters[3][-2:0:-1]
+    if len(xs)*len(ys) > max_points:
+        return None
+    if not len(xs) or not len(ys):
+        # Opposed boundary chains alone define a valid Cartesian point cloud.
+        # In a one-interval strip, adding a legacy interior row would defeat
+        # the rectangle candidate; native CDT/recombination handles the strip.
+        return np.empty((0, 2), dtype=float)
+    values = []
+    for y in ys:
+        if cancellation_check is not None:
+            cancellation_check("native Cartesian rectangle row")
+        values.extend(vertices[0] + xs[:, None]*axes[0] - y*axes[3])
+    return np.asarray(values, dtype=float)
+
+
+def _cartesian_regularity_better(candidate, baseline):
+    """Compare existing quad-angle measures without fitted score weights."""
+    new, old = candidate["core"], baseline["core"]
+    if not candidate["quality_policy"]["accepted"] or candidate["published_growth"]["elements_above_maximum"]:
+        return False
+    if not new.num_quads or new.num_quads*old.num_elements < old.num_quads*new.num_elements:
+        return False
+    new_quality = evaluate_quality(new).quadrilaterals
+    old_quality = evaluate_quality(old).quadrilaterals
+    def departure(group):
+        return max(float(np.max(np.abs(group.minimum_angle-90.))),
+                   float(np.max(np.abs(group.maximum_angle-90.)))) if len(group.element_ids) else float("inf")
+    return departure(new_quality) < departure(old_quality)
+
+
 def mesh_planar_surface(
     outer: Any,
     holes: Sequence[Any] = (),
@@ -2483,6 +2663,7 @@ def mesh_planar_surface(
     _polish_quality_candidates: bool = False,
     _protected_node_ids: Mapping[int, int] | None = None,
     _respect_growth_limit: bool = False,
+    _cartesian_rectangle_candidate: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -2854,6 +3035,43 @@ def mesh_planar_surface(
         )
     else:
         selected = min(candidate_paths, key=_quality_path_key)
+    if (_cartesian_rectangle_candidate and selected_published is not None
+            and not settings.quadratic and not planar_holes and not planar_constraints
+            and not len(explicit_interior) and settings.metric_tensor is None
+            and settings.native_options.point_placement == "legacy_lattice"
+            and settings.native_options.metric_mode == "legacy"
+            and not _preserve_spatial_refinement and _protected_node_ids is None):
+        points = _cartesian_rectangle_points(planar_outer, settings.max_lattice_points,
+                                             cancellation_check)
+        if points is not None:
+            # One additional detached candidate. Failures of its actual gates
+            # retain the already selected original layout; cancellation escapes.
+            cancellation_error = []
+            def candidate_cancel(phase):
+                if cancellation_check is not None:
+                    try:
+                        cancellation_check(phase)
+                    except BaseException as error:
+                        cancellation_error.append(error)
+                        raise
+            try:
+                path = _run_quality_path("cartesian_rectangle", planar_outer, (), (),
+                    explicit_interior, points, settings, candidate_cancel,
+                    allow_refinement=False, preserve_protected_cells=True)
+                published = _prepare_recombined_path(path, plane, planar_outer, (),
+                    settings, candidate_cancel)
+            except MeshError:
+                if cancellation_error:
+                    raise
+                pass
+            else:
+                candidate_paths.append(path)
+                published["alignment_qualified"] = True
+                published["quality_eligible"] = _cartesian_regularity_better(published, selected_published)
+                published_candidates.append(published)
+                phase_seconds["recombination"] += float(published["seconds"])
+                if published["quality_eligible"]:
+                    selected_published, selected = published, path
     generated = selected["generated"]
     initial_candidate = selected["initial"]
     best = selected["best"]

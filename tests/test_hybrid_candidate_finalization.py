@@ -9,6 +9,7 @@ is computed independently of the implementation under test.
 from __future__ import annotations
 
 import importlib
+from copy import deepcopy
 
 import numpy as np
 import pytest
@@ -23,7 +24,7 @@ from anygeometry.structural import (
 from anygeometry.serialization import to_dict
 
 from anymesher.errors import MeshError, StructuredQualityRejected
-from anymesher.mesh import Mesh
+from anymesher.mesh import Coupling, Mesh
 from anymesher.mesh_bvh import MeshElementBVH, normalized_element_filter
 from anymesher.meshing_view import GeometryMeshingView
 from anymesher.structural_pipeline import StructuralMeshingPipeline
@@ -507,6 +508,83 @@ def test_indexed_conflicting_attachment_reports_conflict():
     assert [issue.code for issue in report.issues] == ["coupling-conflict"]
 
 
+def test_adjacent_face_attachments_with_same_master_constraint_are_one_tie():
+    geometry = GeometryModel()
+    p = geometry.add_points(((0., 0., 0.), (1., 0., 0.),
+                             (1., 1., 0.), (0., 1., 0.),
+                             (2., 0., 0.), (2., 1., 0.)))
+    left = geometry.add_plate((p[0], p[1], p[2], p[3]))
+    right = geometry.add_plate((p[1], p[4], p[5], p[2]))
+    geometry.add_sheet((left,))
+    geometry.add_sheet((right,))
+    endpoints = geometry.add_points(((1., 0., -1.), (1., 0., 0.)))
+    member_edge = geometry.add_line(*endpoints)
+    member = geometry.add_member((member_edge,))
+    for face, u in ((left, 1.), (right, 0.)):
+        geometry.add_attachment(
+            member, AttachmentKind.MEMBER_THROUGH_FACE,
+            AttachmentTargetKind.FACE, face, ParameterRange.point(1.),
+            (ParameterRange.point(u), ParameterRange.point(0.)),
+        )
+    mesh = Mesh()
+    mesh.nodes.update({i: np.asarray(geometry.vertices[vertex].position)
+                       for i, vertex in enumerate(p, start=1)})
+    mesh.nodes[7] = np.asarray((1., 0., -1.))
+    mesh.nodes[8] = np.asarray((1., 0., 0.))
+    mesh.quads[10] = (1, 2, 3, 4)
+    mesh.quads[11] = (2, 5, 6, 3)
+    mesh.elements_of_face[left] = [10]
+    mesh.elements_of_face[right] = [11]
+    mesh.beams[20] = (7, 8)
+    mesh.nodes_of_edge[member_edge] = [7, 8]
+    mesh.elements_of_edge[member_edge] = [20]
+    report = _pipeline(geometry).apply_connectivity(mesh)
+    assert not report.issues
+    assert len(mesh.couplings) == 1
+    coupling = next(iter(mesh.couplings.values()))
+    assert coupling.beam_node == 8
+    assert sum(weight for node, weight in zip(coupling.plate_nodes, coupling.weights)
+               if node == 2) == pytest.approx(1.)
+
+
+def test_descending_member_on_face_path_uses_declared_owner_direction():
+    geometry = GeometryModel()
+    vertices = geometry.add_points(
+        ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+         (1.0, 1.0, 0.0), (0.0, 1.0, 0.0))
+    )
+    face = geometry.add_plate(vertices)
+    geometry.add_sheet((face,))
+    member_vertices = geometry.add_points(((1.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+    member_edge = geometry.add_line(*member_vertices)
+    member = geometry.add_member((member_edge,))
+    geometry.add_attachment(
+        member,
+        AttachmentKind.MEMBER_ON_FACE,
+        AttachmentTargetKind.FACE,
+        face,
+        ParameterRange(0.0, 1.0),
+        (ParameterRange(0.0, 1.0), ParameterRange.point(0.0)),
+    )
+    mesh = Mesh()
+    for node_id, vertex_id in enumerate(vertices, start=1):
+        mesh.nodes[node_id] = np.asarray(geometry.vertices[vertex_id].position)
+    mesh.nodes[5] = np.asarray((1.0, 0.0, 0.0))
+    mesh.nodes[6] = np.asarray((0.0, 0.0, 0.0))
+    mesh.quads[10] = (1, 2, 3, 4)
+    mesh.elements_of_face[face] = [10]
+    mesh.beams[20] = (5, 6)
+    mesh.nodes_of_edge[member_edge] = [5, 6]
+    mesh.elements_of_edge[member_edge] = [20]
+    report = _pipeline(geometry).apply_connectivity(mesh)
+    assert not report.issues
+    assert len(mesh.couplings) == 2
+    by_node = {item.beam_node: item for item in mesh.couplings.values()}
+    assert by_node[5].weights == pytest.approx((0.0, 1.0, 0.0, 0.0))
+    assert by_node[6].weights == pytest.approx((1.0, 0.0, 0.0, 0.0))
+    assert all(item.eccentricity == (0.0, 0.0, 0.0) for item in by_node.values())
+
+
 def test_indexed_shared_node_station_creates_no_redundant_coupling():
     geometry = GeometryModel()
     vertices = geometry.add_points(
@@ -616,6 +694,99 @@ def test_junction_rewrites_indexed_coupling_beam_node():
         "attachment-coupling",
         "junction-shared-node",
     ]
+
+
+def test_member_target_attachment_is_handled_by_its_declared_junction():
+    geometry = GeometryModel()
+    a0, a1, b1 = geometry.add_points(
+        ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0))
+    )
+    first_edge = geometry.add_line(a0, a1)
+    second_edge = geometry.add_line(a1, b1)
+    first = geometry.add_member((first_edge,))
+    second = geometry.add_member((second_edge,))
+    attachment = geometry.add_attachment(
+        second,
+        AttachmentKind.MEMBER_ENDPOINT_ON_MEMBER,
+        AttachmentTargetKind.MEMBER,
+        first,
+        ParameterRange.point(0.0),
+        (ParameterRange.point(1.0),),
+    )
+    geometry.add_junction(
+        JunctionKind.ENDPOINT,
+        (JunctionMemberUse(first, ParameterRange.point(1.0)),
+         JunctionMemberUse(second, ParameterRange.point(0.0))),
+        attachment_ids=(attachment,),
+    )
+    mesh = Mesh()
+    mesh.nodes.update({1: np.asarray((0.0, 0.0, 0.0)),
+                       2: np.asarray((1.0, 0.0, 0.0)),
+                       3: np.asarray((1.0, 0.0, 0.0)),
+                       4: np.asarray((2.0, 0.0, 0.0))})
+    mesh.beams[10] = (1, 2)
+    mesh.beams[11] = (3, 4)
+    mesh.nodes_of_edge[first_edge] = [1, 2]
+    mesh.nodes_of_edge[second_edge] = [3, 4]
+    mesh.elements_of_edge[first_edge] = [10]
+    mesh.elements_of_edge[second_edge] = [11]
+    report = _pipeline(geometry).apply_connectivity(mesh)
+    assert not report.issues
+    assert mesh.beams[11] == (2, 4)
+    assert mesh.couplings == {}
+
+
+def test_offset_junction_uses_shared_shell_master_without_merging_beam_nodes():
+    geometry = GeometryModel()
+    plate_vertices = geometry.add_points(
+        ((0., 0., 0.), (1., 0., 0.), (1., 1., 0.), (0., 1., 0.))
+    )
+    face = geometry.add_plate(plate_vertices)
+    geometry.add_sheet((face,))
+    first_vertices = geometry.add_points(((-1., 0., 0.), (0., 0., 0.)))
+    second_vertices = geometry.add_points(((0., 0., 0.), (0., 1., 0.)))
+    first_edge = geometry.add_line(*first_vertices)
+    second_edge = geometry.add_line(*second_vertices)
+    first = geometry.add_member((first_edge,))
+    second = geometry.add_member((second_edge,))
+    geometry.add_junction(
+        JunctionKind.ENDPOINT,
+        (JunctionMemberUse(first, ParameterRange.point(1.)),
+         JunctionMemberUse(second, ParameterRange.point(0.))),
+    )
+    mesh = Mesh()
+    mesh.nodes.update({1: np.asarray((0., 0., 0.)),
+                       2: np.asarray((1., 0., 0.)),
+                       3: np.asarray((1., 1., 0.)),
+                       4: np.asarray((0., 1., 0.)),
+                       5: np.asarray((-1., 0., 0.)),
+                       6: np.asarray((0., 1., 0.)),
+                       7: np.asarray((-1., -.1, 0.)),
+                       8: np.asarray((0., -.1, 0.)),
+                       9: np.asarray((0., 0., -.1)),
+                       10: np.asarray((0., 1., -.1))})
+    mesh.quads[20] = (1, 2, 3, 4)
+    mesh.elements_of_face[face] = [20]
+    mesh.beams[21] = (7, 8)
+    mesh.beams[22] = (9, 10)
+    mesh.nodes_of_edge[first_edge] = [5, 1]
+    mesh.nodes_of_edge[second_edge] = [1, 6]
+    mesh.offset_nodes_of_edge[first_edge] = [7, 8]
+    mesh.offset_nodes_of_edge[second_edge] = [9, 10]
+    mesh.elements_of_edge[first_edge] = [21]
+    mesh.elements_of_edge[second_edge] = [22]
+    mesh.couplings[30] = Coupling(8, (1,), (1.,), (0., -.1, 0.))
+    mesh.couplings[31] = Coupling(9, (1,), (1.,), (0., 0., -.1))
+    incompatible = deepcopy(mesh)
+    incompatible.couplings[31] = Coupling(9, (2,), (1.,), (0., 0., -.1))
+    report = _pipeline(geometry).apply_connectivity(mesh)
+    assert not report.issues
+    assert any(action.kind == "junction-via-shell" for action in report.actions)
+    assert mesh.beams[21] == (7, 8)
+    assert mesh.beams[22] == (9, 10)
+    assert len(mesh.couplings) == 2
+    rejected = _pipeline(geometry).apply_connectivity(incompatible)
+    assert [issue.code for issue in rejected.issues] == ["junction-residual"]
 
 
 def test_edge_target_attachment_reuses_indexed_edge_filter():

@@ -5,9 +5,10 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import math
 import os
+from pathlib import Path
 from typing import Any, Callable
 
-from .count_mcf import CountInfeasible
+from .count_mcf import CountInfeasible, SolveReport
 from .count_model import CountInstance
 from .front import FrontRejected, body_edges, make_quad
 from .quad_mcf_worker import WorkerNotFound, find_worker, solve_count_instance
@@ -341,8 +342,14 @@ def optimize_q4_seed_mcf(
     size_field: Any = None,
     domain: Any = None,
     timeout: float = 30.0,
+    validated_solution_cache: dict[tuple[Path, CountInstance], SolveReport] | None = None,
 ) -> Q4MCFReport:
-    """Pair bounded real T3 seed corridors through the qualified Q4 MCF worker."""
+    """Pair bounded real T3 seed corridors through the qualified Q4 MCF worker.
+
+    An optional invocation-local cache reuses only fully validated successful
+    worker solutions for identical integer instances and worker binaries.
+    Newly solved instances become reusable after this face finishes.
+    """
     h = float(target_size)
     if not math.isfinite(h) or h <= 0.0:
         raise ValueError("target_size must be positive and finite")
@@ -390,19 +397,25 @@ def optimize_q4_seed_mcf(
     worker_calls = 0
     total_cost = 0
     skipped_infeasible = 0
+    new_solutions: dict[tuple[Path, CountInstance], SolveReport] = {}
     for _component, left, right, _arcs in eligible:
         instance = _instance_for_component(
             state, left, right, pair_data, h, size_field, domain
         )
         _cancel(cancellation_check, "quad-first:q4-mcf-worker")
-        worker_calls += 1
-        try:
-            solution = solve_count_instance(
-                instance, worker=resolved_worker, timeout=float(timeout)
-            )
-        except CountInfeasible:
-            skipped_infeasible += 1
-            continue
+        key = (resolved_worker, instance)
+        solution = (validated_solution_cache.get(key)
+                    if validated_solution_cache is not None else None)
+        if solution is None:
+            worker_calls += 1
+            try:
+                solution = solve_count_instance(
+                    instance, worker=resolved_worker, timeout=float(timeout)
+                )
+            except CountInfeasible:
+                skipped_infeasible += 1
+                continue
+            new_solutions[key] = solution
         solved_components += 1
         total_cost += int(solution.total_cost)
         for (i, j), flow in sorted(solution.flows_by_index(instance).items()):
@@ -414,6 +427,8 @@ def optimize_q4_seed_mcf(
     selected = sorted(set(selected))
     selected_tuple = tuple(selected)
     if not selected:
+        if validated_solution_cache is not None:
+            validated_solution_cache.update(new_solutions)
         common.update(
             solved=solved_components,
             calls=worker_calls,
@@ -453,6 +468,9 @@ def optimize_q4_seed_mcf(
                 tx.remove_front_edge(edge[0], edge[1])
         _cancel(cancellation_check, "quad-first:q4-mcf-commit")
         tx.commit()
+
+    if validated_solution_cache is not None:
+        validated_solution_cache.update(new_solutions)
 
     final_t3 = _count_kind(state, "T3")
     final_q4 = _count_kind(state, "Q4")

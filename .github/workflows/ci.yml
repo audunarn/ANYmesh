@@ -24,7 +24,7 @@ jobs:
           repository: audunarn/ANYgeometry
           # Exercise the current owner chart/recovery contracts. Historical
           # qualification jobs below retain their independently frozen inputs.
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: dda8c70a1f6205ae601e8288a1624f52aa76e24a
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry

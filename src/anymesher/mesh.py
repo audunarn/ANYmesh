@@ -305,3 +305,16 @@ class Mesh:
         """All node coordinates, ordered by node ID."""
 
         return np.array([self.nodes[key] for key in sorted(self.nodes)])
+
+
+# Compatibility anchor captured at the class definition, before consumers can
+# replace descriptors or add callbacks. This does not belong to any Mesh
+# instance or persistence schema. Consumers may conservatively decline native
+# optimizations when the class namespace no longer matches these identities.
+_NATIVE_MESH_CLASS = Mesh
+# deepcopy/pickle lazily caches slot names on the class. Materialize this
+# standard-library metadata before freezing the conservative namespace guard,
+# so copying an ordinary mesh does not disable the beam-phase fast path.
+import copyreg as _copyreg
+_copyreg._slotnames(Mesh)
+_NATIVE_MESH_NAMESPACE = tuple(vars(Mesh).items())

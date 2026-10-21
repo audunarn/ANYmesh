@@ -24,6 +24,7 @@ from .front import (
     make_quad,
 )
 from .validate import QuadQualityRejected
+from .quality_gate import validate_triangle_angle_rule
 from .recovery import (
     DEFAULT_RECOVERY_RATIOS,
     AdvanceReport,
@@ -130,6 +131,7 @@ from .quad_tinyad_worker import (
 
 __all__ = [
     "QuadQualityRejected",
+    "validate_triangle_angle_rule",
     "QUAD_MESHING_OPTIONS_SCHEMA",
     "QuadMeshingOptions",
     "FrontNoCandidate",

@@ -119,7 +119,7 @@ class BoundaryStationRegistry:
             # carry equal counts. Size each source edge in physical units and
             # retain one canonical chain for every incident face.
             counts = {
-                edge_id: max(1, ceil(edge_demand(geometry, edge_id, field) - 1e-12),
+                edge_id: max(1, int(round(edge_demand(geometry, edge_id, field))),
                              curved_minimums.get(edge_id, 1))
                 for edge_id in edge_ids
             }

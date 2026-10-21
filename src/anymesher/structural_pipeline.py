@@ -280,7 +280,7 @@ class _FaceTargetIndex:
     tolerance hold for the whole application.
     """
 
-    __slots__ = ("elements", "filter", "member_nodes", "tolerance")
+    __slots__ = ("elements", "filter", "member_nodes", "tolerance", "_exact_nodes")
 
     def __init__(
         self,
@@ -292,6 +292,25 @@ class _FaceTargetIndex:
         self.filter = normalized_element_filter(elements)
         self.member_nodes = member_nodes
         self.tolerance = float(tolerance)
+        self._exact_nodes: dict[
+            tuple[float, float, float], tuple[int, tuple[int, ...]] | None
+        ] | None = None
+
+    def exact_node(self, mesh: Mesh, point: object) -> tuple[int, tuple[int, ...]] | None:
+        """Find a unique target node and its first incident shell element."""
+        nodes = self._exact_nodes
+        if nodes is None:
+            nodes = {}
+            for element in sorted(self.elements):
+                body = tuple(mesh.quads.get(element, mesh.tris.get(element, ())))
+                for node in body:
+                    key = tuple(float(value) for value in mesh.nodes[node])
+                    if key not in nodes:
+                        nodes[key] = (node, body)
+                    elif nodes[key] is not None and nodes[key][0] != node:
+                        nodes[key] = None  # Coincident distinct owners stay on the BVH path.
+            self._exact_nodes = nodes
+        return nodes.get(tuple(float(value) for value in point))
 
 
 # Residual tolerance of the parametric inversion in _linear_face_parameter_hit
@@ -324,6 +343,7 @@ class _ConnectivityIndex:
         self._edge_filters: dict[int, frozenset[int]] = {}
         self._beam_couplings: dict[int, Coupling] | None = None
         self._face_uv: dict[tuple[int, float, float, float], np.ndarray] = {}
+        self._face_attachment_reversed: dict[int, bool] = {}
 
     def face_local_uv(self, face_id: int, xyz: np.ndarray) -> np.ndarray:
         """Face-local coordinates of one node, cached for this application.
@@ -464,6 +484,11 @@ class StructuralMeshingPipeline:
         # Invocation-local cache of edge-node coordinates; one apply_connectivity
         # invocation owns it and merges invalidate it (see _connect_junction).
         self._edge_coordinate_cache: dict[tuple[int, tuple[int, ...]], np.ndarray] | None = None
+        # Repeated attachment and junction intervals visit the same canonical
+        # edge nodes. Keep their exact projection only within one mesh apply.
+        self._member_station_projection_cache: dict[
+            tuple[int, int], tuple[float, float, float]
+        ] | None = None
         self.cache: ComponentGenerationCache[object] = ComponentGenerationCache(
             view.model_id, view.revision
         )
@@ -763,14 +788,25 @@ class StructuralMeshingPipeline:
     ) -> tuple[tuple[float, int], ...]:
         stations: dict[int, float] = {}
         parameter_tolerance = float(self.view.tolerance.parameter)
+        cache = self._member_station_projection_cache
         for span in self.members.spans(member_id):
             axis = tuple(mesh.nodes_of_edge.get(span.edge_id, ()))
             offsets = tuple(mesh.offset_nodes_of_edge.get(span.edge_id, ()))
             for index, node in enumerate(axis):
-                _point, edge_parameter, residual = self.view.closest_edge_point(
-                    span.edge_id, mesh.nodes[node]
-                )
-                if residual > self.view.effective_length(self.view.edge_length(span.edge_id)):
+                key = (int(span.edge_id), int(node))
+                projection = None if cache is None else cache.get(key)
+                if projection is None:
+                    _point, edge_parameter, residual = self.view.closest_edge_point(
+                        span.edge_id, mesh.nodes[node]
+                    )
+                    threshold = self.view.effective_length(
+                        self.view.edge_length(span.edge_id)
+                    )
+                    projection = (edge_parameter, residual, threshold)
+                    if cache is not None:
+                        cache[key] = projection
+                edge_parameter, residual, threshold = projection
+                if residual > threshold:
                     continue
                 member_parameter = span.member_parameter(edge_parameter)
                 if lower - parameter_tolerance <= member_parameter <= upper + parameter_tolerance:
@@ -783,6 +819,67 @@ class StructuralMeshingPipeline:
         source_length = float(source.end - source.start)
         fraction = 0.0 if source_length == 0.0 else (parameter - source.start) / source_length
         return float(target.start + np.clip(fraction, 0.0, 1.0) * (target.end - target.start))
+
+    @staticmethod
+    def _active_coupling_masters(nodes: object, weights: object) -> tuple[tuple[int, float], ...]:
+        return tuple(sorted(
+            (int(node), float(weight))
+            for node, weight in zip(nodes, weights)
+            if abs(float(weight)) > 1.0e-10
+        ))
+
+    @staticmethod
+    def _same_masters(
+        first: tuple[tuple[int, float], ...], second: tuple[tuple[int, float], ...],
+    ) -> bool:
+        return (len(first) == len(second) and all(
+            first_node == second_node and abs(first_weight - second_weight) <= 1.0e-10
+            for (first_node, first_weight), (second_node, second_weight)
+            in zip(first, second)
+        ))
+
+    def _face_attachment_fraction(
+        self, attachment: object, target_face_id: int,
+        member_parameter: float, index: _ConnectivityIndex,
+    ) -> float:
+        """Orient an ordered member interval against its declared face path.
+
+        Face target ranges are stored as increasing bounds, so preparation can
+        lose the direction of a descending UV path.  Reverse only when both
+        endpoints certify the opposite direction on the same declared owners.
+        This does not infer a new attachment or relax its target-face identity.
+        """
+        source = attachment.member_range
+        fraction = float(np.clip(
+            (member_parameter - source.start) / source.length,
+            0.0, 1.0,
+        )) if source.length else 0.0
+        if source.length == 0.0:
+            return fraction
+        reversed_path = index._face_attachment_reversed.get(int(attachment.id))
+        if reversed_path is None:
+            target_u, target_v = attachment.target_parameters
+            owner_points = []
+            for parameter in (source.start, source.end):
+                location = self.members.locate(attachment.member_id, parameter)
+                owner_points.append(np.asarray(self.view.edge_point(
+                    location.span.edge_id, location.edge_parameter,
+                ), dtype=float))
+            face_start = np.asarray(self.view.face_point(
+                target_face_id, target_u.start, target_v.start,
+            ), dtype=float)
+            face_end = np.asarray(self.view.face_point(
+                target_face_id, target_u.end, target_v.end,
+            ), dtype=float)
+            forward = max(float(np.linalg.norm(owner_points[0] - face_start)),
+                          float(np.linalg.norm(owner_points[1] - face_end)))
+            reverse = max(float(np.linalg.norm(owner_points[0] - face_end)),
+                          float(np.linalg.norm(owner_points[1] - face_start)))
+            extent = float(np.linalg.norm(owner_points[1] - owner_points[0]))
+            tolerance = self.view.effective_length(extent)
+            reversed_path = reverse <= tolerance and forward > tolerance
+            index._face_attachment_reversed[int(attachment.id)] = reversed_path
+        return 1.0 - fraction if reversed_path else fraction
 
     def _target_elements_for_edge(self, mesh: Mesh, edge_id: int) -> tuple[int, ...]:
         faces = {
@@ -995,12 +1092,13 @@ class StructuralMeshingPipeline:
                     f"{attachment.target_kind.value!r} is not a meshed face",
                     (("attachment", int(attachment.id)),),
                 )
-            u = self._mapped_parameter(
-                member_parameter, attachment.member_range, attachment.target_parameters[0]
+            fraction = self._face_attachment_fraction(
+                attachment, target_face_id, member_parameter, index,
             )
-            v = self._mapped_parameter(
-                member_parameter, attachment.member_range, attachment.target_parameters[1]
-            )
+            u = float(attachment.target_parameters[0].start + fraction *
+                      attachment.target_parameters[0].length)
+            v = float(attachment.target_parameters[1].start + fraction *
+                      attachment.target_parameters[1].length)
             point = self.view.face_point(target_face_id, u, v)
             face_index = index.face(target_face_id)
             allowed = face_index.elements
@@ -1012,42 +1110,53 @@ class StructuralMeshingPipeline:
                 # redundant MPC that constrains the same node to itself.
                 return (ConnectivityAction('shared-node',
                     ('member',int(attachment.member_id)),('face',target_face_id)),None)
-            hit = bvh.locate(
-                point,
-                element_ids=face_index.filter,
-                tolerance=base_tolerance,
-            )
-            if hit is None and mesh.is_quadratic:
-                curved_tolerance = self._quadratic_face_projection_tolerance(
-                    mesh, allowed, base_tolerance
-                )
-                if curved_tolerance > base_tolerance:
-                    hit = bvh.locate(
-                        point,
-                        element_ids=allowed,
-                        tolerance=curved_tolerance,
-                    )
-            linear_hit = None
-            if hit is None and not mesh.is_quadratic:
-                linear_hit = self._linear_face_parameter_hit(
-                    mesh, target_face_id, u, v, np.asarray(point, dtype=float), allowed,
-                    index,
-                )
-            if hit is None and linear_hit is None:
-                return None, PreflightIssue(
-                    "unresolved-attachment",
-                    f"attachment {attachment.id} target face point is not meshed",
-                    (("attachment", int(attachment.id)),),
-                )
-            if hit is None:
-                plate_nodes, weights, projected = linear_hit
+            exact_node = face_index.exact_node(mesh, point)
+            if exact_node is not None:
+                node, plate_nodes = exact_node
+                weights = tuple(1.0 if item == node else 0.0 for item in plate_nodes)
+                projected = np.asarray(mesh.nodes[node], dtype=float)
             else:
-                plate_nodes, weights = hit.node_ids, hit.weights
-                projected = np.asarray(hit.point, dtype=float)
+                hit = bvh.locate(
+                    point,
+                    element_ids=face_index.filter,
+                    tolerance=base_tolerance,
+                )
+                if hit is None and mesh.is_quadratic:
+                    curved_tolerance = self._quadratic_face_projection_tolerance(
+                        mesh, allowed, base_tolerance
+                    )
+                    if curved_tolerance > base_tolerance:
+                        hit = bvh.locate(
+                            point,
+                            element_ids=allowed,
+                            tolerance=curved_tolerance,
+                        )
+                linear_hit = None
+                if hit is None and not mesh.is_quadratic:
+                    linear_hit = self._linear_face_parameter_hit(
+                        mesh, target_face_id, u, v, np.asarray(point, dtype=float), allowed,
+                        index,
+                    )
+                if hit is None and linear_hit is None:
+                    return None, PreflightIssue(
+                        "unresolved-attachment",
+                        f"attachment {attachment.id} target face point is not meshed",
+                        (("attachment", int(attachment.id)),),
+                    )
+                if hit is None:
+                    plate_nodes, weights, projected = linear_hit
+                else:
+                    plate_nodes, weights = hit.node_ids, hit.weights
+                    projected = np.asarray(hit.point, dtype=float)
 
         record = index.coupling_for_beam_node(beam_node)
         if record is not None:
-            if tuple(record.plate_nodes) == tuple(plate_nodes):
+            old_masters = self._active_coupling_masters(record.plate_nodes, record.weights)
+            new_masters = self._active_coupling_masters(plate_nodes, weights)
+            if (self._same_masters(old_masters, new_masters)
+                    and float(np.linalg.norm(
+                        np.asarray(record.eccentricity, dtype=float) - (actual - projected)
+                    )) <= self.view.effective_length(0.0)):
                 return None, None
             return None, PreflightIssue(
                 "coupling-conflict",
@@ -1194,6 +1303,33 @@ class StructuralMeshingPipeline:
                 float(np.linalg.norm(coordinates[index] - coordinates[0])) > tolerance
                 for index in range(1, len(coordinates))
             ):
+                if index is not None:
+                    if shell_set is None:
+                        shell_set = (
+                            self._shell_node_set(mesh) if shell_nodes is None else shell_nodes()
+                        )
+                    masters = []
+                    for node in nodes:
+                        if node in shell_set:
+                            masters.append(((node, 1.0),))
+                        else:
+                            coupling = index.coupling_for_beam_node(node)
+                            masters.append(
+                                () if coupling is None else self._active_coupling_masters(
+                                    coupling.plate_nodes, coupling.weights,
+                                )
+                            )
+                    if masters[0] and all(
+                        self._same_masters(masters[0], item) for item in masters[1:]
+                    ):
+                        # Distinct eccentric beam nodes are already tied to
+                        # the same shell DOFs.  Merging their coordinates
+                        # would destroy their separate rigid offsets.
+                        actions.append(ConnectivityAction(
+                            "junction-via-shell", ("node", nodes[0]),
+                            ("node", nodes[-1]), int(junction.id),
+                        ))
+                        continue
                 issues.append(
                     PreflightIssue(
                         "junction-residual",
@@ -1212,6 +1348,8 @@ class StructuralMeshingPipeline:
             # Merged stations rewrote beam node identifiers and may have
             # removed nodes; cached edge coordinates must not survive it.
             self._edge_coordinate_cache = {}
+            if self._member_station_projection_cache is not None:
+                self._member_station_projection_cache = {}
             if index is not None:
                 # Beam node identifiers were rewritten; the beam-node
                 # coupling index must not survive this mutation.
@@ -1260,6 +1398,8 @@ class StructuralMeshingPipeline:
         bvh = MeshElementBVH._connectivity_only(mesh, tolerance=tolerance)
         previous_edge_cache = self._edge_coordinate_cache
         self._edge_coordinate_cache = {}
+        previous_station_cache = self._member_station_projection_cache
+        self._member_station_projection_cache = {}
         try:
             index = _ConnectivityIndex(mesh, self)
             next_record = [max((0, *mesh.quads, *mesh.tris, *mesh.beams, *mesh.couplings))]
@@ -1271,9 +1411,26 @@ class StructuralMeshingPipeline:
                 if component.key in ready
                 for identifier in component.attachment_ids
             }
+            junction_ids = {
+                identifier
+                for component in self.components
+                if component.key in ready
+                for identifier in component.junction_ids
+            }
+            junction_attachment_ids = {
+                int(attachment_id)
+                for junction_id in junction_ids
+                for attachment_id in self.view.junctions[junction_id].attachment_ids
+            }
             for identifier in sorted(attachment_ids):
                 attachment = self.view.attachments[identifier]
                 if attachment.member_id is None:
+                    continue
+                if (attachment.target_kind is AttachmentTargetKind.MEMBER
+                        and identifier in junction_attachment_ids):
+                    # Member-to-member connectivity is applied by its exact
+                    # declared junction below, including failure reporting.
+                    # It is not a shell coupling target.
                     continue
                 if attachment.member_range.is_point:
                     node = self._member_node(
@@ -1311,12 +1468,6 @@ class StructuralMeshingPipeline:
                     if issue is not None:
                         issues.append(issue)
 
-            junction_ids = {
-                identifier
-                for component in self.components
-                if component.key in ready
-                for identifier in component.junction_ids
-            }
             shell_cache: list[set[int]] = []
 
             def shell_nodes() -> set[int]:
@@ -1334,6 +1485,7 @@ class StructuralMeshingPipeline:
             return ConnectivityReport(tuple(actions), tuple(issues), states)
         finally:
             self._edge_coordinate_cache = previous_edge_cache
+            self._member_station_projection_cache = previous_station_cache
 
     connect = apply_connectivity
 

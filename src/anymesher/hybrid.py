@@ -13,7 +13,7 @@ node IDs by construction rather than by coordinate welding.
 from __future__ import annotations
 
 from collections.abc import Callable
-from copy import deepcopy
+from copy import copy as shallow_copy, deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
 from time import perf_counter
@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from anygeometry.curves import Straight
+from anygeometry.curves import Arc, Straight
 from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
@@ -79,6 +79,7 @@ from .quad.high_order import (
     evaluate_mapping,
 )
 from .quad.options import QuadMeshingOptions
+from .quad.quality_gate import validate_triangle_angle_rule
 from .quad.mcf_seed import optimize_q4_seed_mcf
 from .quad.optimize import optimize_quad_state
 from .quad.residual import improve_residual_triangles
@@ -127,6 +128,9 @@ class MeshingStrategy(str, Enum):
     AUTO = "auto"
     MAPPED = "mapped"
     NATIVE = "native"
+    # Explicit opt-in: the planar quad-first pipeline seeded by the SmartMapped
+    # prototype through ``anymesher.smart_mapped``.  Never selected by AUTO.
+    SMART_MAPPED = "smart_mapped"
 
 
 class CertificationMode(str, Enum):
@@ -717,18 +721,61 @@ def _element_growth(
     *,
     limit: float,
 ) -> tuple[float, tuple[tuple[int, int, float], ...]]:
+    from .mesh import _NATIVE_MESH_CLASS, _NATIVE_MESH_NAMESPACE
+    from .quad import transition_smoothing as transition
+    # Batch only the native facade. Custom descriptors/producers and coordinate
+    # dtypes retain the original read/conversion/callback order below.
+    namespace = vars(_NATIVE_MESH_CLASS)
+    extra_names = namespace.keys() - dict(_NATIVE_MESH_NAMESPACE).keys()
+    # copyreg caches an empty slot-name list when an ordinary nonslotted Mesh
+    # is deep-copied/pickled. It changes no lookup/arithmetic callback.
+    native_namespace = (not extra_names or
+                        (extra_names == {'__slotnames__'}
+                         and type(namespace['__slotnames__']) is list
+                         and len(namespace['__slotnames__']) == 0))
+    native = (type(mesh) is _NATIVE_MESH_CLASS and Mesh is _NATIVE_MESH_CLASS
+              and native_namespace
+              and all(namespace.get(name) is value
+                      for name, value in _NATIVE_MESH_NAMESPACE)
+              and 'corners_of' not in vars(mesh)
+              and type(mesh.nodes) is dict and type(mesh.quads) is dict and type(mesh.tris) is dict
+              and transition._native_norm_available()
+              and transition._NATIVE_MEAN and np.mean is transition._MEAN)
+    native_cells = None
+    batched = None
+    if native:
+        native = (all(type(node) is int and type(point) is np.ndarray
+                      and point.dtype == np.dtype(np.float64) and point.shape == (3,)
+                      and point.flags.c_contiguous for node, point in mesh.nodes.items())
+                  and all(type(cid) is int and type(body) is tuple
+                          and len(body) in widths and all(type(node) is int for node in body)
+                          for elements, widths in ((mesh.quads, (4, 8)), (mesh.tris, (3, 6)))
+                          for cid, body in elements.items()))
+    if native:
+        native_cells = {cid: mesh.corners_of(cid) for cid in sorted(mesh.shells)}
+        if all(node in mesh.nodes for body in native_cells.values() for node in body):
+            from itertools import islice
+            batched = {}
+            remaining = iter(native_cells.items())
+            while chunk := dict(islice(remaining, 256)):
+                nodes = dict.fromkeys(node for body in chunk.values() for node in body)
+                index = {node: row for row, node in enumerate(nodes)}
+                xyz = np.asarray([mesh.nodes[node] for node in nodes], dtype=float).reshape((-1, 3))
+                batched.update(transition._characteristic_lengths(xyz, index, chunk))
     characteristic: dict[int, float] = {}
     incidence: dict[tuple[int, int], list[int]] = {}
     for element_id in sorted(mesh.shells):
-        corners = mesh.corners_of(element_id)
+        corners = mesh.corners_of(element_id) if batched is None else native_cells[element_id]
         lengths = []
         for first, second in zip(corners, corners[1:] + corners[:1]):
             edge = tuple(sorted((int(first), int(second))))
-            lengths.append(
-                float(np.linalg.norm(mesh.nodes[second] - mesh.nodes[first]))
-            )
+            if batched is None:
+                lengths.append(
+                    float(np.linalg.norm(mesh.nodes[second] - mesh.nodes[first]))
+                )
             incidence.setdefault(edge, []).append(int(element_id))
-        characteristic[int(element_id)] = float(np.mean(lengths))
+        characteristic[int(element_id)] = (float(np.mean(lengths)) if batched is None
+                                            else batched[int(element_id)])
     maximum = 1.0
     violations: list[tuple[int, int, float]] = []
     for attached in incidence.values():
@@ -821,6 +868,130 @@ def _structured_quality_report(
             for first, second, ratio in growth_pairs[:16]
         ],
     }
+
+
+def _planar_growth_fan_repair(
+    geometry: GeometryModel,
+    mesh: Mesh,
+    quality: Mapping[str, Any],
+    options: StructuredMeshingOptions,
+    *,
+    native_face_ids: Iterable[int],
+    cancellation_check: Callable[[str], None] | None = None,
+) -> tuple[Mesh | None, Mapping[str, Any], Mapping[str, Any]]:
+    """Try bounded interior fans at failed linear native/mapped transitions.
+
+    Every original station and cell boundary is retained. A convex Q4 on an
+    authoritative Plane may become four T3s around one owner-chart interior
+    point; no curved or quadratic capability is implied. Only a fully accepted
+    final quality/validity report can replace the deferred candidate.
+    """
+    from .triangulation import orient2d
+
+    diagnostic: dict[str, Any] = {
+        "kind": "planar_growth_fan", "attempted": False, "committed": False,
+        "replaced_quads": {}, "new_node_ids": [], "iterations": 0,
+    }
+    if (type(mesh) is not Mesh or type(geometry) is not GeometryModel
+            or mesh.order != "linear" or quality.get("accepted", False)
+            or not quality.get("growth_violation_count", 0)
+            or any(quality.get("violation_counts", {}).values())
+            or mesh.automatic_beam_connections or mesh.automatic_shell_connections
+            or any(len(coupling.plate_nodes) != 1 for coupling in mesh.couplings.values())):
+        return None, quality, diagnostic
+    native = frozenset(native_face_ids)
+    owners: dict[int, list[int]] = {}
+    for face_id, elements in mesh.elements_of_face.items():
+        for element in elements:
+            owners.setdefault(int(element), []).append(int(face_id))
+    associated = {int(element) for table in (mesh.elements_of_edge, mesh.elements_of_member)
+                  for elements in table.values() for element in elements}
+    candidate = deepcopy(mesh)
+    current_quality = quality
+    next_node = max(candidate.nodes, default=0) + 1
+    next_element = max((*candidate.quads, *candidate.tris, *candidate.beams,
+                        *candidate.couplings), default=0) + 1
+    # Work is bounded independently of model size. Unresolved cascades retain
+    # the original candidate and its normal fallback/refusal path.
+    for iteration in range(4):
+        _check_cancellation(cancellation_check, "planar growth fan selection")
+        selected: dict[int, tuple[int, np.ndarray]] = {}
+        for pair in current_quality.get("growth_violation_pairs", ()):
+            first, second = map(int, pair[:2])
+            def characteristic(element):
+                body = candidate.corners_of(element)
+                return float(np.mean([np.linalg.norm(candidate.nodes[b] - candidate.nodes[a])
+                    for a, b in zip(body, body[1:] + body[:1])]))
+            larger = max((first, second), key=lambda e: (characteristic(e), e))
+            body = candidate.quads.get(larger)
+            owner_ids = owners.get(larger, ())
+            if (body is None or len(body) != 4 or len(owner_ids) != 1
+                    or larger in associated):
+                continue
+            face_id = owner_ids[0]
+            if (face_id not in native or face_id in candidate.grid_of_face
+                    or face_id in candidate.block_grids_of_face or face_id not in geometry.faces):
+                continue
+            face = geometry.faces[face_id]
+            surface = face.surface
+            if type(surface) is not Plane or face.parameterization is not None:
+                continue
+            xyz = np.asarray([candidate.nodes[n] for n in body], dtype=float)
+            uv = np.asarray([surface.local_uv(point) for point in xyz], dtype=float)
+            if not np.all(np.isfinite(uv)):
+                continue
+            turns = [orient2d(uv[i], uv[(i+1) % 4], uv[(i+2) % 4]) for i in range(4)]
+            if not (all(turn > 0. for turn in turns) or all(turn < 0. for turn in turns)):
+                continue
+            extent = max(float(np.linalg.norm(point - xyz[0])) for point in xyz)
+            tolerance = geometry.tolerance.effective_length(extent)
+            if any(float(np.linalg.norm(surface.evaluate(*p) - x)) > tolerance
+                   for p, x in zip(uv, xyz)):
+                continue
+            center = surface.evaluate(*np.mean(uv, axis=0))
+            if np.all(np.isfinite(center)):
+                selected[larger] = (face_id, center)
+        if not selected:
+            break
+        diagnostic["attempted"] = True
+        diagnostic["iterations"] = iteration + 1
+        replacements: dict[int, tuple[int, ...]] = {}
+        for element in sorted(selected):
+            _check_cancellation(cancellation_check, "planar growth fan subdivision")
+            face_id, center = selected[element]
+            body = candidate.quads.pop(element)
+            node = next_node
+            next_node += 1
+            candidate.nodes[node] = np.array(center, copy=True)
+            ids = (element, next_element, next_element+1, next_element+2)
+            next_element += 3
+            for index, identifier in enumerate(ids):
+                candidate.tris[identifier] = (body[index], body[(index+1) % 4], node)
+                owners[identifier] = [face_id]
+                if element in candidate.activity:
+                    candidate.activity[identifier] = candidate.activity[element]
+            replacements[element] = ids
+            diagnostic["replaced_quads"][element] = list(ids)
+            diagnostic["new_node_ids"].append(node)
+        for table in (candidate.elements_of_face, candidate.elements_of_sheet):
+            for owner, elements in table.items():
+                table[owner] = [new for element in elements
+                                for new in replacements.get(int(element), (element,))]
+        _check_cancellation(cancellation_check, "planar growth fan validity")
+        core = _neutral_shell_core(candidate)
+        try:
+            assert_valid_mesh(core, declared_plate_junction_edges=_declared_junction_core_edges(candidate, core))
+        except MeshError:
+            return None, quality, diagnostic
+        current_quality = _structured_quality_report(candidate, options)
+        if current_quality["accepted"]:
+            diagnostic["committed"] = True
+            diagnostic["initial_growth_violation_count"] = int(quality["growth_violation_count"])
+            diagnostic["final_quality"] = current_quality
+            return candidate, current_quality, diagnostic
+        if any(current_quality["violation_counts"].values()):
+            break
+    return None, quality, diagnostic
 
 
 def _junction_growth_repair(
@@ -1610,6 +1781,12 @@ def _mesh_native_face(
     # chart segment lets the surface filler add interior points without adding
     # unregistered boundary stations.
     chart_size = max(segments) * (1.0 + 64.0 * np.finfo(float).eps)
+    if planar_support is not None and size_field.is_uniform:
+        # Boundary pins constrain the boundary, not the spacing of the whole
+        # planar interior. Keep the registered-segment floor (no new boundary
+        # stations) while applying the nominal size in this physical chart.
+        # Nonuniform fields retain their existing local-refinement route.
+        chart_size = max(chart_size, size_field.target_size)
     seeded_general_chart = analytic_chart is not None
     if cylindrical_chart is not None:
         from ._trimmed_cylinder_binding import TrimmedCylinderBinding
@@ -1763,6 +1940,15 @@ def _mesh_native_face(
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
             _respect_growth_limit=_respect_growth_limit,
+            _cartesian_rectangle_candidate=(
+                type(geometry) is GeometryModel and type(face.surface) is Plane
+                and face.parameterization is None
+                and not quadratic and type(size_field) is SizeField and size_field.is_uniform
+                and not face.holes and not chart_constraints and not len(chart_pinned)
+                and all(type(geometry.edges[item.edge].curve) is Straight for item in face.loop)
+                and type(face_native_options) is NativeMeshingOptions
+                and (native_backend is None or type(native_backend) is str)
+            ),
             options=(
                 SurfaceMeshOptions(
                     target_size=chart_size, recombine=recombine, order=order,
@@ -2306,6 +2492,126 @@ def _quad_first_normalize_face_ids(
     return tuple(sorted(values))
 
 
+def _scoped_planar_boundary_beam_edges(
+    geometry: Any,
+    beam_edges: Sequence[int],
+    quad_result: "HybridMeshResult",
+    refinements: Sequence[Any],
+) -> tuple[int, ...]:
+    """Curved beam edges that the straight-sided B3 chord contract admits.
+
+    Scope (everything else keeps the generic curved-beam refusal): an ``Arc``
+    source edge that is a source-boundary edge of at least one quad-first
+    face, every owning quad-first face is a planar chart, the shell published
+    a complete quadratic station chain for it, and the size field is uniform.
+    The solver's B3 is straight-sided, so such a beam is discretized into
+    straight B3 segments whose midside is the chord midpoint of the beam
+    end nodes, while the shell Q8/T6 boundary midside stays on the source arc.
+    """
+    if tuple(refinements):
+        return ()
+    mesh = quad_result.mesh
+    family_by_face = dict(mesh.hybrid_diagnostics.get("geometry_family_by_face", {}))
+    quad_faces = {int(face) for face in mesh.elements_of_face}
+    scoped: list[int] = []
+    for edge_id in beam_edges:
+        edge_id = int(edge_id)
+        curve = geometry.edges[edge_id].curve
+        if isinstance(curve, Straight) or not isinstance(curve, Arc):
+            continue
+        chain = mesh.nodes_of_edge.get(edge_id)
+        if chain is None or len(chain) < 3 or len(chain) % 2 == 0:
+            continue
+        owners = [int(face) for face in geometry.faces_using_edge(edge_id) if int(face) in quad_faces]
+        if not owners or any(family_by_face.get(face, family_by_face.get(str(face))) != "planar"
+                             for face in owners):
+            continue
+        scoped.append(edge_id)
+    return tuple(sorted(scoped))
+
+
+def _promote_linear_beam_result_to_b3(
+    legacy_result: "HybridMeshResult",
+    scoped_edges: frozenset[int],
+    quad_mesh: Mesh,
+) -> "HybridMeshResult":
+    """Re-express a linear beam pass as straight-sided B3 elements.
+
+    Every beam element ``(a, b)`` becomes ``(a, m, b)`` with ``m`` a new node
+    at the chord midpoint of the (offset) end nodes; the axis chain of each
+    beam edge is interleaved with the chord midpoints of its axis stations.
+    An unoffset scoped edge also publishes the interleaved chain as its
+    ``offset_nodes_of_edge`` so the beam keeps nodes distinct from the shell
+    arc midsides; connectivity then couples each chord midside to the shell
+    midside with the geometric chord-arc difference as eccentricity.  Pure:
+    the supplied result is not modified.
+    """
+    # Shallow copy: immutable reports and metadata (diagnostic mapping proxies
+    # cannot be deep-copied) are shared unchanged.  Only the containers this
+    # function adds to or replaces entries of are copied explicitly; node
+    # coordinates are never mutated, so the arrays themselves may be shared.
+    mesh = shallow_copy(legacy_result.mesh)
+    if mesh.is_quadratic:
+        raise MeshError("linear beam pass unexpectedly produced a quadratic mesh")
+    mesh.nodes = dict(mesh.nodes)
+    mesh.nodes_of_edge = dict(mesh.nodes_of_edge)
+    mesh.offset_nodes_of_edge = dict(mesh.offset_nodes_of_edge)
+    mesh.beams = dict(mesh.beams)
+    next_node = max((int(node) for node in mesh.nodes), default=0) + 1
+
+    def _chord_midside(first: int, second: int) -> int:
+        nonlocal next_node
+        node_id = next_node
+        next_node += 1
+        mesh.nodes[node_id] = 0.5 * (
+            np.asarray(mesh.nodes[first], dtype=float) + np.asarray(mesh.nodes[second], dtype=float)
+        )
+        return node_id
+
+    def _interleave(sequence: Sequence[int]) -> list[int]:
+        result = [int(sequence[0])]
+        for first, second in zip(sequence, sequence[1:]):
+            result.extend((_chord_midside(int(first), int(second)), int(second)))
+        return result
+
+    beam_edges = sorted(int(edge) for edge in mesh.elements_of_edge)
+    new_beams: dict[int, tuple[int, ...]] = {}
+    for edge_id in beam_edges:
+        elements = [int(element) for element in mesh.elements_of_edge[edge_id]]
+        axis = mesh.nodes_of_edge.get(edge_id)
+        offset_chain = mesh.offset_nodes_of_edge.get(edge_id)
+        sequence = offset_chain or axis
+        if axis is None or len(elements) != len(sequence) - 1:
+            raise MeshError(f"linear beam edge {edge_id} has an inconsistent station chain")
+        if edge_id in scoped_edges:
+            # No station is moved or adopted: the shell's canonical chain and
+            # the beam axis chain must already carry the same stations.  Any
+            # mismatch is a typed refusal (the merge repeats the geometric
+            # station check), never a silent relocation.
+            shell_chain = quad_mesh.nodes_of_edge.get(edge_id)
+            if shell_chain is None or len(shell_chain) != 2 * len(axis) - 1:
+                raise MeshError(
+                    f"edge {edge_id} shell station chain does not match its beam divisions"
+                )
+        if offset_chain:
+            new_axis = _interleave(axis)
+            new_offset = _interleave(offset_chain)
+        else:
+            new_axis = _interleave(axis)
+            new_offset = list(new_axis) if edge_id in scoped_edges else None
+        for index, element in enumerate(elements):
+            first, middle, second = new_offset[2 * index: 2 * index + 3] if new_offset else new_axis[2 * index: 2 * index + 3]
+            if (first, second) != tuple(int(node) for node in mesh.beams[element]):
+                raise MeshError(f"linear beam element {element} does not follow its edge chain")
+            new_beams[element] = (first, middle, second)
+        mesh.nodes_of_edge[edge_id] = new_axis
+        if new_offset is not None:
+            mesh.offset_nodes_of_edge[edge_id] = new_offset
+    mesh.beams.update(new_beams)
+    mesh.order = "quadratic"
+    return replace(legacy_result, mesh=mesh)
+
+
 def _merge_quad_first_and_legacy(
     geometry: Any,
     *,
@@ -2313,6 +2619,7 @@ def _merge_quad_first_and_legacy(
     legacy_faces: frozenset[int],
     quad_result: "HybridMeshResult",
     legacy_result: "HybridMeshResult",
+    curved_beam_edges: frozenset[int] = frozenset(),
 ) -> "HybridMeshResult":
     """Combine the quad-first and legacy neutral meshes on exact geometry IDs.
 
@@ -2321,6 +2628,12 @@ def _merge_quad_first_and_legacy(
     Every association is matched on geometry identity: ``node_of_vertex``
     vertex IDs, ``nodes_of_edge`` edge IDs, ``elements_of_face`` face IDs.
     No coordinate welding is performed; disagreements raise.
+
+    ``curved_beam_edges`` (scoped planar-boundary Arc beams, see
+    :func:`_scoped_planar_boundary_beam_edges`) are matched on their corner
+    stations only: the straight-sided B3 chord midsides stay distinct nodes
+    from the shell's on-arc midsides and are kept in the beam chain
+    (``offset_nodes_of_edge``) while ``nodes_of_edge`` keeps the shell chain.
     """
 
     if quad_faces & legacy_faces:
@@ -2373,6 +2686,47 @@ def _merge_quad_first_and_legacy(
         else:
             node_map[legacy_node_id] = new_vertex_to_node[legacy_vertex]
     vertex_to_node.update(new_vertex_to_node)
+    # A source edge is a common owner of shell-boundary and beam stations.
+    # Match by that edge's ordered canonical station chain, with a geometric
+    # consistency check; unrelated coincident nodes are never welded.
+    shared_station_map: dict[int, int] = {}
+    for shared_edge in sorted(set(quad_mesh.nodes_of_edge) & set(legacy_mesh.nodes_of_edge)):
+        quad_chain = tuple(map(int, quad_mesh.nodes_of_edge[shared_edge]))
+        legacy_chain = tuple(map(int, legacy_mesh.nodes_of_edge[shared_edge]))
+        if len(quad_chain) != len(legacy_chain):
+            raise MeshError(
+                f"edge {shared_edge} has {len(quad_chain)} quad-first stations "
+                f"but {len(legacy_chain)} legacy stations"
+            )
+        edge_length = float(geometry.edge_length(int(shared_edge)))
+        tolerance = max(geometry.tolerance.effective_length(edge_length),
+                        128.0 * np.finfo(float).eps * max(edge_length, 1.0))
+        scoped_curved = int(shared_edge) in curved_beam_edges
+        for station_position, (quad_node, legacy_node) in enumerate(zip(quad_chain, legacy_chain)):
+            if scoped_curved and station_position % 2:
+                # Straight-sided B3 midside (chord midpoint) versus the shell's
+                # on-arc midside: two distinct canonical nodes by contract.
+                continue
+            if not np.allclose(quad_mesh.nodes[quad_node], legacy_mesh.nodes[legacy_node],
+                               rtol=0.0, atol=tolerance):
+                raise MeshError(f"edge {shared_edge} has mismatched shell/beam station positions")
+            prior = shared_station_map.setdefault(legacy_node, quad_node)
+            if prior != quad_node:
+                raise MeshError(f"legacy node {legacy_node} has conflicting edge-station owners")
+            vertex_owner = node_map.get(legacy_node)
+            if vertex_owner is not None and vertex_owner != quad_node:
+                raise MeshError(f"edge {shared_edge} disagrees with source vertex ownership")
+    # An offset scoped beam has chord midsides on its offset chain; the matching
+    # unoffset axis chord midsides carry no element and are not published.
+    dropped_legacy_nodes: set[int] = set()
+    for scoped_edge in curved_beam_edges:
+        legacy_axis = legacy_mesh.nodes_of_edge.get(int(scoped_edge))
+        legacy_offsets = legacy_mesh.offset_nodes_of_edge.get(int(scoped_edge))
+        if legacy_axis and legacy_offsets:
+            kept_nodes = {int(node) for node in legacy_offsets}
+            dropped_legacy_nodes.update(
+                int(node) for node in legacy_axis[1::2] if int(node) not in kept_nodes
+            )
     legacy_corner_ids = (
         {int(node) for body in legacy_mesh.beams.values() for node in (body[0], body[-1])}
         if stable_beam_promotion else set()
@@ -2382,7 +2736,8 @@ def _merge_quad_first_and_legacy(
         if stable_beam_promotion else sorted(int(node) for node in legacy_mesh.nodes)
     )
     for legacy_node_id in legacy_order:
-        if legacy_node_id in node_map:
+        if (legacy_node_id in node_map or legacy_node_id in shared_station_map
+                or legacy_node_id in dropped_legacy_nodes):
             continue
         node_map[legacy_node_id] = next_id
         next_id += 1
@@ -2392,12 +2747,16 @@ def _merge_quad_first_and_legacy(
         for quad_node_id in sorted(quad_node_ids - quad_corner_ids):
             quad_node_map[quad_node_id] = next_id
             next_id += 1
+    node_map.update({legacy_node: quad_node_map[quad_node]
+                     for legacy_node, quad_node in shared_station_map.items()})
 
     merged_nodes: dict[int, np.ndarray] = {
         quad_node_map[int(node)]: np.asarray(pos, dtype=float)
         for node, pos in quad_mesh.nodes.items()
     }
     for legacy_node, legacy_pos in legacy_mesh.nodes.items():
+        if int(legacy_node) in dropped_legacy_nodes:
+            continue
         merged = node_map.get(int(legacy_node))
         if merged is None:
             raise MeshError(
@@ -2461,23 +2820,21 @@ def _merge_quad_first_and_legacy(
         ]
         existing = nodes_of_edge.get(edge_key)
         if existing is not None:
-            if set(existing) != set(canonical):
+            if (edge_key in curved_beam_edges and len(existing) == len(canonical)
+                    and existing[::2] == canonical[::2]):
+                nodes_of_edge[edge_key] = existing
+                continue
+            if existing != canonical:
                 raise MeshError(
                     f"legacy nodes_of_edge[{edge_key}] disagrees with "
                     f"quad-first nodes_of_edge: {existing!r} != "
                     f"{canonical!r}"
                 )
-            geometry_edge = getattr(
-                geometry, "edges", {}
-            ).get(edge_key, None)
-            if geometry_edge is not None:
-                expected = [
-                    vertex_to_node.get(int(geometry_edge.start)),
-                    vertex_to_node.get(int(geometry_edge.end)),
-                ]
-                if expected[0] is not None and expected[1] is not None:
-                    canonical = [expected[0], expected[1]]
-            nodes_of_edge[edge_key] = canonical
+            # Keep the complete validated shell/beam station chain.  Offset
+            # beam stations are indexed against this axis chain when declared
+            # attachments create shell couplings; collapsing to endpoints
+            # silently leaves interior beam nodes disconnected.
+            nodes_of_edge[edge_key] = existing
         else:
             nodes_of_edge[edge_key] = canonical
 
@@ -2680,7 +3037,12 @@ def _merge_quad_first_and_legacy(
         int(face_id): str(value)
         for face_id, value in legacy_result.strategy_by_face.items()
     }
-    merged_strategies = {face_id: "quad_first" for face_id in sorted(quad_faces)}
+    # Preserve the quad route's own provenance label ("smart_mapped" for the
+    # explicit SmartMapped strategy); ordinary quad-first stays "quad_first".
+    merged_strategies = {
+        face_id: str(quad_result.strategy_by_face.get(face_id, "quad_first"))
+        for face_id in sorted(quad_faces)
+    }
     merged_strategies.update(
         {
             face_id: legacy_strategies[face_id]
@@ -2699,7 +3061,12 @@ def _merge_quad_first_and_legacy(
         for face_id, value in legacy_result.triangulation_backend_by_face.items()
     }
     merged_backends: dict[int, Mapping[str, Any]] = {
-        int(face_id): {"backend": "quad_first"}
+        int(face_id): {
+            "backend": str(
+                dict(quad_result.triangulation_backend_by_face.get(face_id) or {})
+                .get("backend", "quad_first")
+            )
+        }
         for face_id in sorted(quad_faces)
     }
     merged_backends.update(
@@ -3353,13 +3720,28 @@ def _repair_quad_first_quality(
     mesh, geometry, domains_by_face, cancellation_check=None,
     protected_interior_nodes=(),
     allow_corner_relocation=False,
+    protected_regular_nodes=(),
+    regular_cells=(),
+    t3_minimum_angle=15.0,
 ):
     """Replace a low-quality Q4 by its best certified T3 diagonal.
 
     Evaluate the would-be Q8/T6 maps on the owner surface before promotion.
     Both linear and quadratic requests therefore make the same deterministic
     corner-topology decision; residual triangles remain first-class cells.
+
+    ``protected_regular_nodes``/``regular_cells`` (SmartMapped only) freeze the
+    regular rectangle footprints: their nodes never move (so every relocation,
+    precertification, smoothing and aspect move is confined to the irregular
+    cavity) and those cells are never split.  Quality gates are unchanged; a
+    regular cell or residual triangle that cannot meet them is reported as a
+    concrete ``QuadQualityRejected`` instead of being "repaired" by disturbing
+    a regular footprint.  Before reporting, a residual T3 is repaired by a
+    bounded local irregular-cavity replacement (see the block below); no
+    boundary node or station moves.  Empty arguments leave behaviour
+    bit-identical.
     """
+    regular_cell_set = {int(item) for item in regular_cells}
     quad_samples = np.asarray([(a, b) for a in np.linspace(-1., 1., 9)
                                for b in np.linspace(-1., 1., 9)], dtype=float)
     tri_samples = np.asarray([(i/8, j/8) for i in range(9)
@@ -3469,6 +3851,7 @@ def _repair_quad_first_quality(
     relocated_quads = []
     protected = {int(node) for chain in mesh.nodes_of_edge.values() for node in chain}
     protected.update(int(node) for node in protected_interior_nodes)
+    protected.update(int(node) for node in protected_regular_nodes)
     face_of_cell = {int(element): int(face) for face, elements in mesh.elements_of_face.items()
                     for element in elements}
     next_element = max((*mesh.quads, *mesh.tris), default=-1) + 1
@@ -3486,6 +3869,12 @@ def _repair_quad_first_quality(
                 face_id, current_nodes, "Q8", quad_samples, current_normal)
             needs_normal_repair = current_normal_error > _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES
             if current >= _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN and not needs_normal_repair:
+                replacement.append(element_id)
+                continue
+            if element_id in regular_cell_set:
+                # A regular footprint that fails the unchanged gates is a
+                # concrete blocked-quality report, never a split or a move.
+                unresolved.append((face_id, element_id, current))
                 replacement.append(element_id)
                 continue
             if allow_corner_relocation and isinstance(domains_by_face[face_id], PlanarQuadDomain):
@@ -3825,6 +4214,216 @@ def _repair_quad_first_quality(
                         break
         if not changed:
             break
+    blocked_triangles = []
+    cavity_repairs = []
+    if regular_cell_set:
+        # Bounded local irregular-cavity repair (SmartMapped only).  With every
+        # regular footprint frozen, a residual T3 beside a curved source edge
+        # can fail the unchanged Jacobian floor because its exact owner midside
+        # bulges relative to its height.  No boundary node or station moves and
+        # no source segment is split.  For each blocked T3 the adjacent
+        # NON-regular Q4 sharing an edge is united with it into a simple
+        # pentagon; a vertex-mean centroid is inserted and the pair is replaced
+        # by an oriented five-triangle fan.  The fan is committed only as a
+        # complete pass: positive chart areas (star visibility), exact area
+        # coverage and edge incidence, then, for EVERY new T6, the unchanged
+        # Jacobian floor, owner-normal limit, strict certificate and the T3
+        # minimum angle.  Source (boundary) midsides stay with
+        # ``boundary_midpoints``; the new internal midsides are chords.  A failed
+        # trial leaves the mesh untouched (nothing is mutated before the gates
+        # pass) and the next adjacent quad is tried, up to a fixed bound.
+        floor = _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN
+        angle_floor = float(t3_minimum_angle)
+
+        def gate_body(face_id, body):
+            value, nodes, normal = trial(face_id, body, "T6", tri_samples)
+            sound = (normal_error(face_id, nodes, "T6", tri_samples, normal)
+                     <= _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES
+                     and certify_mapping_validity(nodes, "T6", reference_normal=normal).status
+                     is ValidityStatus.CERTIFIED_POSITIVE)
+            return float(value), bool(sound and value >= floor)
+
+        def triangle_min_angle(body):
+            points = [np.asarray(mesh.nodes[node], dtype=float) for node in body[:3]]
+            angles = []
+            for index in range(3):
+                first = points[(index + 1) % 3] - points[index]
+                second = points[(index + 2) % 3] - points[index]
+                denominator = float(np.linalg.norm(first) * np.linalg.norm(second))
+                if denominator <= 0.0:
+                    return 0.0
+                angles.append(float(np.degrees(np.arccos(np.clip(
+                    float(np.dot(first, second)) / denominator, -1.0, 1.0)))))
+            return min(angles)
+
+        def cavity_edges(body):
+            return [(min(body[index], body[(index + 1) % len(body)]),
+                     max(body[index], body[(index + 1) % len(body)]))
+                    for index in range(len(body))]
+
+        # Edge adjacency is derived once for the whole mesh and updated only
+        # when a fan is committed (no all-mesh scan per trial).
+        edge_cells = {}
+        for owner_face, elements in mesh.elements_of_face.items():
+            for cell in elements:
+                body = mesh.quads.get(cell) or mesh.tris.get(cell)
+                if body is None:
+                    continue
+                for edge_key in cavity_edges(body):
+                    edge_cells.setdefault(edge_key, []).append((owner_face, cell))
+
+        def polygon_area(points):
+            return 0.5 * float(sum(points[i][0] * points[(i + 1) % len(points)][1]
+                                   - points[(i + 1) % len(points)][0] * points[i][1]
+                                   for i in range(len(points))))
+
+        def segments_cross(p, q, r, s):
+            def side(a, b, c):
+                return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+            return (side(p, q, r) * side(p, q, s) < 0.0
+                    and side(r, s, p) * side(r, s, q) < 0.0)
+
+        def try_cavity(face_id, tri_cell, quad_cell, shared):
+            nonlocal next_element
+            domain = domains_by_face[face_id]
+            if not isinstance(domain, PlanarQuadDomain):
+                return None
+            tri_body = mesh.tris[tri_cell]
+            quad_body = mesh.quads[quad_cell]
+            # Orient: the triangle traverses the shared edge t0 -> t1, so a
+            # consistently oriented quad traverses it t1 -> t0.
+            start = next((i for i in range(3)
+                          if {tri_body[i], tri_body[(i + 1) % 3]} == set(shared)), None)
+            if start is None:
+                return None
+            t0, t1, t2 = (tri_body[(start + step) % 3] for step in range(3))
+            where = next((i for i in range(4)
+                          if quad_body[i] == t1 and quad_body[(i + 1) % 4] == t0), None)
+            if where is None:
+                return None
+            _q1, _q0, extra_a, extra_b = (quad_body[(where + step) % 4] for step in range(4))
+            ring = (t0, extra_a, extra_b, t1, t2)
+            if len(set(ring)) != 5:
+                return None
+            chart = [np.asarray(node_chart(face_id, node), dtype=float) for node in ring]
+            area = polygon_area(chart)
+            scale = max(max(float(np.linalg.norm(chart[i] - chart[(i + 1) % 5]))
+                            for i in range(5)), 1.0e-300)
+            # Chart area of the triangle (t0, t1, t2) plus the quad
+            # (t1, t0, a, b): the cavity must cover exactly the old cells.
+            old_area = (polygon_area([chart[0], chart[3], chart[4]])
+                        + polygon_area([chart[3], chart[0], chart[1], chart[2]]))
+            if area <= 1.0e-12 * scale * scale:
+                return None
+            # Simple pentagon: no two non-adjacent boundary edges cross.
+            for i in range(5):
+                for j in range(i + 2, 5):
+                    if i == 0 and j == 4:
+                        continue
+                    if segments_cross(chart[i], chart[(i + 1) % 5],
+                                      chart[j], chart[(j + 1) % 5]):
+                        return None
+            centroid = np.mean(chart, axis=0)
+            fan_areas = [polygon_area([centroid, chart[i], chart[(i + 1) % 5]])
+                         for i in range(5)]
+            if (min(fan_areas) <= 1.0e-12 * scale * scale
+                    or abs(sum(fan_areas) - area) > 1.0e-10 * area
+                    or abs(area - old_area) > 1.0e-10 * area):
+                return None
+            try:
+                lifted = np.asarray(domain.lift(tuple(float(v) for v in centroid)), dtype=float)
+            except MeshError:
+                return None
+            new_node = int(max(mesh.nodes)) + 1
+            fan = tuple((new_node, ring[i], ring[(i + 1) % 5]) for i in range(5))
+            incidence = {}
+            for body in fan:
+                for edge_key in cavity_edges(body):
+                    incidence[edge_key] = incidence.get(edge_key, 0) + 1
+            for i in range(5):
+                if incidence.get((min(ring[i], ring[(i + 1) % 5]),
+                                  max(ring[i], ring[(i + 1) % 5]))) != 1:
+                    return None
+                if incidence.get((min(new_node, ring[i]), max(new_node, ring[i]))) != 2:
+                    return None
+            mesh.nodes[new_node] = lifted
+            states = [gate_body(face_id, body) for body in fan]
+            angles = [triangle_min_angle(body) for body in fan]
+            if not (all(state[1] for state in states)
+                    and all(angle >= angle_floor for angle in angles)):
+                mesh.nodes.pop(new_node, None)
+                return None
+            # Commit the complete pass.
+            before_quality = quality(face_id, tri_cell)[0]
+            for edge_key in cavity_edges(tri_body):
+                edge_cells[edge_key].remove((face_id, tri_cell))
+            for edge_key in cavity_edges(quad_body):
+                edge_cells[edge_key].remove((face_id, quad_cell))
+            del mesh.quads[quad_cell]
+            mesh.tris[tri_cell] = fan[0]
+            mesh.tris[quad_cell] = fan[1]
+            made = [tri_cell, quad_cell]
+            for body in fan[2:]:
+                mesh.tris[next_element] = body
+                mesh.elements_of_face[face_id].append(next_element)
+                made.append(next_element)
+                next_element += 1
+            for cell, body in zip(made, fan):
+                for edge_key in cavity_edges(body):
+                    edge_cells.setdefault(edge_key, []).append((face_id, cell))
+            protected.add(new_node)
+            cavity_repairs.append({
+                "face": int(face_id), "triangle": int(tri_cell), "quad": int(quad_cell),
+                "polygon": [int(node) for node in ring], "node": int(new_node),
+                "centroid_chart": [float(v) for v in centroid],
+                "quality_before": float(before_quality),
+                "quality_after": float(min(state[0] for state in states)),
+                "min_angle": float(min(angles)),
+                "cells": [int(cell) for cell in made],
+            })
+            return made
+
+        blocked_queue = [
+            (face_id, element_id)
+            for face_id, elements in mesh.elements_of_face.items()
+            for element_id in elements
+            if element_id in mesh.tris and element_id not in regular_cell_set
+            and quality(face_id, element_id)[0] < floor
+        ]
+        touched = set(blocked_queue)
+        attempts = 0
+        attempt_cap = max(24, 3 * len(blocked_queue))
+        for face_id, tri_cell in blocked_queue:
+            tri_body = mesh.tris.get(tri_cell)
+            if tri_body is None or quality(face_id, tri_cell)[0] >= floor:
+                continue
+            trials = []
+            for edge_key in cavity_edges(tri_body):
+                neighbours = [item for item in edge_cells.get(edge_key, ())
+                              if item[1] != tri_cell]
+                if (len(neighbours) == 1 and neighbours[0][0] == face_id
+                        and neighbours[0][1] in mesh.quads
+                        and neighbours[0][1] not in regular_cell_set):
+                    trials.append((neighbours[0][1], edge_key))
+            for quad_cell, edge_key in sorted(trials):
+                if attempts >= attempt_cap:
+                    break
+                if cancellation_check is not None:
+                    cancellation_check("quad-first:cavity-repair")
+                attempts += 1
+                made = try_cavity(face_id, tri_cell, quad_cell, edge_key)
+                if made is not None:
+                    touched.update((face_id, cell) for cell in made)
+                    break
+        unresolved[:] = [item for item in unresolved if item[1] in mesh.quads]
+        # Residual triangles that the frozen-footprint repair could not lift to
+        # the unchanged Jacobian floor are reported, not hidden.
+        for face_id, element_id in sorted(touched):
+            if element_id not in mesh.tris:
+                continue
+            value = quality(face_id, element_id)[0]
+            if value < floor:
+                blocked_triangles.append((face_id, element_id, float(value)))
     mesh.hybrid_diagnostics["quad_quality_repair"] = {
         "minimum_normalized_jacobian": _QUAD_FIRST_MIN_NORMALIZED_JACOBIAN,
         "split_quads": repaired,
@@ -3837,6 +4436,22 @@ def _repair_quad_first_quality(
         "aspect_moves": aspect_moves,
         "protected_interior_nodes": tuple(sorted(int(node) for node in protected_interior_nodes)),
     }
+    if regular_cell_set:
+        mesh.hybrid_diagnostics["quad_quality_repair"]["regular_footprint_guard"] = {
+            "regular_cells": len(regular_cell_set),
+            "protected_regular_nodes": len({int(node) for node in protected_regular_nodes}),
+            "blocked_triangles": blocked_triangles,
+            "cavity_repairs": cavity_repairs,
+        }
+        if blocked_triangles:
+            face_id, element_id, value = blocked_triangles[0]
+            raise QuadQualityRejected(
+                f"smart mapped repair is blocked: {len(blocked_triangles)} residual "
+                f"triangle(s) remain below the normalized-Jacobian floor "
+                f"{_QUAD_FIRST_MIN_NORMALIZED_JACOBIAN} with every regular rectangle "
+                f"footprint ({len(regular_cell_set)}) frozen; first: face {face_id} "
+                f"element {element_id} ({value!r})"
+            )
     if unresolved:
         # Never publish an element the repair itself classified as failing.
         face_id, element_id, value = unresolved[0]
@@ -3860,9 +4475,17 @@ def _quad_first_execute(
     overrides: Mapping[int, int] | None = None,
     _canonical_stations: "Mapping[int, Sequence[float]] | None" = None,
     layout_policy: str = "existing",
+    t3_minimum_angle: float = 15.0,
+    t3_angle_action: str = "error",
+    first_node_id: int = 0,
     cancellation_check: "Callable[[str], None] | None" = None,
+    smart_mapped: "Any | None" = None,
 ) -> "HybridMeshResult":
     """Execute the genuine PQ-M1 target-size planar quad route.
+
+    ``smart_mapped`` (a per-call ``anymesher.smart_mapped.SmartMappedRun``)
+    selects the SmartMapped seed through an explicit argument and turns on the
+    regular-rectangle footprint guard; ``None`` keeps the ordinary route.
 
     A shared exact boundary-station registry is captured first, then every face
     receives a fresh PQ2 seed consumed by the bounded PQ-M1 front driver.
@@ -3940,13 +4563,22 @@ def _quad_first_execute(
         domains = tuple(domains_list)
     except MeshError as exc:
         raise QuadPublicUnsupported(str(exc)) from exc
+    registry_overrides = overrides
+    if smart_mapped is not None:
+        # SmartMapped boundary profile: internally derived arc divisions enter
+        # the registry before any seeding; the same rule serves both orders.
+        # Ordinary (non-SmartMapped) routes keep ``overrides`` untouched.
+        registry_overrides = smart_mapped.boundary_overrides(
+            geometry, domains, h, size_field=quad_size_field, overrides=overrides)
     registry = timed_quad_call("boundary_stations", BoundaryStationRegistry.for_domains,
         geometry, domains, h, size_field=quad_size_field,
-        overrides=overrides,
+        overrides=registry_overrides,
         _canonical_stations=_canonical_stations,
         _independent_refined_counts=not quad_size_field.is_uniform,
         _adaptive_independent_counts=layout_policy == "adaptive",
     )
+    if smart_mapped is not None:
+        smart_mapped.record_boundary_divisions(registry)
 
     point_seed_cuts: dict[int, tuple[float, float]] = {}
     point_attachment_face_id: int | None = None
@@ -3997,7 +4629,7 @@ def _quad_first_execute(
         station_objects,
         key=lambda key: (0 if key.kind == "vertex" else 1, int(key.entity_id), int(key.divisions), int(key.ordinal)),
     )
-    for global_id, key in enumerate(station_keys):
+    for global_id, key in enumerate(station_keys, start=first_node_id):
         station = station_objects[key]
         global_node_of_station[key] = global_id
         global_nodes[global_id] = np.asarray(station.position, dtype=float)
@@ -4011,14 +4643,20 @@ def _quad_first_execute(
     face_validation: dict[int, dict[str, Any]] = {}
     face_q4: dict[int, dict[str, Any]] = {}
     face_q5: dict[int, dict[str, Any]] = {}
+    transition_original_xyz: dict[int, np.ndarray] = {}
+    transition_face_states: dict[int, Any] = {}
+    # One mesh invocation sees many identical, geometry-derived integer MCF
+    # instances. Reuse only validated successful answers from earlier faces.
+    q4_solution_cache: dict[tuple[Any, Any], Any] = {}
     q5_budget_total = min(int(options.max_local_optimizations), 8)
     q5_budget_remaining = q5_budget_total
-    next_node_id = len(global_nodes)
+    next_node_id = first_node_id + len(global_nodes)
     next_element_id = 0
 
     for domain in domains:
         _check_cancellation(cancellation_check, "quad-first:face-seed")
-        seed = timed_quad_call("seeding", build_planar_quad_seed,
+        seed = timed_quad_call("seeding",
+            build_planar_quad_seed if smart_mapped is None else smart_mapped.seed_builder,
             geometry,
             domain.face_id,
             h,
@@ -4035,8 +4673,13 @@ def _quad_first_execute(
             cancellation_check=cancellation_check,
             size_field=quad_size_field,
             domain=domain,
+            validated_solution_cache=q4_solution_cache,
         )
         face_q4[domain.face_id] = q4_report.to_dict()
+        if smart_mapped is not None:
+            # Optimization-only pins: seed rectangle nodes are protected for the
+            # front and Q5 only; released before the unchanged validator below.
+            smart_mapped.protect_optimization_pins(domain.face_id, seed.state)
         driven = timed_quad_call("front", run_planar_quad_driver,
             seed,
             options,
@@ -4054,10 +4697,23 @@ def _quad_first_execute(
             cancellation_check=cancellation_check,
             size_field=quad_size_field,
             domain=domain,
+            t3_minimum_angle=t3_minimum_angle,
+            t3_angle_action=t3_angle_action,
+            # Both requested orders share this linear corner mesh; smoothing
+            # precedes quadratic promotion and its unchanged mapping gates.
+            linear_transition_quality=True,
         )
         q5_budget_remaining = max(0, q5_budget_remaining - q5_report.worker_calls)
+        if smart_mapped is not None:
+            # Seed -> MCF -> front -> flips -> Q5 must not have dissolved or
+            # moved any regular rectangle (fail closed, never repaired later).
+            smart_mapped.audit_state(domain.face_id, state, "front_q5")
+            # The validator requires protected nodes to be exactly the geometry
+            # stations: release only the recorded extras (verified unchanged).
+            smart_mapped.release_optimization_pins(domain.face_id, state)
         validation = timed_quad_call("front_validation", validate_planar_quad_result,
-            state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed
+            state, face=domain.face_id, reference_area=seed.discrete_area, seed=seed,
+            t3_minimum_angle=t3_minimum_angle, t3_angle_action=t3_angle_action,
         )
         face_driver[domain.face_id] = driven.report.to_dict()
         face_driver[domain.face_id]["residual_flips"] = flip_report.to_dict()
@@ -4109,14 +4765,23 @@ def _quad_first_execute(
             local_to_global[int(node)]
             for node in face_q5[domain.face_id]["resident_moved_node_ids"]
         ]
+        if q5_report.transition_original_positions:
+            original_uv = dict(q5_report.transition_original_positions)
+            transition_face_states[domain.face_id] = (state, seed, original_uv)
+            transition = face_q5[domain.face_id]["transition_quality"]
+            transition["global_moved_node_ids"] = [local_to_global[node] for node in original_uv]
+            for local_node, position in original_uv.items():
+                transition_original_xyz[local_to_global[local_node]] = np.asarray(domain.lift(position), dtype=float)
 
         face_elements: list[int] = []
+        element_of_local_cell: dict[int, int] = {}
         for local_cell in sorted(int(cid) for cid in state.cells):
             body = tuple(
                 local_to_global[int(node)] for node in state.cell(local_cell)
             )
             element_id = next_element_id
             next_element_id += 1
+            element_of_local_cell[local_cell] = element_id
             kind = state.cell_kind(local_cell)
             if kind == "Q4":
                 quads[element_id] = body
@@ -4128,6 +4793,11 @@ def _quad_first_execute(
                 )
             face_elements.append(element_id)
         elements_of_face[domain.face_id] = face_elements
+        if smart_mapped is not None:
+            smart_mapped.bind_face(
+                domain.face_id, state, element_of_local_cell,
+                local_to_global, global_nodes,
+            )
         domain.assert_current(geometry)
 
     nodes_of_edge: dict[int, list[int]] = {}
@@ -4153,6 +4823,31 @@ def _quad_first_execute(
         elements_of_face=elements_of_face,
         order="linear",
     )
+    if transition_original_xyz:
+        from .quad.transition_smoothing import adjudicate_assembled_transition
+        mesh.declared_plate_junction_edges = _topology_plate_junction_edges(mesh, geometry)
+        transition_audit = adjudicate_assembled_transition(
+            mesh, transition_original_xyz, cancellation_check)
+        if not transition_audit["accepted"]:
+            # Restore only this pass. The saved coordinates are post-Q5, so
+            # earlier TinyAD moves and every connectivity/owner record remain.
+            mesh.nodes.update(transition_original_xyz)
+            for face_id, (state, seed, original_uv) in transition_face_states.items():
+                tx = state.transaction()
+                for node, position in original_uv.items():
+                    tx.move_node(node, position)
+                tx.commit()
+                face_validation[face_id] = validate_planar_quad_result(
+                    state, face=face_id, reference_area=seed.discrete_area, seed=seed,
+                    t3_minimum_angle=t3_minimum_angle, t3_angle_action=t3_angle_action).to_dict()
+                transition = face_q5[face_id]["transition_quality"]
+                transition.update(status="ROLLED_BACK_FULL_SHELL",
+                    attempted_moved_node_ids=transition["moved_node_ids"],
+                    moved_node_ids=[], global_moved_node_ids=[], max_displacement=0.,
+                    final_excess=transition["initial_excess"])
+        for face_id in transition_face_states:
+            face_q5[face_id]["transition_quality"]["assembled_shell"] = dict(transition_audit)
+        transition_face_states.clear()
     protected_interior_nodes = ()
     if options.quality_model == "shape_jacobian":
         if point_attachment_face_id is not None:
@@ -4170,12 +4865,26 @@ def _quad_first_execute(
             if len(anchors) != 1:
                 raise MeshError("quad-first point seed did not publish one exact attachment anchor")
             protected_interior_nodes = anchors
-        timed_quad_call("repair", _repair_quad_first_quality,
-            mesh, geometry, {domain.face_id: domain for domain in domains},
-            cancellation_check=cancellation_check,
-            protected_interior_nodes=protected_interior_nodes,
-            allow_corner_relocation=layout_policy == "adaptive",
-        )
+        if smart_mapped is None:
+            timed_quad_call("repair", _repair_quad_first_quality,
+                mesh, geometry, {domain.face_id: domain for domain in domains},
+                cancellation_check=cancellation_check,
+                protected_interior_nodes=protected_interior_nodes,
+                allow_corner_relocation=layout_policy == "adaptive",
+            )
+        else:
+            smart_mapped.audit_mesh("before_repair", mesh)
+            timed_quad_call("repair", _repair_quad_first_quality,
+                mesh, geometry, {domain.face_id: domain for domain in domains},
+                cancellation_check=cancellation_check,
+                protected_interior_nodes=protected_interior_nodes,
+                allow_corner_relocation=layout_policy == "adaptive",
+                protected_regular_nodes=smart_mapped.protected_nodes(),
+                regular_cells=smart_mapped.regular_cells(),
+                t3_minimum_angle=t3_minimum_angle,
+            )
+    if smart_mapped is not None:
+        smart_mapped.audit_mesh("after_repair", mesh)
     for sheet_id, sheet in geometry.sheets.items():
         mesh.elements_of_sheet[int(sheet_id)] = sorted(
             {
@@ -4209,6 +4918,8 @@ def _quad_first_execute(
             raise MeshError(
                 "adaptive quad-first quadratic promotion changed linear corner coordinates"
             )
+    if smart_mapped is not None:
+        smart_mapped.audit_mesh("final", mesh)
     q4_reports = tuple(face_q4.values())
     q4_statuses = tuple(str(item["status"]) for item in q4_reports)
     if any(status == "APPLIED" for status in q4_statuses):
@@ -4295,6 +5006,9 @@ def _quad_first_execute(
         "faces": face_q5,
     }
 
+    angle_warning_count = sum(
+        int(item["t3_angle_warning_count"]) for item in face_validation.values()
+    )
     mesh.hybrid_diagnostics.update(
         {
             "route": (
@@ -4319,16 +5033,26 @@ def _quad_first_execute(
             "line_search": options.line_search,
             "front": {"faces": face_driver},
             "validation": {"faces": face_validation},
+            "t3_angle_rule": {
+                "minimum_angle": t3_minimum_angle,
+                "action": t3_angle_action,
+                "warning_count": angle_warning_count,
+            },
+            "certifiable": angle_warning_count == 0,
             "q4": q4_diagnostics,
             "q5": q5_diagnostics,
         }
     )
+    if smart_mapped is not None:
+        mesh.hybrid_diagnostics["meshing_strategy"] = "smart_mapped"
+        mesh.hybrid_diagnostics["smart_mapped"] = smart_mapped.report()
 
+    face_strategy_label = "quad_first" if smart_mapped is None else "smart_mapped"
     strategy_by_face = {
-        face_id: "quad_first" for face_id in quad_face_ids
+        face_id: face_strategy_label for face_id in quad_face_ids
     }
     triangulation_backend_by_face = {
-        face_id: {"backend": "quad_first", "q4": face_q4[face_id]["status"]}
+        face_id: {"backend": face_strategy_label, "q4": face_q4[face_id]["status"]}
         for face_id in quad_face_ids
     }
     if capabilities is None:
@@ -4350,7 +5074,7 @@ def _quad_first_execute(
         connectivity=None,
         audit_report=None,
         certification_mode=certification_mode,
-        certifiable=True,
+        certifiable=angle_warning_count == 0,
     )
     def _validate(candidate: Any) -> None:
         if not isinstance(candidate, HybridMeshResult):
@@ -4729,6 +5453,8 @@ def generate_hybrid_mesh_result(
     ) = None,
     qualified_s3: bool = False,
     quad_options: QuadMeshingOptions | Mapping[str, Any] | None = None,
+    quad_t3_minimum_angle: float = 15.0,
+    quad_t3_angle_action: str = "error",
     layout_policy: str = "existing",
     quad_face_ids: Iterable[int] | None = None,
     overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
@@ -4771,12 +5497,41 @@ def generate_hybrid_mesh_result(
     mutation_policy = _enum_value(
         mutation_policy, GeometryMutationPolicy, "geometry mutation policy"
     )
+    # Explicit SmartMapped: resolve the request into a normal quad-first call
+    # (default shape_jacobian options when none are supplied) plus a per-call
+    # run object that is handed to ``_quad_first_execute`` by argument.  No
+    # module global is replaced; unsupported requests raise SmartMappedRefusal
+    # (a MeshError that is never QuadPublicUnsupported, so nothing falls back).
+    smart_mapped_run = None
+    if strategy is MeshingStrategy.SMART_MAPPED:
+        from .smart_mapped import prepare_smart_mapped_request
+
+        quad_options, smart_mapped_run = prepare_smart_mapped_request(
+            quad_options=quad_options,
+            quad_face_ids=quad_face_ids,
+            structured_options=structured_options,
+            seeding=seeding,
+            refinements=refinements,
+            overrides=overrides,
+            deferred=_defer_finalization,
+        )
     if type(qualified_s3) is not bool:
         raise MeshError("qualified_s3 must be Boolean")
     if layout_policy not in ("existing", "adaptive"):
         raise MeshError("layout_policy must be 'existing' or 'adaptive'")
     if layout_policy == "adaptive" and quad_options is None:
         raise MeshError("adaptive layout requires explicit quad_options")
+    try:
+        quad_t3_minimum_angle, quad_t3_angle_action = validate_triangle_angle_rule(
+            quad_t3_minimum_angle, quad_t3_angle_action,
+        )
+    except ValueError as error:
+        raise MeshError(str(error)) from None
+    if quad_options is None and (quad_t3_minimum_angle != 15.0 or
+                                 quad_t3_angle_action != "error"):
+        raise MeshError("quad triangle angle controls require quad_options")
+    if certification_mode is CertificationMode.STRICT and quad_t3_angle_action == "warning":
+        raise MeshError("strict certification cannot use warning-only triangle angles")
 
     # Quad-first narrow dispatch: explicit ``quad_options`` is the only signal
     # that the quad-first contract applies.  Public integration validates the
@@ -4963,6 +5718,9 @@ def generate_hybrid_mesh_result(
             refinements=requested_refinements,
             overrides=overrides,
             layout_policy=layout_policy,
+            t3_minimum_angle=quad_t3_minimum_angle,
+            t3_angle_action=quad_t3_angle_action,
+            first_node_id=1 if source_beams else 0,
             cancellation_check=cancellation_check,
         )
         _check_cancellation(cancellation_check, "quad-mixed:legacy")
@@ -5040,7 +5798,11 @@ def generate_hybrid_mesh_result(
             refinements=requested_refinements,
             overrides=overrides,
             layout_policy=layout_policy,
+            t3_minimum_angle=quad_t3_minimum_angle,
+            t3_angle_action=quad_t3_angle_action,
+            first_node_id=1 if source_beams else 0,
             cancellation_check=cancellation_check,
+            smart_mapped=smart_mapped_run,
         )
         if not source_beams:
             if qualified_s3:
@@ -5049,22 +5811,47 @@ def generate_hybrid_mesh_result(
                 )
             return quad_result
 
+        # Scoped planar-boundary curved beams (straight-sided B3 chord
+        # segments, shell midsides stay on the arc) are admitted explicitly;
+        # every other curved beam keeps the generic solver-contract refusal.
+        scoped_curved_beams: tuple[int, ...] = ()
         if order == "quadratic":
-            _refuse_curved_beams(source_geometry, source_beams)
+            scoped_curved_beams = _scoped_planar_boundary_beam_edges(
+                source_geometry, source_beams, quad_result, requested_refinements
+            )
+            _refuse_curved_beams(
+                source_geometry,
+                tuple(edge for edge in source_beams if int(edge) not in scoped_curved_beams),
+            )
 
         _check_cancellation(cancellation_check, "quad-first:beam-generation")
+        beam_overrides = dict(overrides or {})
+        station_stride = 2 if order == "quadratic" else 1
+        for edge_id in source_beams:
+            chain = quad_result.mesh.nodes_of_edge.get(int(edge_id))
+            if chain is not None:
+                if (len(chain) - 1) % station_stride:
+                    raise MeshError(f"edge {edge_id} has an incomplete quadratic station chain")
+                beam_overrides[int(edge_id)] = (len(chain) - 1) // station_stride
         beam_result = generate_hybrid_mesh_result(
             source_geometry,
             target_size=target_size,
-            strategy=strategy,
-            overrides=overrides,
+            # The beam pass owns no faces: it must not re-enter SmartMapped.
+            strategy=(
+                MeshingStrategy.AUTO
+                if strategy is MeshingStrategy.SMART_MAPPED
+                else strategy
+            ),
+            overrides=beam_overrides,
             beam_edges=requested_beam_edges,
             beam_offsets=beam_offsets,
             member_ids=requested_member_ids,
             face_ids=(),
             seeding=requested_seeding,
             refinements=requested_refinements,
-            order=order,
+            # Scoped curved beams: a linear beam pass is re-expressed as B3
+            # chord segments below (the mapped beam builder refuses curved B3).
+            order="linear" if scoped_curved_beams else order,
             recombine=recombine,
             native_backend=native_backend,
             native_options=native_options,
@@ -5081,13 +5868,25 @@ def generate_hybrid_mesh_result(
             _evaluate_declared_junction_alignment=_evaluate_declared_junction_alignment,
             _refine_declared_junction_transition=_refine_declared_junction_transition,
         )
+        if scoped_curved_beams:
+            beam_result = _promote_linear_beam_result_to_b3(
+                beam_result, frozenset(scoped_curved_beams), quad_result.mesh
+            )
         merged = _merge_quad_first_and_legacy(
             source_geometry,
             quad_faces=frozenset(int(face) for face in source_faces),
             legacy_faces=frozenset(),
             quad_result=quad_result,
             legacy_result=beam_result,
+            curved_beam_edges=frozenset(scoped_curved_beams),
         )
+        if scoped_curved_beams:
+            merged.mesh.hybrid_diagnostics["curved_beam_b3"] = {
+                "contract": "straight_sided_b3_chord_midside",
+                "edges": [int(edge) for edge in scoped_curved_beams],
+                "shell_midsides": "source_arc",
+                "beam_midsides": "chord_midpoint_of_beam_end_nodes",
+            }
         if qualified_s3:
             merged = _quad_first_apply_qualified_s3(
                 merged, source_geometry, cancellation_check
@@ -5118,7 +5917,11 @@ def generate_hybrid_mesh_result(
             if not candidate.mesh.beams:
                 raise MeshError("quad-first beam result exposed no beam elements")
             if candidate.connectivity is None or candidate.connectivity.issues:
-                raise MeshError("quad-first beam connectivity is incomplete")
+                issues = () if candidate.connectivity is None else candidate.connectivity.issues
+                raise MeshError(
+                    f"quad-first beam connectivity is incomplete ({len(issues)} issues); "
+                    f"first: {issues[0] if issues else 'missing report'}"
+                )
 
         return publish_atomically(
             merged,
@@ -5414,7 +6217,10 @@ def generate_hybrid_mesh_result(
             overrides=effective_overrides,
             edge_ids=edges,
             unstructured_face_ids=(native_faces if
-                order == "linear" and native_options.point_placement == "frontal_delaunay" else ()),
+                order == "linear" and native_options.point_placement == "frontal_delaunay"
+                else (tuple(face_id for face_id in native_faces
+                            if _native_planar_support(geometry, face_id) is not None)
+                      if size_field.is_uniform else ())),
             maximum_adjacent_growth=(None if structured_report is not None else
                 (_native_surface_options.max_element_growth
                  if _native_surface_options is not None else None)),
@@ -6015,6 +6821,13 @@ def generate_hybrid_mesh_result(
             )
         )
         if repaired_mesh is None:
+            repaired_mesh, repaired_quality, repair_diagnostics = _planar_growth_fan_repair(
+                fallback.working_geometry, fallback.mesh, fallback_quality,
+                structured_report.plan.options,
+                native_face_ids=set(fallback.faces) - set(fallback.mapped_faces),
+                cancellation_check=cancellation_check,
+            )
+        if repaired_mesh is None:
             fallback_message = _quality_rejection_message(fallback_quality)
             rejection = (
                 f"{message}; automatic native fallback also rejected: "
@@ -6080,7 +6893,9 @@ def generate_hybrid_mesh_result(
             # repair moved candidate nodes, so the record no longer describes
             # the repaired shell.
             fallback = fallback.with_mesh(repaired_mesh)
-            fallback.extra_diagnostics["junction_growth_repair"] = dict(
+            repair_key = ("planar_growth_fan_repair" if repair_diagnostics.get("kind") == "planar_growth_fan"
+                          else "junction_growth_repair")
+            fallback.extra_diagnostics[repair_key] = dict(
                 repair_diagnostics
             )
             fallback_quality = repaired_quality

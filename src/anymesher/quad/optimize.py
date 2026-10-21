@@ -1,7 +1,7 @@
 """Bounded TinyAD optimization of real resident Q4 mesh nodes."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import os
 from pathlib import Path
@@ -32,8 +32,10 @@ class QuadOptimizerReport:
     worker_statuses: tuple[str, ...]
     budget: int
     budget_cap: int = _BUDGET_CAP
+    transition_quality: dict[str, Any] | None = None
+    transition_original_positions: tuple[tuple[int, tuple[float, float]], ...] = ()
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "status": self.status,
             "eligible_nodes": self.eligible_nodes,
             "attempts": self.attempts,
@@ -47,6 +49,9 @@ class QuadOptimizerReport:
             "budget": self.budget,
             "budget_cap": self.budget_cap,
         }
+        if self.transition_quality is not None:
+            result["transition_quality"] = dict(self.transition_quality)
+        return result
 
 
 def default_q5_worker_exe() -> Path:
@@ -137,7 +142,7 @@ def _resolve_worker(worker_exe: str | os.PathLike[str] | None,
         name = "quad_tinyad_optimizer.exe" if os.name == "nt" else "quad_tinyad_optimizer"
         return find_worker(root / name)
     return find_worker(None)
-def optimize_quad_state(
+def _optimize_quad_state_q5(
     state: QuadMeshState,
     *,
     target_size: float,
@@ -148,6 +153,8 @@ def optimize_quad_state(
     size_field: Any = None,
     domain: Any = None,
     timeout: float = 30.0,
+    t3_minimum_angle: float = 15.0,
+    t3_angle_action: str = "error",
 ) -> QuadOptimizerReport:
     """Optimize a bounded set of real Q4 interior nodes in-place."""
     h = float(target_size)
@@ -222,7 +229,10 @@ def optimize_quad_state(
             tx.rollback()
             continue
         try:
-            validate_planar_quad_result(candidate)
+            validate_planar_quad_result(
+                candidate, t3_minimum_angle=t3_minimum_angle,
+                t3_angle_action=t3_angle_action,
+            )
         except MeshError:
             # The two-diagonal worker guard permits some concave Q4s. The
             # public quad route requires every four consecutive orientants
@@ -250,6 +260,34 @@ def optimize_quad_state(
         max_disp=max_disp,
         statuses=tuple(statuses),
     )
+
+
+def optimize_quad_state(
+    state: QuadMeshState, *, target_size: float, max_local_optimizations: int,
+    worker_exe=None, worker_root=None, cancellation_check=None, size_field=None,
+    domain=None, timeout: float = 30.0, t3_minimum_angle: float = 15.0,
+    t3_angle_action: str = "error", linear_transition_quality: bool = False,
+) -> QuadOptimizerReport:
+    """Run Q5, then an opt-in planar pass on the shared linear seed stage.
+
+    The caller may subsequently promote that stage to quadratic order; this
+    flag describes the state being optimized, not the requested final order.
+    """
+    report = _optimize_quad_state_q5(state, target_size=target_size,
+        max_local_optimizations=max_local_optimizations, worker_exe=worker_exe,
+        worker_root=worker_root, cancellation_check=cancellation_check,
+        size_field=size_field, domain=domain, timeout=timeout,
+        t3_minimum_angle=t3_minimum_angle, t3_angle_action=t3_angle_action)
+    if (linear_transition_quality and report.status != "UNAVAILABLE_SKIPPED"
+            and os.environ.get("ANYMESH_Q5_DISABLE_WORKER") != "1"):
+        from .transition_smoothing import smooth_planar_transitions
+        transition = smooth_planar_transitions(state, domain,
+            budget=max_local_optimizations, cancellation_check=cancellation_check,
+            t3_minimum_angle=t3_minimum_angle, t3_angle_action=t3_angle_action)
+        original_positions = transition.pop("_original_positions", ())
+        report = replace(report, transition_quality=transition,
+                         transition_original_positions=original_positions)
+    return report
 
 
 __all__ = [

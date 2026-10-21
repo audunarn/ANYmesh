@@ -62,6 +62,21 @@ def test_adaptive_layout_requires_explicit_quad_route() -> None:
                                     layout_policy="adaptive")
 
 
+def test_adaptive_small_four_station_patch_does_not_add_centre_triangles() -> None:
+    model = GeometryModel()
+    vertices = model.add_points(((0., 0., 0.), (.625, 0., 0.),
+                                 (.625, .625, 0.), (0., .625, 0.)))
+    face = model.add_face(model.add_polyline(vertices, close=True), surface=None)
+    before = _signature(model)
+    mesh = generate_hybrid_mesh_result(
+        model, target_size=.5, face_ids=(face,), layout_policy="adaptive",
+        quad_options=QuadMeshingOptions(),
+    ).mesh
+    assert len(mesh.quads) == 1
+    assert not mesh.tris
+    assert _signature(model) == before
+
+
 def test_adaptive_seed_cancellation_keeps_source_unchanged() -> None:
     model, face = _irregular_model(False)
     before = _signature(model)

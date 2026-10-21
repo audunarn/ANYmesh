@@ -13,6 +13,7 @@ from ..triangulation import PlanarTriangulation, orient2d, triangulate_polygon
 from .boundary import BoundaryStationKey, BoundaryStationRegistry
 from .domain import CylindricalQuadDomain, PlanarQuadDomain, Vec2
 from .state import QuadMeshState
+from .rectangle_seed import rectangle_seed_data
 
 def _shoelace(loop_points: np.ndarray) -> float:
     loop = np.asarray(loop_points, dtype=float)
@@ -456,6 +457,17 @@ def _adaptive_interior_points(
          np.asarray(domain.lift(ring[(i + 1) % len(ring)]), dtype=float))
         for ring in rings for i, a in enumerate(ring)
     ]
+    # A small four-station patch needs no interior seed. Adding its centre
+    # turns one admissible quadrilateral into a four-triangle star that the
+    # front cannot collapse without removing that otherwise unused node.
+    # Keep larger, trimmed, and locally refined patches on the normal seed.
+    if (len(outer) == 4 and not holes
+            and (size_field is None or size_field.is_uniform)
+            and all(float(np.linalg.norm(end - start)) <= 1.5 * target_size
+                    for start, end in boundary)):
+        if cancellation_check is not None:
+            cancellation_check("quad-first:adaptive-coarse-seed")
+        return np.empty((0, 2), dtype=float)
     lower = np.min(np.asarray(outer, dtype=float), axis=0)
     upper = np.max(np.asarray(outer, dtype=float), axis=0)
     extent = upper - lower
@@ -639,6 +651,22 @@ def build_planar_quad_seed(
         if len(hole_points) < 3:
             raise MeshError("hole boundary has fewer than three stations")
         hole_polys.append(np.asarray(hole_points, dtype=float))
+    if layout_policy == "adaptive" and source_aligned_cut is None:
+        regular = rectangle_seed_data(
+            geometry, domain, registry, outer, size_field, cancellation_check,
+            target_size=target_size,
+        )
+        if regular is not None:
+            triangulation, state = regular
+            station_to_node = {station.key: row for row, station in enumerate(stations)}
+            if len(station_to_node) != len(stations):
+                raise MeshError("canonical boundary station identities are not unique on the face")
+            domain.assert_current(geometry)
+            registry.assert_current(geometry)
+            if int(geometry.revision) != start_revision or str(geometry.model_id) != start_model_id:
+                raise MeshError("PQ2 seed mutated source geometry")
+            return PlanarQuadSeed(domain, registry, float(target_size), tuple(station_to_node),
+                                  triangulation, state, station_to_node)
     constraints: tuple[np.ndarray, ...] = ()
     central_points: tuple[Vec2, ...] = ()
     station_lattice = _cylindrical_station_lattice(domain, registry, outer, float(target_size))

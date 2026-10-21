@@ -95,6 +95,29 @@ def _neutral_quad() -> tuple[GeometryModel, int]:
     return geometry, face
 
 
+def test_simple_thin_quad_uses_localized_structured_seeding() -> None:
+    geometry = GeometryModel()
+    vertices = geometry.add_points(
+        ((0.0, 0.0, 0.0), (2.5, 0.0, 0.0),
+         (2.5, 0.125, 0.0), (0.0, 0.125, 0.0))
+    )
+    edges = geometry.add_polyline(vertices, close=True)
+    face = geometry.add_face_from_loop(
+        geometry.order_loop(edges), (0, 1, 2, 3), surface=PLANE,
+    )
+    before = _document_bytes(geometry)
+
+    working, report = apply_structured_layout(
+        geometry, plan_structured_layout(geometry, target_size=1.25),
+    )
+
+    assert _document_bytes(geometry) == before
+    assert len(report.source_to_working_faces[face]) == 1
+    assert report.seed_solution[edges[0]] == report.seed_solution[edges[2]] == 7
+    assert report.seed_solution[edges[1]] == report.seed_solution[edges[3]] == 1
+    assert working.validate_topology() == ()
+
+
 def _unmapped_cylinder() -> tuple[GeometryModel, int]:
     geometry = GeometryModel()
     surface = Cylinder(

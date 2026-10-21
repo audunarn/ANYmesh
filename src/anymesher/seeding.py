@@ -37,8 +37,10 @@ from typing import Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
 
-from anygeometry.entities import Face, OrientedEdge
+from anygeometry.curves import Straight
+from anygeometry.entities import Edge, Face, OrientedEdge
 from anygeometry.model import GeometryModel
+from anygeometry.surfaces import Plane
 
 from .refinement import SizeField
 
@@ -195,6 +197,8 @@ def _apply_face_shape_minimums(
     *,
     desired: Dict[int, int],
     demands: Mapping[int, float],
+    localized_structured_face_ids: frozenset[int] = frozenset(),
+    composite_structured_face_ids: frozenset[int] = frozenset(),
 ) -> None:
     """Bound mapped-axis station anisotropy before compatibility solving.
 
@@ -205,9 +209,17 @@ def _apply_face_shape_minimums(
     refining the coarser axis to the 30-degree triangular spacing bound.
     """
 
-    maximum_step_ratio = 1.7320508075688772  # sqrt(3), tan(30 deg) inverse
     for face in faces:
         sides = face.sides()
+        # A simple mapped quad has an independent, unchanged final aspect and
+        # growth gate. Its thin axis need not impose the native triangle's
+        # 30-degree spacing bound on every opposite-side seed class.
+        maximum_step_ratio = (
+            3.0 if face.id in localized_structured_face_ids
+            and (all(len(side) == 1 for side in sides)
+                 or face.id in composite_structured_face_ids)
+            else 1.7320508075688772  # sqrt(3), tan(30 deg) inverse
+        )
         axes: list[tuple[tuple[int, int], float, float]] = []
         for pair in ((0, 2), (1, 3)):
             axis_demand = max(
@@ -223,11 +235,21 @@ def _apply_face_shape_minimums(
         if reference_step <= 0.0:
             continue
         for pair, axis_demand, axis_step in axes:
-            if axis_step <= maximum_step_ratio * reference_step:
+            local_reference = reference_step
+            if face.id in composite_structured_face_ids:
+                # A short segment constrains the transverse spacing for local
+                # aspect, not every segment around the entire face. Keep the
+                # existing mapped ratio 3 and all final element quality gates.
+                transverse = (1, 3) if pair == (0, 2) else (0, 2)
+                local_reference = min(
+                    demands[item.edge] / desired[item.edge]
+                    for index in transverse for item in sides[index]
+                )
+            if axis_step <= maximum_step_ratio * local_reference:
                 continue
             minimum = max(
                 1,
-                int(np.ceil(axis_demand / (maximum_step_ratio * reference_step))),
+                int(np.ceil(axis_demand / (maximum_step_ratio * local_reference))),
             )
             for index in pair:
                 _raise_side_minimum(
@@ -244,10 +266,20 @@ def _apply_face_boundary_minimums(
     desired: Dict[int, int],
     demands: Mapping[int, float],
     maximum_step_ratio: float = 1.25,
+    localized_structured_face_ids: frozenset[int] = frozenset(),
+    composite_structured_face_ids: frozenset[int] = frozenset(),
 ) -> None:
     """Prevent short imprint segments from forcing abrupt native transitions."""
 
     for face in faces:
+        if (face.id in localized_structured_face_ids and len(face.corners) == 4
+                and not face.holes
+                and (all(len(side) == 1 for side in face.sides())
+                     or face.id in composite_structured_face_ids)):
+            # The mapped-axis and final quality checks handle this block.
+            # Propagating its shortest edge around the entire boundary makes
+            # an isolated thin strip set the resolution of distant bays.
+            continue
         loops = (face.loop,) + face.holes
         edge_ids = tuple(
             dict.fromkeys(item.edge for loop in loops for item in loop)
@@ -273,6 +305,38 @@ def _apply_face_boundary_minimums(
             desired[edge_id] = max(desired[edge_id], minimum)
 
 
+def _composite_structured_faces(
+    geometry: GeometryModel,
+    size_field: SizeField,
+    faces: Sequence[Face],
+    localized: frozenset[int],
+    demands: Mapping[int, float] | None = None,
+) -> frozenset[int]:
+    """Extend localized sizing only to native uniform straight planar blocks.
+
+    Explicit Plane support is already the affine-chart contract. Boundary
+    stations are retained individually: removing the shortest-segment heuristic
+    changes demands, never topology, pins or the opposite-side equations. The
+    structured caller still checks actual aspect, growth and Jacobian quality.
+    Custom supports/fields and nonuniform refinement retain their old route.
+    """
+    if not localized or type(geometry) is not GeometryModel or type(size_field) is not SizeField:
+        return frozenset()
+    if not size_field.is_uniform:
+        return frozenset()
+    return frozenset(
+        face.id for face in faces
+        if type(face) is Face and face.id in localized
+        and len(face.corners) == 4 and not face.holes and len(face.loop) > 4
+        and type(face.surface) is Plane and face.parameterization is None
+        and (demands is None or all(demands[item.edge] > 0.0 for item in face.loop))
+        and all(type(item) is OrientedEdge
+                and type(geometry.edges[item.edge]) is Edge
+                and type(geometry.edges[item.edge].curve) is Straight
+                for item in face.loop)
+    )
+
+
 def solve_seeding(
     geometry: GeometryModel,
     *,
@@ -285,6 +349,7 @@ def solve_seeding(
     max_sweeps: int = 200,
     max_divisions: int = 100_000,
     maximum_adjacent_growth: float | None = None,
+    localized_structured_face_ids: Iterable[int] = (),
     cancellation_check=None,
 ) -> Seeding:
     """Resolve division counts for every edge.
@@ -298,6 +363,10 @@ def solve_seeding(
     local unstructured refinement keep shared edge demand/overrides, but do not
     impose mapped-axis compatibility or whole-face uniform transition estimates.
     Generated-mesh quality gates remain authoritative.
+    ``localized_structured_face_ids`` is used by the quality-gated structured
+    planner for existing planar mapped faces: simple quads retain their
+    vertices and growth constraints without imposing the shortest boundary
+    segment on an entire face.
     """
 
     if size_field is None:
@@ -318,6 +387,11 @@ def solve_seeding(
     if maximum_adjacent_growth is not None and (
             not np.isfinite(maximum_adjacent_growth) or maximum_adjacent_growth <= 1.):
         raise SeedingConflict("adjacent growth must be finite and greater than one")
+    localized_structured_faces = frozenset(
+        int(face_id) for face_id in localized_structured_face_ids
+    )
+    if not localized_structured_faces.issubset(geometry.faces):
+        raise SeedingConflict("localized structured spacing references unknown faces")
     edges = (
         list(geometry.edges)
         if edge_ids is None
@@ -353,10 +427,15 @@ def solve_seeding(
             for item in loop
         )
     ]
+    composite_structured_faces = _composite_structured_faces(
+        geometry, size_field, boundary_faces, localized_structured_faces, demands,
+    )
     _apply_face_boundary_minimums(
         boundary_faces,
         desired=desired,
         demands=demands,
+        localized_structured_face_ids=localized_structured_faces,
+        composite_structured_face_ids=composite_structured_faces,
     )
 
     faces = [
@@ -366,7 +445,11 @@ def solve_seeding(
         and not face.holes
         and all(item.edge in desired for item in face.loop)
     ]
-    _apply_face_shape_minimums(faces, desired=desired, demands=demands)
+    _apply_face_shape_minimums(
+        faces, desired=desired, demands=demands,
+        localized_structured_face_ids=localized_structured_faces,
+        composite_structured_face_ids=composite_structured_faces,
+    )
 
     union = _UnionFind()
     for edge_id in edges:
@@ -426,6 +509,10 @@ def solve_seeding(
                 ):
                     changed = True
         if maximum_adjacent_growth is not None:
+            changed |= _repair_composite_growth(
+                faces, composite_structured_faces, union, counts, locked,
+                demands, maximum_adjacent_growth, max_divisions,
+            )
             changed |= _repair_growth(geometry, faces, union, counts, locked,
                                       maximum_adjacent_growth, max_divisions)
         if not changed:
@@ -445,6 +532,45 @@ def solve_seeding(
         classes={edge_id: union.find(edge_id) for edge_id in edges},
         size_field=size_field,
     )
+
+
+def _repair_composite_growth(faces, admitted, union, counts, locked, demands, limit, maximum):
+    """Bound station jumps at individual straight chain joints, not face-wide.
+
+    Uniform demands are lengths divided by one common target, so ratios are
+    physical station-width ratios. This conservative estimate remains subject
+    to the generated element growth gate. Opposite-side repair in the same
+    bounded monotone solve propagates any raised count without moving a joint.
+    """
+    if not admitted:
+        return False
+    changed = False
+    for face in faces:
+        if face.id not in admitted:
+            continue
+        for side in face.sides():
+            for first, second in zip(side, side[1:]):
+                a, b = union.find(first.edge), union.find(second.edge)
+                if a == b:
+                    # Raising a shared class cannot change this width ratio.
+                    # Leave the actual two-dimensional growth gate authoritative.
+                    continue
+                left = demands[first.edge] / counts[a]
+                right = demands[second.edge] / counts[b]
+                if left <= limit * right and right <= limit * left:
+                    continue
+                edge, root, small = ((first.edge, a, right) if left > right
+                                     else (second.edge, b, left))
+                if locked[root]:
+                    raise SeedingConflict(
+                        f"face {face.id} composite growth requires refinement of pinned edge {edge}")
+                wanted = int(np.ceil(demands[edge] / (limit * small)))
+                if wanted > maximum:
+                    raise SeedingConflict(f"composite growth exceeded {maximum} divisions per edge")
+                if wanted > counts[root]:
+                    counts[root] = wanted
+                    changed = True
+    return changed
 
 
 def _repair_growth(geometry, faces, union, counts, locked, limit, maximum):

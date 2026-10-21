@@ -9,7 +9,9 @@ import numpy as np
 from ..errors import MeshError
 from ..triangulation import orient2d
 from .front import edge_key
-from .quality_gate import RELATIVE_EPS, corner_metrics, policy_record, quad_violation, triangle_violation
+from .quality_gate import (RELATIVE_EPS, QUAD_FIRST_T3_MIN_ANGLE, corner_metrics,
+                           policy_record, quad_violation, triangle_violation,
+                           validate_triangle_angle_rule)
 from .seed import PlanarQuadSeed
 
 __all__ = ["QuadQualityRejected", "QuadValidationReport", "validate_planar_quad_result"]
@@ -37,6 +39,10 @@ class QuadValidationReport:
     min_q4_scaled_jacobian: float | None = None
     max_q4_angle: float | None = None
     min_t3_angle: float | None = None
+    t3_angle_warning_count: int = 0
+    t3_angle_warning_cells: tuple[int, ...] = ()
+    t3_minimum_angle: float = QUAD_FIRST_T3_MIN_ANGLE
+    t3_angle_action: str = "error"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,7 +62,9 @@ class QuadValidationReport:
             "min_q4_scaled_jacobian": self.min_q4_scaled_jacobian,
             "max_q4_angle": self.max_q4_angle,
             "min_t3_angle": self.min_t3_angle,
-            "quality_gates": policy_record(),
+            "t3_angle_warning_count": self.t3_angle_warning_count,
+            "t3_angle_warning_cells": list(self.t3_angle_warning_cells),
+            "quality_gates": policy_record(self.t3_minimum_angle, self.t3_angle_action),
         }
 
 
@@ -112,8 +120,13 @@ def validate_planar_quad_result(
     face: int = 0,
     reference_area: float | None = None,
     seed: PlanarQuadSeed | None = None,
+    t3_minimum_angle: float = QUAD_FIRST_T3_MIN_ANGLE,
+    t3_angle_action: str = "error",
 ) -> QuadValidationReport:
     """Validate the resident final state without coordinate welding or O(N^2) scans."""
+    t3_minimum_angle, t3_angle_action = validate_triangle_angle_rule(
+        t3_minimum_angle, t3_angle_action,
+    )
     if reference_area is not None and (
         not np.isfinite(float(reference_area)) or float(reference_area) <= 0.0
     ):
@@ -130,6 +143,8 @@ def validate_planar_quad_result(
     worst_jacobian: float | None = None
     worst_angle: float | None = None
     thinnest: float | None = None
+    angle_warning_count = 0
+    angle_warning_cells: list[int] = []
 
     for cid in sorted(int(item) for item in state.cells):
         body = tuple(int(x) for x in state.cell(cid))
@@ -159,11 +174,16 @@ def validate_planar_quad_result(
         else:
             if not _positive_area(points):
                 raise MeshError(f"T3 cell {cid} is not positively oriented")
-            reason = triangle_violation(points)
-            if reason is not None:
+            reason = triangle_violation(points, t3_minimum_angle)
+            if reason is not None and (t3_angle_action == "error" or
+                                       reason == "triangle is not positively oriented"):
                 raise QuadQualityRejected(f"T3 cell {cid} {body!r}: {reason}")
             min_angle = corner_metrics(points)[0]
             thinnest = min_angle if thinnest is None else min(thinnest, min_angle)
+            if reason is not None:
+                angle_warning_count += 1
+                if len(angle_warning_cells) < 20:
+                    angle_warning_cells.append(cid)
             tri_count += 1
             tri_area += signed
         cell_areas.append(signed)
@@ -237,4 +257,8 @@ def validate_planar_quad_result(
         min_q4_scaled_jacobian=worst_jacobian,
         max_q4_angle=worst_angle,
         min_t3_angle=thinnest,
+        t3_angle_warning_count=angle_warning_count,
+        t3_angle_warning_cells=tuple(angle_warning_cells),
+        t3_minimum_angle=t3_minimum_angle,
+        t3_angle_action=t3_angle_action,
     )
