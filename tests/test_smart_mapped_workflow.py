@@ -688,7 +688,10 @@ def test_real_downstream_linear_and_quadratic_arc_hole_nodes_lie_on_source_arcs(
         with SmartMappedSeedContext(seed_callback=records.append) as adapter:
             result = hybrid.generate_hybrid_mesh_result(
                 geometry, target_size=0.4, face_ids=(face,),
-                quad_options=QuadMeshingOptions(), order=order)
+                # Historical private-prototype curve-projection profile: keep the
+                # original layout (adaptive is the public quad-first default).
+                quad_options=QuadMeshingOptions(), order=order,
+                layout_policy="existing")
         assert hybrid.build_planar_quad_seed is ORIGINAL and adapter.restored
         assert adapter.calls == 1 and adapter.failures == ()
         assert len(records[0].seed_quads) > 0

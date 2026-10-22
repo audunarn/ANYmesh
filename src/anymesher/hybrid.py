@@ -377,6 +377,117 @@ def _next_identifier(values: Iterable[int]) -> int:
     return max((int(item) for item in values), default=0) + 1
 
 
+def _collapse_entity_targets(
+    geometry: GeometryModel,
+    target_size: float,
+    refinements: Sequence[Refinement],
+    source_faces: Sequence[int],
+    source_beams: Sequence[int],
+) -> tuple[float, tuple[Refinement, ...]]:
+    """Fold a uniform entity override of the whole selection into the target.
+
+    When every selected face and every selected beam line carries an entity
+    size override and they all agree, the selection is exactly an isolated
+    entity meshed at that size.  Using it as the global target reproduces the
+    equivalent global-target mesh bit for bit (coarser or finer, tensor seeds
+    and every regular fast path included).  Any other mixture keeps its
+    per-entity overrides for the size field.  Refine-only zones are untouched.
+    """
+
+    refinements = tuple(refinements)
+    overrides = [item for item in refinements if item.mode == "override"]
+    if not overrides:
+        return target_size, refinements
+    # Validate every request against the ORIGINAL global contract before
+    # anything is folded or dropped: a missing entity, or a refine-only zone
+    # coarser than the original target, is an error here and can never vanish
+    # into the fast path.  (The field is discarded; it is a check only.)
+    SizeField(geometry, target_size, refinements)
+    # An override equal to the global target is a no-op; it leaves no trace.
+    live = tuple(
+        item for item in refinements
+        if not (item.mode == "override" and item.size == target_size)
+    )
+    if not (source_faces or source_beams):
+        return target_size, live
+    faces: dict[int, float] = {}
+    edges: dict[int, float] = {}
+    for item in overrides:
+        assert item.ref is not None
+        table = faces if item.ref.kind == "face" else edges
+        key = int(item.ref.id)
+        table[key] = min(item.size, table.get(key, item.size))
+    if not (
+        all(int(face) in faces for face in source_faces)
+        and all(int(edge) in edges for edge in source_beams)
+    ):
+        return target_size, live
+    sizes = {faces[int(face)] for face in source_faces} | {
+        edges[int(edge)] for edge in source_beams
+    }
+    if len(sizes) != 1:
+        return target_size, live
+    effective = float(next(iter(sizes)))
+    # Admitted refine-only zones that cannot refine the effective target are
+    # inert there (finer entity target); they were validated above.
+    return effective, tuple(
+        item for item in refinements
+        if item.mode != "override" and item.size <= effective
+    )
+
+
+def _entity_edge_pins(
+    geometry: GeometryModel,
+    target_size: float,
+    refinements: Sequence[Refinement],
+    face_groups: Mapping[int, Any],
+    overrides: Mapping[int, int] | None,
+) -> dict[int, int]:
+    """Division counts for edges shared by faces that are meshed in separate calls.
+
+    ``face_groups`` maps every selected face to the call that meshes it.  An
+    edge touched by more than one call gets the count its finest adjacent plate
+    asks for, so the separately generated boundary stations agree.  Explicit
+    user pins win and are never overwritten.
+    """
+
+    from .seeding import edge_demand
+
+    field = SizeField(
+        geometry, target_size, tuple(refinements), active_faces=tuple(face_groups)
+    )
+    owners: dict[int, set[Any]] = {}
+    for face_id, group in face_groups.items():
+        face = geometry.faces[int(face_id)]
+        for loop in (face.loop, *face.holes):
+            for use in loop:
+                owners.setdefault(int(use.edge), set()).add(group)
+    fixed = {int(edge) for edge in (overrides or {})}
+    return {
+        edge: max(1, int(round(edge_demand(geometry, edge, field))))
+        for edge, groups in sorted(owners.items())
+        if len(groups) > 1 and edge not in fixed
+    }
+
+
+def _remap_entity_overrides(
+    refinements: Sequence[Refinement],
+    source_to_final_faces: Mapping[int, Sequence[int]],
+    source_to_final_edges: Mapping[int, Sequence[int]],
+) -> tuple[Refinement, ...]:
+    """Re-bind entity size overrides to every descendant of their source entity."""
+
+    result: list[Refinement] = []
+    for item in refinements:
+        assert item.ref is not None
+        table = source_to_final_faces if item.ref.kind == "face" else source_to_final_edges
+        for final_id in table.get(int(item.ref.id), (int(item.ref.id),)):
+            result.append(
+                replace(item, ref=EntityRef(item.ref.kind, int(final_id)))
+            )
+    return tuple(result)
+
+
 def _station_parameters(
     geometry: GeometryModel,
     edge_id: int,
@@ -4480,8 +4591,16 @@ def _quad_first_execute(
     first_node_id: int = 0,
     cancellation_check: "Callable[[str], None] | None" = None,
     smart_mapped: "Any | None" = None,
+    context_faces: "Sequence[int] | None" = None,
 ) -> "HybridMeshResult":
     """Execute the genuine PQ-M1 target-size planar quad route.
+
+    Entity size overrides in ``refinements`` are plate-scoped: the one shared
+    boundary-station registry takes each shared edge from the finest adjacent
+    plate of ``context_faces`` (default: the selected faces), and every plate's
+    seed, MCF and Q5 run at that plate's own target through a per-plate view of
+    the field and registry.  Without entity sizes the plate view is the very
+    same field and registry, so the ordinary route is unchanged.
 
     ``smart_mapped`` (a per-call ``anymesher.smart_mapped.SmartMappedRun``)
     selects the SmartMapped seed through an explicit argument and turns on the
@@ -4499,7 +4618,10 @@ def _quad_first_execute(
     quad_face_ids = tuple(sorted(set(int(item) for item in face_ids)))
     if not quad_face_ids:
         raise MeshError("quad-first requires at least one selected face")
-    quad_size_field = SizeField(geometry, h, tuple(refinements))
+    quad_size_field = SizeField(
+        geometry, h, tuple(refinements),
+        active_faces=quad_face_ids if context_faces is None else tuple(context_faces),
+    )
 
     for face_id in quad_face_ids:
         face = geometry.faces.get(face_id)
@@ -4655,23 +4777,45 @@ def _quad_first_execute(
 
     for domain in domains:
         _check_cancellation(cancellation_check, "quad-first:face-seed")
+        # The ordinary adaptive route (no SmartMapped seed builder) also admits
+        # split-edge rectangles as a station-conforming tensor and freezes any
+        # admitted regular tensor through Q5; every other face keeps the
+        # unchanged adaptive seed. The explicit existing layout is untouched.
+        seed_extra = {"edge_aligned": True} if (
+            smart_mapped is None and layout_policy == "adaptive"
+            and isinstance(domain, PlanarQuadDomain)
+        ) else {}
+        face_h = quad_size_field.face_target(domain.face_id)
+        face_field = quad_size_field.face_view(domain.face_id)
+        # The registry (and its shared canonical chains) is one for the call;
+        # a plate with its own target sees it under that target.
+        face_registry = (
+            registry if face_h == h else replace(registry, target_size=float(face_h))
+        )
         seed = timed_quad_call("seeding",
             build_planar_quad_seed if smart_mapped is None else smart_mapped.seed_builder,
             geometry,
             domain.face_id,
-            h,
+            face_h,
             domain=domain,
-            registry=registry,
-            size_field=quad_size_field,
+            registry=face_registry,
+            size_field=face_field,
             source_aligned_cut=point_seed_cuts.get(domain.face_id),
             layout_policy=layout_policy,
             cancellation_check=cancellation_check,
+            **seed_extra,
         )
+        # Recorded before MCF/front/Q5 can touch the resident state.
+        edge_aligned_record = ({
+            "boundary_stations": len(seed.station_to_node),
+            "interior_points": len(seed.state.nodes) - len(seed.station_to_node),
+            "tensor_cells": len(seed.state.cells),
+        } if getattr(seed, "edge_aligned", False) else None)
         q4_report = timed_quad_call("optimization", optimize_q4_seed_mcf,
             seed.state,
-            target_size=h,
+            target_size=face_h,
             cancellation_check=cancellation_check,
-            size_field=quad_size_field,
+            size_field=face_field,
             domain=domain,
             validated_solution_cache=q4_solution_cache,
         )
@@ -4692,16 +4836,20 @@ def _quad_first_execute(
         )
         q5_report = timed_quad_call("optimization", optimize_quad_state,
             state,
-            target_size=h,
-            max_local_optimizations=q5_budget_remaining,
+            target_size=face_h,
+            # A station-conforming tensor has no irregular node to improve;
+            # freezing its regular interior keeps every grid line on its
+            # boundary stations, so neither Q5 nor transition smoothing runs.
+            max_local_optimizations=(0 if edge_aligned_record is not None
+                                     else q5_budget_remaining),
             cancellation_check=cancellation_check,
-            size_field=quad_size_field,
+            size_field=face_field,
             domain=domain,
             t3_minimum_angle=t3_minimum_angle,
             t3_angle_action=t3_angle_action,
             # Both requested orders share this linear corner mesh; smoothing
             # precedes quadratic promotion and its unchanged mapping gates.
-            linear_transition_quality=True,
+            linear_transition_quality=edge_aligned_record is None,
         )
         q5_budget_remaining = max(0, q5_budget_remaining - q5_report.worker_calls)
         if smart_mapped is not None:
@@ -4726,6 +4874,8 @@ def _quad_first_execute(
                 "interior_points": len(seed.state.nodes) - len(seed.station_to_node),
                 "targeted_reseed_points": seed.targeted_reseed_count,
             }
+        if edge_aligned_record is not None:
+            face_driver[domain.face_id]["edge_aligned_seed"] = edge_aligned_record
         q5_face_report = q5_report.to_dict()
         q5_face_report["resident_moved_node_ids"] = list(q5_face_report["moved_node_ids"])
         face_q5[domain.face_id] = q5_face_report
@@ -5126,6 +5276,33 @@ def _candidate_s3_record_is_stale(
     )
 
 
+def _prune_native_recombination_nodes(mesh: Mesh) -> int:
+    """Discard inactive T6 diagonal midsides after recombination, keeping IDs.
+
+    Native MeshCore retains inactive triangles for its recombination receipts.
+    Their internal diagonal midsides are not Q8 nodes. Final publication must
+    not expose these as free, unconnected degrees of freedom. Keep every node
+    referenced by an element, coupling or public geometry/member/grid binding.
+    """
+    referenced = set(mesh.node_of_vertex.values())
+    for table in (mesh.quads, mesh.tris, mesh.beams, mesh.nodes_of_edge,
+                  mesh.offset_nodes_of_edge, mesh.nodes_of_member):
+        for nodes in table.values():
+            referenced.update(map(int, nodes))
+    for coupling in mesh.couplings.values():
+        referenced.add(int(coupling.beam_node))
+        referenced.update(map(int, coupling.plate_nodes))
+    for grid in mesh.grid_of_face.values():
+        referenced.update(map(int, np.asarray(grid).ravel()))
+    for grids in mesh.block_grids_of_face.values():
+        for grid in grids:
+            referenced.update(map(int, np.asarray(grid).ravel()))
+    discarded = mesh.nodes.keys() - referenced
+    for node in discarded:
+        del mesh.nodes[node]
+    return len(discarded)
+
+
 def _finalize_hybrid_candidate(
     candidate: _HybridCandidateContext,
     *,
@@ -5207,6 +5384,11 @@ def _finalize_hybrid_candidate(
     phase_seconds["structural_connectivity"] = (
         perf_counter() - connectivity_started
     )
+    if mesh.is_quadratic and "native" in candidate.source_strategies.values():
+        _check_cancellation(cancellation_check, "native inactive node cleanup")
+        cleanup_started = perf_counter()
+        track["discarded_inactive_native_nodes"] = _prune_native_recombination_nodes(mesh)
+        phase_seconds["native_inactive_node_cleanup"] = perf_counter() - cleanup_started
     track["connectivity_application_count"] = (
         int(track.get("connectivity_application_count", 0)) + 1
     )
@@ -5455,7 +5637,7 @@ def generate_hybrid_mesh_result(
     quad_options: QuadMeshingOptions | Mapping[str, Any] | None = None,
     quad_t3_minimum_angle: float = 15.0,
     quad_t3_angle_action: str = "error",
-    layout_policy: str = "existing",
+    layout_policy: str | None = None,
     quad_face_ids: Iterable[int] | None = None,
     overlap_policy: OverlapPolicy | str = OverlapPolicy.CONNECT_DECLARED,
     mutation_policy: GeometryMutationPolicy | str = GeometryMutationPolicy.READ_ONLY,
@@ -5468,6 +5650,7 @@ def generate_hybrid_mesh_result(
     _refine_declared_junction_transition: bool = False,
     _defer_finalization: bool = False,
     _respect_native_growth_limit: bool = False,
+    _independent_beams: bool = True,
 ) -> HybridMeshResult | _HybridCandidateContext:
     """Generate a model-bound mapped/native mesh from an explicit ownership policy.
 
@@ -5506,18 +5689,48 @@ def generate_hybrid_mesh_result(
     if strategy is MeshingStrategy.SMART_MAPPED:
         from .smart_mapped import prepare_smart_mapped_request
 
+        refinements = tuple(refinements)
+        if any(getattr(item, "mode", "refine") == "override" for item in refinements):
+            # A uniform entity size over the whole selection is simply the
+            # target (decided here, before the request is prepared, so it takes
+            # the very route a global target of that size takes); anything else
+            # is plate-scoped and handled by the quad-first plate views.
+            target_size, refinements = _collapse_entity_targets(
+                geometry,
+                target_size,
+                refinements,
+                _face_ids(
+                    geometry, None if face_ids is None else tuple(int(i) for i in face_ids)
+                ),
+                _member_edges(
+                    GeometryMeshingView(geometry),
+                    tuple(int(item) for item in beam_edges),
+                    None if member_ids is None else tuple(int(item) for item in member_ids),
+                ),
+            )
+
         quad_options, smart_mapped_run = prepare_smart_mapped_request(
             quad_options=quad_options,
             quad_face_ids=quad_face_ids,
             structured_options=structured_options,
             seeding=seeding,
-            refinements=refinements,
+            # Beam-only entity sizes never reach the shell seed builder.
+            refinements=tuple(
+                item for item in refinements
+                if getattr(item, "mode", "refine") != "override"
+            ),
             overrides=overrides,
             deferred=_defer_finalization,
         )
     if type(qualified_s3) is not bool:
         raise MeshError("qualified_s3 must be Boolean")
-    if layout_policy not in ("existing", "adaptive"):
+    if layout_policy is None:
+        # Omitted: the quad-first route (explicit quad_options, which SmartMapped
+        # also supplies above) defaults to the adaptive layout. Every other
+        # route keeps the existing layout. ``None`` is only a sentinel for
+        # omission: an explicit "existing" or "adaptive" is honoured as given.
+        layout_policy = "adaptive" if quad_options is not None else "existing"
+    elif layout_policy not in ("existing", "adaptive"):
         raise MeshError("layout_policy must be 'existing' or 'adaptive'")
     if layout_policy == "adaptive" and quad_options is None:
         raise MeshError("adaptive layout requires explicit quad_options")
@@ -5570,6 +5783,21 @@ def generate_hybrid_mesh_result(
     if not source_faces and not source_beams:
         raise MeshError("nothing to mesh: no faces and no beam edges")
 
+    # Entity size overrides (mode="override") are not spatial zones.  A uniform
+    # override of the whole selection is the target; anything else is per-entity
+    # and only the routes that honour it may run.
+    target_size, requested_refinements = _collapse_entity_targets(
+        source_geometry, target_size, requested_refinements, source_faces, source_beams
+    )
+    refinements = requested_refinements
+    _remaining_overrides = [
+        item for item in requested_refinements if item.mode == "override"
+    ]
+    if _remaining_overrides and structured_options is not None:
+        raise MeshError(
+            "structured layout planning does not support mixed per-entity mesh "
+            "sizes; use one size for the selection or drop structured_options"
+        )
     _quad_face_selector = _quad_first_normalize_face_ids(quad_face_ids)
     if _quad_normalized is not None and _quad_face_selector is not None:
         _selected_face_set = {int(face_id) for face_id in source_faces}
@@ -5707,16 +5935,31 @@ def generate_hybrid_mesh_result(
             )
         _legacy_selected = sorted(_selected_face_set - _quad_selected)
         _check_cancellation(cancellation_check, "quad-mixed:dispatch")
+        # Plates meshed by separate calls share boundary stations only through
+        # pinned counts; computed only when entity sizes are present.
+        _mixed_pins: dict[int, int] = {}
+        if _remaining_overrides:
+            _mixed_pins = _entity_edge_pins(
+                source_geometry,
+                target_size,
+                requested_refinements,
+                {
+                    int(face_id): ("quad" if int(face_id) in _quad_selected else "legacy")
+                    for face_id in source_faces
+                },
+                overrides,
+            )
         quad_result = _quad_first_execute(
             geometry,
             face_ids=tuple(sorted(_quad_selected)),
+            context_faces=source_faces,
             target_size=target_size,
             certification_mode=certification_mode,
             options=_quad_normalized,
             capabilities=_quad_capabilities,
             order=order,
             refinements=requested_refinements,
-            overrides=overrides,
+            overrides={**_mixed_pins, **dict(overrides or {})} if _mixed_pins else overrides,
             layout_policy=layout_policy,
             t3_minimum_angle=quad_t3_minimum_angle,
             t3_angle_action=quad_t3_angle_action,
@@ -5728,7 +5971,7 @@ def generate_hybrid_mesh_result(
             source_geometry,
             target_size=target_size,
             strategy=strategy,
-            overrides=overrides,
+            overrides={**_mixed_pins, **dict(overrides or {})} if _mixed_pins else overrides,
             beam_edges=requested_beam_edges,
             beam_offsets=beam_offsets,
             member_ids=requested_member_ids,
@@ -5790,6 +6033,7 @@ def generate_hybrid_mesh_result(
         quad_result = _quad_first_execute(
             geometry,
             face_ids=source_faces,
+            context_faces=source_faces,
             target_size=target_size,
             certification_mode=certification_mode,
             options=_quad_normalized,
@@ -5867,6 +6111,8 @@ def generate_hybrid_mesh_result(
             _native_surface_options=_native_surface_options,
             _evaluate_declared_junction_alignment=_evaluate_declared_junction_alignment,
             _refine_declared_junction_transition=_refine_declared_junction_transition,
+            # Own-size beams are rebuilt below, on the merged shell chains.
+            _independent_beams=False,
         )
         if scoped_curved_beams:
             beam_result = _promote_linear_beam_result_to_b3(
@@ -5880,6 +6126,27 @@ def generate_hybrid_mesh_result(
             legacy_result=beam_result,
             curved_beam_edges=frozenset(scoped_curved_beams),
         )
+        if _remaining_overrides and _independent_beams:
+            from ._independent_beams import apply_independent_beams
+
+            apply_independent_beams(
+                source_geometry,
+                merged.mesh,
+                source_beams,
+                SizeField(
+                    source_geometry, target_size, requested_refinements,
+                    active_faces=source_faces,
+                ),
+                dict(beam_offsets or {}),
+                {
+                    int(use.edge)
+                    for face in source_geometry.faces.values()
+                    for loop in (face.loop, *face.holes)
+                    for use in loop
+                },
+                cancellation_check=cancellation_check,
+            )
+            _check_cancellation(cancellation_check, "independent beams complete")
         if scoped_curved_beams:
             merged.mesh.hybrid_diagnostics["curved_beam_b3"] = {
                 "contract": "straight_sided_b3_chord_midside",
@@ -6148,11 +6415,18 @@ def generate_hybrid_mesh_result(
         beam_offsets,
         label="beam offset",
     )
-    refinements = _remap_refinements(
-        geometry,
-        source_to_final_faces,
-        source_to_final_edges,
-        refinements,
+    refinements = (
+        tuple(_remap_refinements(
+            geometry,
+            source_to_final_faces,
+            source_to_final_edges,
+            tuple(item for item in refinements if item.mode != "override"),
+        ))
+        + _remap_entity_overrides(
+            tuple(item for item in refinements if item.mode == "override"),
+            source_to_final_faces,
+            source_to_final_edges,
+        )
     )
 
     view = GeometryMeshingView(geometry)
@@ -6195,7 +6469,7 @@ def generate_hybrid_mesh_result(
     size_field = (
         seeding.size_field
         if seeding is not None and seeding.size_field is not None
-        else SizeField(geometry, target_size, refinements)
+        else SizeField(geometry, target_size, refinements, active_faces=faces)
     )
     edges = _active_edges(geometry, faces, beams)
     if seeding is None:
@@ -6220,7 +6494,7 @@ def generate_hybrid_mesh_result(
                 order == "linear" and native_options.point_placement == "frontal_delaunay"
                 else (tuple(face_id for face_id in native_faces
                             if _native_planar_support(geometry, face_id) is not None)
-                      if size_field.is_uniform else ())),
+                      if not size_field.zones else ())),
             maximum_adjacent_growth=(None if structured_report is not None else
                 (_native_surface_options.max_element_growth
                  if _native_surface_options is not None else None)),
@@ -6242,6 +6516,9 @@ def generate_hybrid_mesh_result(
             seeding=seeding,
             refinements=refinements,
             order=order,
+            # Own-size beams are built after the native faces, on the final
+            # canonical chains.
+            _independent_beams=False,
         )
         _check_cancellation(cancellation_check, "mapped generation complete")
         phase_seconds["mapped_generation"] = perf_counter() - mapped_started
@@ -6384,7 +6661,9 @@ def generate_hybrid_mesh_result(
             recombine=False if quadratic_cylinder else bool(recombine),
             native_backend=native_backend,
             native_options=NativeMeshingOptions() if quadratic_cylinder else native_options,
-            size_field=size_field,
+            # Each plate is meshed at its own target; with no entity sizes this
+            # is the same field object as before.
+            size_field=size_field.face_view(face_id),
             metric_model_uuid=str(source_geometry.model_id),
             metric_geometry_revision=int(source_geometry.revision),
             boundary_registry=boundary_registry,
@@ -6454,6 +6733,25 @@ def generate_hybrid_mesh_result(
         binding = material_region_bindings[representative]
         triangulation_backend_by_face[representative]['material_region_final_physical_quality'] = (
             binding.certify_published(mesh, boundary_registry, settings, cancellation_check))
+
+    if _independent_beams and beams and getattr(size_field, "has_entity_sizes", False):
+        from ._independent_beams import apply_independent_beams
+
+        apply_independent_beams(
+            geometry,
+            mesh,
+            beams,
+            size_field,
+            final_beam_offsets,
+            {
+                int(use.edge)
+                for face in geometry.faces.values()
+                for loop in (face.loop, *face.holes)
+                for use in loop
+            },
+            cancellation_check=cancellation_check,
+        )
+        _check_cancellation(cancellation_check, "independent beams complete")
 
     for sheet_id, sheet in geometry.sheets.items():
         element_ids = {

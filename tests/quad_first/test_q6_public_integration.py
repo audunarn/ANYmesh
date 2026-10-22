@@ -163,6 +163,7 @@ def test_quad_first_exercises_worker_chain_when_explicit() -> None:
         target_size=1.0,
         face_ids=(face,),
         quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # worker/front legacy behaviour; adaptive is the default
         cancellation_check=phases.append,
     )
     quad_phases = [p for p in phases if p.startswith("quad-first:")]
@@ -341,6 +342,7 @@ def test_explicit_quad_route_uses_requested_face_geometry() -> None:
         target_size=1.0,
         face_ids=(face,),
         quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # front-iteration legacy behaviour; adaptive is the default
         cancellation_check=phases.append,
     )
     quad_phases = [p for p in phases if p.startswith("quad-first:")]
@@ -1136,6 +1138,7 @@ def test_quad_first_beam_coupling_slice() -> None:
     result = generate_hybrid_mesh_result(
         geometry, target_size=1.0, face_ids=(face,), member_ids=(member,),
         quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # worker legacy behaviour; adaptive is the default
     )
     mesh = result.mesh
     assert min(mesh.nodes) > 0  # structural boundary ownership requires positive IDs

@@ -767,8 +767,87 @@ class StructuralMeshingPipeline:
         )
         return node
 
+    def _independent_axis(
+        self, mesh: Mesh, edge_id: int
+    ) -> tuple[tuple[float, int], ...] | None:
+        """Actual stations ``(edge parameter, beam node)`` of an independent beam.
+
+        A beam meshed at its own size on a shared shell edge has stations that
+        differ from the canonical ``nodes_of_edge`` chain, so the axis/offset
+        zip used for ordinary beams does not describe it.  Its stations come
+        from the beam elements; an eccentric node's axis point is the coupled
+        shell point (position minus the coupling eccentricity).  ``None`` for
+        every ordinary edge.
+        """
+
+        cache = self._member_station_projection_cache
+        key = ("independent", int(edge_id))
+        if cache is not None and key in cache:
+            return cache[key]
+        result = self._infer_independent_axis(mesh, int(edge_id), cache)
+        if cache is not None:
+            cache[key] = result
+        return result
+
+    def _infer_independent_axis(self, mesh: Mesh, edge_id: int, cache):
+        """Decide from the mesh's own associations, never from diagnostics.
+
+        An edge is independent when its beam elements do not use the ordinary
+        node set (the canonical chain, or the offset chain zipped with it): a
+        strict subset of it, or an own station that carries a coupling.  Extra
+        uncoupled nodes (a B3 chord midside) leave the ordinary path alone.
+        """
+
+        elements = mesh.elements_of_edge.get(edge_id)
+        if not elements:
+            return None
+        beam_nodes: dict[int, None] = {}
+        for element in elements:
+            for node in mesh.beams.get(int(element), ()):
+                beam_nodes.setdefault(int(node), None)
+        chain = tuple(int(node) for node in mesh.nodes_of_edge.get(edge_id, ()))
+        offsets = tuple(int(node) for node in mesh.offset_nodes_of_edge.get(edge_id, ()))
+        ordinary = set(offsets if offsets and len(offsets) == len(chain) else chain)
+        extra = set(beam_nodes) - ordinary
+        coupling_of = None if cache is None else cache.get(("beam-couplings",))
+        if coupling_of is None:
+            coupling_of = {int(item.beam_node): item for item in mesh.couplings.values()}
+            if cache is not None:
+                cache[("beam-couplings",)] = coupling_of
+        independent = (set(beam_nodes) < ordinary) or any(
+            node in coupling_of for node in extra
+        )
+        if not independent:
+            return None
+        threshold = self.view.effective_length(self.view.edge_length(edge_id))
+        stations: dict[int, float] = {}
+        for node in beam_nodes:
+            point = np.asarray(mesh.nodes[node], dtype=float)
+            coupling = coupling_of.get(node)
+            if coupling is not None:
+                point = point - np.asarray(coupling.eccentricity, dtype=float)
+            _closest, parameter, residual = self.view.closest_edge_point(edge_id, point)
+            if residual <= threshold:
+                stations[node] = float(parameter)
+        return tuple(sorted((value, node) for node, value in stations.items()))
+
     def _member_node(self, mesh: Mesh, member_id: int, parameter: float) -> int | None:
         location = self.members.locate(member_id, parameter)
+        independent = self._independent_axis(mesh, location.span.edge_id)
+        if independent is not None:
+            expected = np.asarray(
+                self.view.edge_point(location.span.edge_id, location.edge_parameter),
+                dtype=float,
+            )
+            best = None
+            for edge_parameter, node in independent:
+                gap = float(np.linalg.norm(np.asarray(
+                    self.view.edge_point(location.span.edge_id, edge_parameter), dtype=float
+                ) - expected))
+                if best is None or gap < best[0]:
+                    best = (gap, node)
+            tolerance = self.view.effective_length(self.view.edge_length(location.span.edge_id))
+            return None if best is None or best[0] > tolerance else int(best[1])
         axis = tuple(mesh.nodes_of_edge.get(location.span.edge_id, ()))
         node = self._edge_node(
             mesh,
@@ -790,6 +869,13 @@ class StructuralMeshingPipeline:
         parameter_tolerance = float(self.view.tolerance.parameter)
         cache = self._member_station_projection_cache
         for span in self.members.spans(member_id):
+            independent = self._independent_axis(mesh, span.edge_id)
+            if independent is not None:
+                for edge_parameter, node in independent:
+                    member_parameter = span.member_parameter(edge_parameter)
+                    if lower - parameter_tolerance <= member_parameter <= upper + parameter_tolerance:
+                        stations[int(node)] = float(np.clip(member_parameter, lower, upper))
+                continue
             axis = tuple(mesh.nodes_of_edge.get(span.edge_id, ()))
             offsets = tuple(mesh.offset_nodes_of_edge.get(span.edge_id, ()))
             for index, node in enumerate(axis):
@@ -886,7 +972,11 @@ class StructuralMeshingPipeline:
             face_id
             for sheet_id in self.view.sheets_using_edge(edge_id)
             for face_id in self.view.faces_for_sheet(sheet_id)
-            if any(item.edge == edge_id for item in self.view.faces[face_id].loop)
+            if any(
+                item.edge == edge_id
+                for loop in (self.view.faces[face_id].loop, *self.view.faces[face_id].holes)
+                for item in loop
+            )
         }
         return tuple(
             sorted(

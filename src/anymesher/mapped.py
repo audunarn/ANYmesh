@@ -110,6 +110,7 @@ def generate_mesh(
     seeding: Seeding | None = None,
     refinements: Iterable[Refinement] = (),
     order: str = "linear",
+    _independent_beams: bool = True,
 ) -> Mesh:
     """Mesh the faces of a geometry model, plus any edges carrying beams.
 
@@ -256,7 +257,19 @@ def generate_mesh(
             shell_node_cache = None
             _build_beam(mesh, edge_id, next_element)
 
+    if _independent_beams and beam_edge_ids:
+        # Beams whose own size differs from the shell chain they sit on are
+        # rebuilt on their own stations (hybrid runs this after native faces
+        # instead, and passes ``_independent_beams=False``).
+        from ._independent_beams import apply_independent_beams
+
+        apply_independent_beams(
+            geometry, mesh, beam_edge_ids, size_field, offsets, source_shell_edges
+        )
     return mesh
+
+
+
 
 
 def _refuse_curved_beams(

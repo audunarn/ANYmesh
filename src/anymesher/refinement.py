@@ -27,6 +27,7 @@ at mesh time, so re-meshing or editing the geometry never loses it.
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from numbers import Real
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -39,11 +40,15 @@ from anygeometry.model import GeometryModel
 
 
 __all__ = [
+    "REFINEMENT_MODES",
     "Refinement",
     "SizeField",
     "refine_around",
     "refine_at",
+    "size_override",
 ]
+
+REFINEMENT_MODES = ("refine", "override")
 
 
 def _finite_real(value: object, label: str) -> float:
@@ -91,8 +96,18 @@ class Refinement:
     center: Optional[Sequence[float]] = None
     growth: float = 1.5
     name: str = "refinement"
+    # ``"refine"`` is the spatial refine-only zone described above.  ``"override"``
+    # is an entity-scoped size: the bound face or edge is meshed at ``size`` even
+    # when that is coarser than the global target, and it never changes the size
+    # asked of neighbouring entities.  See :class:`SizeField`.
+    mode: str = "refine"
 
     def __post_init__(self) -> None:
+        if self.mode not in REFINEMENT_MODES:
+            raise ValueError(
+                f"refinement {self.name!r}: mode must be one of "
+                f"{', '.join(REFINEMENT_MODES)}"
+            )
         size = _finite_real(
             self.size, f"refinement {self.name!r}: element size"
         )
@@ -125,6 +140,13 @@ class Refinement:
                 f"refinement {self.name!r}: give either ref (bound to "
                 "geometry) or center (a raw coordinate), not both and not "
                 "neither."
+            )
+        if self.mode == "override" and (
+            self.ref is None or self.ref.kind not in ("face", "edge")
+        ):
+            raise ValueError(
+                f"refinement {self.name!r}: an entity size override binds to "
+                "a face (plate) or an edge (beam line), not a point or vertex"
             )
         if self.center is not None:
             object.__setattr__(
@@ -199,32 +221,163 @@ class SizeField:
         geometry: GeometryModel,
         target_size: float,
         refinements: Iterable[Refinement] = (),
+        active_faces: Iterable[int] | None = None,
     ) -> None:
         if target_size <= 0.0:
             raise ValueError("target element size must be positive")
         self.target_size = float(target_size)
-        self.zones: Tuple[Refinement, ...] = tuple(refinements)
-        self._sources: List[np.ndarray] = [
-            zone.sources(geometry) for zone in self.zones
-        ]
-        for zone in self.zones:
+        requested = tuple(refinements)
+        spatial = tuple(zone for zone in requested if zone.mode != "override")
+        self.overrides: Tuple[Refinement, ...] = tuple(
+            zone for zone in requested if zone.mode == "override"
+        )
+        for zone in spatial:
             if zone.size > self.target_size:
                 raise ValueError(
                     f"refinement {zone.name!r} asks for {zone.size:g} m "
                     f"elements, which is coarser than the global target size "
                     f"{self.target_size:g} m. A refinement zone refines; to "
-                    "coarsen, raise the target size."
+                    "coarsen, raise the target size or use an entity size "
+                    "override (mode='override')."
                 )
+        # Entity overrides are resolved to per-entity sizes.  The same entity
+        # named twice resolves to the finer request, so overlap is
+        # deterministic.  A request equal to the global target is a no-op and
+        # leaves no trace: the field stays uniform and every regular fast path
+        # keeps its exact mesh.
+        face_requested: Dict[int, float] = {}
+        edge_requested: Dict[int, float] = {}
+        names: Dict[Tuple[str, int], str] = {}
+        for zone in sorted(
+            self.overrides,
+            key=lambda item: (item.ref.kind, item.ref.id, item.size, item.name),
+        ):
+            assert zone.ref is not None
+            table = face_requested if zone.ref.kind == "face" else edge_requested
+            known = geometry.faces if zone.ref.kind == "face" else geometry.edges
+            if zone.ref.id not in known:
+                raise ValueError(
+                    f"size override {zone.name!r} names missing "
+                    f"{zone.ref.kind} {zone.ref.id}"
+                )
+            if zone.ref.id not in table or zone.size < table[zone.ref.id]:
+                table[zone.ref.id] = zone.size
+                names[(zone.ref.kind, zone.ref.id)] = zone.name
+        self.face_sizes: Dict[int, float] = {
+            face_id: size
+            for face_id, size in sorted(face_requested.items())
+            if size != self.target_size
+        }
+        # Entity sizes are never sampled distance zones: a plate's size reaches
+        # its own interior through ``face_view`` and its boundary through the
+        # per-edge station sizes below, and nothing leaks into other plates.
+        self.zones: Tuple[Refinement, ...] = spatial
+        self._sources: List[np.ndarray] = [
+            zone.sources(geometry) for zone in self.zones
+        ]
+
+        active = (
+            None if active_faces is None
+            else frozenset(int(face) for face in active_faces)
+        )
+        candidates = set(edge_requested)
+        for face_id in face_requested:
+            face = geometry.faces[face_id]
+            for loop in (face.loop, *face.holes):
+                candidates.update(int(item.edge) for item in loop)
+        #: Station size per edge whose stations differ from the global target.
+        #: A shared edge takes the finest size any incident active plate (or a
+        #: finer beam) asks for, so neighbours stay conforming and neither is
+        #: under-resolved.  A free beam line takes its own size, either way.
+        self.edge_sizes: Dict[int, float] = {}
+        #: Explicit beam targets, whichever way they differ from the target.
+        self.beam_sizes: Dict[int, float] = {}
+        for edge_id in sorted(candidates):
+            incident = [
+                int(face)
+                for face in geometry.faces_using_edge(edge_id)
+                if active is None or int(face) in active
+            ]
+            explicit = edge_requested.get(edge_id)
+            if incident:
+                # The canonical shell chain: finest adjacent plate wins.  A beam
+                # target never changes it; the beam builds its own stations.
+                station = min(
+                    face_requested.get(face, self.target_size)
+                    for face in incident
+                )
+            else:
+                station = self.target_size if explicit is None else explicit
+            if station != self.target_size:
+                self.edge_sizes[edge_id] = station
+            if explicit is not None and (
+                explicit != self.target_size or station != self.target_size
+            ):
+                self.beam_sizes[edge_id] = explicit
 
     @property
     def is_uniform(self) -> bool:
         """Whether this field is just the global target everywhere.
 
         The uniform case takes the original code path exactly, so adding the
-        size field cannot move a number in a model that does not use it.
+        size field cannot move a number in a model that does not use it.  An
+        entity override equal to the target is a no-op and keeps it uniform.
         """
 
-        return not self.zones
+        return not self.zones and not self.edge_sizes
+
+    @property
+    def has_entity_sizes(self) -> bool:
+        """Whether any plate or edge carries a size of its own."""
+
+        return bool(self.face_sizes or self.edge_sizes or self.beam_sizes)
+
+    def face_target(self, face_id: int) -> float:
+        """The plate's own target size (the global target when not overridden)."""
+
+        return self.face_sizes.get(int(face_id), self.target_size)
+
+    def beam_target(self, edge_id: int) -> float:
+        """Element size one beam line is meshed at (own override, else global)."""
+
+        return self.beam_sizes.get(int(edge_id), self.target_size)
+
+    def face_view(self, face_id: int) -> "SizeField":
+        """A field for meshing one plate's interior at that plate's own target.
+
+        Entity sizes are scoped, so the view carries none of them: no other
+        plate's size can leak in through a shared boundary.  Refine-only
+        spatial zones stay (they can still reduce the target) except where a
+        zone is coarser than this plate's target, which it cannot influence.
+        A model without entity sizes returns ``self`` unchanged.
+        """
+
+        if not self.has_entity_sizes:
+            return self
+        target = self.face_target(face_id)
+        view = copy(self)
+        view.target_size = float(target)
+        keep = [
+            index for index, zone in enumerate(self.zones)
+            if zone.size <= target
+        ]
+        view.zones = tuple(self.zones[index] for index in keep)
+        view._sources = [self._sources[index] for index in keep]
+        view.overrides = ()
+        view.face_sizes = {}
+        view.edge_sizes = {}
+        view.beam_sizes = {}
+        return view
+
+    def edge_size(self, edge_id: int) -> float:
+        """Station size the entity overrides ask along one edge."""
+
+        return self.edge_sizes.get(int(edge_id), self.target_size)
+
+    def beam_size(self, edge_id: int) -> float | None:
+        """Explicit beam target for ``edge_id``, or None when it follows the edge."""
+
+        return self.beam_sizes.get(int(edge_id))
 
     def size_at(self, points: np.ndarray) -> np.ndarray:
         """Desired element size at each of an (n, 3) array of points."""
@@ -241,6 +394,11 @@ class SizeField:
     def summary(self) -> str:
         if self.is_uniform:
             return f"uniform {self.target_size:g} m"
+        if not self.zones:
+            return (
+                f"{self.target_size:g} m target, {len(self.edge_sizes)} "
+                "entity edge size(s)"
+            )
         finest = min(zone.size for zone in self.zones)
         return (
             f"{self.target_size:g} m target, {len(self.zones)} refinement "
@@ -277,6 +435,17 @@ def refine_around(
     """Refine to ``size`` within ``radius`` of a modelled entity."""
 
     return Refinement(size=size, radius=radius, ref=ref, **options)
+
+
+def size_override(ref: EntityRef, size: float, **options) -> Refinement:
+    """Mesh one face or edge at ``size``, finer or coarser than the target.
+
+    Unlike :func:`refine_around` this is scoped to the entity: it never grades
+    into neighbouring entities, and a value equal to the global target is a
+    no-op.
+    """
+
+    return Refinement(size=size, ref=ref, mode="override", **options)
 
 
 def refine_at(

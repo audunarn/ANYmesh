@@ -14,6 +14,7 @@ from .boundary import BoundaryStationKey, BoundaryStationRegistry
 from .domain import CylindricalQuadDomain, PlanarQuadDomain, Vec2
 from .state import QuadMeshState
 from .rectangle_seed import rectangle_seed_data
+from .edge_aligned_seed import edge_aligned_seed_data
 
 def _shoelace(loop_points: np.ndarray) -> float:
     loop = np.asarray(loop_points, dtype=float)
@@ -37,6 +38,9 @@ class PlanarQuadSeed:
     state: QuadMeshState
     station_to_node: Mapping[BoundaryStationKey, int]
     targeted_reseed_count: int = 0
+    # True when the adaptive route admitted a regular station-conforming tensor
+    # (opt-in via ``edge_aligned``); the caller then keeps its nodes through Q5.
+    edge_aligned: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "station_to_node", MappingProxyType(dict(self.station_to_node)))
@@ -627,9 +631,12 @@ def build_planar_quad_seed(
     source_aligned_cut: tuple[float, float] | None = None,
     layout_policy: str = "existing",
     cancellation_check: Callable[[str], None] | None = None,
+    edge_aligned: bool = False,
 ) -> PlanarQuadSeed:
     if layout_policy not in ("existing", "adaptive"):
         raise MeshError("layout_policy must be 'existing' or 'adaptive'")
+    if type(edge_aligned) is not bool:
+        raise MeshError("edge_aligned must be a bool")
     start_revision = int(geometry.revision)
     start_model_id = str(geometry.model_id)
     domain = domain or PlanarQuadDomain.from_geometry(geometry, face_id)
@@ -651,22 +658,33 @@ def build_planar_quad_seed(
         if len(hole_points) < 3:
             raise MeshError("hole boundary has fewer than three stations")
         hole_polys.append(np.asarray(hole_points, dtype=float))
+    regular = None
     if layout_policy == "adaptive" and source_aligned_cut is None:
         regular = rectangle_seed_data(
             geometry, domain, registry, outer, size_field, cancellation_check,
             target_size=target_size,
         )
-        if regular is not None:
-            triangulation, state = regular
-            station_to_node = {station.key: row for row, station in enumerate(stations)}
-            if len(station_to_node) != len(stations):
-                raise MeshError("canonical boundary station identities are not unique on the face")
-            domain.assert_current(geometry)
-            registry.assert_current(geometry)
-            if int(geometry.revision) != start_revision or str(geometry.model_id) != start_model_id:
-                raise MeshError("PQ2 seed mutated source geometry")
-            return PlanarQuadSeed(domain, registry, float(target_size), tuple(station_to_node),
-                                  triangulation, state, station_to_node)
+        if regular is None and edge_aligned:
+            # Opt-in generalisation: a rectangle whose sides are cut into
+            # collinear source edges becomes the same station-conforming Q4
+            # tensor.  Holes, angled/curved edges and graded fields decline
+            # (None) to the unchanged adaptive CDT route below.
+            regular = edge_aligned_seed_data(
+                geometry, domain, registry, outer, size_field, cancellation_check,
+                target_size=target_size,
+            )
+    if regular is not None:
+        triangulation, state = regular
+        station_to_node = {station.key: row for row, station in enumerate(stations)}
+        if len(station_to_node) != len(stations):
+            raise MeshError("canonical boundary station identities are not unique on the face")
+        domain.assert_current(geometry)
+        registry.assert_current(geometry)
+        if int(geometry.revision) != start_revision or str(geometry.model_id) != start_model_id:
+            raise MeshError("PQ2 seed mutated source geometry")
+        return PlanarQuadSeed(domain, registry, float(target_size), tuple(station_to_node),
+                              triangulation, state, station_to_node,
+                              edge_aligned=bool(edge_aligned))
     constraints: tuple[np.ndarray, ...] = ()
     central_points: tuple[Vec2, ...] = ()
     station_lattice = _cylindrical_station_lattice(domain, registry, outer, float(target_size))

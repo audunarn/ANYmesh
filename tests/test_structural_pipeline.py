@@ -20,6 +20,45 @@ from anymesher.mesh import Mesh
 from anymesher.mesh_bvh import ElementType, MeshElementBVH, inverse_interpolate
 
 
+def test_independent_beam_attachment_interpolates_on_a_hole_boundary():
+    from anygeometry.operations import trim_face
+    from anymesher.mesh import Coupling
+
+    geometry = GeometryModel()
+    vertices = geometry.add_points(((0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0),
+                                    (1, 1, 0), (3, 1, 0), (3, 3, 0), (1, 3, 0)))
+    face = geometry.add_plate(vertices[:4])
+    hole = tuple(OrientedEdge(geometry.add_line(vertices[i], vertices[4 + (i - 3) % 4]), True)
+                 for i in range(4, 8))
+    trim_face(geometry, face, (hole,))
+    geometry.add_sheet((face,))
+    edge = hole[0].edge
+    member = geometry.add_member((OrientedEdge(edge, True),))
+    geometry.add_attachment(member, AttachmentKind.MEMBER_ON_FACE_BOUNDARY,
+                            AttachmentTargetKind.EDGE, edge, ParameterRange(0., 1.),
+                            (ParameterRange(0., 1.),))
+    mesh = Mesh()
+    mesh.nodes = {i + 1: geometry.vertex_position(vertex) for i, vertex in enumerate(vertices)}
+    mesh.nodes[9] = np.array((2., 1., 0.))
+    mesh.quads = {10: (1, 2, 6, 5), 11: (2, 3, 7, 6),
+                  12: (3, 4, 8, 7), 13: (4, 1, 5, 8)}
+    mesh.elements_of_face[face] = [10, 11, 12, 13]
+    mesh.beams = {20: (5, 9), 21: (9, 6)}
+    mesh.elements_of_edge[edge] = [20, 21]
+    mesh.nodes_of_edge[edge] = [5, 6]
+    mesh.couplings[30] = Coupling(beam_node=9, plate_nodes=(5, 6),
+                                 weights=(.5, .5), eccentricity=(0., 0., 0.))
+    pipeline = StructuralMeshingPipeline(GeometryMeshingView(geometry),
+        overlap_policy="connect_declared", mutation_policy="working_copy")
+    result = pipeline.apply_connectivity(mesh)
+    assert not result.issues
+    assert mesh.beams == {20: (5, 9), 21: (9, 6)}
+    assert len(mesh.couplings) == 1
+    coupling = mesh.couplings[30]
+    assert np.allclose(sum(w * mesh.nodes[n] for n, w in zip(coupling.plate_nodes, coupling.weights)),
+                       mesh.nodes[9])
+
+
 def test_reversed_member_boundary_stations_do_not_create_false_eccentric_couplings():
     geometry = GeometryModel()
     vertices = geometry.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)))

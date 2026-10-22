@@ -356,6 +356,7 @@ def test_d2_q6_production_worker_chain_runs_and_is_canonical(
     mesh = generate_hybrid_mesh_result(
         geometry, target_size=1.0, face_ids=(face,),
         quad_options=QuadMeshingOptions(), cancellation_check=phases.append,
+        layout_policy="existing",  # worker legacy behaviour; adaptive is the default
     ).mesh
     quad_phases = [p for p in phases if p.startswith("quad-first:")]
     expected = [

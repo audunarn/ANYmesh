@@ -107,12 +107,28 @@ def edge_demand(
     if size_field.is_uniform:
         return geometry.edge_length(edge_id) / size_field.target_size
 
+    # Entity overrides scale one edge's demand by its own size.  With no
+    # spatial zones the field is constant, so this is exactly length / size
+    # (the same expression a global target of that size would give).
+    entity_size = getattr(size_field, "edge_sizes", {}).get(int(edge_id))
+    if not getattr(size_field, "zones", ()):
+        size = size_field.target_size if entity_size is None else entity_size
+        return geometry.edge_length(edge_id) / size
+
     parameters = np.linspace(0.0, 1.0, _FIELD_SAMPLES + 1)
     points = geometry.sample_edge(edge_id, parameters)
     steps = np.linalg.norm(np.diff(points, axis=0), axis=1)
     # Size at each segment midpoint, which is where the segment is spent.
     midpoints = 0.5 * (points[:-1] + points[1:])
     sizes = size_field.size_at(midpoints)
+    if entity_size is not None:
+        if entity_size > size_field.target_size:
+            # Coarse entity: the (global-clamped) field is scaled up so a
+            # spatial refine zone still refines this edge proportionally.
+            sizes = sizes * (entity_size / size_field.target_size)
+        else:
+            # Fine entity: an implicit plate zone may already ask this much.
+            sizes = np.minimum(sizes, entity_size)
     return float(np.sum(steps / sizes))
 
 

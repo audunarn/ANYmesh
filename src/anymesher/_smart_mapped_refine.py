@@ -189,12 +189,16 @@ def refine(points,quads,triangles,*,protected_edges,enabled,budget,work,cancella
                     if (_point_on_segment(p,c,d,epsilon)
                             or (p[0]-c[0])*(p[0]-d[0])+(p[1]-c[1])*(p[1]-d[1]) < 0.):
                         rejection = dict(reason='protected_edge_encroachment',edge=(c,d))
-                # A point must lie strictly inside some original cavity cell.
+                # A point must be inside the cavity union. A right triangle's
+                # circumcenter is on its hypotenuse: that is a valid interior
+                # station when both incident cells belong to this cavity.
+                # Cavity boundaries and protected interfaces were excluded by
+                # the barrier checks above; do not reject artificial cell seams.
                 inside = False
                 if rejection is None:
                     for row in component:
                         work.step('smart-mapped:refinement-stations')
-                        if all(orient2d(output_points[a],output_points[b],p) > 0.
+                        if all(orient2d(output_points[a],output_points[b],p) >= 0.
                                for a,b in _edges(cells[row])):
                             inside = True; break
                     if not inside:

@@ -531,8 +531,13 @@ class SmartMappedSeedContext:
         def smart_mapped_build_planar_quad_seed(
             geometry, face_id, target_size, *, domain=None, registry=None,
             size_field=None, source_aligned_cut=None, layout_policy="existing",
-            cancellation_check=None,
+            cancellation_check=None, edge_aligned=False,
         ) -> PlanarQuadSeed:
+            # ``edge_aligned`` is the hybrid adaptive route's opt-in for the
+            # station-conforming tensor seed.  The prototype owns its own seed
+            # layout, so the keyword is accepted for call compatibility and
+            # ignored: prototype semantics and the seed's edge_aligned=False
+            # state (hence no Q5 skip) are unchanged.
             try:
                 if _ACTIVE is not self or threading.get_ident() != self._owner:
                     raise SmartMappedAdapterError(

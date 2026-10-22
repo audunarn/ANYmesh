@@ -280,8 +280,17 @@ def smart_mapped_eligibility(
         refuse("target_size_invalid", "target_size must be positive and finite")
     if order not in ("linear", "quadratic"):
         refuse("unsupported_order", f"unsupported element order {order!r}")
-    if tuple(refinements):
+    refinements = tuple(refinements)
+    # Plate/line entity sizes (mode="override") are admitted: each plate is
+    # seeded at its own uniform target against the shared canonical stations.
+    # Spatial refine-only zones still make the field non-uniform.
+    if any(getattr(item, "mode", "refine") != "override" for item in refinements):
         refuse("non_uniform_size_field", "refinements make the size field non-uniform")
+    face_target: dict[int, float] = {}
+    for item in refinements:
+        ref = getattr(item, "ref", None)
+        if getattr(item, "mode", "refine") == "override" and ref is not None and ref.kind == "face":
+            face_target[int(ref.id)] = min(float(item.size), face_target.get(int(ref.id), float("inf")))
     if overrides:
         refuse("edge_division_pins", "edge division overrides are not supported")
     if seeding is not None:
@@ -400,10 +409,12 @@ def smart_mapped_eligibility(
                         # Heuristic scale estimate (quads of size h plus a
                         # boundary band and an arc allowance).  It is NOT a
                         # proven upper bound: many projected stations or a
-                        # strongly graded chart can exceed it.
-                        cells = int(math.ceil((max(area, 0.0) + 0.25 * arc_sq) / (h * h)
-                                              + perimeter / h)) + 4
-                        stations = int(math.ceil(perimeter / h)) + 4 * len(edge_ids)
+                        # strongly graded chart can exceed it.  A plate with
+                        # its own entity size is estimated at that size.
+                        h_face = min(h, face_target.get(int(face_id), h))
+                        cells = int(math.ceil((max(area, 0.0) + 0.25 * arc_sq) / (h_face * h_face)
+                                              + perimeter / h_face)) + 4
+                        stations = int(math.ceil(perimeter / h_face)) + 4 * len(edge_ids)
                         work = 12 * cells + 64 * stations
             except (MeshError, GeometryError, ValueError, ArithmeticError) as error:
                 face_reasons.append((
