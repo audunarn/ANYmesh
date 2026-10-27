@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "workflow": "Workflow 2",
+  "status": "PARTIAL_IMPLEMENTATION_BLOCKED_PROVIDER_FEASIBILITY",
+  "production_provider_enabled": false,
+  "qualified_provider_geometry_classes": [],
+  "development_envelope": ["box", "strictly_convex_normal_prism", "thin_signed_offset_prism"],
+  "unsupported": ["holes", "concavity", "cavities", "multiple_components", "conformal_material_interfaces", "curved_geometry", "CAD_import"],
+  "source_review": "Independent non-author OpenAI-family Read review; blocked-feature replay defect repaired with public-path regression and separate non-author review. No human/different-family acceptance claimed.",
+  "provider_artifact": "pytetwild0.4.2+anyworkflow2.1 import-only patch approved by user; native bytes unchanged",
+  "official_import_failure": "feasibility-box-c30b1ddd82",
+  "native_attempts": [
+    {"id": "feasibility-box-patched-4277ca13bf", "platform": "Windows CPython3.11", "status": "timeout", "wall_seconds": 120.062},
+    {"id": "native-optimization-diagnostic-e3dc2199a6", "platform": "Windows CPython3.11", "status": "timeout_diagnostic_only", "wall_seconds": 30.0},
+    {"id": "linux-feasibility-box-a179d67912", "platform": "Ubuntu24.04 CPython3.12", "status": "timeout", "wall_seconds": 120.02586066400002}
+  ],
+  "criteria_changed": false,
+  "raw_mesh_accepted": false,
+  "remaining_gates": ["bounded real-provider feasibility", "protected-face and thin-region qualification", "real generated-mesh P1/P2 specimen", "full applicable repository/native gates", "installed optional-provider Windows/Linux Python3.11-3.14 matrix", "performance and memory qualification", "release acceptance"],
+  "workflow1": "Separate unresolved reference-convergence and NLG-007 gates; production coupling NO_GO",
+  "handoff": "docs/WORKFLOW_2_HANDOFF.md"
+}

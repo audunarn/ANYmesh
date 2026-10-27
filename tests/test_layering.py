@@ -40,6 +40,7 @@ FORBIDDEN = frozenset(
         "anymaterial",
         "anystructure",
         "anystruct",
+        "anysolid",
     }
 )
 
@@ -51,6 +52,7 @@ FORBIDDEN = frozenset(
 OPTIONAL_IMPORT_EXCEPTIONS: dict[str, frozenset[str]] = {
     "backends/gmsh.py": frozenset({"gmsh"}),
     "_parallel_pool.py": frozenset({"threadpoolctl"}),
+    "_volume_worker.py": frozenset({"pytetwild"}),
 }
 
 

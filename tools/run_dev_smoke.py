@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import argparse
 from pathlib import Path
 
 
@@ -27,15 +28,26 @@ SMOKE_CASES = (
     "tests/quad_first/test_q6_public_integration.py::test_publish_atomically_orders_and_cancels",
 )
 
+# Controlled provider/process contracts only. This profile never invokes the
+# real optional mesher and is not a provider qualification or release gate.
+VOLUME_SMOKE_CASES = (
+    'tests/test_volume_mesh.py',
+    'tests/test_volume_process.py',
+)
+
 
 def main() -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--profile', choices=('shell', 'volume'), default='shell')
+    options, pytest_args = parser.parse_known_args()
     print(
         "ANYmesher development smoke: focused feedback only; "
         "run affected tests and the required full gates separately",
         flush=True,
     )
     return subprocess.call(
-        [sys.executable, "-m", "pytest", "-q", *SMOKE_CASES, *sys.argv[1:]],
+        [sys.executable, "-m", "pytest", "-q",
+         *(VOLUME_SMOKE_CASES if options.profile == 'volume' else SMOKE_CASES), *pytest_args],
         cwd=ROOT,
     )
 

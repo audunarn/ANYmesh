@@ -24,6 +24,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "anymesher"
 TESTS = ROOT / "tests"
 
+# The provider worker runs by absolute path in a child process, so its public
+# consumers are intentionally absent from the static Python import graph.
+_DYNAMIC_CONSUMERS = {
+    'anymesher._volume_worker': ('tests/test_volume_mesh.py', 'tests/test_volume_process.py'),
+}
+
 
 def _relative(path: str | Path) -> str:
     candidate = Path(path)
@@ -172,6 +178,7 @@ def select_tests(changed: list[str], extra: list[str] = ()) -> tuple[list[str], 
         if source_path.name == "__init__.py":
             affected.update(module for module in index if module.startswith(start + "."))
         matched = [test for test, deps in test_dependencies.items() if deps & affected]
+        matched = sorted(set(matched) | set(_DYNAMIC_CONSUMERS.get(start, ())))
         if not matched:
             unknown.append(name)
         for test in matched:
@@ -179,10 +186,10 @@ def select_tests(changed: list[str], extra: list[str] = ()) -> tuple[list[str], 
 
     for raw in extra:
         name = _relative(raw)
-        if not name.startswith("tests/") or not name.endswith(".py") or not (ROOT / name).is_file():
-            raise ValueError(f"--extra needs an existing test file: {raw}")
         if name.startswith("tests/sg1/"):
             raise ValueError("SG1 tests require their own scientific gate procedure")
+        if not name.startswith("tests/") or not name.endswith(".py") or not (ROOT / name).is_file():
+            raise ValueError(f"--extra needs an existing test file: {raw}")
         selected[name].append("explicit extra")
     if unknown:
         raise ValueError(
