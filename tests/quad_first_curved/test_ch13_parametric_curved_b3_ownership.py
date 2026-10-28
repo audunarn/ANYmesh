@@ -47,6 +47,7 @@ def _generate(model, face, member, *, cancellation_check=None):
         model, face_ids=(face,), member_ids=(member,), target_size=0.6,
         strategy="native", native_backend="python", recombine=True,
         order="quadratic", quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Frozen CH10/CH11 owner topology.
         cancellation_check=cancellation_check,
     ).mesh
 

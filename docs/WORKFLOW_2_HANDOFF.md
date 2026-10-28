@@ -1,6 +1,42 @@
 # Workflow 2 handoff — implementation partial, qualification in progress
 
-The live2026-10-28 addendum at the end updates this historical2026-10-27 record.
+The terminal2026-10-28 addendum below updates this historical2026-10-27 record.
+
+## Terminal2026-10-28 remaining-gate outcome
+
+**Workflow2 is incomplete / NO_GO.** Public provider remains disabled. Root
+reconciled the following finite slices; the living project record and
+`volume_qualification.json` contain current status and exact evidence links.
+
+- Q4 conforming recovery is atomic and passes333 source quad checks plus11 real
+  pinned ANYfem consumer tests. Independent non-author same-family review found
+  no blocking repair defect; this does not establish full repository acceptance.
+- Installed dual-native Linux3.12 focused checks:242 passed. Full4129-test
+  selection timed out after900.053781692s with1155 passed calls,29 failed calls,
+  3 skipped nodes, one unfinished and2941 unstarted. All335 quad_first nodes
+  passed in that prefix. Explicit Existing-policy fixture correction preserves
+  original assertions/tolerances/goldens:73passed/9failed; later PQ6 still fails.
+  Full/native/reference gates are not waived. See `volume_native_gate_20261028.md`.
+- Fresh thin study: aligned case passes22 P1/P2 checks; rotated negative-offset
+  case fails unchanged axial-span fraction limit (0.5021240286845365 >0.5).
+  Both native calls consumed. Full worker-lifetime RSS measured at95,002,624 and
+  98,377,728bytes. Finer h<=t/5 proposal is unexecuted draft only. See
+  `thin_resolution_results_20261028.md` and `thin_resolution_candidate_v2_proposal.md`.
+- Descendant-aware Linux supervisor integrated into actual reusable CLI and
+  source-gate callers:6 controlled tests passed, cleanup zero owned descendants.
+  See `workflow2_testing_regime.md`; this is a controller capability contract,
+  distinct from the product ABI matrix.
+- Four notice-only exact1 wheels retain runtime bytes; independent root audit
+  verifies all RECORD entries and licenses.11 packaging tests and4 isolated
+  import smokes passed. Source/relink payload supplied, recipient relink unrun,
+  final symbol retention unmeasured, Microsoft redistribution conditions
+  unadjudicated. See `pytetwild_exact_notice_handoff.md`.
+
+All earlier failures/budgets/source identities are retained; no fresh meshing
+attempt is implied by unused process seconds. Native/macOS/candidate-owner CI,
+final artifact/release and independent workflow acceptance remain unmet.
+No merge, push or publication occurred. Workflow1 coupling remains separately
+NO_GO and is not superseded by these geometry/meshing results.
 
 Date: 2026-10-27. Root workspace C:/ANYworkspaceWork/workflow2-20261027.
 Living record: ANYgeometry/docs/WORKFLOW_2_PROJECT.md. Canonical handoff contract:

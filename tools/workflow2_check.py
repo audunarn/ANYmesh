@@ -51,21 +51,26 @@ def main():
         'ANYGEOMETRY_DISABLE_NATIVE','ANYGEOMETRY_BUILD_NATIVE','ANYGEOMETRY_REQUIRE_NATIVE')}
     (folder / 'identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
     # Reuse the existing Windows Job Object supervisor, without any inference.
-    helper = a.linux_supervisor if os.name != 'nt' else Path.home() / 'bin' / 'claude-review.py'
-    if helper is None:
-        p.error('--linux-supervisor must identify the established local Linux process helper')
+    helper = ((a.linux_supervisor or Path(__file__).with_name('workflow2_process_supervisor.py'))
+              if os.name != 'nt' else Path.home() / 'bin' / 'claude-review.py')
     spec = importlib.util.spec_from_file_location('workflow2_supervisor', helper)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    identity.update(runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                    supervisor_path=str(helper.resolve()),
+                    supervisor_sha256=hashlib.sha256(helper.read_bytes()).hexdigest())
+    (folder / 'identity.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
     if os.name == 'nt':
         receipt, _ = module.run_process(command, folder, 'stdout', a.timeout, env, a.cwd)
     else:
-        import ctypes
-        if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
-            raise OSError('Linux child-subreaper unavailable')
-        receipt = module.linux_process(command, folder/'process', a.timeout, env, a.cwd)
-    print(json.dumps({'evidence': str(folder), **receipt}))
-    return 0 if receipt['status'] == 'completed' else 1
+        if not hasattr(module,'run_linux'):
+            p.error('Linux checks require descendant-aware run_linux; use the bundled supervisor')
+        receipt = module.run_linux(command, folder/'process', a.timeout, env, a.cwd)
+    cleanup=receipt.get('cleanup',{})
+    print(json.dumps(dict(evidence=str(folder),status=receipt['status'],exit_code=receipt.get('exit_code'),
+        process_wall_seconds=receipt['process_wall_seconds'],cleanup_verified=cleanup.get('verified'),
+        remaining_owned_processes=len(cleanup.get('remaining_members',[])))))
+    return 0 if receipt['status'] == 'completed' and receipt.get('cleanup',{}).get('verified') else 1
 
 
 if __name__ == '__main__':

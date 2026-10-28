@@ -50,6 +50,7 @@ def _generate_member(model, face, member, order, *, cancellation_check=None):
         recombine=True,
         order=order,
         quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Frozen legacy seed/topology reference.
         cancellation_check=cancellation_check,
     ).mesh
 

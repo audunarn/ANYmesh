@@ -53,6 +53,7 @@ def _public(points=SKEW, h=0.5):
         target_size=h,
         face_ids=(face,),
         quad_options=QuadMeshingOptions(max_local_optimizations=0),
+        layout_policy="existing",  # Match _seed and its causal MCF corridor.
     )
     return model, face, result
 
@@ -269,6 +270,7 @@ def test_public_enabled_vs_disabled_mcf_is_causal(monkeypatch):
     before_e = _signature(model_e)
     enabled = generate_hybrid_mesh_result(
         model_e, target_size=0.5, face_ids=(face_e,),
+        layout_policy="existing",  # Hold the MCF comparison seed fixed.
         quad_options=QuadMeshingOptions(max_local_optimizations=0),
     )
     q4e = enabled.mesh.hybrid_diagnostics["q4"]
@@ -281,6 +283,7 @@ def test_public_enabled_vs_disabled_mcf_is_causal(monkeypatch):
     before_d = _signature(model_d)
     disabled = generate_hybrid_mesh_result(
         model_d, target_size=0.5, face_ids=(face_d,),
+        layout_policy="existing",  # Hold the MCF comparison seed fixed.
         quad_options=QuadMeshingOptions(max_local_optimizations=0),
     )
     q4d = disabled.mesh.hybrid_diagnostics["q4"]

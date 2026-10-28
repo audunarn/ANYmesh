@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "workflow": "Workflow 2",
-  "status": "PARTIAL_IMPLEMENTATION_QUALIFICATION_IN_PROGRESS",
+  "status": "PARTIAL_IMPLEMENTATION_NO_GO_THIN_AND_FULL_NATIVE_GATES",
   "production_provider_enabled": false,
   "qualified_provider_geometry_classes": [],
   "development_envelope": ["box", "strictly_convex_normal_prism", "thin_signed_offset_prism"],
@@ -26,9 +26,58 @@
     "case_process_wall_used_seconds": 301.520741163,
     "scope_limit": "Registered finite-case metrics only; not universal relative error or provider admission"
   },
-  "geometry_evidence": "Five frozen cases passed geometry/topology/ownership/group predicates; quality/thin-resolution acceptance remains OPEN. evidence/volume-geometry-20261028-summary.json",
+  "geometry_evidence": "Five original frozen cases passed geometry/topology/ownership/group predicates. Fresh prospective thin study is terminal NO_GO: rotated negative-offset axial span/thickness 0.5021240286845365 exceeds unchanged 0.5; aligned case passes. evidence/thin-resolution-20261028-a1/terminal-summary.json",
   "installed_matrix": "Windows/Linux Python3.11-3.14:8 cells each125 installed tests and22 P1/P2 physical checks passed;1000 tests/176checks total,8/8 native calls consumed. Core extensions disabled; public provider still disabled. evidence/installed-matrix-20261028-a1/reconciled-result.json",
-  "remaining_gates": ["prospective thin-region resolution and quality acceptance", "full applicable repository/native gates: missing ANYfem test dependency; partial timeout; first quad recovery failure reproduced on both original baselines", "performance and native-provider peak-memory qualification", "local native artifact license/distribution assessment", "release/CI acceptance including preserved native/macOS coverage"],
+  "source_repair": {
+    "status": "FINITE_REPAIR_VERIFIED_NOT_FULL_GATE",
+    "quad_tests_passed": 333,
+    "real_consumer_tests_passed": 11,
+    "collection_only_count": 4078,
+    "consumer_commit": "ed845899e7c358b46376bc3ad873327b0267e174",
+    "review": "Root plus independent non-author OpenAI-family review; no blocking Q4 atomicity defect found. GUI owner compatibility is not qualified.",
+    "evidence": "evidence/source-gate-repair-20261028-a1/summary.json"
+  },
+  "fresh_thin_study": {
+    "status": "NO_GO_PROPOSED_ROTATED_THIN_SAMPLING_ENVELOPE",
+    "frozen_identity": "19908113aba71307a4ab63253a32d6df4ea13ec5f895b65c62c1c8effc621cf4",
+    "native_calls_used": 2,
+    "native_calls_remaining": 0,
+    "process_wall_used_seconds": 304.8633017330033,
+    "process_wall_limit_seconds": 1200,
+    "axial_span_fraction_limit": 0.5,
+    "aligned_max_fraction": 0.49754309315662026,
+    "rotated_max_fraction": 0.5021240286845365,
+    "aligned_physical_checks_passed": 22,
+    "rotated_physical_checks": "NOT_RUN_AFTER_GEOMETRIC_FAILURE",
+    "native_worker_full_lifetime_peak_rss_bytes": [95002624, 98377728],
+    "next_candidate": "docs/thin_resolution_candidate_v2_proposal.md: unexecuted draft, no execution authority"
+  },
+  "installed_native_gate": {
+    "status": "NO_GO_TIMEOUT_WITH_FAILURES",
+    "scope": "Ubuntu24.04 CPython3.12, installed native geometry and mesher",
+    "selected": 4129,
+    "passed_calls": 1155,
+    "failed_calls": 29,
+    "skipped_nodes": 3,
+    "active_at_kill": 1,
+    "unstarted": 2941,
+    "full_run_process_wall_seconds": 900.053781692,
+    "focused_native_passes": 242,
+    "reference_policy_followup": "73 passed / 9 failed, then targeted PQ6 1 failed; all original assertions/tolerances/goldens retained",
+    "campaign_process_wall_used_seconds": 1275.912226017,
+    "campaign_process_wall_limit_seconds": 1800,
+    "evidence": "evidence/native-core-gate-20261028-a1/summary.json"
+  },
+  "notice_refresh": {
+    "status": "NOTICE_PACKAGING_ACCEPTED_ONLY",
+    "runtime_payloads_unchanged": true,
+    "wheel_count": 4,
+    "focused_tests_passed": 11,
+    "actual_isolated_import_smokes_passed": 4,
+    "root_independent_byte_and_record_audit": "evidence/provider-notices-20261028-a1/root-review.json",
+    "limits": "Recipient relink unexecuted; exact final retained symbols unmeasured; Microsoft redistribution conditions unadjudicated. No publication/provider promotion."
+  },
+  "remaining_gates": ["required thin-region sampling envelope failed; fresh finer candidate is a draft only", "full applicable repository/native regressions and timeout remain unresolved after finite Q4 repair and fixture-policy correction", "applicable candidate-owner CI/native platform coverage including preserved macOS jobs", "recipient relink and native-artifact distribution/release assessment", "independent final workflow acceptance"],
   "workflow1": "Separate unresolved reference-convergence and NLG-007 gates; production coupling NO_GO",
   "handoff": "docs/WORKFLOW_2_HANDOFF.md"
 }

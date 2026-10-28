@@ -150,6 +150,7 @@ def test_ch11_graded_residual_promotes_mixed_q8_t6(name):
         linear_model, face_ids=(linear_face,), target_size=0.6,
         strategy="native", native_backend="python", recombine=True,
         order="linear", quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Frozen graded seed/corner topology.
         refinements=(linear_refinement,),
     ).mesh
 
@@ -162,6 +163,7 @@ def test_ch11_graded_residual_promotes_mixed_q8_t6(name):
         model, face_ids=(face,), target_size=0.6,
         strategy="native", native_backend="python", recombine=True,
         order="quadratic", quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Frozen graded seed/corner topology.
         refinements=(refinement,),
     ).mesh
 

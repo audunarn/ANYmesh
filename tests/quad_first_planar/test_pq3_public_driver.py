@@ -26,6 +26,7 @@ def _run(fixture, h):
         target_size=h,
         face_ids=(face_id,),
         quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Fixed stations and NO_ELIGIBLE reference.
     ).mesh
 
 
@@ -114,7 +115,8 @@ def test_public_recovery_is_causal_on_small_trapezoid():
     vertices = geometry.add_points(((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (3.0, 4.0, 0.0), (1.0, 4.0, 0.0)))
     face_id = geometry.add_plate(vertices)
     public = generate_hybrid_mesh_result(
-        geometry, target_size=0.75, face_ids=(face_id,), quad_options=QuadMeshingOptions()
+        geometry, target_size=0.75, face_ids=(face_id,), quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Compare against the same manual seed below.
     ).mesh
     report = public.hybrid_diagnostics["front"]["faces"][face_id]
     assert report["recovery_accepts"] >= 1
@@ -137,3 +139,24 @@ def test_public_recovery_is_causal_on_small_trapezoid():
     assert with_recovery.report.final_t3 <= without_recovery.report.final_t3
     assert on.q4_count_fraction > off.q4_count_fraction
     assert on.q4_area_fraction > off.q4_area_fraction
+
+
+def test_explicit_quad_options_default_matches_explicit_adaptive_layout():
+    """Legacy references must not change the public default layout contract."""
+    geometry = GeometryModel()
+    vertices = geometry.add_points(((0., 0., 0.), (2., 0., 0.),
+                                    (1.6, 1., 0.), (0., 1., 0.)))
+    face = geometry.add_plate(vertices)
+    revision = geometry.revision
+    arguments = dict(target_size=.8, face_ids=(face,),
+                     quad_options=QuadMeshingOptions())
+    default = generate_hybrid_mesh_result(geometry, **arguments).mesh
+    explicit = generate_hybrid_mesh_result(
+        geometry, layout_policy="adaptive", **arguments).mesh
+    assert geometry.revision == revision
+    assert default.hybrid_diagnostics["layout_policy"] == "adaptive"
+    assert explicit.hybrid_diagnostics["layout_policy"] == "adaptive"
+    assert default.quads == explicit.quads and default.tris == explicit.tris
+    assert default.nodes_of_edge == explicit.nodes_of_edge
+    assert {node: tuple(point) for node, point in default.nodes.items()} == {
+        node: tuple(point) for node, point in explicit.nodes.items()}
