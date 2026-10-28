@@ -7,13 +7,23 @@ approval. The canonical geometry handoff is ANYgeometry's
 
 **Current real-provider capability: UNQUALIFIED / blocked.** Public
 `generate_volume_mesh(..., backend='pytetwild')` refuses with
-`VolumeBackendUnavailable` before launching a process. W2.0 did not establish
-viable provider execution. There is no environment variable or public parameter
+`VolumeBackendUnavailable` before launching a process. Subsequent bounded studies
+have measured real native execution with the local
+`pytetwild==0.4.2+anyworkflow2.exact1` artifact and finite installed-ANYsolid P1/P2
+consumption. Those results do not complete the remaining qualification, platform,
+review and release gates. There is no environment variable or public parameter
 that bypasses this decision. Root's `tools/volume_feasibility.py` is a separately
-governed research route, not a production API. Controlled tests substitute fake
-providers and establish the neutral mesh, admission and adapter contracts only.
+governed research route, not a production API. Controlled tests establish the
+neutral mesh, admission and adapter contracts only.
 The example below documents the interface for a future explicitly adopted
 provider capability; it does not currently enable real volume generation.
+
+The finite E2E handoff includes the user's exact-case acceptance of the aligned
+thin specimen's nominal-reference discrepancy under
+`decisions/W2-DEV-001-aligned-nominal-discrepancy.json`. Its original measured
+NO_GO and six failed values remain recorded. This does not change global limits,
+qualify another output automatically or waive the separate provider/release
+gates. See `WORKFLOW_2_HANDOFF.md` for current disposition.
 
 ```python
 from anymesher import generate_volume_mesh
@@ -54,9 +64,11 @@ This validator also re-admits structural objects and all their IDs/groups.
 The optional `solids-pytetwild` extra pins `pytetwild==0.4.2`. Ordinary imports never load
 that provider. Upstream 0.4.2's public import unconditionally imports its optional
 PyVista accessor despite declaring NumPy as its sole base dependency. Root's
-Workflow 2 artifact `0.4.2+anyworkflow2.1` contains the explicitly approved
-import-only guard; native bytes remain unchanged. This local version is accepted
-and recorded exactly. No private-module import bypass, silent provider change,
+earlier Workflow 2 artifact `0.4.2+anyworkflow2.1` contains the explicitly approved
+import-only guard with unchanged upstream native bytes. Later native studies use
+the separately identified local rebuild `0.4.2+anyworkflow2.exact1`; its identity
+and evidence are governed by the Workflow 2 records. Neither local artifact is
+promised by installing the published extra. No private-module import bypass, silent provider change,
 PyVista installation or automatic package repair occurs at runtime. Follow the
 root Workflow 2 handoff for the exact local artifact identity and feasibility
 disposition. The local import patch by itself establishes no meshing capability.
@@ -131,3 +143,37 @@ fixtures provide no real-provider evidence. The affected-test runner maps the
 file-launched worker explicitly; ordinary import analysis cannot infer it.
 Real-provider feasibility, installed cross-repository consumption, independent
 review and release gates remain root-owned and are reported separately.
+
+## Headless controlled consumer example
+
+[`examples/solid_volume_controlled.py`](../examples/solid_volume_controlled.py)
+creates a native ANYgeometry closed box snapshot, explicitly supplies six Tet4
+cells, constructs immutable `VolumeMesh` data with complete exterior ownership,
+and re-admits it against that snapshot. Installed ANYsolid is an explicit optional
+consumer. Both P1 and P2 assemble stiffness, recover complete strain/stress tensors
+and check affine traction equilibrium, energy, symmetry and body-load resultants.
+It does not call a native provider and does not qualify generated-mesh accuracy.
+
+Use candidate owner/mesher wheels and an independently installed ANYsolid with its
+NumPy/SciPy/scikit-fem dependencies, then run from any directory:
+
+```text
+python -I /path/to/solid_volume_controlled.py --output result.json
+```
+
+The repository's offline Windows delivery harness builds fresh pure-Python owner
+and mesher wheels from frozen copied inputs, installs them with the registered
+unchanged ANYsolid wheel into a disposable venv, verifies installed origins and
+wheel payload hashes, and runs this example and three focused checks. Exact
+invocation and measured evidence are in
+[`installed_delivery_20261028.md`](installed_delivery_20261028.md). It adds no
+ANYsolid runtime dependency to ANYmesher. The existing
+`.github/workflows/solid-volume.yml` remains the eight-cell core owner/consumer
+contract lane; this small local smoke does not replace native or platform gates.
+
+For real generated-mesh evidence, see
+[`thin_resolution_v2_results_20261028.md`](thin_resolution_v2_results_20261028.md)
+and [`prism_e2e_results_20261028.md`](prism_e2e_results_20261028.md), together with
+the retained cube and rectangular-box records. The thin v2 record retains its
+original **NO_GO**, unchanged thresholds and six failed physical comparisons;
+case-specific acceptance and remaining gates belong to root's adjudication.
