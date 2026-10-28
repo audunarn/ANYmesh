@@ -367,3 +367,6 @@ __all__ = [
     "verify_mesh_quality",
     "validate_prepared_current_component_associations",
 ]
+
+from .material_source_transfer import requires_material_source_transfer
+__all__.append("requires_material_source_transfer")

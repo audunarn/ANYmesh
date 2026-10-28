@@ -210,11 +210,75 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
     return (('native',native),*(item for item in recipes if item[0]!='native'))
 
 
+def select_curvilinear_recovery_policy(
+    geometry, *, requested_strategy, order, certification_mode,
+    geometry_approximation_error, explicit_controls, automation=None,
+    face_ids=None, cancellation_check=None,
+):
+    """Select existing recovery only for new, owner-qualified curved domains.
+
+    Application intent is explicit input; constructed legacy controls do not
+    establish user intent. This selection grants no geometric cell authority.
+    """
+    if (automation is not None or explicit_controls or order != 'linear'
+            or str(getattr(certification_mode, 'value', certification_mode)) != 'interactive'
+            or str(getattr(requested_strategy, 'value', requested_strategy)) not in
+                ('auto', 'automatic', 'quad_first')
+            or geometry_approximation_error is None):
+        return automation, None
+    import anygeometry as owner
+    from ._material_region_binding import (checked_geometry_approximation_error,
+        face_requires_curvilinear, region_requires_curvilinear)
+    error = checked_geometry_approximation_error(geometry_approximation_error)
+    selected = tuple(geometry.faces if face_ids is None else face_ids)
+    candidates = tuple(face for face in selected
+        if face_requires_curvilinear(geometry, face))
+    if not candidates:
+        return automation, None
+    # A raw NURBS/display type is merely a query hint. Exact-Coons provenance
+    # and canonical material chart qualification remain with the owner.
+    regions = owner.query_material_surface_regions(
+        geometry, candidates, expected_revision=geometry.revision,
+        cancellation_check=cancellation_check)
+    owner.validate_material_surface_regions_binding(
+        geometry, regions, cancellation_check=cancellation_check)
+    admitted = {face.id for region in regions.regions
+                if region_requires_curvilinear(region) for face in region.faces}
+    if admitted != set(candidates):
+        raise MeshError('new curved recovery lacks complete owner material charts')
+    return MeshAutomationOptions(strict_method=False, allow_inspection=False), {
+        'requested_strategy': str(getattr(requested_strategy, 'value', requested_strategy)),
+        'reason': 'new owner-qualified NURBS material uses existing automatic native recipe',
+        'geometry_approximation_error': error,
+        'source_faces': sorted(admitted),
+    }
+
+
+def _record_curvilinear_recovery(result, selection, method, recipe):
+    if selection is None:
+        return
+    from dataclasses import asdict, is_dataclass
+    def literal(value):
+        serializer = getattr(value, 'to_dict', None)
+        if callable(serializer):
+            return serializer()
+        return asdict(value) if is_dataclass(value) else value
+    record = dict(selection)
+    record.update(selected_method=method, effective_strategy=recipe.get('strategy'),
+                  native_options=literal(recipe.get('native_options')),
+                  native_surface_options=literal(recipe.get('_native_surface_options')),
+                  recombine=recipe.get('recombine'),
+                  structured_options=literal(recipe.get('structured_options')))
+    result.mesh.hybrid_diagnostics['curvilinear_recovery'] = record
+
+
+
 def generate_automatic_mesh_result(
     geometry: GeometryModel,
     *,
     automation: MeshAutomationOptions | None = None,
     fallback_structured_options: Any | None = None,
+    curvilinear_recovery_selection: Mapping[str, Any] | None = None,
     **meshing_options: Any,
 ) -> AutomaticMeshResult:
     """Try bounded methods and retain a valid inspect-only mesh if needed.
@@ -251,6 +315,10 @@ def generate_automatic_mesh_result(
         recipes = recipes[:1]
     else:
         recipes = _prefer_analytic_trim_recipe(geometry, first, recipes)
+    if curvilinear_recovery_selection is not None:
+        recipes = tuple((method, dict(recipe, recombine=first.get('recombine', True)))
+                        if method == 'native' else (method, recipe)
+                        for method, recipe in recipes)
     attempts: list[Mapping[str, object]] = []
     first_recoverable: Exception | None = None
     admission_error: S3QualityError | None = None
@@ -318,6 +386,7 @@ def generate_automatic_mesh_result(
         attempts.append({"method": method, "status": "selected"})
         selected = AutomaticMeshResult(result, method, "ready", tuple(attempts))
         result.mesh.hybrid_diagnostics["automation"] = selected.to_dict()
+        _record_curvilinear_recovery(result, curvilinear_recovery_selection, method, recipe)
         return selected
 
     if policy.allow_inspection and (
