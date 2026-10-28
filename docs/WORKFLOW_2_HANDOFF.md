@@ -1,5 +1,37 @@
 # Workflow 2 handoff — implementation partial, qualification in progress
 
+## Latest revised-candidate and end-to-end result — 2026-10-28
+
+Required convex-prism coverage advanced: the exact retained regular pentagonal
+prism passes9 geometry predicates,22 P1/P2 checks and complete readmission with
+source identities/overlapping groups preserved. Zero new native calls. Root
+accepted that finite source-owner/installed-ANYsolid slice. Existing cube and
+rectangular-prism evidence remains separate, with its original scope.
+
+Revised thin h=0.002m candidate is terminal **NO_GO** under unchanged gates.
+Both outputs pass sampling/conditioning and all20 geometry predicates; all28
+source identity/group comparisons pass across refinement. Rotated negative
+offset passes22 P1/P2 checks. Aligned passes16 and fails6: affine equilibrium,
+force/moment and energy/work at both orders. Total38/44 physical predicates
+pass; favorable old/new cases cannot be mixed into post-hoc qualification.
+Two native calls consumed, no retries,939.985701038/1200 process seconds charged,
+all owned cleanup verified. Prism separately119.604706017/600s, no native calls.
+
+The aligned mesh is within1e-6m geometry tolerance but differs from nominal
+source volume by8.0859255e-9 relatively; its affine energy discrepancy is the
+same, exceeding1e-10. The old helper uses source normals/area/volume with FEM
+integration on the numerical mesh. Independent Read review confirms this is a
+stronger combined nominal-domain gate; no reference switch or tolerance waiver
+has been adopted. The next substantive issue is boundary fidelity under that
+contract, not thin sampling or an established FE code defect. No further native
+call is authorized by the closed v2 registration.
+
+See `thin_resolution_v2_results_20261028.md`, `prism_e2e_results_20261028.md`,
+current `volume_qualification.json` and the living ANYgeometry project record.
+The public provider stays disabled; existing full-suite/platform/artifact/release
+gates remain explicit. No unrelated surface-regression execution/repair,
+merge, push or publication occurred in this campaign.
+
 The terminal2026-10-28 addendum below updates this historical2026-10-27 record.
 
 ## Terminal2026-10-28 remaining-gate outcome

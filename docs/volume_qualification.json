@@ -50,7 +50,7 @@
     "aligned_physical_checks_passed": 22,
     "rotated_physical_checks": "NOT_RUN_AFTER_GEOMETRIC_FAILURE",
     "native_worker_full_lifetime_peak_rss_bytes": [95002624, 98377728],
-    "next_candidate": "docs/thin_resolution_candidate_v2_proposal.md: unexecuted draft, no execution authority"
+    "next_candidate": "User separately authorized v2 on2026-10-28. See revised_thin_candidate; original failed study and consumed calls unchanged."
   },
   "installed_native_gate": {
     "status": "NO_GO_TIMEOUT_WITH_FAILURES",
@@ -77,7 +77,49 @@
     "root_independent_byte_and_record_audit": "evidence/provider-notices-20261028-a1/root-review.json",
     "limits": "Recipient relink unexecuted; exact final retained symbols unmeasured; Microsoft redistribution conditions unadjudicated. No publication/provider promotion."
   },
-  "remaining_gates": ["required thin-region sampling envelope failed; fresh finer candidate is a draft only", "full applicable repository/native regressions and timeout remain unresolved after finite Q4 repair and fixture-policy correction", "applicable candidate-owner CI/native platform coverage including preserved macOS jobs", "recipient relink and native-artifact distribution/release assessment", "independent final workflow acceptance"],
+  "revised_thin_candidate": {
+    "status": "NO_GO_ALIGNED_NOMINAL_GEOMETRY_PHYSICS_GATES",
+    "target_edge_length_m": 0.002,
+    "frozen_identity": "e4a362d60012cb31be690ab2a91e3be52db492ac2ff76580e6f001f5ea0b8452",
+    "unchanged_limits": true,
+    "original_geometry_snapshot_and_input_bytes_reused": true,
+    "source_identity_and_group_comparisons_passed": 28,
+    "geometric_predicates_passed": 20,
+    "physical_predicates_passed": 38,
+    "physical_predicates_failed": 6,
+    "aligned": {"status":"NO_GO", "nodes":6147, "cells":29440, "max_axial_span_fraction":0.3488468668528982, "max_regular_tet_condition":5.029858745144823, "physical_passed":16, "physical_failed":6, "failures_each_order":["affine_equilibrium","face_force_moment","positive_energy_and_work"]},
+    "rotated_negative_offset": {"status":"PASS", "nodes":6562, "cells":32313, "max_axial_span_fraction":0.4043397736867796, "max_regular_tet_condition":4.579452318608783, "physical_passed":22, "physical_failed":0},
+    "native_calls_used": 2,
+    "native_calls_remaining": 0,
+    "retries": 0,
+    "process_wall_used_seconds": 939.985701038,
+    "process_wall_limit_seconds": 1200,
+    "scope": "Finite same-source refinement evidence. Sampling/conditioning resolved for these two outputs; whole candidate remains NO_GO. Do not mix favorable old/new cases into a post-hoc envelope.",
+    "reference_finding": "Nominal-source face normals/areas/volume are compared against integration on the slightly displaced numerical domain. Within-delta geometry does not imply the stricter nominal energy/work/equilibrium bounds. No reference or threshold change adopted.",
+    "independent_non_author_review": "evidence/thin-resolution-v2-20261028-a1/independent-final-review.json: supports terminal NO_GO, same OpenAI family; no different-family/human acceptance claimed",
+    "evidence": "evidence/thin-resolution-v2-20261028-a1/handoff.json",
+    "results": "docs/thin_resolution_v2_results_20261028.md"
+  },
+  "retained_prism_end_to_end": {
+    "status": "ACCEPTED_FINITE_RETAINED_PRISM_E2E",
+    "geometry": "regular pentagonal prism, radius0.1m, height0.06m",
+    "nodes": 463,
+    "cells": 1899,
+    "geometry_predicates_passed": 9,
+    "physical_predicates_passed": 22,
+    "physical_predicates_failed": 0,
+    "source_identity_and_groups_preserved": true,
+    "readmission_boundary_facets": 498,
+    "source_faces": 7,
+    "native_calls": 0,
+    "physics_attempts": 1,
+    "process_wall_and_failed_launch_charge_seconds": 119.604706017,
+    "process_wall_limit_seconds": 600,
+    "root_non_author_review": "evidence/prism-e2e-20261028-a1/root-final-review.json",
+    "scope": "Exact retained native mesh/source owners plus installed ANYsolid P1/P2; one prism resolution. No new installed-owner/platform/release claim.",
+    "results": "docs/prism_e2e_results_20261028.md"
+  },
+  "remaining_gates": ["revised thin sampling/conditioning passed but aligned nominal-source force/moment, affine equilibrium and energy/work gates failed; boundary-fidelity candidate needed without weakening limits", "full applicable repository/native regressions and timeout remain unresolved; no unrelated regression work executed in this campaign", "applicable candidate-owner CI/native platform coverage including preserved macOS jobs", "recipient relink and native-artifact distribution/release assessment", "independent final workflow acceptance"],
   "workflow1": "Separate unresolved reference-convergence and NLG-007 gates; production coupling NO_GO",
   "handoff": "docs/WORKFLOW_2_HANDOFF.md"
 }
