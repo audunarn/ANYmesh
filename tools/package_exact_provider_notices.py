@@ -297,6 +297,13 @@ def relink_member(name):
             bool(re.search(r'CMakeFiles/PyfTetWildWrapper\.dir/src/FTetWildWrapper\.cpp\.(o|obj)$', name)))
 
 
+def write_posix_relink_recipe(path, command):
+    """Keep recipient shell bytes portable even when exported on Windows."""
+    text = '#!/bin/sh\nset -eu\n# Run from this directory with compatible GCC13/system GMP/OpenMP.\n'+command
+    with Path(path).open('x', encoding='utf-8', newline='\n') as stream:
+        stream.write(text)
+
+
 def export_relink(folder):
     folder.mkdir()
     results = {}
@@ -353,7 +360,7 @@ def export_relink(folder):
         if abi.startswith('linux'):
             output='PyfTetWildWrapper.abi3.so' if abi=='linux312abi3' else 'PyfTetWildWrapper.cpython-311-x86_64-linux-gnu.so'
             command='c++ -fPIC -O3 -fsigned-char -ffp-contract=off -shared -Wl,--gc-sections -o '+output+' '+ ' '.join(objects+libraries)+' -fopenmp -lgmp -ldl\n'
-            (destination/'relink.sh').write_text('#!/bin/sh\nset -eu\n# Run from this directory with compatible GCC13/system GMP/OpenMP.\n'+command)
+            write_posix_relink_recipe(destination/'relink.sh', command)
         else:
             python_lib='python311.lib' if abi=='windows311' else 'python3.lib'
             command='link.exe /nologo /dll /machine:x64 /INCREMENTAL:NO /out:PyfTetWildWrapper.pyd '+ ' '.join('"'+p.replace('/','\\')+'"' for p in objects+libraries)+' "%PYTHON_LIB_DIR%\\'+python_lib+'" "%MPIR_LIB_DIR%\\gmp.lib" psapi.lib kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib\n'

@@ -50,3 +50,35 @@ def test_notice_cannot_add_runtime_member(tmp_path):
     before=tmp_path/'before.whl';original(before)
     with pytest.raises(ValueError,match='permitted dist-info'):
         package.repack(before,tmp_path/'after.whl',{'new-runtime.py':b'bad'},'note')
+
+
+def test_exported_posix_recipe_has_utf8_lf_bytes_on_windows(tmp_path, monkeypatch):
+    """Exercise export wiring as well as the byte writer with synthetic inputs."""
+    import tarfile
+    import io
+    root=tmp_path/'historical';root.mkdir()
+    libraries=sorted(name for name in package.LIBRARY_NAMES
+                     if name.endswith('.a') and name!='libnanobind-static-abi3.a')
+    assert len(libraries)==9
+    obj='CMakeFiles/PyfTetWildWrapper.dir/src/FTetWildWrapper.cpp.o'
+    for directory in ('native-build-configuration','windows-native-build-configuration',
+                      'linux311/build-configuration','windows312/build-configuration'):
+        config=root/directory;config.mkdir(parents=True)
+        (config/'build.ninja').write_text('  LINK_LIBRARIES = '+'  '.join(libraries)+'\n')
+    for abi in ('linux311','windows312'):
+        with tarfile.open(root/abi/'previous-abi-relink-inputs.tar.gz','w:gz') as archive:
+            for name in [obj]+libraries:
+                member=tarfile.TarInfo(name);member.size=1
+                archive.addfile(member,io.BytesIO(b'x'))
+    for build in ('linux-build','windows-build'):
+        for name in [obj]+libraries:
+            target=root/build/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'x')
+    monkeypatch.setattr(package,'OLD',root)
+    exported=tmp_path/'relink';package.export_relink(exported)
+    for abi,output in [('linux312abi3','PyfTetWildWrapper.abi3.so'),
+                       ('linux311','PyfTetWildWrapper.cpython-311-x86_64-linux-gnu.so')]:
+        data=(exported/abi/'relink.sh').read_bytes()
+        assert data.startswith(b'#!/bin/sh\nset -eu\n') and b'\r' not in data
+        assert ('-o '+output+' '+obj).encode('utf-8') in data
+        assert data.endswith(b' -fopenmp -lgmp -ldl\n')
+        assert data.decode('utf-8').encode('utf-8')==data
