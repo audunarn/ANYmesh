@@ -188,6 +188,8 @@ def validate_volume_mesh(mesh, snapshot, *, boundary_tolerance):
                            source_region_id=source.region_id, source_signature=source.signature)
     if any(mesh.provenance.get(key) != value for key, value in expected_source.items()):
         raise InvalidVolumeMesh('mesh provenance does not match source identity, revision and signature')
+    if set(map(int, mesh.cell_groups.get(source.region_id, ()))) != set(map(int, mesh.cell_ids)):
+        raise InvalidVolumeMesh('source region group must cover all external cell IDs')
     given = np.asarray(mesh.boundary_facets)
     owners, report = validate_geometry(mesh.coordinates, mesh.cells, given, source)
     if len(mesh.boundary_ids) != len(given) or len(set(map(int, mesh.boundary_ids))) != len(given):
@@ -224,9 +226,19 @@ def generate_volume_mesh(snapshot, *, target_edge_length, boundary_tolerance,
         raise VolumeMeshingCancelled('cancelled before provider launch')
     from ._volume_process import run_provider
     x, t, metadata = run_provider(source, float(target_edge_length), float(timeout), cancel)
+    return _admit_provider_output(source, x, t, metadata, float(target_edge_length), cancel)
+
+
+def _admit_provider_output(source, x, t, metadata, target_edge_length, cancel=None):
+    """Common admitted-array path for generation and bounded qualification tools.
+
+    This helper performs no provider execution and changes no capability guard.
+    Qualification can inspect retained arrays through the identical production
+    postchecks without enabling an unqualified native backend.
+    """
     if _cancelled(cancel):
         raise VolumeMeshingCancelled('cancelled before output validation')
-    from ._volume_validation import validate_cells
+    from ._volume_validation import validate_cells, validate_geometry
     # Provider orientation convention is canonicalized explicitly; never repair a
     # collapsed cell, position or topology. Keep every raw row for admission.
     x = _array(x, float)
@@ -273,6 +285,7 @@ def generate_volume_mesh(snapshot, *, target_edge_length, boundary_tolerance,
     # Constructor rechecks independent immutable storage. No object escapes until
     # every numerical/geometry/group check above succeeds.
     mesh = VolumeMesh(x, t, boundary_facets=exterior, boundary_ids=ids,
+                      cell_groups={source.region_id: np.arange(1, len(t) + 1)},
                       boundary_groups=groups, face_owners=dict(zip(map(int, ids), owners)),
                       provenance=metadata, _cancel=cancel)
     if _cancelled(cancel):

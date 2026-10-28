@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "status": "PROSPECTIVE_DEVELOPMENT_DIAGNOSIS_ONLY",
+  "authority": "User Proceed, 2026-10-28; bounded continuation after retained failures",
+  "case": "box from volume_feasibility_manifest_patched.json",
+  "same_physical_criteria": true,
+  "threads": 1,
+  "profile_seconds": 15,
+  "profile_rate_hz": 100,
+  "process_tree_timeout_seconds": 45,
+  "native_calls_maximum": 1,
+  "question": "Sampled envelope classification cost versus native threading/orientation/filter failure",
+  "source": {
+    "wrapper": "pyvista/pytetwild v0.4.2 src/FTetWildWrapper.cpp",
+    "ftetwild_commit": "d7d99bb4387a07895b9adce058dc7305f6b6e5ab",
+    "default_exact_envelope_option": false
+  },
+  "acceptance": "Diagnostic completeness requires raw native stacks and verified owned-session cleanup; no scientific or production acceptance is conferred. A failed profiler launch is not a geometric test."
+}

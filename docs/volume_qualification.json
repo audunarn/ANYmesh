@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "workflow": "Workflow 2",
-  "status": "PARTIAL_IMPLEMENTATION_BLOCKED_PROVIDER_FEASIBILITY",
+  "status": "PARTIAL_IMPLEMENTATION_QUALIFICATION_IN_PROGRESS",
   "production_provider_enabled": false,
   "qualified_provider_geometry_classes": [],
   "development_envelope": ["box", "strictly_convex_normal_prism", "thin_signed_offset_prism"],
   "unsupported": ["holes", "concavity", "cavities", "multiple_components", "conformal_material_interfaces", "curved_geometry", "CAD_import"],
   "source_review": "Independent non-author OpenAI-family Read review; blocked-feature replay defect repaired with public-path regression and separate non-author review. No human/different-family acceptance claimed.",
-  "provider_artifact": "pytetwild0.4.2+anyworkflow2.1 import-only patch approved by user; native bytes unchanged",
+  "provider_artifact": "Fresh local0.4.2+anyworkflow2.exact1 candidate uses pinned upstream exact-envelope mode plus raw-wrapper initialization and optional accessor import guard. Native bytes differ from import-only patch; four ABI wheels identified separately. No publication or provider promotion.",
   "official_import_failure": "feasibility-box-c30b1ddd82",
   "native_attempts": [
     {"id": "feasibility-box-patched-4277ca13bf", "platform": "Windows CPython3.11", "status": "timeout", "wall_seconds": 120.062},
@@ -15,8 +15,20 @@
     {"id": "linux-feasibility-box-a179d67912", "platform": "Ubuntu24.04 CPython3.12", "status": "timeout", "wall_seconds": 120.02586066400002}
   ],
   "criteria_changed": false,
-  "raw_mesh_accepted": false,
-  "remaining_gates": ["bounded real-provider feasibility", "protected-face and thin-region qualification", "real generated-mesh P1/P2 specimen", "full applicable repository/native gates", "installed optional-provider Windows/Linux Python3.11-3.14 matrix", "performance and memory qualification", "release acceptance"],
+  "raw_mesh_accepted": true,
+  "finite_evidence": {
+    "scope": "Linux312 exact1 raw box and thin, followed by actual production admission and installed ANYsolid P1/P2",
+    "box": "retained-box-qualification-repaired-20261028-results/result.json:22 checks passed",
+    "thin": "retained-thin-qualification-20261028-results/result.json:22 checks passed",
+    "rigid_check_review_finding": "Original six-mode check could accept zero columns; independent physical-rank/span/residual supplement passed bothorders bothcases; original evidence retained",
+    "rigid_supplements": ["retained-box-rigid-supplement-results/result.json", "retained-thin-rigid-supplement-results/result.json"],
+    "case_budget_seconds": 360,
+    "case_process_wall_used_seconds": 301.520741163,
+    "scope_limit": "Registered finite-case metrics only; not universal relative error or provider admission"
+  },
+  "geometry_evidence": "Five frozen cases passed geometry/topology/ownership/group predicates; quality/thin-resolution acceptance remains OPEN. evidence/volume-geometry-20261028-summary.json",
+  "installed_matrix": "Windows/Linux Python3.11-3.14:8 cells each125 installed tests and22 P1/P2 physical checks passed;1000 tests/176checks total,8/8 native calls consumed. Core extensions disabled; public provider still disabled. evidence/installed-matrix-20261028-a1/reconciled-result.json",
+  "remaining_gates": ["prospective thin-region resolution and quality acceptance", "full applicable repository/native gates: missing ANYfem test dependency; partial timeout; first quad recovery failure reproduced on both original baselines", "performance and native-provider peak-memory qualification", "local native artifact license/distribution assessment", "release/CI acceptance including preserved native/macOS coverage"],
   "workflow1": "Separate unresolved reference-convergence and NLG-007 gates; production coupling NO_GO",
   "handoff": "docs/WORKFLOW_2_HANDOFF.md"
 }

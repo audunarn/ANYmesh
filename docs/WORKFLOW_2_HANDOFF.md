@@ -1,4 +1,6 @@
-# Workflow 2 handoff — implementation partial, provider blocked
+# Workflow 2 handoff — implementation partial, qualification in progress
+
+The live2026-10-28 addendum at the end updates this historical2026-10-27 record.
 
 Date: 2026-10-27. Root workspace C:/ANYworkspaceWork/workflow2-20261027.
 Living record: ANYgeometry/docs/WORKFLOW_2_PROJECT.md. Canonical handoff contract:
@@ -119,3 +121,34 @@ release numbering must follow patch-only policy and compatibility gates.
 
 Workflow 1 qualification is separate and unchanged: transition reference and
 NLG-007 remain blocked; production shell-solid coupling remains NO_GO.
+# Live continuation delta — 2026-10-28
+
+The historical handoff above is retained. Its provider-feasibility blocker is
+superseded by separately identified exact-envelope candidate evidence, not erased.
+Current status is **qualification in progress; production provider disabled**.
+
+All four native ABI wheels built/imported without PyVista: Windows311 and
+312+ABI3, Linux311 and312+ABI3. Build/source/license/relink inventory and original
+1379.061/2400s accounting: `../evidence/exact-envelope-20261028-a1`.
+These are local development artifacts; no manylinux/distribution qualification.
+
+Raw box/thin feasibility passed original geometry criteria. Actual production
+postchecks and installed ANYsolid P1/P2 retained-mesh studies each passed22
+checks. Independent same-family non-author review found the original rigid
+check accepted zero modes; strengthened physical rank/span/residual supplements
+passed bothorders bothcases. Five false-reporting/rigid regressions pass.
+All prior scientific limits and failed evidence remain unchanged. Total301.521
+of original360case seconds used including the failed serialization attempt.
+
+Required geometry/refinement five-case qualification and eight-cell installed
+Windows/Linux3.11–3.14 candidate matrix are now separately frozen/in progress.
+The full ANYgeometry source gate passed4386tests with15 existing compiled-core
+skips. Unfiltered ANYmesher source collection failed because two existing
+ANYfem-consumer modules lack that test dependency in the isolated Linux runtime;
+that full gate remains unmet. Complementary coverage explicitly excluding those
+two modules is being gathered and cannot replace the failed full gate.
+
+Canonical current record: sibling ANYgeometry `docs/WORKFLOW_2_PROJECT.md`.
+No merge, push, publication, sibling source changes or Workflow1 qualification
+changes. `docs/volume_qualification.json` separates current finite acceptance
+from remaining promotion/release obligations.

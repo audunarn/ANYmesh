@@ -2,7 +2,9 @@
 from __future__ import annotations
 import argparse
 import importlib.metadata
+import hashlib
 import json
+import os
 from pathlib import Path
 import time
 import numpy as np
@@ -17,14 +19,24 @@ def main():
     manifest_path = a.manifest or Path(__file__).resolve().parents[1] / 'docs/volume_feasibility_manifest.json'
     manifest = json.loads(manifest_path.read_text())
     case = next(c for c in manifest['cases'] if c['id'] == a.case)
+    a.output = a.output.resolve()
+    a.output.mkdir(parents=True,exist_ok=False)
     from anysolid import SolidMesh
     import pytetwild
     assert importlib.metadata.version('pytetwild') == manifest['backend'].split('==')[1]
+    if manifest.get('required_native_exact_envelope'):
+        from pytetwild import PyfTetWildWrapper
+        assert getattr(PyfTetWildWrapper, '_workflow2_exact_envelope', False) is True
+        native_hash = hashlib.sha256(Path(PyfTetWildWrapper.__file__).read_bytes()).hexdigest()
+        assert native_hash == manifest['backend_native_sha256']
     dims = np.array(case['dimensions'])
     x = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0],
                   [0,0,1],[1,0,1],[1,1,1],[0,1,1]], float) * dims
     loops = ((0,3,2,1),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7))
     triangles = np.array([tri for q in loops for tri in ((q[0],q[1],q[2]),(q[0],q[2],q[3]))], dtype=np.int32)
+    # Upstream writes auxiliary surface files even on its quiet path. Keep all
+    # native outputs inside this immutable owned attempt, as production does.
+    os.chdir(a.output)
     started = time.perf_counter()
     vertices, cells = pytetwild.tetrahedralize(
         x, triangles, edge_length_abs=case['target_edge_length'],
@@ -36,7 +48,7 @@ def main():
     determinants = np.linalg.det(vertices[cells[:,1:]]-vertices[cells[:,:1]])
     reverse = determinants < 0
     cells[reverse,1:3] = cells[reverse,2:0:-1]
-    mesh = SolidMesh(vertices, cells, provenance={'provider': 'pytetwild0.4.2', 'case':case})
+    mesh = SolidMesh(vertices, cells, provenance={'provider': manifest['backend'], 'case':case})
     f = mesh.boundary_facets
     points = vertices[f]
     cross = np.cross(points[:,1]-points[:,0], points[:,2]-points[:,0])
@@ -68,7 +80,6 @@ def main():
         'bounds':bool(np.all(vertices>=-tol) and np.all(vertices<=dims+tol)),
         'anysolid_constructor':True,
     }
-    a.output.mkdir(parents=True,exist_ok=False)
     np.savez_compressed(a.output/'mesh.npz',coordinates=vertices,cells=cells,boundary_facets=f,face_matches=np.stack(matches))
     result = dict(case=case, options=manifest['options'], backend_version=importlib.metadata.version('pytetwild'),
                   backend_wall_seconds=backend_wall,nodes=len(vertices),cells=len(cells),facets=len(f),

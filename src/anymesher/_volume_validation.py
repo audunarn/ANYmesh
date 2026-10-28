@@ -233,7 +233,75 @@ def _intersection_points(p, q, planes):
     return points
 
 
+def _orientation_sign(a, b, c, point):
+    """Certified sign of orient3d on the supplied binary coordinates, else zero.
+
+    The determinant is expanded after translation. 64 machine epsilons times
+    the absolute-product permanent conservatively exceeds the orient3d
+    forward-error bound for the subtractions, products and additions. The
+    tiny additive floor rejects underflow-sensitive results. Zero means that
+    the original SAT/clipping/exact route must decide; it never means coplanar.
+    """
+    ux, uy, uz = (float(b[k]) - float(a[k]) for k in range(3))
+    vx, vy, vz = (float(c[k]) - float(a[k]) for k in range(3))
+    wx, wy, wz = (float(point[k]) - float(a[k]) for k in range(3))
+    yz, zy = vy*wz, vz*wy
+    zx, xz = vz*wx, vx*wz
+    xy, yx = vx*wy, vy*wx
+    determinant = ux*(yz-zy) + uy*(zx-xz) + uz*(xy-yx)
+    permanent = abs(ux)*(abs(yz)+abs(zy)) + abs(uy)*(abs(zx)+abs(xz)) + abs(uz)*(abs(xy)+abs(yx))
+    error = 64*np.finfo(float).eps*permanent + 64*np.finfo(float).tiny
+    return 1 if determinant > error else -1 if determinant < -error else 0
+
+
+def _certified_face_contact(p, q, common, distances):
+    """Prove the entire tet intersection equals its shared topological simplex.
+
+    A face of p contains every common vertex. Its opposite vertex is strictly
+    inside, while every noncommon vertex of q is strictly outside, all proved
+    by filtered orientation signs. Thus p is in the inside closed halfspace;
+    q meets that halfspace only in conv(common). That simplex belongs to both
+    tets, so it is exactly their intersection. This covers vertex/edge contact
+    without assuming that arbitrary topological neighbours cannot overlap.
+    """
+    in_p = np.any(np.all(p[:, None, :] == common[None, :, :], axis=2), axis=1)
+    in_q = np.any(np.all(q[:, None, :] == common[None, :, :], axis=2), axis=1)
+    if np.count_nonzero(in_p) != len(common) or np.count_nonzero(in_q) != len(common):
+        return False
+    # Normalized distances are only a cheap candidate screen, never the proof.
+    candidates = np.flatnonzero(~in_p & np.all(distances[~in_q] > 16*_EPS, axis=0))
+    for opposite in candidates:
+        a, b, c = p[list(_FACES[opposite])]
+        if _orientation_sign(a, b, c, p[opposite]) != -1:
+            continue
+        if all(_orientation_sign(a, b, c, vertex) == 1 for vertex in q[~in_q]):
+            return True
+    return False
+
+
 def _check_pair(p, q, common, planes_p, planes_q):
+    # Direct validate_cells callers may retain float32 normalization. Its
+    # projection rounding does not satisfy the float64 fast-path margin, so
+    # preserve the original routine for every non-float64 dtype.
+    if p.dtype != np.float64 or q.dtype != np.float64:
+        return _check_pair_fallback(p, q, common, planes_p, planes_q)
+    # Face axes are a subset of the original SAT axes. A full extra _EPS
+    # margin makes this sufficient early exit conservative with respect to
+    # the original -_EPS threshold; ambiguous/near-threshold results fall back.
+    axes = np.concatenate((planes_p[0], planes_q[0]))
+    proj_p, proj_q = p @ axes.T, q @ axes.T
+    overlap = np.minimum(proj_p.max(axis=0), proj_q.max(axis=0)) - np.maximum(proj_p.min(axis=0), proj_q.min(axis=0))
+    if np.any(overlap < -2*_EPS):
+        return
+    if 0 < len(common) < 3:
+        if _certified_face_contact(p, q, common, proj_q[:, :4] - planes_p[1]):
+            return
+        if _certified_face_contact(q, p, common, proj_p[:, 4:] - planes_q[1]):
+            return
+    _check_pair_fallback(p, q, common, planes_p, planes_q)
+
+
+def _check_pair_fallback(p, q, common, planes_p, planes_q):
     # Strict SAT on all tetra face normals and edge cross axes detects positive
     # volume intersections. A numerical uncertainty is a refusal, not a repair.
     axes = [*planes_p[0], *planes_q[0]]

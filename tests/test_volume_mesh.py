@@ -46,9 +46,23 @@ def make_mesh(snapshot, cells, delta=1e-7, **kwargs):
     metadata = dict(source_model_id=snapshot.model_id, source_revision=snapshot.revision,
                     source_region_id=snapshot.region_id, source_signature=snapshot.source_signature)
     metadata.update(kwargs.pop('provenance', {}))
+    cell_groups = {snapshot.region_id: np.arange(200, 206), **kwargs.pop('cell_groups', {})}
     return VolumeMesh(snapshot.coordinates, cells, node_ids=np.arange(100, 108),
         cell_ids=np.arange(200, 206), boundary_facets=facets, boundary_ids=ids,
-        boundary_groups=groups, face_owners=dict(zip(map(int, ids), owners)), provenance=metadata, **kwargs)
+        boundary_groups=groups, face_owners=dict(zip(map(int, ids), owners)), provenance=metadata, cell_groups=cell_groups, **kwargs)
+
+
+def test_generated_region_group_uses_external_cell_ids(monkeypatch):
+    snapshot, cells = box()
+    fake_provider(monkeypatch, snapshot.coordinates, cells)
+    mesh = generate_volume_mesh(snapshot, target_edge_length=.2, boundary_tolerance=1e-7)
+    np.testing.assert_array_equal(mesh.cell_groups[snapshot.region_id], mesh.cell_ids)
+    fields = ('coordinates','cells','node_ids','cell_ids','boundary_facets','boundary_ids',
+              'node_groups','cell_groups','boundary_groups','units','geometry_order','provenance','face_owners')
+    raw = SimpleNamespace(**{name: getattr(mesh, name) for name in fields})
+    raw.cell_groups = {}
+    with pytest.raises(InvalidVolumeMesh, match='region'):
+        validate_volume_mesh(raw, snapshot, boundary_tolerance=1e-7)
 
 
 def fake_provider(monkeypatch, coordinates, cells):
