@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "workflow": "Workflow 2",
-  "status": "FINITE_E2E_ACCEPTED_WITH_DOCUMENTED_DEVIATION_LOCAL_DELIVERY_VERIFIED_RELEASE_GATES_OPEN",
+  "status": "FINITE_E2E_ACCEPTED_WITH_DEVIATION_LOCAL_NATIVE_COMPATIBILITY_VERIFIED_HOSTED_GATES_PENDING",
   "production_provider_enabled": false,
   "qualified_provider_geometry_classes": [],
   "development_envelope": ["box", "strictly_convex_normal_prism", "thin_signed_offset_prism"],
@@ -151,9 +151,52 @@
     "process_limit_seconds": 600,
     "report": "docs/provider_relink_verification_20261028.md",
     "review": "evidence/provider-relink-20261028-a1/independent-final-review.json: pass with explicit limits",
-    "limits": "Other ABI relinks, modified-library rebuild, numerical equivalence, exact final source/symbol closure and distribution conditions not verified. Some early harness versions lack retained snapshots; timing uncertainty is explicit. No derivative promotion."
+    "combined_technical_ABIs": ["windows311", "windows312abi3", "linux311", "linux312abi3"],
+    "remaining_ABI_supplement": {
+      "tested": ["Windows CPython3.12 ABI3", "Ubuntu24.04 CPython3.11"],
+      "status": "VERIFIED_FINITE_TECHNICAL_LINK_IMPORT_ONLY",
+      "registration_controls_passed": 10,
+      "supervised_processes_completed": 10,
+      "supervised_seconds": 10.067699122997904,
+      "process_limit_seconds": 600,
+      "full_runner_snapshots": 10,
+      "real_provider_calls": 0,
+      "report": "docs/provider_remaining_abis_20261028.md",
+      "independent_review": "evidence/provider-relink-remaining-20261028-a1/independent-final-review.json: no blocking findings"
+    },
+    "limits": "All four delivered ABI families now have separate technical link/import proof. Modified-library rebuild, numerical equivalence, exact final source/symbol closure and distribution conditions remain unverified. Earlier campaign runner-retention/timing limits remain; remaining-ABI supplement preserves all10 exact snapshots. No derivative promotion."
   },
-  "remaining_gates": ["full applicable repository/native regressions and timeout remain unresolved; no waiver or unrelated regression work implied by W2-DEV-001", "applicable candidate-owner CI/native platform coverage including preserved macOS jobs", "remaining native-artifact/source/relink/distribution assessment and untested ABI scope", "independent final workflow/release acceptance"],
+  "windows_native_compatibility": {
+    "status": "VERIFIED_FINITE_INSTALLED_NATIVE_PROFILE",
+    "platform": "Windows CPython3.11, required installed native ANYgeometry and ANYmesher",
+    "frozen_manifest_sha256": "217f47f08211c88484ac8f32c3364c5841b6465ed73de3fe1a899074a09126f8",
+    "contract_tests_passed": 118,
+    "failed_skipped_deselected": 0,
+    "required_compiled_operation_witnesses": 2,
+    "terminal_phase_reports_passed": 354,
+    "synthetic_acceptance_guard_tests_passed": 12,
+    "controlled_P1_P2_example": "PASS",
+    "process_seconds": 96.03100000001723,
+    "process_limit_seconds": 1200,
+    "owned_job_receipts_cleanup_verified": 16,
+    "real_provider_calls": 0,
+    "report": "docs/workflow2_windows_native_20261028.md",
+    "independent_review": "evidence/windows-native-w2-20261028-a1/independent-review.json: terminal evidence supported; prospective selection blocker resolved before execution",
+    "scope": "Local Windows3.11 only, targeted owner/consumer/native operations. Existing Linux312 evidence reused; no full-suite, remote-matrix or real-provider requalification claim."
+  },
+  "candidate_owner_CI": {
+    "status": "PREPARED_NOT_EXECUTED_REMOTELY",
+    "profiles": ["pure", "native"],
+    "platforms": ["windows-latest", "ubuntu-latest"],
+    "python": ["3.11", "3.12", "3.13", "3.14"],
+    "matrix_cells": 16,
+    "events": ["pull_request", "workflow_dispatch"],
+    "immutable_PR_owner_ref": "6a72e9d6eecf4db2aca5a5c4c37badfe4eb3a3ee",
+    "workflow": ".github/workflows/solid-volume.yml",
+    "historical_jobs_and_macOS_coverage_preserved": true,
+    "publication_boundary": "Candidate branches remain local at last remote read; hosted execution requires branch publication/draft PR authority. No merge or package publication."
+  },
+  "remaining_gates": ["hosted candidate-owner/core/native/platform CI including existing macOS jobs; local proof does not substitute hosted results", "full applicable repository/native regressions and prior timeout disposition remain unresolved; W2-DEV-001 does not waive them", "remaining native-artifact/source/modified-library/distribution assessment", "independent final workflow/release acceptance"],
   "workflow1": "Separate unresolved reference-convergence and NLG-007 gates; production coupling NO_GO",
   "handoff": "docs/WORKFLOW_2_HANDOFF.md"
 }

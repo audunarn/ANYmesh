@@ -1,5 +1,33 @@
 # Workflow 2 handoff — implementation partial, qualification in progress
 
+## Latest local compatibility checkpoint — 2026-10-28
+
+Windows3.11 installed required-native owner/mesher profile passes118 tests,
+zero failures/skips/deselections, including two real compiled-kernel operations
+and the controlled P1/P2 example. All354 execution phases and complete JUnit
+match the frozen inventory. Twelve acceptance/refusal controls pass; the
+prospective pytest-steering/omitted-witness finding was fixed before execution.
+16 owned Job receipts verify zero active processes,96.031000000017s/1200s.
+
+Remaining Windows312 ABI3/Linux311 recipient relinks/imports pass with10
+registration controls and10 complete cleanup receipts,10.067699122998s/600s.
+Together with the prior profile, all four supplied ABI families now have finite
+technical link/import evidence. Derivatives remain unqualified; no modified
+library, numerical or distribution acceptance is implied. Full runner snapshots
+are retained for this supplement; historical earlier limits remain unchanged.
+
+The existing candidate-owner workflow now has16 pure/native Windows/Linux
+Python3.11–3.14 cells, PR trigger, immutable owner pin/manual override and
+explicit native-witness outcomes. Historical CI/macOS jobs are preserved.
+Hosted execution remains pending publication of the two local candidate
+branches; W2-DEV-001 does not grant merge/push/publication authority.
+
+Reports: `workflow2_windows_native_20261028.md` and
+`provider_remaining_abis_20261028.md`. Independent non-author same-family
+reviews support these finite outcomes. Root static reconciliation is retained
+at `evidence/remaining-compatibility-root-review-20261028.json`; no passing
+scientific campaign was repeated. Accepted aligned discrepancy stays closed.
+
 ## Current user adjudication — W2-DEV-001
 
 Local delivery is now verified within finite scopes: fresh Windows3.11 owner/
