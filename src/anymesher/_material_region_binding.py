@@ -412,3 +412,42 @@ def registered_core_rows(core, receipts):
         if previous_row != row:
             raise MeshError("material region source station has ambiguous chart rows")
     return result
+
+
+def face_requires_curvilinear(geometry, face_id):
+    """Routing hint only; the geometry owner still proves the material chart."""
+    from anygeometry.nurbs import NurbsSurface
+    from anygeometry import Plane
+    from anygeometry.support_curves import PlaneNurbsCurve
+    face = geometry.faces[face_id]
+    if isinstance(face.surface, NurbsSurface) or isinstance(face.parameterization, NurbsSurface):
+        return True
+    return isinstance(face.surface, Plane) and any(
+        isinstance(geometry.edges[use.edge].curve, PlaneNurbsCurve)
+        for loop in (face.loop, *face.holes) for use in loop)
+
+
+def region_requires_curvilinear(region):
+    from anygeometry.nurbs import NurbsSurface
+    from anygeometry import Plane
+    from anygeometry.support_curves import PlaneNurbsCurve
+    support = getattr(region, 'support', None)
+    return (isinstance(support, NurbsSurface) or
+            isinstance(support, Plane) and any(isinstance(path.curve, PlaneNurbsCurve)
+                for loop in region.boundaries for path in loop))
+
+
+def checked_geometry_approximation_error(value):
+    """Validate explicit source/linear-FE discrepancy authority."""
+    if value is None:
+        return None
+    from numbers import Real
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise MeshError('geometry_approximation_error must be a finite positive real')
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise MeshError('geometry_approximation_error must be a finite positive real') from error
+    if not np.isfinite(value) or value <= 0.:
+        raise MeshError('geometry_approximation_error must be a finite positive real')
+    return value
