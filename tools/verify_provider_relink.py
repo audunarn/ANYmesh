@@ -20,8 +20,20 @@ REPO = Path(__file__).resolve().parents[1]
 WORK = REPO.parent
 OLD = WORK/'evidence/exact-envelope-20261028-a1'
 DELIVERY = WORK/'evidence/provider-notices-20261028-a1'
-OUT = WORK/'evidence/provider-relink-20261028-a1'
-ABIS = ('windows311', 'linux312abi3')
+PRIOR = WORK/'evidence/provider-relink-20261028-a1'
+OUT = WORK/'evidence/provider-relink-remaining-20261028-a1'
+ABIS = ('windows312abi3', 'linux311')
+PROFILE = 'remaining'
+MATRIX = WORK/'evidence/installed-matrix-20261028-a1'
+
+def select_profile(profile):
+    if profile != 'remaining':
+        raise ValueError('prior campaign is sealed; use its preserved executed runner for inspection')
+
+def native_output(abi):
+    if abi.startswith('windows'): return 'PyfTetWildWrapper.pyd'
+    if abi == 'linux311': return 'PyfTetWildWrapper.cpython-311-x86_64-linux-gnu.so'
+    raise ValueError('unregistered ABI')
 
 def sha(path):
     with Path(path).open('rb') as stream:
@@ -84,12 +96,15 @@ def prepare():
 def windows_environment():
     env = dict(os.environ)
     env.update(json.loads((OLD/'windows-prerequisite-probe-explicit-release/toolchain-environment.json').read_text()))
-    env['PYTHON_LIB_DIR'] = str(Path(sys.base_prefix)/'libs')
+    # Match the already installed matrix 3.12 runtime, including stable ABI SDK.
+    cfg = (MATRIX/'cells/windows312/venv/pyvenv.cfg').read_text()
+    home = next(line.split(' = ',1)[1] for line in cfg.splitlines() if line.startswith('home = '))
+    env['PYTHON_LIB_DIR'] = str(Path(home)/'libs')
     env['MPIR_LIB_DIR'] = str(OLD/'windows-sdk/Library/lib')
     return env
 
 def repair():
-    folder=OUT/'work/linux312abi3/relink'
+    folder=OUT/'work/linux311/relink'
     original=(folder/'relink.sh').read_bytes()
     repaired=original.replace(b'\r\n',b'\n')
     if b'\r\n' not in original or b'\r' in repaired:raise ValueError('expected CRLF-only recipe')
@@ -127,7 +142,8 @@ def link(abi,repaired=False):
         effective_environment={key: env.get(key) for key in
             ('LIB','INCLUDE','PYTHON_LIB_DIR','MPIR_LIB_DIR','VCToolsInstallDir','WindowsSDKVersion')})
     if os.name == 'nt':
-        info['python_import_library'] = identity(Path(env['PYTHON_LIB_DIR'])/'python311.lib')
+        info['python_import_library_path'] = str(Path(env['PYTHON_LIB_DIR'])/'python3.lib')
+        info['python_import_library'] = identity(Path(info['python_import_library_path']))
         info['gmp_import_library'] = identity(Path(env['MPIR_LIB_DIR'])/'gmp.lib')
         version = subprocess.run([tool,'/?'],env=env,capture_output=True,text=True)
     else:
@@ -141,7 +157,7 @@ def link(abi,repaired=False):
     info['recipe_identity']=identity(recipe)
     write(folder/('effective-link-repaired.json' if repaired else 'effective-link.json'),info)
     subprocess.run(command,cwd=recipe.parent,env=env,check=True)
-    output = recipe.parent/('PyfTetWildWrapper.pyd' if os.name == 'nt' else 'PyfTetWildWrapper.abi3.so')
+    output = recipe.parent/native_output(abi)
     write(folder/'raw-link-output.json',dict(path=str(output),**identity(output), qualified=False,native_calls=0))
 
 def package(abi):
@@ -182,10 +198,12 @@ def package(abi):
     verify_files(folder/'package',unchanged)
     write(folder/'derivative.json',dict(path=native_names[0],**identity(target),qualified=False,
         original_native=proof(abi)['preserved_runtime_members'][native_names[0]],
-        unchanged_runtime_files=len(unchanged),recipe_modified=abi=='linux312abi3',native_calls=0))
+        unchanged_runtime_files=len(unchanged),recipe_modified=abi=='linux311',native_calls=0))
 
 def smoke(abi):
     import importlib.metadata
+    expected_version=(3,12) if abi=='windows312abi3' else (3,11)
+    if sys.version_info[:2] != expected_version:raise ValueError('ABI/interpreter mismatch')
     folder=OUT/'work'/abi
     sys.path.insert(0,str(folder/'package'))
     import pytetwild
@@ -227,11 +245,14 @@ def audit():
             proof(abi)['preserved_runtime_members'].items() if not name.endswith('/') and name!=derivative['path']])
         results[abi]=dict(derivative=derivative,import_proof=imported,
             raw_link=json.loads((folder/'raw-link-output.json').read_text()))
-    original=(OUT/'work/linux312abi3/relink/relink.sh').read_bytes()
-    repaired=(OUT/'work/linux312abi3/relink/relink.lf.sh').read_bytes()
+    original=(OUT/'work/linux311/relink/relink.sh').read_bytes()
+    repaired=(OUT/'work/linux311/relink/relink.lf.sh').read_bytes()
     if original.replace(b'\r\n',b'\n')!=repaired:raise ValueError('recipe repair changed more than newlines')
     checks=json.loads((OUT/'checks.json').read_text())
-    if checks['failed'] or checks['passed']!=6:raise ValueError('refusal checks missing')
+    if checks['failed'] or checks['passed']!=10:raise ValueError('refusal/registration checks missing')
+    prior=json.loads((PRIOR/'handoff-final.json').read_text())
+    if identity(REPO/'tools/package_exact_provider_notices.py') != prior['generator_comparison']['fixed_generator']:
+        raise ValueError('generator changed; prior 12 checks cannot be reused')
     ledger=json.loads((OUT/'budget.json').read_text())
     if not all(row.get('cleanup',{}).get('verified') for row in ledger['attempts']):
         raise ValueError('cleanup not verified')
@@ -239,13 +260,15 @@ def audit():
         results=results,focused_checks=checks,recipe_repair=json.loads((OUT/'linux-recipe-repair.json').read_text()),
         native_meshing_calls=0,qualification_reruns=0,qualified_derivatives=False,publication=False,
         budget_reference='budget.json (includes audit after its controller completes)',
-        failures_preserved=['processes/link-windows311','processes/link-linux312abi3'],
-        limits=['Windows312abi3 and Linux311 recipient relink not tested',
+        generator_tests_reused=dict(counts=prior['generator_tests'],source=identity(PRIOR/'handoff-final.json'),
+            unchanged_generator=identity(REPO/'tools/package_exact_provider_notices.py')),
+        failures_preserved=[row['name'] for row in ledger['attempts'] if row['status']!='completed' or row.get('exit_code')!=0],
+        limits=[
             'No numerical/physics equivalence or provider/release promotion',
             'No final retained-symbol/header/source licensing or Microsoft redistribution adjudication',
             'Windows derivative DLL imports adapted with installed delvewheel; unchanged delivered bootstrap/dependencies',
-            'Linux original CRLF recipe fails; separate newline-normalized recipient recipe succeeds',
-            'First Linux controller runner hash unavailable after accounting bug; precise child receipt recovered'],
+            'Linux original CRLF recipe preserved; separate newline-normalized recipient recipe succeeds',
+            'W2DEV001 exact-case waiver, original thresholds and raw NO_GO remain unchanged'],
         commands_reference='budget.json attempts[].command plus work/*/effective-link*.json'))
 
 def checks():
@@ -263,6 +286,14 @@ def checks():
         try:verify_files(root,rows);failures+=1
         except ValueError:pass
         count+=1
+    select_profile('remaining');count+=1
+    try:select_profile('prior');failures+=1
+    except ValueError:pass
+    count+=1
+    if native_output('windows312abi3')!='PyfTetWildWrapper.pyd':failures+=1
+    count+=1
+    if native_output('linux311')!='PyfTetWildWrapper.cpython-311-x86_64-linux-gnu.so':failures+=1
+    count+=1
     write(OUT/'checks.json',dict(passed=count-failures,failed=failures,native_calls=0))
     if failures:raise ValueError('focused refusal checks failed')
 
@@ -301,7 +332,7 @@ def run(action,abi,child):
     ledger_path=OUT/'budget.json'
     ledger=json.loads(ledger_path.read_text()) if ledger_path.exists() else dict(limit_seconds=600.,used_seconds=0.,attempts=[])
     remaining=600-ledger['used_seconds']
-    reserve=0 if action in ('smoke','checks') else 90
+    reserve=0 if action in ('smoke','checks','audit') else 90
     timeout=min(180.,remaining-reserve)
     if timeout<=0:raise RuntimeError('recipient check budget exhausted')
     name=action+('-'+abi if abi else '')
@@ -309,12 +340,21 @@ def run(action,abi,child):
     if folder.exists():raise FileExistsError(folder)
     snapshot=OUT/'runner-snapshots'/f'{name}.py';snapshot.parent.mkdir(exist_ok=True)
     with snapshot.open('xb') as stream:stream.write(Path(__file__).read_bytes())
-    command=[child or sys.executable,'-I','-B',str(Path(__file__).resolve()),action]
+    command=[child or sys.executable,'-I','-B',str(Path(__file__).resolve()),action,'--profile',PROFILE]
     if abi:command+=['--abi',abi]
     if action=='focused-tests':
         command=[sys.executable,'-I','-B','-m','pytest','-q',str(REPO/'tests/test_exact_provider_notices.py'),
             '--junitxml='+str(OUT/'generator-focused-repaired.xml')]
     helper=Path.home()/'bin/claude-review.py' if os.name=='nt' else REPO/'tools/workflow2_process_supervisor.py'
+    # All identities are recorded before the supervised child is launched.
+    write(OUT/'step-identities'/f'{name}.json',dict(profile=PROFILE,abis=ABIS,
+        runner=identity(snapshot),supervisor=identity(helper),
+        generator=identity(REPO/'tools/package_exact_provider_notices.py'),
+        controller=dict(executable=sys.executable,identity=identity(sys.executable),version=sys.version),
+        child=dict(executable=command[0],identity=identity(command[0])),
+        delivery_manifest=identity(DELIVERY/'payload-final/relink-manifest.json'),
+        input_identities=identity(OUT/'input-identities.json') if (OUT/'input-identities.json').exists() else None,
+        proofs={name:identity(DELIVERY/'proofs-final'/f'{name}.json') for name in ABIS}))
     spec=importlib.util.spec_from_file_location('relink_supervisor',helper)
     supervisor=importlib.util.module_from_spec(spec);spec.loader.exec_module(supervisor)
     receipt=None;started=time.perf_counter()
@@ -339,11 +379,18 @@ def run(action,abi,child):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('phase',choices=('run','prepare','link','link-repaired','repair','recover','package','smoke','checks','audit','generator-check','finalize'))
-    parser.add_argument('action',nargs='?',choices=('prepare','link','link-repaired','repair','recover','package','smoke','checks','audit','generator-check','focused-tests','finalize'))
+    parser.add_argument('phase',choices=('run','prepare','link','link-repaired','repair','package','smoke','checks','audit'))
+    parser.add_argument('action',nargs='?',choices=('prepare','link','link-repaired','repair','package','smoke','checks','audit'))
+    parser.add_argument('--profile',choices=('remaining','prior'),default='remaining')
     parser.add_argument('--abi',choices=ABIS)
     parser.add_argument('--child-python')
     args=parser.parse_args()
+    select_profile(args.profile)
+    if args.phase=='run' and not args.action:parser.error('run requires action')
+    operation=args.action if args.phase=='run' else args.phase
+    if operation in ('link','link-repaired','package','smoke') and not args.abi:parser.error('action requires --abi')
+    if operation=='link' and args.abi=='linux311':parser.error('use normalized copied recipe via link-repaired')
+    if operation=='link-repaired' and args.abi!='linux311':parser.error('normalized recipe only registered for linux311')
     if args.phase=='run':return run(args.action,args.abi,args.child_python)
     if args.phase=='prepare':prepare()
     elif args.phase=='checks':checks()
