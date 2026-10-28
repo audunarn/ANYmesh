@@ -1,5 +1,13 @@
 # Thin-region candidate v2 — measured NO_GO
 
+**Subsequent user adjudication:** the exact aligned specimen's reported
+nominal-reference discrepancy is accepted under
+`docs/decisions/W2-DEV-001-aligned-nominal-discrepancy.json`. Finite E2E handoff
+proceeds with that documented deviation. The measured results below, their
+failed thresholds and the original aggregate NO_GO remain unchanged; no other
+mesh or general qualification limit is covered. Final independent Read review
+supports the original terminal evidence; it is not a numerical PASS.
+
 The authorized h=0.002 m (thickness/5) candidate completed both end-to-end cases. It is **NO_GO**: both orientations pass every geometric predicate, but the aligned case fails three unchanged physical predicates for each of P1 and P2. The rotated negative-offset case passes all geometric and P1/P2 predicates. Independent final review is pending; this author report does not establish acceptance or provider readiness.
 
 Only sizing metadata changed from the original h=0.0025 m study. Original geometry.json, snapshot.json and input.npz were copied byte for byte. All original source model/region/face IDs, coordinates, signatures, revisions, face groups, group owner semantics and region groups match. All 28 recorded semantic comparisons pass. Original failed evidence and exhausted authority remain intact.

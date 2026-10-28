@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "workflow": "Workflow 2",
-  "status": "PARTIAL_IMPLEMENTATION_NO_GO_THIN_AND_FULL_NATIVE_GATES",
+  "status": "FINITE_E2E_ACCEPTED_WITH_DOCUMENTED_DEVIATION_LOCAL_DELIVERY_VERIFIED_RELEASE_GATES_OPEN",
   "production_provider_enabled": false,
   "qualified_provider_geometry_classes": [],
   "development_envelope": ["box", "strictly_convex_normal_prism", "thin_signed_offset_prism"],
@@ -26,7 +26,7 @@
     "case_process_wall_used_seconds": 301.520741163,
     "scope_limit": "Registered finite-case metrics only; not universal relative error or provider admission"
   },
-  "geometry_evidence": "Five original frozen cases passed geometry/topology/ownership/group predicates. Fresh prospective thin study is terminal NO_GO: rotated negative-offset axial span/thickness 0.5021240286845365 exceeds unchanged 0.5; aligned case passes. evidence/thin-resolution-20261028-a1/terminal-summary.json",
+  "geometry_evidence": "Five original cases passed geometry/topology/ownership/groups. V1 sampling failure remains immutable. V2 both sampling/conditioning cases passed; aligned nominal-reference physics discrepancy accepted by user under W2-DEV-001 for that exact specimen only. No general provider promotion.",
   "installed_matrix": "Windows/Linux Python3.11-3.14:8 cells each125 installed tests and22 P1/P2 physical checks passed;1000 tests/176checks total,8/8 native calls consumed. Core extensions disabled; public provider still disabled. evidence/installed-matrix-20261028-a1/reconciled-result.json",
   "source_repair": {
     "status": "FINITE_REPAIR_VERIFIED_NOT_FULL_GATE",
@@ -79,6 +79,9 @@
   },
   "revised_thin_candidate": {
     "status": "NO_GO_ALIGNED_NOMINAL_GEOMETRY_PHYSICS_GATES",
+    "adjudicated_disposition": "ACCEPTED_WITH_CASE_SPECIFIC_DEVIATION",
+    "user_acceptance_record": "docs/decisions/W2-DEV-001-aligned-nominal-discrepancy.json",
+    "adjudication_scope": "Exact recorded aligned v2 nominal-source P1/P2 discrepancies only; six failed predicates remain recorded. No numerical PASS, threshold/reference change, other specimen waiver or release promotion.",
     "target_edge_length_m": 0.002,
     "frozen_identity": "e4a362d60012cb31be690ab2a91e3be52db492ac2ff76580e6f001f5ea0b8452",
     "unchanged_limits": true,
@@ -94,7 +97,7 @@
     "retries": 0,
     "process_wall_used_seconds": 939.985701038,
     "process_wall_limit_seconds": 1200,
-    "scope": "Finite same-source refinement evidence. Sampling/conditioning resolved for these two outputs; whole candidate remains NO_GO. Do not mix favorable old/new cases into a post-hoc envelope.",
+    "scope": "Finite same-source refinement evidence. Original measured aggregate remains NO_GO; user separately accepts the exact aligned deviation under W2-DEV-001 so finite E2E handoff can proceed. No post-hoc old/new case pooling or general h-policy guarantee.",
     "reference_finding": "Nominal-source face normals/areas/volume are compared against integration on the slightly displaced numerical domain. Within-delta geometry does not imply the stricter nominal energy/work/equilibrium bounds. No reference or threshold change adopted.",
     "independent_non_author_review": "evidence/thin-resolution-v2-20261028-a1/independent-final-review.json: supports terminal NO_GO, same OpenAI family; no different-family/human acceptance claimed",
     "evidence": "evidence/thin-resolution-v2-20261028-a1/handoff.json",
@@ -119,7 +122,38 @@
     "scope": "Exact retained native mesh/source owners plus installed ANYsolid P1/P2; one prism resolution. No new installed-owner/platform/release claim.",
     "results": "docs/prism_e2e_results_20261028.md"
   },
-  "remaining_gates": ["revised thin sampling/conditioning passed but aligned nominal-source force/moment, affine equilibrium and energy/work gates failed; boundary-fidelity candidate needed without weakening limits", "full applicable repository/native regressions and timeout remain unresolved; no unrelated regression work executed in this campaign", "applicable candidate-owner CI/native platform coverage including preserved macOS jobs", "recipient relink and native-artifact distribution/release assessment", "independent final workflow acceptance"],
+  "installed_delivery": {
+    "status": "VERIFIED_CONTROLLED_INSTALLED_DELIVERY",
+    "platform": "Windows CPython3.11; native owner extensions disabled",
+    "candidate_geometry_wheel_sha256": "0b56f76ef50b3a2075acfadd0d07c19b9459f482a5fb3cb805cbc362848711ac",
+    "candidate_mesher_wheel_sha256": "ea85486c54751c7676c379232c0a2420a0ab85ec0f837f4615c41ee4d8806be9",
+    "unchanged_solid_wheel_sha256": "601bd500625e6cd95f3a741f4f19b87bdcb4a72a7c7650278fea8be3efc56c3c",
+    "focused_tests_passed": 3,
+    "focused_tests_failed_or_skipped": 0,
+    "standalone_P1_P2_example": "PASS: six explicit Tet4 fixture; source-free installed origins and wheel payload hashes verified; pip check passed",
+    "completed_refresh_refusal": "PASS: actual CLI exit2 and350 protected hashes unchanged before accounting",
+    "process_seconds_with_negative_check": 77.05900000000838,
+    "process_limit_seconds": 600,
+    "native_meshing_calls": 0,
+    "report": "docs/installed_delivery_20261028.md",
+    "review": "evidence/delivery-independent-review-20261028.json: no blocking findings in finite scope"
+  },
+  "recipient_relink": {
+    "status": "VERIFIED_FINITE_TECHNICAL_LINK_IMPORT_ONLY",
+    "tested": ["Windows CPython3.11", "Ubuntu24.04 CPython3.12 ABI3"],
+    "relinked_derivatives_qualified": false,
+    "original_qualified_payloads_unchanged": true,
+    "generator_repair": "Explicit UTF-8 LF for Linux shell scripts, regression through actual export path; original CRLF failure retained",
+    "packaging_tests_passed": 12,
+    "native_meshing_calls": 0,
+    "supervised_seconds": 10.677205986963447,
+    "additional_accounting_recovery_tool_wall_upper_bound_seconds": 0.8284962,
+    "process_limit_seconds": 600,
+    "report": "docs/provider_relink_verification_20261028.md",
+    "review": "evidence/provider-relink-20261028-a1/independent-final-review.json: pass with explicit limits",
+    "limits": "Other ABI relinks, modified-library rebuild, numerical equivalence, exact final source/symbol closure and distribution conditions not verified. Some early harness versions lack retained snapshots; timing uncertainty is explicit. No derivative promotion."
+  },
+  "remaining_gates": ["full applicable repository/native regressions and timeout remain unresolved; no waiver or unrelated regression work implied by W2-DEV-001", "applicable candidate-owner CI/native platform coverage including preserved macOS jobs", "remaining native-artifact/source/relink/distribution assessment and untested ABI scope", "independent final workflow/release acceptance"],
   "workflow1": "Separate unresolved reference-convergence and NLG-007 gates; production coupling NO_GO",
   "handoff": "docs/WORKFLOW_2_HANDOFF.md"
 }

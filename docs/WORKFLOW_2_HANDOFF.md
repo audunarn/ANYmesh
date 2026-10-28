@@ -1,5 +1,34 @@
 # Workflow 2 handoff — implementation partial, qualification in progress
 
+## Current user adjudication — W2-DEV-001
+
+Local delivery is now verified within finite scopes: fresh Windows3.11 owner/
+mesher/ANYsolid wheels, independent installed origins, standalone controlled
+P1/P2 example,3 focused tests and completed-refresh refusal. Recipient relink/
+isolated imports passed for Windows3.11 and Linux3.12;12 packaging tests pass
+after the explicit UTF-8/LF generator repair. Derivatives are unqualified and
+original qualified payloads remain unchanged. Reports:
+`installed_delivery_20261028.md`, `provider_relink_verification_20261028.md`.
+Same-family non-author reviews support these finite slices; historical failure,
+runner-retention and timing limits remain explicit. Broader repository/platform,
+artifact/distribution and final release gates remain open. Public provider stays
+disabled; no merge, push or publication has occurred.
+
+User accepted the measured aligned v2 discrepancy and instructed continuation.
+The exact-case decision is
+`docs/decisions/W2-DEV-001-aligned-nominal-discrepancy.json`, identifying the
+frozen source, raw/admitted mesh and all six failed P1/P2 nominal-reference
+metrics. Finite E2E handoff proceeds **with this documented deviation**.
+Original measured NO_GO and every failed value/threshold remain intact; this
+does not make another output, configuration or future run eligible automatically.
+The numerical runners, scientific references and acceptance limits are unchanged.
+
+No tighter-boundary rerun is needed for this accepted specimen. Remaining work
+is installed delivery/example, recipient-relink technical proof and existing
+repository/platform/artifact/release gates. Public provider enabling, merge,
+push and publication remain separately gated. Historical results below describe
+the original measurements and are superseded only in adjudication by this record.
+
 ## Latest revised-candidate and end-to-end result — 2026-10-28
 
 Required convex-prism coverage advanced: the exact retained regular pentagonal
