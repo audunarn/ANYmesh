@@ -257,11 +257,18 @@ def select_curvilinear_recovery_policy(
                 if region_requires_curvilinear(region) for face in region.faces}
     if admitted != set(candidates):
         raise MeshError('new curved recovery lacks complete owner material charts')
+    from ._parametric_tensor import nurbs_tensor_admission
+    tensor_faces = sorted(face for face in admitted if nurbs_tensor_admission(geometry, face).eligible)
+    reason = ('new owner-qualified NURBS material uses existing automatic native recipe'
+              if not tensor_faces else
+              'tensor-eligible NURBS faces use the quad-first tensor route; every other face and any '
+              'tensor refusal use the existing automatic native recipe')
     return MeshAutomationOptions(strict_method=False, allow_inspection=False), {
         'requested_strategy': str(getattr(requested_strategy, 'value', requested_strategy)),
-        'reason': 'new owner-qualified NURBS material uses existing automatic native recipe',
+        'reason': reason,
         'geometry_approximation_error': error,
         'source_faces': sorted(admitted),
+        'nurbs_tensor_faces': tensor_faces,
     }
 
 
@@ -332,7 +339,9 @@ def generate_automatic_mesh_result(
     else:
         recipes = _prefer_analytic_trim_recipe(geometry, first, recipes)
     if curvilinear_recovery_selection is not None:
-        recipes = tuple((method, dict(recipe, recombine=first.get('recombine', True)))
+        tensor_mode = 'allowed' if curvilinear_recovery_selection.get('nurbs_tensor_faces') else None
+        recipes = tuple((method, dict(recipe, recombine=first.get('recombine', True),
+                                      **({} if tensor_mode is None else {'_nurbs_tensor': tensor_mode})))
                         if method == 'native' else (method, recipe)
                         for method, recipe in recipes)
     attempts: list[Mapping[str, object]] = []

@@ -34,6 +34,8 @@ except ImportError:  # Older supported ANYgeometry builds predate schema 6.
 
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
+from ._stage_cancellation import (check_stage as _stage_check,
+    preserve_stage_cancellation as _preserve_stage_cancellation, stage_scope as _stage_scope)
 from .errors import MeshError, StructuredQualityRejected
 from ._hybrid_candidate import _HybridCandidateContext, new_candidate_runtime
 from ._runtime_counters import (
@@ -1098,7 +1100,8 @@ def _planar_growth_fan_repair(
         core = _neutral_shell_core(candidate)
         try:
             assert_valid_mesh(core, declared_plate_junction_edges=_declared_junction_core_edges(candidate, core))
-        except MeshError:
+        except MeshError as _stage_error:
+            _preserve_stage_cancellation(_stage_error)
             return None, quality, diagnostic
         current_quality = _structured_quality_report(candidate, options)
         if current_quality["accepted"]:
@@ -1223,7 +1226,8 @@ def _junction_growth_repair(
                     candidate, candidate_core
                 ),
             )
-        except MeshError:
+        except MeshError as _stage_error:
+            _preserve_stage_cancellation(_stage_error)
             continue
         candidate_quality = _structured_quality_report(candidate, options)
         if not candidate_quality["accepted"]:
@@ -1653,8 +1657,7 @@ def _active_rows(connectivity: Any, activity: Any) -> Iterable[np.ndarray]:
 def _check_cancellation(
     cancellation_check: Callable[[str], None] | None, stage: str
 ) -> None:
-    if cancellation_check is not None:
-        cancellation_check(stage)
+    _stage_check(cancellation_check, stage)
 
 
 def _publish_native_face_elements(mesh, face_id, core, core_to_global):
@@ -1706,6 +1709,12 @@ def _mesh_native_face(geometry, mesh, face_id, **options):
         options = dict(options, cancellation_check=checked)
     snapshot = PublicationSnapshot(mesh, options['boundary_registry'],
         options['component_seed_registry'], binding, binding._curvilinear_state)
+    initial_zones = ()
+    from .refinement import SizeField
+    if type(options.get('size_field')) is SizeField and hasattr(binding,'initial_curvature_size_zones'):
+        initial_zones = binding.initial_curvature_size_zones(options['size_field'].target_size,
+            options.get('cancellation_check'))
+    localized_zones = []
     for retry in range(4):
         try:
             binding.validate(None)
@@ -1718,21 +1727,107 @@ def _mesh_native_face(geometry, mesh, face_id, **options):
             if snapshot.changed():
                 raise MeshError('source-cell attempt state changed during callback')
             binding.validate(None)
-            diagnostics = _mesh_native_face_once(geometry, mesh, face_id,
-                **options, _interior_resolution_scale=2. ** -retry)
+            attempt_options = options
+            if (initial_zones or localized_zones) and options.get('size_field') is not None:
+                from .refinement import SizeField
+                original_field = options['size_field']
+                if type(original_field) is SizeField:
+                    from copy import copy
+                    refined_field = copy(original_field)
+                    refined_field.zones = (*original_field.zones, *initial_zones, *localized_zones)
+                    refined_field._sources = (*original_field._sources,
+                        *(zone.sources(geometry) for zone in (*initial_zones,*localized_zones)))
+                    attempt_options = dict(options, size_field=refined_field)
+            from ._material_region_binding import material_read_scope
+            with material_read_scope(binding, attempt_options) as material_read:
+                diagnostics = _mesh_native_face_once(geometry, mesh, face_id,
+                    **attempt_options, _interior_resolution_scale=2. ** -retry,
+                    _owner_size_zone_count=len(initial_zones) + len(localized_zones))
+            if material_read is not None:
+                diagnostics['detached_material_evaluations'] = material_read['evaluations']
+            if initial_zones:
+                diagnostics['initial_curvature_size_zones'] = len(initial_zones)
             if retry:
                 diagnostics['source_cell_resolution'] = {
                     'refinement_retries': retry,
                     'interior_scale': 2. ** -retry,
+                    'localized_failure_zones': len(localized_zones),
                 }
             return diagnostics
         except _SourceCellResolutionRequired as error:
             snapshot.restore()
-            if any(error is original for original in callback_errors) or retry == 3:
+            if (any(error is original for original in callback_errors) or retry == 3
+                    or getattr(error, "boundary_failure_kind", None) == "boundary_limited"):
                 raise
+            # Pure refine-only proposal from the actual refused cell. This does
+            # not change the fixed or local approximation allowance.
+            xyz = getattr(error, 'cell_xyz', ())
+            if xyz and getattr(error, 'face_id', None) == face_id:
+                import math
+                from .refinement import Refinement
+                centre = tuple(sum(row[k] for row in xyz)/len(xyz) for k in range(3))
+                radius = max(math.dist(centre, row) for row in xyz)
+                if math.isfinite(radius) and radius > 0:
+                    localized_zones.append(Refinement(size=min(radius/2, options['size_field'].target_size*2.**(-retry-2)), radius=radius,
+                        center=centre, name='source-cell owner refusal'))
         except BaseException:
             snapshot.restore()
             raise
+
+
+def _try_parametric_tensor(geometry, face_id, outer, holes, constraints, pinned, chart_inverse,
+                           protected_rows, analytic_chart, quality_options, binding,
+                           interior_scale, diagnostics, declared_junction_edges=(), order='linear',
+                           recombine=True, size_field=None, owner_zone_count=0, request_refusal=None):
+    """Opt-in tensor core, or None (typed refusal recorded) so the native route runs unchanged."""
+    from ._parametric_tensor import ParametricTensorUnsupported, parametric_tensor_core
+    def refuse(reason):
+        diagnostics['parametric_tensor_refusal'] = reason
+        return None
+    if request_refusal:
+        return refuse('request outside the tensor allowlist: ' + request_refusal)
+    if binding is None or analytic_chart is None or protected_rows is None:
+        return refuse('tensor route requires an owner-bound NURBS material region')
+    if not binding.requires_curvilinear or order != 'linear':
+        return refuse('tensor route requires a linear NURBS material region')
+    declared = {int(edge) for edge in declared_junction_edges}
+    region = binding.region
+    edges = {int(path.source_edge) for paths in region.boundaries for path in paths}
+    edges.update(int(path.source_edge) for path in region.interior_constraints)
+    if edges & declared:
+        return refuse('tensor route does not evaluate declared-junction alignment')
+    if interior_scale < 1.:
+        return refuse('owner proof requested finer resolution than a fixed tensor can supply')
+    if not recombine:
+        return refuse('tensor route yields quadrilaterals only; recombine=False was requested')
+    # Owner-added curvature / source-cell zones are the last ``owner_zone_count`` zones; the tensor lets the
+    # owner proof judge those. Anything the caller asked for (zones, entity sizes) cannot be honoured.
+    if (size_field is None or type(size_field) is not SizeField or size_field.edge_sizes
+            or len(size_field.zones) != owner_zone_count):
+        return refuse('tensor route cannot honour a non-uniform size field or feature controls')
+    try:
+        core, _ = parametric_tensor_core(outer, holes, constraints, pinned, chart_inverse, protected_rows)
+    except ParametricTensorUnsupported as error:
+        return refuse(str(error))
+    from .quality_v2 import evaluate_quality
+    from .surface_mesh import SurfaceMeshOptions, _quality_threshold_report, _published_growth
+    policy = StructuredMeshingOptions().quality_policy if quality_options is None else quality_options.quality_policy
+    growth = 1.5 if quality_options is None else quality_options.max_element_growth
+    settings = SurfaceMeshOptions(
+        min_scaled_jacobian=policy.minimum_scaled_jacobian, max_aspect_ratio=policy.maximum_aspect_ratio,
+        min_angle=policy.minimum_angle, max_angle=policy.maximum_angle, max_warpage=policy.maximum_warpage,
+        max_element_growth=growth)
+    xyz = np.asarray(analytic_chart.evaluate(core.node_coordinates[:, :2]), dtype=float)
+    physical = MeshCore(xyz, core.triangle_connectivity, core.quad_connectivity)
+    report = _quality_threshold_report(evaluate_quality(physical), settings)
+    maximum_growth, growth_poor = _published_growth(physical, growth)
+    if not report['accepted'] or growth_poor:
+        from ._tensor_contract import non_default_gate_options
+        named = non_default_gate_options(quality_options)
+        return refuse('tensor candidate misses the final quality or growth gate'
+                      + (f' (non-default {named})' if named else ''))
+    diagnostics['parametric_tensor_quality'] = {'worst': report['worst'], 'maximum_growth': maximum_growth}
+    return core
 
 
 def _mesh_native_face_once(
@@ -1760,6 +1855,9 @@ def _mesh_native_face_once(
     _material_input_eligibility: Any = None,
     _respect_growth_limit: bool = False,
     _interior_resolution_scale: float = 1.,
+    _nurbs_tensor: str | None = None,
+    _owner_size_zone_count: int = 0,
+    _nurbs_tensor_refusal: str | None = None,
 ) -> dict[str, Any]:
     if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
         from ._cylindrical_recombine import assert_face_open
@@ -1994,9 +2092,25 @@ def _mesh_native_face_once(
         # field. Carry their scale into curved NURBS interior proposals instead
         # of filling a finely sampled boundary with cells that fail the separate
         # source-to-linear-mesh error requirement. This grants no proof: final
-        # cell, conformity and physical-quality gates remain mandatory.
-        proposed = _material_region_binding.interior_size_proposal(
-            size_metric_spec.global_control.target_size, cancellation_check)
+        # cell, conformity and physical-quality gates remain mandatory. The
+        # canonical graded proposal keeps boundary resolution local; source
+        # curvature/user constraints and final owner cell proofs still apply.
+        # Chord-distance controls are composed before the native entry.
+        graded_caller = (native_options.point_placement == 'frontal_delaunay'
+            and native_options.metric_mode == 'isotropic_spatial'
+            and native_options.experimental_metric_provider is None)
+        if graded_caller:
+            proposed, affine_spacing, graded_spacing = _material_region_binding.interior_size_proposal(
+                size_metric_spec.global_control.target_size, cancellation_check,
+                _boundary_graded=True, _with_graded=True)
+        else:
+            # Unknown/legacy providers keep the exact existing affine proposal
+            # and fallback law; only the canonical graded route opts in above.
+            proposed, affine_spacing = _material_region_binding.interior_size_proposal(
+                size_metric_spec.global_control.target_size, cancellation_check,
+                _boundary_graded=(native_options.point_placement == 'frontal_delaunay'),
+                _with_affine=True)
+            graded_spacing = affine_spacing
         proposed *= _interior_resolution_scale
         size_metric_spec = replace(size_metric_spec,
             global_control=IsotropicMetricControl(proposed))
@@ -2015,7 +2129,12 @@ def _mesh_native_face_once(
                 raise MeshError('NURBS interior seed stretch could not be evaluated') from exc
             if not np.isfinite(stretch) or stretch <= 0.:
                 raise MeshError('NURBS interior seed stretch must be finite and positive')
-            chart_size = min(chart_size, seed_world_size / stretch)
+            # target_size also limits frontal offcentre height, even when the
+            # optional lattice is omitted. Restore its nominal chart scale only
+            # for this freshly bound graded proposal; fine metrics
+            # still constrain each offcentre through the actual local tensor.
+            chart_size = (seed_world_size / stretch if graded_spacing else
+                          min(chart_size, seed_world_size / stretch))
     supplemental_metric_field = None
     if (
         native_options.metric_mode == "isotropic_spatial"
@@ -2054,6 +2173,26 @@ def _mesh_native_face_once(
             )
         else:
             supplemental_metric_field = size_metric_spec
+    if (analytic_chart is not None and _material_region_binding is not None
+            and native_options.metric_mode == "isotropic_spatial"):
+        # Compose after explicit/user controls so the owner's protected chord
+        # spacing uses the effective global cap and effective gradation.
+        if face_native_options.metric_field is not None:
+            face_native_options = replace(face_native_options,
+                metric_field=_material_region_binding.boundary_size_metric(
+                    face_native_options.metric_field, cancellation_check))
+        elif supplemental_metric_field is not None:
+            supplemental_metric_field = _material_region_binding.boundary_size_metric(
+                supplemental_metric_field, cancellation_check)
+    # Optional lattice rows must obey the same protected-segment exclusion
+    # as later frontal insertions, including on the first attempt. Caller pins
+    # and shared boundary rows are never passed to the free-seed filter.
+    initial_owner_seed_clearance = False
+    if (seeded_general_chart and analytic_chart is not None
+            and native_options.point_placement == "frontal_delaunay"
+            and native_options.metric_mode == "isotropic_spatial"):
+        from .surface_mesh import _analytic_preview_chart
+        initial_owner_seed_clearance = _analytic_preview_chart(metric_to_physical) is analytic_chart
     deferred_recombine = (cylindrical_chart is not None and not quadratic
         and bool(recombine) and native_options.point_placement == "frontal_delaunay")
     if deferred_recombine:
@@ -2115,7 +2254,39 @@ def _mesh_native_face_once(
     surface_diagnostics: dict[str, Any] = {}
     primary_output_origin = None
     primary_output_entry = None
-    if quality_options is None:
+    tensor_core = None
+    if _nurbs_tensor:
+        tensor_core = _try_parametric_tensor(
+            geometry, face_id, native_outer, native_holes, native_constraints, native_pinned,
+            chart_inverse, protected_input_rows, analytic_chart, quality_options,
+            _material_region_binding, _interior_resolution_scale, surface_diagnostics,
+            declared_junction_edges, order, recombine, size_field, _owner_size_zone_count,
+            _nurbs_tensor_refusal)
+        if tensor_core is None and _nurbs_tensor == 'required':
+            # Explicit quad-first never falls back to the native route.
+            from .quad.public_integration import QuadPublicUnsupported
+            raise QuadPublicUnsupported(
+                'NURBS quad-first tensor route refused face %d: %s'
+                % (face_id, surface_diagnostics.get('parametric_tensor_refusal')))
+    if tensor_core is not None:
+        core = tensor_core
+        if quality_options is not None:
+            policy = quality_options.quality_policy
+            surface_options = SurfaceMeshOptions(
+                recombine=recombine, order=order, target_size=chart_size, backend=native_backend,
+                min_scaled_jacobian=policy.minimum_scaled_jacobian, max_aspect_ratio=policy.maximum_aspect_ratio,
+                min_angle=policy.minimum_angle, max_angle=policy.maximum_angle, max_warpage=policy.maximum_warpage,
+                max_element_growth=quality_options.max_element_growth, prefer_quality_policy=True,
+                declared_junction=False, native_options=face_native_options)
+        primary_output_origin = getattr(core, '_output_row_provenance', None)
+        primary_output_entry = (primary_output_origin.source_by_row, primary_output_origin.source_to_row)
+        surface_diagnostics['parametric_tensor'] = {
+            'cells': int(core.quad_active.sum()), 'nodes': int(core.num_nodes),
+            'boundary_nodes': len(native_outer), 'interior_nodes': int(core.num_nodes) - len(native_outer),
+            # No insertion, cut, staging or repair runs: the 16/32/128/512 repair ceilings are never debited.
+            'insertion_accounting': {'cuts': 0, 'staged_nodes': 0, 'admitted_nodes': 0,
+                                     'touched_cells': 0, 'work': 0, 'retained_insertions': 0}}
+    elif quality_options is None:
         core = mesh_planar_surface(
             native_outer,
             native_holes,
@@ -2147,7 +2318,9 @@ def _mesh_native_face_once(
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
             _respect_growth_limit=_respect_growth_limit,
-            _protect_generated_seed_disks=(_interior_resolution_scale < 1.
+            _mandatory_only_frontal_seed=initial_owner_seed_clearance,
+            _protect_generated_seed_disks=((_interior_resolution_scale < 1.
+                or initial_owner_seed_clearance)
                 and _material_region_binding is not None
                 and _material_region_binding.requires_curvilinear),
             _cartesian_rectangle_candidate=(
@@ -2243,7 +2416,9 @@ def _mesh_native_face_once(
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
             _respect_growth_limit=_respect_growth_limit,
-            _protect_generated_seed_disks=(_interior_resolution_scale < 1.
+            _mandatory_only_frontal_seed=initial_owner_seed_clearance,
+            _protect_generated_seed_disks=((_interior_resolution_scale < 1.
+                or initial_owner_seed_clearance)
                 and _material_region_binding is not None
                 and _material_region_binding.requires_curvilinear),
         )
@@ -3486,6 +3661,7 @@ def _validate_promoted_element_family(nodes, elements, family):
             try:
                 coordinates = np.asarray([nodes[node] for node in body], dtype=float)
             except Exception as error:
+                _preserve_stage_cancellation(error)
                 gathering_error = (element_id, body, error, error.__traceback__)
                 break
             records.append((element_id, coordinates))
@@ -4299,7 +4475,7 @@ def _repair_quad_first_quality(
                 replacement.append(element_id)
                 continue
             if cancellation_check is not None:
-                cancellation_check("quad-first:quality-repair")
+                _check_cancellation(cancellation_check, "quad-first:quality-repair")
             if element_index % _REPAIR_NORMAL_LOOKAHEAD == 0 and _batch_initial_normals:
                 prefetch_normals(face_id, elements[element_index:element_index+_REPAIR_NORMAL_LOOKAHEAD])
             current, current_nodes, current_normal = trial(face_id, body, "Q8", quad_samples)
@@ -4341,7 +4517,8 @@ def _repair_quad_first_quality(
                             try:
                                 candidate = np.asarray(domain.lift(tuple(
                                     own_uv + fraction*local_length*direction)), dtype=float)
-                            except MeshError:
+                            except MeshError as _stage_error:
+                                _preserve_stage_cancellation(_stage_error)
                                 continue
                             mesh.nodes[node] = candidate
                             evidence = [(owner, cell, *trial(
@@ -4413,7 +4590,8 @@ def _repair_quad_first_quality(
                             try:
                                 candidate = np.asarray(
                                     domain.lift(tuple(own_uv + alpha*direction)), dtype=float)
-                            except MeshError:
+                            except MeshError as _stage_error:
+                                _preserve_stage_cancellation(_stage_error)
                                 continue
                             movement = float(np.linalg.norm(candidate-old))
                             if movement > .25*local_length:
@@ -4574,7 +4752,8 @@ def _repair_quad_first_quality(
                     for alpha in (.1, .25, .5, 1.0):
                         try:
                             candidate = np.asarray(domain.lift(tuple(own_uv + alpha*adjustment)), dtype=float)
-                        except MeshError:
+                        except MeshError as _stage_error:
+                            _preserve_stage_cancellation(_stage_error)
                             continue
                         if float(np.linalg.norm(candidate-old)) > .25*local_length:
                             continue
@@ -4628,7 +4807,8 @@ def _repair_quad_first_quality(
                     for alpha in (1.0, 1.5, 2.0):
                         try:
                             candidate = np.asarray(domain.lift(tuple(own_uv+alpha*delta*direction/norm)), dtype=float)
-                        except MeshError:
+                        except MeshError as _stage_error:
+                            _preserve_stage_cancellation(_stage_error)
                             continue
                         if float(np.linalg.norm(candidate-old)) > .25*max(edge_lengths):
                             continue
@@ -4770,7 +4950,8 @@ def _repair_quad_first_quality(
                 return None
             try:
                 lifted = np.asarray(domain.lift(tuple(float(v) for v in centroid)), dtype=float)
-            except MeshError:
+            except MeshError as _stage_error:
+                _preserve_stage_cancellation(_stage_error)
                 return None
             new_node = int(max(mesh.nodes)) + 1
             fan = tuple((new_node, ring[i], ring[(i + 1) % 5]) for i in range(5))
@@ -4847,7 +5028,7 @@ def _repair_quad_first_quality(
                 if attempts >= attempt_cap:
                     break
                 if cancellation_check is not None:
-                    cancellation_check("quad-first:cavity-repair")
+                    _check_cancellation(cancellation_check, "quad-first:cavity-repair")
                 attempts += 1
                 made = try_cavity(face_id, tri_cell, quad_cell, edge_key)
                 if made is not None:
@@ -4970,6 +5151,7 @@ def _quad_first_execute(
                 cancellation_check=cancellation_check,
             )
         except MeshError as exc:
+            _preserve_stage_cancellation(exc)
             raise QuadPublicUnsupported(
                 "quad-first public route requires planar or owner-qualified "
                 f"cylindrical faces: {exc}"
@@ -5012,7 +5194,8 @@ def _quad_first_execute(
                     try:
                         domain = PlanarQuadDomain.from_geometry(geometry, face_id)
                         family = "planar"
-                    except MeshError:
+                    except MeshError as _stage_error:
+                        _preserve_stage_cancellation(_stage_error)
                         domain = ParametricQuadDomain.from_geometry(geometry, face_id)
                         family = "ruled" if isinstance(surface, RuledSurface) else "coons"
             else:
@@ -5022,6 +5205,7 @@ def _quad_first_execute(
             geometry_family_by_face[face_id] = family
         domains = tuple(domains_list)
     except MeshError as exc:
+        _preserve_stage_cancellation(exc)
         raise QuadPublicUnsupported(str(exc)) from exc
     registry_overrides = overrides
     if smart_mapped is not None:
@@ -6011,6 +6195,11 @@ def _finalize_hybrid_candidate(
     return result
 
 
+from .approximation_policy import _resolve_public_approximation
+
+
+@_stage_scope
+@_resolve_public_approximation
 def generate_hybrid_mesh_result(
     geometry: GeometryModel,
     *,
@@ -6028,6 +6217,9 @@ def generate_hybrid_mesh_result(
     native_backend: Any = "auto",
     native_options: NativeMeshingOptions | Mapping[str, Any] | None = None,
     geometry_approximation_error: float | None = None,
+    geometry_approximation_policy=None,
+    geometry_approximation_resolution=None,
+    geometry_approximation_source=None,
     structured_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
@@ -6050,6 +6242,7 @@ def generate_hybrid_mesh_result(
     _defer_finalization: bool = False,
     _respect_native_growth_limit: bool = False,
     _independent_beams: bool = True,
+    _nurbs_tensor: str | None = None,
 ) -> HybridMeshResult | _HybridCandidateContext:
     """Generate a model-bound mapped/native mesh from an explicit ownership policy.
 
@@ -6060,6 +6253,8 @@ def generate_hybrid_mesh_result(
     isolated mesh-job closure and may be finalized in place.
     """
 
+    # The caller request exactly as given; the NURBS tensor allowlist (``_tensor_contract``) judges this snapshot.
+    _tensor_request = {name: value for name, value in locals().items() if name != 'geometry'}
     from ._material_region_binding import checked_geometry_approximation_error
     geometry_approximation_error = checked_geometry_approximation_error(geometry_approximation_error)
     phase_seconds: dict[str, float] = {}
@@ -6180,16 +6375,56 @@ def generate_hybrid_mesh_result(
     source_view = GeometryMeshingView(source_geometry)
     source_faces = _face_ids(source_geometry, requested_face_ids)
     from ._material_region_binding import face_requires_curvilinear
+    _nurbs_tensor_refusal = None
     nurbs_selected = any(face_requires_curvilinear(source_geometry, face) for face in source_faces)
     if nurbs_selected:
         if geometry_approximation_error is None:
-            raise MeshError('NURBS approximation requires explicit geometry_approximation_error')
+            raise MeshError('curvilinear approximation resolution did not supply an error limit')
+        if _nurbs_tensor not in (None, 'allowed', 'required'):
+            raise MeshError('_nurbs_tensor must be None, "allowed" or "required"')
+        from ._tensor_contract import request_refusal
+        contract_problem = request_refusal(_tensor_request, native_options, _quad_normalized)
+        if contract_problem is None and _member_edges(source_view, requested_beam_edges, requested_member_ids):
+            contract_problem = 'structural members or beam edges are present; member selection is not honoured'
+        _nurbs_tensor_refusal = contract_problem
         if quad_options is not None:
-            raise QuadPublicUnsupported('NURBS cut cells require the owner-bound native reference-cell route')
+            # Explicit quad-first is served only by the tensor route, and only when every selected face is
+            # an admitted NURBS face; anything else keeps the typed refusal (fail closed).
+            from ._parametric_tensor import nurbs_tensor_admission
+            problem = None
+            if strategy is MeshingStrategy.SMART_MAPPED or smart_mapped_run is not None:
+                problem = 'smart-mapped request'
+            for face in source_faces:
+                admission = (nurbs_tensor_admission(source_geometry, face)
+                             if face_requires_curvilinear(source_geometry, face)
+                             else None)
+                if admission is None:
+                    problem = problem or f'face {face} is not a NURBS face'
+                elif not admission.eligible:
+                    problem = problem or f'face {face}: {admission.code}'
+            problem = problem or contract_problem
+            if problem is None and quad_face_ids is not None:
+                selector = _quad_first_normalize_face_ids(quad_face_ids)
+                if selector is not None and set(selector) != {int(face) for face in source_faces}:
+                    problem = 'quad_face_ids must cover exactly the selected NURBS faces'
+            if problem is not None:
+                raise QuadPublicUnsupported(
+                    'NURBS cut cells require the owner-bound native reference-cell route (' + problem + ')')
+            if strategy is MeshingStrategy.MAPPED:
+                raise MeshError('NURBS material approximation does not admit the generic mapped route')
+            quad_options = None
+            _quad_normalized = None
+            quad_face_ids = None
+            layout_policy = 'existing'
+            strategy = MeshingStrategy.NATIVE
+            _nurbs_tensor = 'required'
+            _nurbs_tensor_refusal = None
         if strategy is MeshingStrategy.MAPPED:
             raise MeshError('NURBS material approximation does not admit the generic mapped route')
         if strategy is MeshingStrategy.AUTO:
             strategy = MeshingStrategy.NATIVE
+            if _nurbs_tensor is None:
+                _nurbs_tensor = 'allowed'
         if default_native_controls:
             native_options = replace(native_options, point_placement='frontal_delaunay',
                                      metric_mode='isotropic_spatial')
@@ -6289,7 +6524,8 @@ def generate_hybrid_mesh_result(
                     PlanarQuadDomain.from_geometry(
                         source_geometry, int(_quad_scope_face_id)
                     )
-                except MeshError:
+                except MeshError as _stage_error:
+                    _preserve_stage_cancellation(_stage_error)
                     if order == "quadratic" and source_beams:
                         _metric_boundary_edges = {
                             int(use.edge)
@@ -7009,22 +7245,15 @@ def generate_hybrid_mesh_result(
     # Source parameters are identities, not a grading hint. Refine the actual
     # FE stations through the owner, then authenticate their shared-edge union
     # on every incident material region before allocating any mesh nodes.
-    shared_parameters = {}
-    for binding in curvilinear_bindings:
-        if not binding.requires_curvilinear:
-            continue
-        parameter_rows = {int(path.source_edge): _station_parameters(
-            geometry, int(path.source_edge), int(seeding[int(path.source_edge)]), size_field)
-            for loop in binding.region.boundaries for path in loop}
-        for edge, targets in binding.prepare_curvilinear_seed(parameter_rows, cancellation_check).items():
-            shared_parameters.setdefault(edge, set()).update(targets)
-    for binding in curvilinear_bindings:
-        for edge, targets in binding.prepare_curvilinear_seed(
-                {edge: tuple(sorted(parameters)) for edge, parameters in shared_parameters.items()},
-                cancellation_check, refine=False).items():
-            previous = owner_stations.setdefault(edge, targets)
-            if previous != targets:
-                raise MeshError('incident NURBS faces disagree on owner source stations')
+    from ._material_region_binding import _prepare_curvilinear_station_union
+    owner_stations = _prepare_curvilinear_station_union(
+        geometry,curvilinear_bindings,seeding,size_field,cancellation_check,
+        maximum_gradation=(
+            (native_options.metric_field.maximum_gradation
+             if native_options.metric_field is not None else 1.5)
+            if curvilinear_bindings and native_options.point_placement == 'frontal_delaunay'
+            and native_options.metric_mode == 'isotropic_spatial'
+            and native_options.experimental_metric_provider is None else None))
     _ensure_edge_registry(
         geometry,
         view,
@@ -7177,6 +7406,8 @@ def generate_hybrid_mesh_result(
             _material_region_binding=material_region_binding,
             _material_input_eligibility=material_input_eligibility,
             _respect_growth_limit=_respect_native_growth_limit,
+            _nurbs_tensor=_nurbs_tensor,
+            _nurbs_tensor_refusal=_nurbs_tensor_refusal,
         )
         triangulation_backend_by_face[int(face_id)] = face_diagnostics
         if material_region_binding is not None:

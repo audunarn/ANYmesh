@@ -138,7 +138,7 @@ def advertise_quad_capabilities(
     *,
     mcf_worker_path: "str | os.PathLike[str] | None" = None,
     q5_worker_path: "str | os.PathLike[str] | None" = None,
-    unsupported_scope: "str | tuple[str, ...]" = ("curved", "Q9+"),
+    unsupported_scope: "str | tuple[str, ...]" = ("curved: NURBS tensor-eligible faces only", "Q9+"),
 ) -> QuadCapabilityReport:
     """Build the :class:`QuadCapabilityReport` for the public route.
 
@@ -215,5 +215,5 @@ def route_quad_first(
         q4_count_worker="NOT_INTEGRATED",
         q5_tinyad_worker="NOT_INTEGRATED",
         mixed_q4_s3=bool(_MIXED_Q4_S3_ROUTE_SUPPORTED and _s3_production_available()),
-        unsupported_scope=("curved", "Q9+"),
+        unsupported_scope=("curved: NURBS tensor-eligible faces only", "Q9+"),
     )
