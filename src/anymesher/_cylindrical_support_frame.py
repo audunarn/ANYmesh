@@ -83,7 +83,9 @@ def _strip_rail(curve, forward: bool, fraction_reversed: bool, surface) -> dict:
     u_star = radius * (math.cos(gamma) * r0 + math.sin(gamma) * c0)
     v_star = sigma * radius * (-math.sin(gamma) * r0 + math.cos(gamma) * c0)
     d_u, d_v = float(np.linalg.norm(u_perp - u_star)), float(np.linalg.norm(v_perp - v_star))
-    scale = float(np.linalg.norm(centre) + np.linalg.norm(u_vec) + np.linalg.norm(v_vec)) + radius
+    # Arc evaluation rounds at the absolute world coordinates, not only at the local offsets.
+    world = float(np.linalg.norm(o) + np.linalg.norm(np.asarray(curve.center, dtype=float)))
+    scale = float(np.linalg.norm(centre) + np.linalg.norm(u_vec) + np.linalg.norm(v_vec)) + radius + world
     tau = _ROUNDING * scale
     amplitude = math.hypot(u_a, v_a)
     return dict(

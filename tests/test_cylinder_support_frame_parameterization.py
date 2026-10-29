@@ -418,7 +418,7 @@ def _l_shaped(parameterized: bool):
 
 
 def _strip(parameterized: bool = True, *, R=6.5, a=.3, sweep=.6, z0=0., k0=0., z1=3., k1=0.,
-           top_offset=(0., 0., 0.), split_left=False):
+           top_offset=(0., 0., 0.), split_left=False, shift=(0., 0., 0.)):
     """A ruled strip: mitred EllipticArc rails z = z_i + k_i R cos(theta), Straight generators.
 
     ``top_offset`` moves the top rail's centre (off the support); its vertices
@@ -426,8 +426,9 @@ def _strip(parameterized: bool = True, *, R=6.5, a=.3, sweep=.6, z0=0., k0=0., z
     two collinear Straight edges (a five-edge loop with four corners).
     """
     model = GeometryModel()
-    bottom_arc = EllipticArc((0., 0., z0), (R, 0., k0 * R), (0., R, 0.), a, sweep)
-    top_arc = EllipticArc(tuple(np.add((0., 0., z1), top_offset)), (R, 0., k1 * R), (0., R, 0.), a, sweep)
+    bottom_arc = EllipticArc(tuple(np.add((0., 0., z0), shift)), (R, 0., k0 * R), (0., R, 0.), a, sweep)
+    top_arc = EllipticArc(tuple(np.add(np.add((0., 0., z1), top_offset), shift)), (R, 0., k1 * R),
+                          (0., R, 0.), a, sweep)
     b, t = bottom_arc.evaluate(np.array((0., 1.))), top_arc.evaluate(np.array((0., 1.)))
     v = model.add_points((tuple(b[0]), tuple(b[1]), tuple(t[1]), tuple(t[0])))
     edges = [model.add_curve(v[0], v[1], bottom_arc), model.add_line(v[1], v[2]),
@@ -439,7 +440,7 @@ def _strip(parameterized: bool = True, *, R=6.5, a=.3, sweep=.6, z0=0., k0=0., z
         corners = [0, 1, 2, 3]
     else:
         edges.append(model.add_line(v[0], v[3]))
-    support = Cylinder((0., 0., -10.), (0., 0., 1.), (1., 0., 0.), R, 30., a - .25)
+    support = Cylinder(tuple(np.add((0., 0., -10.), shift)), (0., 0., 1.), (1., 0., 0.), R, 30., a - .25)
     face = model.add_face(tuple(edges), corners=corners, surface=support)
     model.set_face_parameterization(face, CoonsSurface() if parameterized else None)
     model.add_sheet((face,))
@@ -578,3 +579,26 @@ def test_existing_admitted_models_carry_a_tight_certificate(rotate):
         certificate = _support_chart(model, face).support_view.orientation_certificate
         assert certificate["support_deviation"] <= 1e-11
         assert certificate["normal_lower"] >= .99 * certificate["normal_ideal"] > 0.
+
+
+@pytest.mark.parametrize("translation, admitted", ((1.5e8, False), (1e3, True)),
+                         ids=("far-1.5e8-refused", "near-1e3-admitted"))
+def test_certificate_rounding_scales_with_the_world_coordinates(translation, admitted):
+    """Finding R3 (P3): evaluating an arc at coordinates ~1e8 carries ~1e-8 rounding.
+
+    The rounding allowance must include the absolute coordinate magnitude, so
+    admission itself refuses a strip whose measured deviation can exceed the
+    owner's surface residual.
+    """
+    shift = (translation,) * 3
+    try:
+        model, face = _strip(shift=shift)
+    except GeometryError:
+        assert not admitted
+        return
+    if admitted:
+        certificate = _support_chart(model, face).support_view.orientation_certificate
+        assert certificate["support_deviation"] <= model.tolerance.surface_residual
+    else:
+        with pytest.raises(MeshError, match=_CERTIFICATE):
+            _support_chart(model, face)
