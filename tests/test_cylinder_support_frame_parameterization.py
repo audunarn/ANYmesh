@@ -19,7 +19,7 @@ import re
 import numpy as np
 import pytest
 
-from anygeometry import EllipticArc, GeometryModel
+from anygeometry import EllipticArc, GeometryError, GeometryModel
 from anygeometry.cylinder_patch import CylinderPatchError
 from anygeometry.structural import ParameterRange
 from anygeometry.surfaces import CoonsSurface, Cylinder, Plane
@@ -383,3 +383,198 @@ def test_parameterized_patch_with_a_hole_matches_its_twin(order):
     model, same = _rect_patch(True, **kw)
     assert len(model.faces[same].holes) == 1
     _assert_twins(_generate(model, same, order), _generate(twin, face, order))
+
+
+# --- MESH-B fix round 2: folded or off-support maps inside a positive loop ---
+
+_FAMILY = "admits only a ruled cylinder strip"
+_CERTIFICATE = "cannot certify that the face parameterization keeps the support orientation"
+
+
+def _l_shaped(parameterized: bool):
+    """Review R2 repro: a concave L-shaped trim with four declared Coons corners.
+
+    Its loop winds positively and the Coons normal at (0.5, 0.5) agrees with
+    the support, but the Coons map folds (two elements opposed the face
+    normal on 8e14b93) and leaves the support by up to 6.3 mm.
+    """
+    model = GeometryModel()
+    R, a, sweep, height = 6.5, .3, .35, 3.
+    uv = [(0, 0), (1, 0), (1, .4), (.4, .4), (.4, 1), (0, 1)]
+    xyz = [(R * math.cos(a + sweep * u), R * math.sin(a + sweep * u), height * v) for u, v in uv]
+    vertices = model.add_points(xyz)
+    edges = []
+    for i, (u, v) in enumerate(uv):
+        w, _ = uv[(i + 1) % len(uv)]
+        j = (i + 1) % len(uv)
+        edges.append(model.add_line(vertices[i], vertices[j]) if u == w else model.add_curve(
+            vertices[i], vertices[j],
+            EllipticArc((0, 0, height * v), (R, 0, 0), (0, R, 0), a + sweep * u, sweep * (w - u))))
+    face = model.add_face(edges, corners=[0, 1, 2, 5],
+                          surface=Cylinder((0, 0, 0), (0, 0, 1), (1, 0, 0), R, height, a, sweep))
+    model.set_face_parameterization(face, CoonsSurface() if parameterized else None)
+    model.add_sheet((face,))
+    return model, face
+
+
+def _strip(parameterized: bool = True, *, R=6.5, a=.3, sweep=.6, z0=0., k0=0., z1=3., k1=0.,
+           top_offset=(0., 0., 0.), split_left=False):
+    """A ruled strip: mitred EllipticArc rails z = z_i + k_i R cos(theta), Straight generators.
+
+    ``top_offset`` moves the top rail's centre (off the support); its vertices
+    stay at the rail's own ends. ``split_left`` splits the left generator into
+    two collinear Straight edges (a five-edge loop with four corners).
+    """
+    model = GeometryModel()
+    bottom_arc = EllipticArc((0., 0., z0), (R, 0., k0 * R), (0., R, 0.), a, sweep)
+    top_arc = EllipticArc(tuple(np.add((0., 0., z1), top_offset)), (R, 0., k1 * R), (0., R, 0.), a, sweep)
+    b, t = bottom_arc.evaluate(np.array((0., 1.))), top_arc.evaluate(np.array((0., 1.)))
+    v = model.add_points((tuple(b[0]), tuple(b[1]), tuple(t[1]), tuple(t[0])))
+    edges = [model.add_curve(v[0], v[1], bottom_arc), model.add_line(v[1], v[2]),
+             model.add_curve(v[3], v[2], top_arc)]
+    corners = None
+    if split_left:
+        (middle,) = model.add_points((tuple(.5 * (t[0] + b[0])),))
+        edges += [model.add_line(middle, v[3]), model.add_line(v[0], middle)]
+        corners = [0, 1, 2, 3]
+    else:
+        edges.append(model.add_line(v[0], v[3]))
+    support = Cylinder((0., 0., -10.), (0., 0., 1.), (1., 0., 0.), R, 30., a - .25)
+    face = model.add_face(tuple(edges), corners=corners, surface=support)
+    model.set_face_parameterization(face, CoonsSurface() if parameterized else None)
+    model.add_sheet((face,))
+    return model, face
+
+
+def _support_chart(model, face):
+    return CylindricalMetricChart.from_geometry(model, face, support_frame_parameterization=True)
+
+
+def _radial_dot(model, face, u, v):
+    """face normal . the radial direction at the face's own point (support normal, R > 0)."""
+    point = model.face_point(face, u, v)
+    return float(model.face_normal(face, u, v)[:2] @ point[:2])
+
+
+def test_l_shaped_trim_with_four_declared_corners_is_refused():
+    """Finding R2 (P2): positive winding plus a centre normal admitted a folded Coons map."""
+    model, face = _l_shaped(True)
+    grid = [(u, v) for u in np.linspace(.01, .99, 30) for v in np.linspace(.01, .99, 30)]
+    # Teeth: the Coons map leaves the support by millimetres and its normal turns inward somewhere.
+    assert max(abs(float(np.hypot(*model.face_point(face, u, v)[:2])) - 6.5) for u, v in grid) > 5e-3
+    assert min(_radial_dot(model, face, u, v) for u, v in grid) < 0.
+    assert _radial_dot(model, face, .5, .5) > 0.
+    with pytest.raises(MeshError, match=_FAMILY):
+        _support_chart(model, face)
+    with pytest.raises(MeshError, match=_FAMILY):
+        _generate(model, face)
+    twin, same = _l_shaped(False)
+    assert _element_normal_signs(twin, same, _generate(twin, same)) == {1.}
+
+
+class _RailSwap:
+    """The owner queries _certify_ruled_strip reads, with the top rail's curve replaced.
+
+    The owner refuses a crossed or off-support loop when the face is made, so
+    the certificate's own refusal (defence in depth) is exercised on the valid
+    face's topology with a substituted rail; its vertices move to the new
+    rail's ends, so the corner residual stays at rounding level.
+    """
+
+    def __init__(self, model, face, curve):
+        from dataclasses import replace
+        loop = model.faces[face].loop
+        top = model.edges[loop[2].edge]
+        self.edges = dict(model.edges)
+        self.edges[top.id] = replace(top, curve=curve)
+        ends = curve.evaluate(np.array((0., 1.)))
+        self._moved = {top.start: ends[0], top.end: ends[1]}
+        self._model = model
+        self.tolerance = model.tolerance
+
+    def vertex_position(self, vertex):
+        return self._moved.get(vertex, self._model.vertex_position(vertex))
+
+
+def _certify_with_top_rail(curve, **kw):
+    from anymesher._cylindrical_support_frame import _certify_ruled_strip
+    model, face = _strip(**kw)
+    record = model.faces[face]
+    return _certify_ruled_strip(_RailSwap(model, face, curve), record, record.surface)
+
+
+_FOLD_K = 10. / 6.5  # top rail z = z1 + 10 cos(theta) on theta in [0.3, 0.9]
+
+
+@pytest.mark.parametrize("dip", (-2e-3, -.5), ids=("2mm", "500mm"))
+def test_folded_strip_is_refused_by_the_certificate(dip):
+    """The top rail crosses below the bottom rail near u=1: h(u) changes sign.
+
+    The owner already refuses that loop (it self-intersects); the certificate
+    refuses the same rail on its own, while its vertex polygon still winds
+    positively and h at the centre is positive.
+    """
+    z1 = -10. * math.cos(.9) + dip
+    with pytest.raises(GeometryError, match="self-intersects"):
+        _strip(z1=z1, k1=_FOLD_K)
+    folded = EllipticArc((0., 0., z1), (6.5, 0., _FOLD_K * 6.5), (0., 6.5, 0.), .3, .6)
+    ends = folded.evaluate(np.array((0., .5, 1.)))[:, 2]
+    assert ends[0] > 2. and ends[1] > 1. and ends[2] < 0.
+    with pytest.raises(MeshError, match=_CERTIFICATE):
+        _certify_with_top_rail(folded, z1=1., k1=_FOLD_K)
+
+
+@pytest.mark.parametrize("gap", (2e-3, 1.), ids=("nearly-folded-2mm", "plain"))
+def test_unfolded_strip_is_certified(gap):
+    model, face = _strip(z1=-10. * math.cos(.9) + gap, k1=_FOLD_K)
+    certificate = _support_chart(model, face).support_view.orientation_certificate
+    assert .9 * gap < certificate["h_min"] <= gap
+    assert certificate["support_deviation"] <= 1e-11
+    assert certificate["normal_lower"] >= .99 * certificate["normal_ideal"] > 0.
+
+
+@pytest.mark.parametrize("offset", (2e-8, 1e-6, 1e-3))
+def test_off_support_rail_is_refused_by_the_certificate(offset):
+    """A rail whose centre is off the axis: the map leaves its support by about ``offset``."""
+    if offset >= 1e-6:
+        with pytest.raises(GeometryError, match="inconsistent with its explicit surface"):
+            _strip(top_offset=(offset, 0., 0.))
+    shifted = EllipticArc((offset, 0., 3.), (6.5, 0., 0.), (0., 6.5, 0.), .3, .6)
+    with pytest.raises(MeshError, match=_CERTIFICATE):
+        _certify_with_top_rail(shifted)
+
+
+def test_on_support_rail_within_the_surface_residual_is_admitted():
+    model, face = _strip(top_offset=(1e-12, 0., 0.))
+    certificate = _support_chart(model, face).support_view.orientation_certificate
+    assert certificate["support_deviation"] <= model.tolerance.surface_residual
+
+
+def test_split_generator_side_is_outside_the_certified_family():
+    """Collinear split sides are not in the proven family (narrower than 8e14b93): refused."""
+    model, face = _strip(split_left=True)
+    assert len(model.faces[face].loop) == 5
+    with pytest.raises(MeshError, match=_FAMILY):
+        _support_chart(model, face)
+
+
+def test_concave_strip_in_the_family_matches_its_twin_and_follows_the_face_normal():
+    """The top rail dips in the middle (concave in the support frame) but never folds."""
+    kw = dict(a=-.3, sweep=.6, z1=3., k1=-.4)
+    twin, face = _strip(False, **kw)
+    model, same = _strip(True, **kw)
+    top = [float(model.face_point(same, u, 1.)[2]) for u in (0., .5, 1.)]
+    assert top[1] < min(top[0], top[2]) - .1
+    assert _support_chart(model, same).support_view.orientation_certificate["h_min"] > .3
+    actual = _generate(model, same)
+    _assert_twins(actual, _generate(twin, face))
+    assert _element_normal_signs(model, same, actual) == {1.}
+
+
+@pytest.mark.parametrize("rotate", (0, 1))
+def test_existing_admitted_models_carry_a_tight_certificate(rotate):
+    for model, face in (_rect_patch(True, rotate=rotate), _mitred_patch(True),
+                        _rect_patch(True, rotate=rotate, sweep=.4, hole=((.42, .56), (1.1, 1.9)))):
+        certificate = _support_chart(model, face).support_view.orientation_certificate
+        assert certificate["support_deviation"] <= 1e-11
+        assert certificate["normal_lower"] >= .99 * certificate["normal_ideal"] > 0.
