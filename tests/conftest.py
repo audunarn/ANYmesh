@@ -143,3 +143,17 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     if _REQUIRE_QUAD_WORKERS:
         pytest.fail(f"{message} (ANYMESHER_REQUIRE_QUAD_WORKERS=1)", pytrace=False)
     pytest.skip(message)
+
+
+@pytest.fixture(autouse=True)
+def _pin_optional_quad_workers_off(request, monkeypatch):
+    """Keep golden/default-output tests independent of locally built workers.
+
+    The Q4 (MCF) and Q5 (TinyAD) executables are optional, ignored build
+    products; when found they change meshes. Only ``quad_workers`` tests, which
+    exist to exercise them, see the real environment.
+    """
+
+    if request.node.get_closest_marker("quad_workers") is None:
+        monkeypatch.setenv("ANYMESH_Q4_DISABLE_WORKER", "1")
+        monkeypatch.setenv("ANYMESH_Q5_DISABLE_WORKER", "1")
