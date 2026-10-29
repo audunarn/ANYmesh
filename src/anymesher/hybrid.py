@@ -289,6 +289,20 @@ def _refuse_folded_topology_surface(geometry: GeometryModel, face_id: int) -> No
         )
 
 
+def _quad_face_frame(geometry: Any, domain: Any) -> Any:
+    """Owner of face-uv queries for a quad-first domain.
+
+    A cylindrical domain whose chart works in its support frame (a distinct
+    face parameterization, MESH-B A2) answers them from the support; every
+    other domain keeps the source geometry.
+    """
+    if isinstance(domain, CylindricalQuadDomain):
+        view = getattr(domain.chart, "support_view", None)
+        if view is not None:
+            return view
+    return geometry
+
+
 def _native_chart_uv(geometry: GeometryModel, face: Any, face_id: int, point: Any) -> tuple[float, float]:
     """Chart coordinates of a boundary point for native planar meshing.
 
@@ -4318,8 +4332,9 @@ def _repair_quad_first_quality(
             normal = np.asarray(domain.normal, dtype=float)
         else:
             centre = np.mean(nodes[:len(corners)], axis=0)
-            u, v = geometry.face_local_uv(face_id, centre)
-            normal = geometry.face_normal(face_id, u, v)
+            frame = _quad_face_frame(geometry, domain)
+            u, v = frame.face_local_uv(face_id, centre)
+            normal = frame.face_normal(face_id, u, v)
         # The aspect scan uses only the rebuilt coordinates.  Preserve every
         # construction/conversion before admission and evaluate these same
         # arrays on fallback, rather than invoking owner protocols twice.
@@ -4438,7 +4453,8 @@ def _repair_quad_first_quality(
             owner_normals = np.broadcast_to(np.asarray(domain.normal, dtype=float),
                                             jacobians.shape)
         else:
-            batch_uv = getattr(geometry, "face_local_uv_many", None)
+            frame = _quad_face_frame(geometry, domain)
+            batch_uv = getattr(frame, "face_local_uv_many", None)
             if cached_normal is not None:
                 owner_normals = cached_normal[1]
             elif batch_uv is None:
@@ -4446,13 +4462,13 @@ def _repair_quad_first_quality(
                 # API. Preserve the scalar owner result on that supported
                 # dependency line.
                 uv = np.asarray(
-                    [geometry.face_local_uv(face_id, point) for point in sampled.points],
+                    [frame.face_local_uv(face_id, point) for point in sampled.points],
                     dtype=float,
                 ).reshape((-1, 2))
             else:
                 uv = batch_uv(face_id, sampled.points)
             if cached_normal is None:
-                owner_normals = geometry.face_normal_many(face_id, uv)
+                owner_normals = frame.face_normal_many(face_id, uv)
         cosines = np.einsum("ij,ij->i", jacobians / lengths[:, None], owner_normals)
         return float(np.max(np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))))
 
@@ -5149,6 +5165,9 @@ def _quad_first_execute(
                 cylinder_face_ids,
                 NativeMeshingOptions(point_placement="frontal_delaunay"),
                 cancellation_check=cancellation_check,
+                # MESH-B A2: quad-first meshes a distinct face
+                # parameterization in the certified support frame.
+                support_frame_parameterizations=True,
             )
         except MeshError as exc:
             _preserve_stage_cancellation(exc)

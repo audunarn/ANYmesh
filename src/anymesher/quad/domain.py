@@ -224,6 +224,17 @@ class PlanarQuadDomain:
         x,y=float(point[0]),float(point[1]); return (self.origin[0]+x*self.x_hat[0]+y*self.y_hat[0], self.origin[1]+x*self.x_hat[1]+y*self.y_hat[1], self.origin[2]+x*self.x_hat[2]+y*self.y_hat[2])
 
 
+def _cylinder_chart_projector(chart):
+    """FaceChart.project, or the support-frame projection (MESH-B A2).
+
+    A chart bound to a face with a distinct parameterization works in its
+    support frame; every other chart keeps the owner face projection.
+    """
+    if getattr(chart, "support_view", None) is not None:
+        return chart.project
+    return chart.face_chart.project
+
+
 @dataclass(frozen=True)
 class CylindricalQuadDomain:
     """Owner-qualified cylindrical face expressed in physical chart metres."""
@@ -261,7 +272,7 @@ class CylindricalQuadDomain:
 
     @staticmethod
     def _project_positions(chart, positions):
-        projection = chart.face_chart.project(np.asarray(positions, dtype=float))
+        projection = _cylinder_chart_projector(chart)(np.asarray(positions, dtype=float))
         scale = max(float(chart.circumferential_length), float(chart.axial_length), 1.0)
         if np.any(projection.distances > 1.0e-9 * scale):
             raise MeshError("cylindrical source boundary is not on its owner face")
@@ -358,7 +369,7 @@ class CylindricalQuadDomain:
 
     def project(self, point):
         self.chart._current()
-        projection = self.chart.face_chart.project(np.asarray([tuple(map(float, point))], dtype=float))
+        projection = _cylinder_chart_projector(self.chart)(np.asarray([tuple(map(float, point))], dtype=float))
         scale = max(float(self.chart.circumferential_length), float(self.chart.axial_length), 1.0)
         if float(projection.distances[0]) > 1.0e-9 * scale:
             raise MeshError("point is not on the owner cylindrical face")

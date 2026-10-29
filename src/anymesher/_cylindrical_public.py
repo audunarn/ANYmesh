@@ -26,11 +26,14 @@ from .metric import IsotropicMetricControl, MetricFieldSpec
 from .surface_mesh import SurfaceMeshOptions
 
 
-def prepare_bindings(geometry, native_faces, native_options, cancellation_check=None):
+def prepare_bindings(geometry, native_faces, native_options, cancellation_check=None, *,
+                     support_frame_parameterizations=False):
     """Bind general analytic trims in physical charts for either point filler.
 
     Legacy cylinders without physical joints keep their original route. Exact
     curves and qualified joints need physical chart lengths with either filler.
+    ``support_frame_parameterizations`` (quad-first only) admits a distinct face
+    parameterization on the owner-certified trimmed route, in the support frame.
     """
     remaining = {int(face) for face in native_faces
                  if isinstance(geometry.faces[face].surface, Cylinder)}
@@ -95,6 +98,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
         if generalized:
             binding = prepare_trimmed_cylinders(
                 geometry, selected, cancellation_check=cancellation_check,
+                support_frame_parameterizations=support_frame_parameterizations,
             )
         elif len(selected)==1:
             binding=prepare_cylindrical_patch(geometry,selected,cancellation_check=cancellation_check)
