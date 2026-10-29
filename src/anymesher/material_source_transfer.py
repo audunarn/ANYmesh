@@ -4,6 +4,7 @@ The public query grants no publication/S3 admission. The private publisher
 requires the original live mesh, generation receipts and exact identity maps.
 """
 from .errors import MeshError
+from ._material_region_binding import face_requires_curvilinear, region_requires_curvilinear  # patched by routing tests
 
 _IDENTITY_PUBLICATIONS = {}
 
@@ -93,21 +94,37 @@ def _closure_publication_qualification(source, closure, token, *, check_source=F
     return work
 
 def requires_material_source_transfer(geometry, mesh):
-    """Conservative routing hint; this grants no publication authority."""
-    from ._material_region_binding import curvilinear_reference_candidates, face_requires_curvilinear
-    if bool(curvilinear_reference_candidates(mesh)) or any(
-            face_requires_curvilinear(geometry, face) for face in geometry.faces):
-        return True
     from anygeometry import ExtrudedSurface, CoonsSurface, query_material_surface_regions, GeometryError
-    from anygeometry.nurbs import NurbsSurface
-    candidates = tuple(face.id for face in geometry.faces.values()
-                       if isinstance(face.surface, (ExtrudedSurface, CoonsSurface)))
+    from anygeometry.surfaces import Plane, Cylinder, Cone, RuledSurface
+    from anygeometry.curves import Straight, Arc
+    from anygeometry.exact_curves import EXACT_CURVES
+    
+    from ._material_region_binding import curvilinear_reference_candidates
+    if bool(curvilinear_reference_candidates(mesh)):
+        return True
+    face_ids = tuple(face for face, cells in getattr(mesh, 'elements_of_face', {}).items() if cells)
+    if not face_ids:
+        face_ids = tuple(geometry.faces)
+    if any(face not in geometry.faces for face in face_ids):
+        return True
+    if any(face_requires_curvilinear(geometry, face) for face in face_ids):
+        return True
+    for key in face_ids:
+        face = geometry.faces[key]
+        if face.surface is not None and not isinstance(
+                face.surface, (Plane, Cylinder, Cone, RuledSurface, ExtrudedSurface, CoonsSurface)):
+            return True
+        if any(not isinstance(geometry.edges[use.edge].curve, (Straight, Arc, *EXACT_CURVES))
+               for loop in (face.loop, *face.holes) for use in loop):
+            return True
+    candidates=tuple(face.id for face in (geometry.faces[key] for key in face_ids)
+                     if isinstance(face.surface,(ExtrudedSurface,CoonsSurface)))
     if candidates:
         try:
-            regions = query_material_surface_regions(geometry, candidates)
+            regions=query_material_surface_regions(geometry,candidates)
         except GeometryError:
-            return True  # unresolved owner support cannot be admitted by generic source labels
-        return any(isinstance(region.support, NurbsSurface) for region in regions.regions)
+            return True
+        return any(region_requires_curvilinear(region) for region in regions.regions)
     return False
 
 
