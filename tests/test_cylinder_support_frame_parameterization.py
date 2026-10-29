@@ -602,3 +602,247 @@ def test_certificate_rounding_scales_with_the_world_coordinates(translation, adm
     else:
         with pytest.raises(MeshError, match=_CERTIFICATE):
             _support_chart(model, face)
+
+
+# --- MESH-B round 3: split-rail ruled strips -----------------------------------
+#
+# After apply, the planner's seam lines end on a cylinder strip's rim and split that rim
+# edge into a chain of sub-arcs of the same circle (57 cap-skin strips of model A: the
+# side shared with the cap plate is a chain of 3-8 arcs, face 1 has 7). The strip itself
+# is unchanged; the topology Coons map then evaluates that rail as a chain by length
+# fractions.
+
+# Face 1 of the captured model A (ADM2-seamrot-sub1081): its seven bottom sub-arcs as
+# (start, sweep) angles; the cylinder is centred at x = 50, R 6.5, the top rail is mitred.
+_FACE1_BOTTOM = ((0.0, 0.00721881021102626), (0.00721881021102626, 0.008992649941018551),
+                 (0.01621146015204481, 0.0311904358006935), (0.04740189595273831, 0.004712892379607821),
+                 (0.05211478833234613, 0.011228906836020541), (0.06334369516836667, 0.017261468057068685),
+                 (0.08060516322543536, 0.024114591894224408))
+_FACE1_SWEEP = 0.10471975511965977
+_FACE1_MITRE = 2.692388155425118 / 6.5
+
+
+def _chain_angles(cuts, a, sweep):
+    """(start, sweep) of consecutive sub-arcs of [a, a + sweep] split at the fractions ``cuts``."""
+    angles = [a] + [a + sweep * c for c in cuts] + [a + sweep]
+    return tuple((s0, s1 - s0) for s0, s1 in zip(angles, angles[1:]))
+
+
+def _split_rail_strip(parameterized: bool = True, *, bottom=None, top=None, R=6.5, a=0.0,
+                      sweep=_FACE1_SWEEP, z0=-17.5, z1=3.692388155425118, k0=0., k1=_FACE1_MITRE,
+                      centre=(50., 0., 0.), rotate=0, backward=(), piece=None, radial_stretch=1.):
+    """A ruled strip like the captured cap-skin strips, with rails split into sub-arcs.
+
+    ``bottom`` / ``top``: (start, sweep) per sub-arc of the rail z = z_i + k_i R cos(theta), in
+    the direction of increasing angle (None: one arc over [a, a + sweep]). ``backward`` names
+    bottom sub-arcs stored from their end to their start (negative sweep), traversed backward.
+    ``piece`` = (index, dict) overrides the EllipticArc fields of one bottom sub-arc. ``rotate``
+    starts the loop at another side (rails on sides 1 and 3). ``radial_stretch`` scales the
+    bottom ellipse's u axis (off the support's circle). The support is a full turn.
+    """
+    model = GeometryModel()
+    bottom = bottom or ((a, sweep),)
+    top = top or ((a, sweep),)
+    origin = np.asarray(centre, dtype=float)
+
+    def rail(pieces, z, k, overrides=None, stored_backward=(), stretch=1.):
+        fields = dict(center=tuple(origin + (0., 0., z)), u_vector=(R * stretch, 0., k * R),
+                      v_vector=(0., R, 0.))
+        curves = []
+        for index, (start, span) in enumerate(pieces):
+            own = dict(fields, start_angle=start, sweep_angle=span)
+            if overrides is not None and overrides[0] == index:
+                own.update(overrides[1])
+            curves.append(EllipticArc(**own))
+        ends = [curves[0].evaluate(np.array((0.,)))[0]] + [c.evaluate(np.array((1.,)))[0] for c in curves]
+        vertices = model.add_points([tuple(p) for p in ends])
+        edges = []
+        for index, curve in enumerate(curves):
+            if index in stored_backward:
+                flipped = EllipticArc(curve.center, curve.u_vector, curve.v_vector,
+                                      curve.start_angle + curve.sweep_angle, -curve.sweep_angle)
+                edges.append(model.add_curve(vertices[index + 1], vertices[index], flipped))
+            else:
+                edges.append(model.add_curve(vertices[index], vertices[index + 1], curve))
+        return edges, vertices
+
+    bottom_edges, vb = rail(bottom, z0, k0, piece, backward, radial_stretch)
+    top_edges, vt = rail(top, z1, k1)
+    sides = [bottom_edges, [model.add_line(vb[-1], vt[-1])], top_edges[::-1], [model.add_line(vb[0], vt[0])]]
+    sides = sides[rotate:] + sides[:rotate]
+    corners, loop = [], []
+    for side in sides:
+        corners.append(len(loop))
+        loop.extend(side)
+    support = Cylinder(tuple(origin + (0., 0., z0 - 7.)), (0., 0., 1.), (1., 0., 0.), R, 35.19238815542512,
+                       a - .25, 2. * math.pi)
+    face = model.add_face(tuple(loop), corners=corners, surface=support)
+    model.set_face_parameterization(face, CoonsSurface() if parameterized else None)
+    model.add_sheet((face,))
+    return model, face
+
+
+_SPLIT_LAYOUTS = {
+    "3-arcs": dict(bottom=_chain_angles((.31, .62), 0., _FACE1_SWEEP)),
+    "5-arcs": dict(bottom=_chain_angles((.12, .3, .55, .81), 0., _FACE1_SWEEP)),
+    "7-arcs-face1": dict(bottom=_FACE1_BOTTOM),
+    # (The s0c evaluator refuses some 7-8 arc layouts: a local parameter overshoots [0, 1].)
+    "8-arcs": dict(bottom=_chain_angles((.06, .18, .3, .41, .57, .72, .9), 0., _FACE1_SWEEP)),
+    # A split rail must be circular (a split mitred rail is refused, see below).
+    "top-3-arcs": dict(top=_chain_angles((.25, .6), 0., _FACE1_SWEEP), k1=0., z1=6.3),
+    "both-split": dict(bottom=_chain_angles((.31, .62), 0., _FACE1_SWEEP),
+                       top=_chain_angles((.2, .45, .77), 0., _FACE1_SWEEP), k1=0., z1=6.3),
+    "7-arcs-rotated": dict(bottom=_FACE1_BOTTOM, rotate=1),
+    "backward-stored-piece": dict(bottom=_chain_angles((.31, .62), 0., _FACE1_SWEEP), backward=(1,)),
+}
+
+
+@pytest.mark.parametrize("layout", tuple(_SPLIT_LAYOUTS), ids=tuple(_SPLIT_LAYOUTS))
+def test_split_rail_strip_is_admitted_and_meshes_like_its_twin(layout):
+    """The 57 refused cap-skin strips' pattern: a rail is a chain of sub-arcs of one circle."""
+    kw = _SPLIT_LAYOUTS[layout]
+    model, face = _split_rail_strip(True, **kw)
+    assert max(len(side) for side in model.faces[face].sides()) > 1
+    certificate = _support_chart(model, face).support_view.orientation_certificate
+    assert certificate["h_min"] > 23.
+    assert certificate["support_deviation"] <= 1e-10
+    assert certificate["normal_lower"] >= .99 * certificate["normal_ideal"] > 0.
+    assert 0. <= certificate["rail_reparameterization_position"] <= 1e-12
+    twin, same = _split_rail_strip(False, **kw)
+    # Target 0.2: at 0.25 the quad-first quality gate rejects the face-1 layout's twin too
+    # (a T3 corner of 13.8 deg next to its 31 mm sub-arc), which is not an admission matter.
+    actual = _generate(model, face, target=.2)
+    _assert_twins(actual, _generate(twin, same, target=.2))
+    assert _element_normal_signs(model, face, actual) == {1.}
+
+
+def test_face1_split_rail_matches_the_merged_rail_certificate():
+    """Same strip with one bottom arc: the chain adds only rounding-level terms."""
+    split = _support_chart(*_split_rail_strip(bottom=_FACE1_BOTTOM)).support_view.orientation_certificate
+    whole = _support_chart(*_split_rail_strip()).support_view.orientation_certificate
+    assert "rail_reparameterization_position" not in whole
+    assert split["support_deviation"] - whole["support_deviation"] <= 1e-13
+    assert abs(split["h_min"] - whole["h_min"]) <= 1e-12
+    assert split["normal_lower"] >= whole["normal_lower"] - 1e-9
+
+
+_SPLIT_FAMILY_REFUSALS = {
+    "centre-moved-1e-12": (1, dict(center=(50. + 1e-12, 0., -17.5))),
+    "axis-turned-same-circle": (1, dict(u_vector=(6.5 * math.cos(.1), 6.5 * math.sin(.1), 0.),
+                                        v_vector=(-6.5 * math.sin(.1), 6.5 * math.cos(.1), 0.),
+                                        start_angle=_FACE1_BOTTOM[1][0] - .1)),
+    "gap-1e-12-rad": (1, dict(start_angle=_FACE1_BOTTOM[1][0] + 1e-12,
+                              sweep_angle=_FACE1_BOTTOM[1][1] - 1e-12)),
+    "overlap-1e-12-rad": (1, dict(start_angle=_FACE1_BOTTOM[1][0] - 1e-12,
+                                  sweep_angle=_FACE1_BOTTOM[1][1] + 1e-12)),
+}
+
+
+@pytest.mark.parametrize("case", tuple(_SPLIT_FAMILY_REFUSALS), ids=tuple(_SPLIT_FAMILY_REFUSALS))
+def test_split_rail_with_mismatched_or_discontinuous_sub_arcs_is_refused(case):
+    """Sub-arcs must share bit-identical ellipse fields and be contiguous in angle.
+
+    The owner accepts all four faces (the vertices lie on every sub-arc within its
+    tolerance); the support-frame chart refuses them as outside the certified family.
+    """
+    model, face = _split_rail_strip(bottom=_FACE1_BOTTOM, piece=_SPLIT_FAMILY_REFUSALS[case])
+    with pytest.raises(MeshError, match=_FAMILY):
+        _support_chart(model, face)
+    with pytest.raises(MeshError, match=_FAMILY):
+        _generate(model, face)
+
+
+class _ChainSwap:
+    """Owner view with one loop edge's curve replaced (the owner itself refuses such a loop)."""
+
+    def __init__(self, model, edge, curve):
+        from dataclasses import replace
+        self._model = model
+        self.edges = dict(model.edges)
+        if edge is not None:
+            self.edges[edge] = replace(model.edges[edge], curve=curve)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+
+def test_split_rail_with_a_reversed_sub_arc_is_refused():
+    """A sub-arc running against the chain's angular direction (a fold-back)."""
+    from anymesher._cylindrical_support_frame import _certify_ruled_strip
+    model, face = _split_rail_strip(bottom=_FACE1_BOTTOM)
+    record = model.faces[face]
+    item = record.sides()[0][2]
+    start, span = _FACE1_BOTTOM[2]
+    reversed_arc = EllipticArc((50., 0., -17.5), (6.5, 0., 0.), (0., 6.5, 0.), start + span, -span)
+    with pytest.raises(MeshError, match=_FAMILY):
+        _certify_ruled_strip(_ChainSwap(model, item.edge, reversed_arc), record, record.surface)
+    # The owner refuses that loop itself (the arc's ends no longer match its vertices).
+    with pytest.raises(GeometryError):
+        _split_rail_strip(bottom=_FACE1_BOTTOM, piece=(2, dict(start_angle=start + span, sweep_angle=-span)))
+
+
+def test_split_rail_with_a_straight_piece_is_refused():
+    from anymesher._cylindrical_support_frame import _certify_ruled_strip
+    from anygeometry.curves import Straight
+    model, face = _split_rail_strip(bottom=_FACE1_BOTTOM)
+    record = model.faces[face]
+    with pytest.raises(MeshError, match=_FAMILY):
+        _certify_ruled_strip(_ChainSwap(model, record.sides()[0][3].edge, Straight()), record, record.surface)
+
+
+@pytest.mark.parametrize("stretch", (4e-9, 1e-6), ids=("2.6e-8m", "6.5e-6m"))
+def test_split_non_circular_rail_is_refused(stretch):
+    """Sub-arcs of one ellipse that is not the support's circle: certificate refusal.
+
+    The owner refuses such a face itself (inconsistent with its explicit surface);
+    the certificate refuses the same chain on its own, every sub-arc of the
+    valid face swapped for the stretched ellipse.
+    """
+    from dataclasses import replace
+    from anymesher._cylindrical_support_frame import _certify_ruled_strip
+    with pytest.raises(GeometryError, match="inconsistent with its explicit surface"):
+        _split_rail_strip(bottom=_FACE1_BOTTOM, radial_stretch=1. + stretch)
+    model, face = _split_rail_strip(bottom=_FACE1_BOTTOM)
+    record = model.faces[face]
+    view = _ChainSwap(model, None, None)
+    for item in record.sides()[0]:
+        curve = model.edges[item.edge].curve
+        view.edges[item.edge] = replace(model.edges[item.edge], curve=replace(
+            curve, u_vector=(6.5 * (1. + stretch), 0., 0.)))
+    with pytest.raises(MeshError, match=_CERTIFICATE):
+        _certify_ruled_strip(view, record, record.surface)
+
+
+def test_split_mitred_rail_with_a_kinked_angle_map_is_refused():
+    """A mitred (non-circular) rail on the support split into sub-arcs.
+
+    Its sub-arc lengths are not proportional to their sweeps, so the chain's angle
+    map is piecewise linear with kinks. The single-arc strip is admitted; the
+    split one is refused by the reparameterization bound (conservative: the bound
+    treats the angle error as a deviation from the support).
+    """
+    _support_chart(*_split_rail_strip(k0=.4))
+    model, face = _split_rail_strip(k0=.4, bottom=_chain_angles((.31, .62), 0., _FACE1_SWEEP))
+    with pytest.raises(MeshError, match=_CERTIFICATE):
+        _support_chart(model, face)
+
+
+@pytest.mark.parametrize("k0, cuts", ((0., (.31, .62)), (.4, (.31, .62)), (.4, (.1, .2, .5, .9))),
+                         ids=("circle", "mitred-3", "mitred-5"))
+def test_chain_reparameterization_bound_covers_the_measured_rail_error(k0, cuts):
+    """The added rail terms bound the chain rail's measured distance from the merged arc."""
+    from anymesher._cylindrical_support_frame import _chain_rail
+    model, face = _split_rail_strip(k0=k0, bottom=_chain_angles(cuts, 0., _FACE1_SWEEP))
+    record = model.faces[face]
+    side = record.sides()[0]
+    rail, extra = _chain_rail(model, side, False, record.surface)
+    data = model._chain_data(side)
+    first = model.edges[side[0].edge].curve
+    w = np.linspace(0., 1., 2001)
+    merged = EllipticArc(first.center, first.u_vector, first.v_vector, rail["phi_start"], rail["delta"])
+    ideal = merged.evaluate(w)
+    actual = np.asarray([model._chain_eval(data, float(x))[0] for x in w])
+    derivative = np.asarray([model._chain_eval(data, float(x))[1] for x in w[:-1] + 2.5e-4])
+    ideal_derivative = merged.derivative(w[:-1] + 2.5e-4)
+    assert float(np.max(np.linalg.norm(actual - ideal, axis=1))) <= extra["position"] + 1e-13
+    assert float(np.max(np.linalg.norm(derivative - ideal_derivative, axis=1))) <= extra["derivative"] + 1e-12

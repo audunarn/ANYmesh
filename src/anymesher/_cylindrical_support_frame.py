@@ -17,6 +17,8 @@ built-in Cylinder face path must be mirrored here.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
+from types import SimpleNamespace
 
 import numpy as np
 from anygeometry import EllipticArc, GeometryError, GeometryModel
@@ -39,8 +41,11 @@ _NORMAL_MARGIN = 0.5
 # face's coordinate scale (|centre - origin| + |U| + |V| + radius).
 _ROUNDING = 64.0 * float(np.finfo(float).eps)
 
+_EPS = float(np.finfo(float).eps)
+
 _FAMILY_REFUSAL = ("support-frame cylinder chart admits only a ruled cylinder strip parameterization "
-                   "(two opposite sides one EllipticArc edge each, the other two one Straight edge each); "
+                   "(two opposite sides each one EllipticArc edge or a split rail - a contiguous chain of "
+                   "sub-arcs of one ellipse in one angular direction - the other two one Straight edge each); "
                    "the orientation of any other face parameterization relative to its support is undecided")
 _CERTIFICATE_REFUSAL = ("support-frame cylinder chart cannot certify that the face parameterization keeps "
                         "the support orientation and lies on its support over the whole face")
@@ -102,12 +107,134 @@ def _rail_heights(rail: dict, w: np.ndarray) -> np.ndarray:
     return rail["c_a"] + rail["u_a"] * np.cos(phi) + rail["v_a"] * np.sin(phi)
 
 
+def _side_kind(owner, side):
+    """EllipticArc for a rail (one arc, or a chain of arcs), Straight for one Straight edge, else None."""
+    curves = [owner.edges[item.edge].curve for item in side]
+    if len(curves) == 1 and type(curves[0]) is Straight:
+        return Straight
+    if curves and all(type(curve) is EllipticArc for curve in curves):
+        return EllipticArc
+    return None
+
+
+def _round_up(value) -> float:
+    """A float not below the exact (Fraction) ``value`` >= 0."""
+    result = float(value)
+    return result if Fraction(result) >= value else math.nextafter(result, math.inf)
+
+
+def _chain_rail(owner, side, fraction_reversed: bool, surface):
+    """A split rail (several EllipticArc edges) as one merged arc plus its reparameterization bound.
+
+    Admitted only when every sub-arc has the same ellipse fields (centre, U, V
+    equal), all run in one angular direction along the chain, and each starts
+    where the previous one ends (angle gap within rounding). Anything else
+    raises MeshError (outside the family).
+
+    The topology Coons map evaluates the chain at fraction ``f`` (GeometryModel
+    ``_chain_data``/``_chain_eval``): with the evaluator's float lengths L_k,
+    total T and cumulative C_k, sub-arc k covers f in [C_k/T, C_{k+1}/T] (the
+    last one up to 1) at local parameter (fT - C_k)/L_k. So the rail is the
+    ellipse E(phi) at an angle phi(f) that is piecewise affine: alpha_k + beta_k
+    (fT - C_k)/L_k on sub-arc k (alpha_k, beta_k: the traversal start angle and
+    signed sweep). The merged arc is the same ellipse at the affine angle
+    phi*(w) = phi_start + w delta (``_strip_rail``; w = f, or 1 - f on sides 2
+    and 3). In exact arithmetic on those floats, phi - phi* is affine on every
+    sub-arc, so D = max|phi - phi*| is attained at a sub-arc end (both one-sided
+    values, so an angle gap is included), and D' = max_k |dphi/dw - delta|.
+    A float allowance R covers the evaluator's rounding of the local parameter
+    (target, subtraction, division, the 1 - w argument, the 8 eps end snap) and
+    of the arc angle start + sweep * t. The sub-arc chosen by searchsorted is the
+    one containing the computed target t~, so the evaluation is the exact piece
+    model at f' = t~/T, |f' - f| <= ~1.5 eps, which moves phi* by <= 1.5 eps |delta|.
+    Since |dE/dphi| and |d2E/dphi2| <= |U| + |V|,
+      |rail - merged|     <= (|U| + |V|) (D + R),
+      |rail' - merged'|   <= (|U| + |V|) (D' + |delta| (D + R) + 8 eps max|dphi/dw|),
+    and these are added to the merged rail's residuals delta_pos, delta_der.
+    Returns (rail, extra) with extra = position/derivative terms and the
+    chain breakpoints in w.
+    """
+    curves = [owner.edges[item.edge].curve for item in side]
+    first = curves[0]
+    if any(type(curve) is not EllipticArc or tuple(curve.center) != tuple(first.center)
+           or tuple(curve.u_vector) != tuple(first.u_vector) or tuple(curve.v_vector) != tuple(first.v_vector)
+           for curve in curves):
+        raise MeshError(_FAMILY_REFUSAL)
+    alphas, betas = [], []
+    for item, curve in zip(side, curves):
+        start, sweep = Fraction(float(curve.start_angle)), Fraction(float(curve.sweep_angle))
+        alphas.append(start if item.forward else start + sweep)
+        betas.append(sweep if item.forward else -sweep)
+    if not (all(beta > 0 for beta in betas) or all(beta < 0 for beta in betas)):
+        raise MeshError(_FAMILY_REFUSAL)
+    allowance = Fraction(_ROUNDING)
+    for k in range(len(side) - 1):
+        gap = alphas[k + 1] - (alphas[k] + betas[k])
+        if abs(gap) > allowance * (1 + abs(alphas[k]) + abs(betas[k]) + abs(alphas[k + 1])):
+            raise MeshError(_FAMILY_REFUSAL)
+    total = alphas[-1] + betas[-1] - alphas[0]
+    if not abs(float(total)) <= 2.0 * math.pi:
+        raise MeshError(_FAMILY_REFUSAL)
+    merged = SimpleNamespace(center=first.center, u_vector=first.u_vector, v_vector=first.v_vector,
+                             start_angle=float(alphas[0]), sweep_angle=float(total))
+    rail = dict(_strip_rail(merged, True, fraction_reversed, surface))
+
+    _, lengths, length_total, cumulative, _ = owner._chain_data(side)
+    lengths = [Fraction(float(value)) for value in lengths]
+    cumulative = [Fraction(float(value)) for value in cumulative]
+    whole = Fraction(float(length_total))
+    if len(lengths) != len(side) or any(value <= 0 for value in lengths) or whole <= 0:
+        raise MeshError(_CERTIFICATE_REFUSAL)
+    phi_start, delta = Fraction(rail["phi_start"]), Fraction(rail["delta"])
+    direction = -1 if fraction_reversed else 1
+
+    def ideal(f):
+        return phi_start + ((1 - f) if fraction_reversed else f) * delta
+
+    eps = Fraction(_EPS)
+    offset = rate_error = rate_max = rounding = Fraction(0)
+    last = len(side) - 1
+    for k in range(len(side)):
+        f_low = cumulative[k] / whole
+        f_high = Fraction(1) if k == last else cumulative[k + 1] / whole
+        local_high = (f_high * whole - cumulative[k]) / lengths[k]
+        offset = max(offset, abs(alphas[k] - ideal(f_low)),
+                     abs(alphas[k] + betas[k] * local_high - ideal(f_high)))
+        rate = betas[k] * whole / lengths[k]  # dphi/df on sub-arc k
+        rate_error = max(rate_error, abs(direction * rate - delta))
+        rate_max = max(rate_max, abs(rate))
+        rounding = max(rounding, abs(betas[k]) * (whole / lengths[k] + 2))
+    # Local parameter (target, subtraction, division, 1 - w, 1 - local, 8 eps snap), the
+    # shift of the evaluated fraction, and the arc's own angle = start + sweep * t rounding.
+    angle_error = (offset + 16 * eps * rounding + 4 * eps * abs(delta)
+                   + 4 * eps * max(abs(alphas[k]) + abs(betas[k]) for k in range(len(side))))
+    # |U| + |V| with the norms' own rounding covered.
+    lipschitz = (Fraction(float(np.linalg.norm(np.asarray(first.u_vector, dtype=float))))
+                 + Fraction(float(np.linalg.norm(np.asarray(first.v_vector, dtype=float))))) * (1 + 8 * eps)
+    position = _round_up(lipschitz * angle_error)
+    derivative = _round_up(lipschitz * (rate_error + abs(delta) * angle_error + 8 * eps * rate_max))
+    rail["delta_pos"] = math.nextafter(rail["delta_pos"] + position, math.inf)
+    rail["delta_der"] = math.nextafter(rail["delta_der"] + derivative, math.inf)
+    breakpoints = [float(cumulative[k] / whole) for k in range(1, len(side))]
+    if fraction_reversed:
+        breakpoints = [1.0 - value for value in breakpoints]
+    return rail, dict(position=position, derivative=derivative, angle_offset=float(offset),
+                      rate_error=float(rate_error), breakpoints=breakpoints, pieces=len(side))
+
+
 def _certify_ruled_strip(owner, face, surface) -> dict:
     """Certify a topology Coons map on a Cylinder support as an unfolded strip on that support.
 
-    Admitted family: four corners, every side exactly one edge; one pair of
-    opposite sides EllipticArc edges (the rails), the other pair Straight
-    edges. Anything else raises MeshError (undecided, fail closed).
+    Admitted family: four corners; one pair of opposite sides are rails, each
+    one EllipticArc edge or a split rail (MESH-B round 3: a chain of sub-arcs
+    of one ellipse, _chain_rail), the other pair one Straight edge each.
+    Anything else raises MeshError (undecided, fail closed). A split rail is
+    certified as its merged arc with the chain's reparameterization bound
+    added to its residuals; its breakpoints join the h samples. Its Coons
+    corners are the evaluator's chain ends. The map is then continuous and C1
+    on each sub-arc's w-interval, and the bounds below hold on each piece
+    (one-sided derivatives at a breakpoint), so a positive normal component on
+    every piece still excludes folding.
 
     Proof. The Coons map (ANYgeometry ``_topology_face_point_and_derivatives``)
     is P = (1-v)A(u) + vC(1-u) + (1-u)D(1-v) + uB(v) - bilinear(corners). A
@@ -141,27 +268,38 @@ def _certify_ruled_strip(owner, face, surface) -> dict:
     h_min > 0, and ep <= the owner's surface_residual (the map lies on its
     support). Rounding: every residual and sample carries _ROUNDING * scale.
     """
-    if len(face.corners) != 4 or len(face.loop) != 4:
+    if len(face.corners) != 4 or len(face.loop) < 4:
         raise MeshError(_FAMILY_REFUSAL)
     sides = face.sides()
-    if any(len(side) != 1 for side in sides):
-        raise MeshError(_FAMILY_REFUSAL)
-    kinds = [type(owner.edges[side[0].edge].curve) for side in sides]
+    kinds = [_side_kind(owner, side) for side in sides]
     if kinds == [EllipticArc, Straight, EllipticArc, Straight]:
-        rails, orientation = ((sides[0][0], False), (sides[2][0], True)), 1.0
+        rails, orientation = ((sides[0], False), (sides[2], True)), 1.0
     elif kinds == [Straight, EllipticArc, Straight, EllipticArc]:
-        rails, orientation = ((sides[3][0], True), (sides[1][0], False)), -1.0
+        rails, orientation = ((sides[3], True), (sides[1], False)), -1.0
     else:
         raise MeshError(_FAMILY_REFUSAL)
     radius = float(surface.radius)
     made = []
+    chains = []
     corner_residual = 0.0
-    for item, fraction_reversed in rails:
-        edge = owner.edges[item.edge]
-        made.append(_strip_rail(edge.curve, item.forward, fraction_reversed, surface))
-        # Corner residual: the arc's own ends against its vertices (the Straight ends).
-        ends = np.asarray(edge.curve.evaluate(np.asarray((0.0, 1.0))), dtype=float)
-        for end, vertex in zip(ends, (edge.start, edge.end)):
+    for side, fraction_reversed in rails:
+        if len(side) == 1:
+            item = side[0]
+            edge = owner.edges[item.edge]
+            made.append(_strip_rail(edge.curve, item.forward, fraction_reversed, surface))
+            # Corner residual: the arc's own ends against its vertices (the Straight ends).
+            ends = np.asarray(edge.curve.evaluate(np.asarray((0.0, 1.0))), dtype=float)
+            vertices = (edge.start, edge.end)
+        else:
+            rail, extra = _chain_rail(owner, side, fraction_reversed, surface)
+            made.append(rail)
+            chains.append(extra)
+            # The Coons corners of a chain are the evaluator's own chain ends (fractions 0, 1).
+            data = owner._chain_data(side)
+            ends = np.asarray([owner._chain_eval(data, 0.0)[0], owner._chain_eval(data, 1.0)[0]], dtype=float)
+            last = owner.edges[side[-1].edge]
+            vertices = (owner.oriented_start_vertex(side[0]), last.end if side[-1].forward else last.start)
+        for end, vertex in zip(ends, vertices):
             corner_residual = max(corner_residual, float(np.linalg.norm(
                 end - np.asarray(owner.vertex_position(vertex), dtype=float))))
     rail0, rail1 = made
@@ -180,6 +318,10 @@ def _certify_ruled_strip(owner, face, surface) -> dict:
     el = e0 + e1 + 2.0 * corner_residual
     sign = math.copysign(1.0, float(surface.sweep_angle) * float(surface.height) * beta0 * orientation)
     w = np.linspace(0.0, 1.0, _STRIP_SAMPLES + 1)
+    breakpoints = [value for extra in chains for value in extra["breakpoints"]]
+    if breakpoints:
+        # Extra samples only shorten the gaps, so the slack below stays valid.
+        w = np.unique(np.concatenate((w, np.clip(np.asarray(breakpoints, dtype=float), 0.0, 1.0))))
     heights = sign * (_rail_heights(rail1, w) - _rail_heights(rail0, w))
     slack = (rail0["z_curvature"] + rail1["z_curvature"]) / (8.0 * _STRIP_SAMPLES ** 2) + 2.0 * tau
     h_min = float(np.min(heights)) - slack
@@ -189,6 +331,10 @@ def _certify_ruled_strip(owner, face, surface) -> dict:
     lower = ideal * (1.0 - 2.0 * ep / radius) - (ew * h_max + tangent * el + ew * el)
     certificate = dict(h_min=h_min, h_max=h_max, support_deviation=ep, normal_lower=lower,
                        normal_ideal=ideal)
+    if chains:
+        certificate.update(
+            rail_reparameterization_position=max(extra["position"] for extra in chains),
+            rail_reparameterization_derivative=max(extra["derivative"] for extra in chains))
     if not (all(math.isfinite(value) for value in certificate.values()) and h_min > 0.0
             and ep < 0.5 * radius and lower >= _NORMAL_MARGIN * ideal
             and ep <= float(owner.tolerance.surface_residual)):
