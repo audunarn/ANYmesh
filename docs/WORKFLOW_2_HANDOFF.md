@@ -335,3 +335,35 @@ with an identical test file. This is an unresolved committed-main gate, not a
 waiver or a Workflow 2 numerical failure reclassification; no unrelated repair or
 test suppression was performed. Evidence and exact commands are under the
 hosted-reconciled-20261029-a1/delivery-repair record and its process references.
+
+### Prepared-lineage and licensing blocker repair — 2026-10-29
+
+The optional sibling-partition shortcut now asks the owner's additive readiness
+API before attempting reuse. A normal committed revision supplies no exemption
+and enters the existing real overlap classifier; strict queries, callback errors
+and forged/native/raw mutation refusal remain enforced. The owner authenticates
+advanced current content with weak complete-state witnesses captured before
+consumer observers, not revision numbers alone. No link clearing, implicit new
+epoch, blind clone or test suppression was introduced.
+
+Development smoke now passes19/19. Focused owner55,consumer10,material/native/
+cancellation20 checks pass. Non-author source review caught the initial
+same-operand mutation gap; the failed evidence remains and the revised witness
+mechanism received a clean delta review (same-family, not engineering acceptance).
+Fresh installed-wheel coverage verifies147 cases across the initial141passes and
+six fixture-complete native-negative cases. Original missing-fixture attempts
+remain, with no package/assertion changes to obtain the final six results.
+
+Both current development smoke and new volume owner lanes pin immutable geometry
+41483d2d6614380500dcd7a998960a0131e4b608. Historical qualification owner pins remain
+unchanged. Its licensing repair inventories the pre-existing optional SciPy and
+uses explicit dev+planar installed audits while preserving strict default/all
+present-optional checks. It does not approve unreviewed component metadata or
+redistribution. Exact commands/source hashes/refusals and review decisions are in
+C:/ANYworkspaceWork/workflow2-20261027/evidence/ci-blockers-20261029-a1.
+
+Two unchanged CurveOnSurface fixture/domain failures observed during a broader
+owner selection remain recorded; no control-domain/tolerance/fixture waiver was
+made. Full/scientific/platform/distribution gates and original failed evidence
+remain. Hosted checks are rerun for the new exact heads separately; no live-main
+merge, tags, package publication or provider promotion is authorized.

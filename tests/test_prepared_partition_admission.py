@@ -102,3 +102,97 @@ def test_partition_helper_propagates_actual_cancellation_and_raw_stale_refusal()
     with pytest.raises(owner.GeometryError):
         validated_prepared_partition_disjoint_interiors(working,*pair)
     assert owner.to_dict(working) == changed
+
+
+@pytest.mark.parametrize('edited', ['source', 'working'])
+def test_revision_stale_partition_is_reclassified_without_erasing_explicit_stale_proof(monkeypatch, edited):
+    import anymesher.preparation as preparation
+    import anymesher._owner_trim_domains as trims
+    from anygeometry.prepared_material_source_transfer import _LINKS
+
+    source, working, pair = partition_pair()
+    stale_links = _LINKS[working]
+    (source if edited == 'source' else working).add_point(100, 100, 100)
+    before = owner.to_dict(source), owner.to_dict(working)
+    with pytest.raises(owner.GeometryError, match='stale'):
+        validated_prepared_partition_disjoint_interiors(working, *pair)
+    class CurrentAuditReached(BaseException):
+        pass
+
+    def audit(*args, **kwargs):
+        assert args[0] is working
+        raise CurrentAuditReached()  # Reclassification wiring, never admission.
+
+    monkeypatch.setattr(preparation, 'find_coplanar_overlaps', audit)
+    monkeypatch.setattr(trims, 'validated_same_support_material_disjoint_interiors',
+                        lambda *args, **kwargs: False)
+    monkeypatch.setattr(trims, 'validated_complementary_trim_domains',
+                        lambda *args, **kwargs: False)
+    with pytest.raises(CurrentAuditReached):
+        prepare_structural_closure(working, face_ids=pair,
+            options={'automatic_face_connections': False, 'automatic_member_connections': False,
+                     'automatic_member_sheet_connections': False, 'declare_missing_owners': False},
+            reuse_working_copy=True)
+    assert (owner.to_dict(source), owner.to_dict(working)) == before
+    assert _LINKS[working] is stale_links
+    with pytest.raises(owner.GeometryError, match='stale'):
+        validated_prepared_partition_disjoint_interiors(working, *pair)
+
+
+def test_preparation_never_falls_back_from_malformed_readiness_or_current_native_refusal(monkeypatch):
+    import anymesher.preparation as preparation
+    source, working, pair = partition_pair()
+    before = owner.to_dict(working)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('owner refusal reached an unrelated fallback')
+    monkeypatch.setattr(preparation, 'find_coplanar_overlaps', forbidden)
+    actual = owner.has_current_prepared_partition_lineage
+    monkeypatch.setattr(owner, 'has_current_prepared_partition_lineage', lambda model: 1)
+    from anymesher.errors import MeshError
+    with pytest.raises(MeshError, match='malformed classification'):
+        prepare_structural_closure(working, face_ids=pair, options=False)
+    error = owner.GeometryError('native lineage changed')
+    def refuse(model):
+        raise error
+    monkeypatch.setattr(owner, 'has_current_prepared_partition_lineage', refuse)
+    with pytest.raises(owner.GeometryError) as caught:
+        prepare_structural_closure(working, face_ids=pair, options=False)
+    assert caught.value is error
+    monkeypatch.setattr(owner, 'has_current_prepared_partition_lineage', actual)
+    assert owner.to_dict(working) == before
+
+
+@pytest.mark.parametrize('attack', ['commit', 'raw', 'cancel'])
+def test_current_readiness_does_not_hide_later_callback_mutation_or_cancellation(monkeypatch, attack):
+    import anymesher.preparation as preparation
+    from anygeometry.prepared_material_source_transfer import _LINKS
+    source, working, pair = partition_pair()
+    before = owner.to_dict(working)
+    links = _LINKS[working]
+    error = RuntimeError('cancel structural partition audit')
+    def forbidden(*args, **kwargs):
+        raise AssertionError('changed current proof fell through to another classifier')
+    monkeypatch.setattr(preparation, 'find_coplanar_overlaps', forbidden)
+    called = []
+    def frontier(phase):
+        if phase != 'structural preparation overlap narrow phase':
+            return
+        called.append(phase)
+        if attack == 'cancel':
+            raise error
+        if attack == 'commit':
+            working.add_point(100, 100, 100)
+        else:
+            face = pair[0]
+            working._faces[face] = replace(working.faces[face], metadata={'callback_raw_edit': True})
+    with pytest.raises(RuntimeError if attack == 'cancel' else owner.GeometryError) as caught:
+        prepare_structural_closure(working, face_ids=pair,
+            options={'automatic_face_connections': False, 'automatic_member_connections': False,
+                     'automatic_member_sheet_connections': False, 'declare_missing_owners': False},
+            reuse_working_copy=True, cancellation_check=frontier)
+    assert called and _LINKS[working] is links
+    if attack == 'cancel':
+        assert caught.value is error and owner.to_dict(working) == before
+    else:
+        assert len(working.faces) == len(before['faces'])
+        assert len(working.edges) == len(before['edges'])

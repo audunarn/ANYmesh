@@ -26,7 +26,7 @@ permissions:
 env:
   # One immutable owner identity feeds both validation and checkout. Dispatch
   # always validates its supplied input; PRs use the locally tested candidate.
-  CANDIDATE_GEOMETRY_REF: ${{ github.event_name == 'pull_request' && '28c359ed10d82bba7326d2d298e06aaa7077aa1b' || inputs.geometry_ref }}
+  CANDIDATE_GEOMETRY_REF: ${{ github.event_name == 'pull_request' && '41483d2d6614380500dcd7a998960a0131e4b608' || inputs.geometry_ref }}
   OMP_NUM_THREADS: '1'
   OPENBLAS_NUM_THREADS: '1'
   MKL_NUM_THREADS: '1'
