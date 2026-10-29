@@ -246,7 +246,24 @@ def test_geometric_validation_refuses_boundary_damage(monkeypatch, mutation):
 
 def test_public_import_is_lazy_for_optional_backend_and_consumer():
     result = subprocess.run([sys.executable, '-c',
-        "import sys, anymesher; assert not {'pytetwild', 'pyvista', 'anysolid'} & set(sys.modules)"],
+        """
+import sys
+import anymesher
+from anymesher import approximation_policy, boundary_orientation, material_source_transfer, volume
+
+# Main's shell/material API and Workflow2's solid API must coexist at the public
+# package boundary without loading optional providers or solver consumers.
+for module, names in (
+    (volume, ('VolumeMesh', 'generate_volume_mesh', 'validate_volume_mesh')),
+    (approximation_policy, ('GeometryApproximationPolicy', 'resolve_geometry_approximation')),
+    (boundary_orientation, ('orient_displacement_boundary', 'generate_displacement_boundary_mesh_result')),
+    (material_source_transfer, ('validate_material_source_transfer_for_mesh', 'publish_model_closure_mesh_to_source')),
+):
+    for name in names:
+        assert name in anymesher.__all__, name
+        assert getattr(anymesher, name) is getattr(module, name), name
+assert not {'pytetwild', 'pyvista', 'vtk', 'anysolid', 'anysolver', 'ngsolve'} & set(sys.modules)
+"""],
         capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
 

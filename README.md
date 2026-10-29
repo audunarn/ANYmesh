@@ -300,10 +300,17 @@ mesh = result.mesh  # Q4 plus qualified residual T3
 Supported faces are planar faces (including holes and concavity), owner-certified
 cylinders, analytic cones, and ruled/Coons surfaces, with linear or Q8/T6
 output and straight B3 members. Residual triangles are expected wherever
-the layout cannot pair them. Published elements must pass fixed shape gates
-(Q4 corners within 20-160 degrees, triangles no thinner than 15 degrees);
-if an element cannot meet them the call raises `QuadQualityRejected` rather
-than publishing it. Two optional helper executables (an integer
+the layout cannot pair them. By default, published elements must pass fixed
+shape gates (Q4 corners within 20-160 degrees, residual triangles no thinner
+than 15 degrees); a violation raises `QuadQualityRejected`. A quad-first
+caller can set `quad_t3_minimum_angle=15.0` and
+`quad_t3_angle_action="warning"` to publish positive-area thin residual
+triangles instead. Per-face validation reports the measured minimum angle,
+warning count and up to 20 cell IDs; `mesh.hybrid_diagnostics["t3_angle_rule"]`
+records the total. Such a mesh is marked non-certifiable when warnings occur,
+and strict certification refuses warning-only mode. The Q4 gates, topology,
+positive-area checks and qualified-S3 admission remain hard. Two optional
+helper executables (an integer
 min-cost-flow count planner and a TinyAD local optimizer) are not shipped in
 wheels; build them from a source checkout with
 `python tools/build_quad_workers.py`. Without them those stages report

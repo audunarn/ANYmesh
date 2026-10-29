@@ -271,7 +271,7 @@ def test_advertise_quad_capabilities_reports_both_workers() -> None:
     assert report.mixed_q4_s3 is True
     assert "quad_mcf_worker" in report.q4_count_worker
     assert "quad_tinyad_optimizer" in report.q5_tinyad_worker
-    assert report.unsupported_scope == ("curved", "Q9+")
+    assert report.unsupported_scope == ("curved: NURBS tensor-eligible faces only", "Q9+")  # S6 wording
     as_dict = report.to_dict()
     del as_dict["unsupported_scope"]
     assert as_dict["q4_count_worker"] == report.q4_count_worker

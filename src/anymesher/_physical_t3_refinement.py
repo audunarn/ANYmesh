@@ -15,7 +15,9 @@ def _alternative_progress(before, after):
         or after['quality_violation_count'] > before['quality_violation_count']
         or after['elements_above_maximum_growth'] > before['elements_above_maximum_growth'])
     progresses = (any(proposed_counts[name] < count for name, count in previous_counts.items())
-        or after['max_element_growth'] < before['max_element_growth'])
+        or after['max_element_growth'] < before['max_element_growth']
+        or (after['elements_above_maximum_growth'] < before['elements_above_maximum_growth']
+            and after['max_element_growth'] <= before['max_element_growth']))
     return not increases and progresses
 
 
@@ -29,11 +31,14 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
         raise MeshError('invalid physical flip option')
 
     owner_cavities = False
+    flip_rejection_chart = None
     if allow_physical_flips:
         from ._analytic_metric_chart import AnalyticMetricChart
         chart = getattr(evaluate_coordinates, '__self__', None)
         owner_cavities = (isinstance(chart, AnalyticMetricChart)
             and getattr(evaluate_coordinates, '__func__', None) is AnalyticMetricChart.evaluate)
+        from ._physical_mixed_repair import _batch_chart
+        flip_rejection_chart = _batch_chart(evaluate_coordinates,cancellation_check)
 
     cancellation_failure = None
     if cancellation_check is not None:
@@ -109,14 +114,46 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
 
     # Reuse each detached state's validated values until its next atomic change.
     current, xyz = physical_state(*topology.canonical_export())
+    from ._physical_split_trials import PhysicalSplitTrials
+    trials = PhysicalSplitTrials(settings) if cancellation_check is None else None
+    sparse_evaluation_used = False
     staged = None
     require_progress = False
     owner_failure = None
 
     def validate_split(points, cells):
-        nonlocal staged, owner_failure
+        nonlocal staged, owner_failure, sparse_evaluation_used
         try:
-            trial, coordinates = physical_state(points, cells)
+            trial = None
+            if trials is not None and trials.available():
+                trials.rebase(current,xyz)
+                from ._material_region_binding import (_material_chart_snapshot,_CANONICAL_MATERIAL_EVALUATE,
+                    _CANONICAL_MATERIAL_EVALUATOR_PIN,_CanonicalMaterialRead,_boundary_callable_pin)
+                from ._analytic_metric_chart import AnalyticMetricChart,_REFERENCE_ANALYTIC_EVALUATE,_REFERENCE_ANALYTIC_HELPERS
+                chart = getattr(evaluate_coordinates,'__self__',None)
+                canonical = (type(chart) is AnalyticMetricChart
+                    and not any(name in vars(chart) for name,_ in _REFERENCE_ANALYTIC_HELPERS)
+                    and all(_boundary_callable_pin(vars(AnalyticMetricChart).get(name))==pin
+                            for name,pin in _REFERENCE_ANALYTIC_HELPERS)
+                    and getattr(evaluate_coordinates,'__func__',None) is AnalyticMetricChart.evaluate
+                    and (AnalyticMetricChart.evaluate,AnalyticMetricChart.evaluate.__code__) == _REFERENCE_ANALYTIC_EVALUATE
+                    and _material_chart_snapshot(chart) is not None
+                    and _CanonicalMaterialRead.evaluate is _CANONICAL_MATERIAL_EVALUATE
+                    and _boundary_callable_pin(_CanonicalMaterialRead.evaluate)==_CANONICAL_MATERIAL_EVALUATOR_PIN)
+                prefix = len(points)==len(current.points)+1 and np.array_equal(points[:-1],current.points)
+                if canonical and prefix:
+                    sparse_evaluation_used = True
+                    coordinates = np.vstack((xyz,evaluate_coordinates(points[-1:])))
+                else:
+                    # Unknown/batch-dependent evaluators retain their exact full
+                    # batch call. Arithmetic reuse requires actual XYZ equality.
+                    coordinates = np.asarray(evaluate_coordinates(points),dtype=float)
+                trial = trials.trial(points,cells,coordinates)
+                if trial is None:
+                    trial = _physical_quality_candidate(
+                        _make_candidate(points,cells,settings=settings),settings,lambda _:coordinates)
+            if trial is None:
+                trial, coordinates = physical_state(points, cells)
         except _GeometryLimited as error:
             # An evaluator exception is not a local split refusal, even when a
             # callback happens to use the mesher's private exception type.
@@ -222,6 +259,10 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                 selected_cell_exhausted = True
         if not committed and allow_physical_flips and used < settings.native_options.max_topology_operations:
             flip_refusal = None
+            rejection = None
+            if flip_rejection_chart is not None and flip_rejection_chart.check is None:
+                from ._physical_flip_rejection import prepare_flip_rejection
+                rejection = prepare_flip_rejection(current,xyz,settings,(topology.points,topology.triangles))
 
             def validate_flip(points, cells):
                 nonlocal staged, flip_refusal
@@ -247,6 +288,10 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                     cancellation_check('native-v2 physical flip attempt')
                 used += 1
                 flip_attempts += 1
+                if (rejection is not None and flip_rejection_chart.check is None
+                        and rejection.rejects(edge,current,xyz)):
+                    flip_refused_attempts += 1
+                    continue
                 staged = None
                 flip_refusal = None
                 try:
@@ -325,6 +370,18 @@ def refine_physical_candidate(candidate, triangulation, settings, report,
                 stop_reason = 'no_progress_for_candidate_cells'
             break
     points, cells = current.points, current.triangles
+    if trials is not None and trials.used:
+        if sparse_evaluation_used:
+            final_check,final_xyz = physical_state(points,cells)
+        else:
+            # Preserve arbitrary evaluator call/exception semantics; its cached
+            # actual full-batch XYZ is freshly scored by the complete oracle.
+            final_xyz = xyz
+            final_check = _physical_quality_candidate_from_xyz(
+                _make_candidate(points,cells,settings=settings),settings,xyz)
+        if final_check.report != current.report or final_check.score != current.score:
+            raise MeshError('incremental physical trial differs from full final quality')
+        current,xyz = final_check,final_xyz
     result = replace(candidate, points=points, triangles=cells, report=current.report,
                      score=current.score, aspect_ratios=current.aspect_ratios,
                      flips=candidate.flips+flips)

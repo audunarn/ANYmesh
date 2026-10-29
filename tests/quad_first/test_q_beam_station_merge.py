@@ -24,11 +24,12 @@ def _inputs(midpoint=(0.5, 0.0, 0.0)):
                1: np.array((1.0, 0.0, 0.0)),
                2: np.array((1.0, 1.0, 0.0)),
                3: np.array((0.0, 1.0, 0.0)),
-               4: np.array((0.5, 0.0, 0.0))},
-        quads={0: (0, 1, 2, 3)},
+               4: np.array((0.5, 0.0, 0.0)),
+               5: np.array((0.5, 1.0, 0.0))},
+        quads={0: (0, 4, 5, 3), 1: (4, 1, 2, 5)},
         node_of_vertex=dict(zip(vertices, (0, 1, 2, 3))),
         nodes_of_edge={edge: [0, 4, 1]},
-        elements_of_face={face: [0]},
+        elements_of_face={face: [0, 1]},
     )
     beam = Mesh(
         nodes={10: np.array((0.0, 0.0, 0.0)),

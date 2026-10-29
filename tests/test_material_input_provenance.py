@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from fractions import Fraction
 from types import SimpleNamespace
 
 import numpy as np
@@ -126,6 +127,57 @@ def test_selected_interval_requires_exact_owner_station_pair():
                                segment_specs=tuple(altered)),)
     with pytest.raises(MeshError, match="changed source interval"):
         binding.input_provenance(mesh, registry, changed, (), context, emitted)
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_selected_interior_interval_orders_exact_fractions_by_value(reverse):
+    model, binding, mesh, registry, _, context, _, curved = inputs()
+    straight = next(edge for edge in context["edges"] if edge != curved)
+    context["edges"][straight] = {**{name: True for name in _TERMS}, "selected": True}
+    added_nodes = []
+    for parameter in (.25, .5, .75):
+        node = max(mesh.nodes) + 1
+        registry.register(straight, parameter, node_id=node)
+        mesh.nodes[node] = tuple(model.sample_edge(straight, [parameter])[0])
+        added_nodes.append(node)
+    mesh.nodes_of_edge[straight][1:1] = added_nodes
+    loops = tuple(SimpleNamespace(node_ids=nodes, uv=uv, segment_specs=specs)
+                  for nodes, uv, specs in binding.loops(mesh, registry, {straight}))
+    if reverse:
+        loops = tuple(SimpleNamespace(
+            node_ids=tuple(reversed(loop.node_ids)), uv=loop.uv[::-1].copy(),
+            segment_specs=tuple(loop.segment_specs[(len(loop.node_ids) - 2 - i)
+                                                   % len(loop.node_ids)]
+                                for i in range(len(loop.node_ids)))) for loop in loops)
+    emitted = {"transform": np.eye(2),
+               "chart_loops": tuple(np.array(loop.uv, copy=True) for loop in loops),
+               "chart_constraints": (), "chart_pinned": np.empty((0, 2))}
+    before = to_dict(model), deepcopy(mesh.nodes), deepcopy(mesh.nodes_of_edge)
+    # (1, 4), (1, 2) must be ordered as rational numbers, not serialized tuples.
+    receipt = binding.input_provenance(mesh, registry, loops, (), context, emitted)
+    assert receipt.validate() is receipt
+    intervals = [tuple(Fraction(*station) for station in row["interval_stations"])
+                 for row in receipt.to_dict()["boundary_inputs"]
+                 if row["source_edge"] == straight]
+    assert any(set(interval) == {Fraction(1, 4), Fraction(1, 2)}
+               for interval in intervals)
+    assert to_dict(model) == before[0]
+    assert mesh.nodes == before[1] and mesh.nodes_of_edge == before[2]
+
+    index = next(i for i, spec in enumerate(loops[0].segment_specs)
+                 if spec == (straight, .25, .5))
+    original_specs = loops[0].segment_specs
+    for wrong in ((straight, .25, np.nextafter(.5, 1.)),
+                  (curved, .25, .5), (straight, .5, .25)):
+        altered = list(original_specs)
+        altered[index] = wrong
+        loops[0].segment_specs = tuple(altered)
+        with pytest.raises(MeshError, match="changed source interval"):
+            binding.input_provenance(mesh, registry, loops, (), context, emitted)
+        with pytest.raises(MeshError):
+            receipt.validate()
+    loops[0].segment_specs = original_specs
+    assert receipt.validate() is receipt
 
 
 def test_complete_registry_and_pin_sets_are_required(monkeypatch):

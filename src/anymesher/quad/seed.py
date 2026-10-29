@@ -16,6 +16,10 @@ from .state import QuadMeshState
 from .rectangle_seed import rectangle_seed_data
 from .edge_aligned_seed import edge_aligned_seed_data
 
+def _project_boundary_station(domain, station):
+    project = getattr(domain, "project_station", None)
+    return project(station) if callable(project) else domain.project(station.position)
+
 def _shoelace(loop_points: np.ndarray) -> float:
     loop = np.asarray(loop_points, dtype=float)
     if loop.ndim != 2 or loop.shape[1] < 2 or len(loop) < 3:
@@ -293,7 +297,7 @@ def _cylindrical_station_lattice(domain, registry, outer, target_size):
     tolerance = 1e-10 * max(1.0, float(np.max(upper-lower)))
     axes: list[list[np.ndarray]] = [[], []]
     for edge_id, forward in domain.edge_uses:
-        chain = np.asarray([domain.project(station.position)
+        chain = np.asarray([_project_boundary_station(domain, station)
                             for station in registry.chain(edge_id, forward)], dtype=float)
         if np.max(chain[:, 1])-np.min(chain[:, 1]) <= tolerance:
             axis = 0
@@ -650,11 +654,11 @@ def build_planar_quad_seed(
     if abs(registry.target_size-float(target_size)) > 1.0e-15*max(1.0,abs(float(target_size))):
         raise MeshError("boundary registry target_size differs from seed target_size")
     stations = registry.outer_stations(domain)
-    outer = tuple(domain.project(station.position) for station in stations)
+    outer = tuple(_project_boundary_station(domain, station) for station in stations)
     hole_polys: list[np.ndarray] = []
     for index in range(len(domain.hole_edge_uses)):
         hole_stations = registry.hole_stations(domain, index)
-        hole_points = [domain.project(station.position) for station in hole_stations]
+        hole_points = [_project_boundary_station(domain, station) for station in hole_stations]
         if len(hole_points) < 3:
             raise MeshError("hole boundary has fewer than three stations")
         hole_polys.append(np.asarray(hole_points, dtype=float))

@@ -515,6 +515,19 @@ def generate_hybrid_mesh_result_parallel(
     # executor refusal included — must see the same None vs explicit-empty
     # faces/members and the canonical beamNone->() semantics.
     options = _normalize_selections(dict(options, target_size=target_size))
+    # Owner-issued field/transport receipts cannot cross a process boundary.
+    resolution=options.get('geometry_approximation_resolution')
+    active_local=getattr(resolution,'_field',None) is not None
+    if options.get('geometry_approximation_error') is None:
+        from .approximation_policy import GeometryApproximationPolicy
+        from ._material_region_binding import face_requires_curvilinear
+        policy=options.get('geometry_approximation_policy') or GeometryApproximationPolicy()
+        if type(policy) is dict:policy=GeometryApproximationPolicy.from_dict(policy)
+        selected=geometry.faces if options.get('face_ids') is None else options['face_ids']
+        active_local=active_local or (getattr(policy,'adaptation',None)=='local' and
+            any(face_requires_curvilinear(geometry,face) for face in selected))
+    if active_local:
+        return _serial(geometry,options,'live local approximation field requires serial owner context')
     if parallel.executor is not None and parallel.pool_lease is not None:
         raise ValueError(
             "pass either executor or pool_lease to ParallelOptions, not both"

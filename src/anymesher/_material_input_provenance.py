@@ -79,9 +79,37 @@ def _payload(binding, mesh, registry, loops, pinned_ids, context, emitted,
     seen_tokens = set()
     used_edges = set()
 
+    # Reuse only detached literal extraction inside this one payload. Each
+    # payload still performs its own full current entry/final owner validation.
+    from ._material_region_binding import MaterialRegionBinding
+    extract = binding._boundary_source_chain
+    finish = None
+    from .hybrid import _LoopBoundary
+    def literal(value):
+        if type(value) in (type(None), bool, int, float, str):
+            return True
+        if type(value) is np.ndarray:
+            return value.dtype == np.dtype(float)
+        if type(value) in (tuple, list):
+            return all(literal(item) for item in value)
+        if type(value) is dict:
+            return all(type(key) in (str, int) and literal(item) for key, item in value.items())
+        return False
+    plain = (type(loops) in (tuple,list) and all(type(loop) is _LoopBoundary
+        and literal(vars(loop)) for loop in loops) and literal(context)
+        and literal(emitted) and literal(pinned_ids)
+        and not binding.region.interior_constraints and not binding.region.retained_vertices)
+    if type(binding) is MaterialRegionBinding and plain:
+        extract, finish = binding._prepare_boundary_source_chains(
+            mesh, registry, cancellation_check)
+
     def bound_path_chain(path):
         try:
-            return binding._boundary_source_chain(path, mesh, registry)
+            # The qualified closure covers boundary occurrences only; interior
+            # constraints retain the original full path contract.
+            boundary_path = any(path is item for loop in binding.region.boundaries for item in loop)
+            return (extract(path, mesh, registry) if boundary_path else
+                    binding._boundary_source_chain(path, mesh, registry))
         except KeyError as error:
             raise MeshError("material input source path has a missing registered node") from error
 
@@ -141,10 +169,12 @@ def _payload(binding, mesh, registry, loops, pinned_ids, context, emitted,
             specification = loop.segment_specs[index]
             if (specification is None) == expected_selected:
                 raise MeshError("material input segment spec contradicts route context")
+            # Serialized pairs have no numerical tuple order: (1, 4) precedes
+            # (1, 2) along the edge. Order by exact rational value for comparison.
             if specification is not None and (
                     int(specification[0]) != edge
                     or (_fraction(specification[1]), _fraction(specification[2]))
-                    != tuple(sorted(stations))):
+                    != tuple(sorted(stations, key=lambda item: Fraction(*item)))):
                 raise MeshError("material input segment spec changed source interval")
             token = ("boundary", loop_index, index)
             if token in seen_tokens:
@@ -261,6 +291,8 @@ def _payload(binding, mesh, registry, loops, pinned_ids, context, emitted,
     owner_hash = sha256(json.dumps(before, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     context_hash = sha256(json.dumps(context_before, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
+    if finish is not None:
+        finish()
     return {"schema": "anymesher.material-input-provenance-v1",
             "owner_model_id": str(owner.model_id), "owner_revision": owner.revision,
             "owner_content_sha256": owner_hash,

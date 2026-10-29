@@ -53,10 +53,42 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers", "gui: opt-in test that creates a real desktop window"
     )
     config.addinivalue_line(
+        "markers", "fast: development-gate tier (tests measured under 5 s)"
+    )
+    config.addinivalue_line(
+        "markers", "slow: real-geometry acceptance tier (>= 5 s or timed out)"
+    )
+    config.addinivalue_line(
+        "markers", "baseline_failing: failed in the isolated-copy baseline run"
+    )
+    config.addinivalue_line(
         "markers",
         "quad_workers: needs the optional quad-first MCF and TinyAD worker "
         "executables (python tools/build_quad_workers.py)",
     )
+
+
+def _apply_tier_markers(items: list[pytest.Item]) -> None:
+    """Tag tiers from ``tier_manifest.json`` without editing any test.
+
+    ``slow``: measured >= 5 s (or timed out at 300 s) in the baseline run.
+    ``fast``: every other test (the development gate).
+    ``baseline_failing``: failed in the baseline run in this isolated copy;
+    stays selected and is reported explicitly, never hidden or skipped.
+    """
+
+    import json
+
+    path = _TESTS_ROOT / "tier_manifest.json"
+    if not path.is_file():
+        return
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    slow = manifest["slow"]
+    failing = set(manifest["baseline_failing"])
+    for item in items:
+        item.add_marker(pytest.mark.slow if item.nodeid in slow else pytest.mark.fast)
+        if item.nodeid in failing:
+            item.add_marker(pytest.mark.baseline_failing)
 
 
 def pytest_collection_modifyitems(
@@ -65,6 +97,7 @@ def pytest_collection_modifyitems(
     """Real Tk tests never run unless the operator explicitly opts in."""
 
     del config
+    _apply_tier_markers(items)
     if _RUN_GUI_TESTS:
         return
     skipped = pytest.mark.skip(
@@ -110,3 +143,17 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     if _REQUIRE_QUAD_WORKERS:
         pytest.fail(f"{message} (ANYMESHER_REQUIRE_QUAD_WORKERS=1)", pytrace=False)
     pytest.skip(message)
+
+
+@pytest.fixture(autouse=True)
+def _pin_optional_quad_workers_off(request, monkeypatch):
+    """Keep golden/default-output tests independent of locally built workers.
+
+    The Q4 (MCF) and Q5 (TinyAD) executables are optional, ignored build
+    products; when found they change meshes. Only ``quad_workers`` tests, which
+    exist to exercise them, see the real environment.
+    """
+
+    if request.node.get_closest_marker("quad_workers") is None:
+        monkeypatch.setenv("ANYMESH_Q4_DISABLE_WORKER", "1")
+        monkeypatch.setenv("ANYMESH_Q5_DISABLE_WORKER", "1")

@@ -9,7 +9,7 @@ from ..refinement import SizeField
 from ..errors import MeshError
 from ..triangulation import PlanarTriangulation, orient2d
 from .boundary import BoundaryStationRegistry
-from .domain import PlanarQuadDomain
+from .domain import PlanarQuadDomain, ParametricQuadDomain
 from .state import QuadMeshState
 
 
@@ -22,19 +22,27 @@ def rectangle_seed_data(geometry, domain, registry, outer, size_field,
     transformed rectangles; it is not a replacement for downstream quality,
     area, topology or high-order validity checks.
     """
+    parametric = False
+    if type(geometry) is GeometryModel and type(domain) is ParametricQuadDomain:
+        mapper = getattr(geometry, "face_boundary_uv", None)
+        parametric = (callable(mapper) and not domain.hole_edge_uses
+                      and len(domain.edge_uses) == 4
+                      and all(mapper(domain.face_id, edge, (0., 1.)) is not None
+                              for edge, _ in domain.edge_uses))
     if (type(geometry) is not GeometryModel
-            or type(domain) is not PlanarQuadDomain
+            or (type(domain) is not PlanarQuadDomain and not parametric)
             or type(registry) is not BoundaryStationRegistry
             or domain.hole_edge_uses or len(domain.edge_uses) != 4
             or (size_field is not None
                 and (type(size_field) is not SizeField or not size_field.is_uniform))
-            or any(type(geometry.edges[e].curve) is not Straight
-                   for e, _ in domain.edge_uses)):
+            or (not parametric and any(type(geometry.edges[e].curve) is not Straight
+                   for e, _ in domain.edge_uses))):
         return None
     chains = [registry.chain(edge, forward) for edge, forward in domain.edge_uses]
     if len(chains[0]) != len(chains[2]) or len(chains[1]) != len(chains[3]):
         return None
-    sides = [np.asarray([domain.project(s.position) for s in chain], dtype=float)
+    sides = [np.asarray([(domain.project_station(s) if parametric else domain.project(s.position))
+                        for s in chain], dtype=float)
              for chain in chains]
     if any(not np.isfinite(side).all() for side in sides):
         return None

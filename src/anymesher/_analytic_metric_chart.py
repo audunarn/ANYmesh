@@ -1,12 +1,16 @@
 """Owner-certified metric evaluation for general analytic material faces."""
 import numpy as np
-from anygeometry import (Cone, query_trimmed_surface_charts,
+from anygeometry import (Cone, Plane, query_trimmed_surface_charts,
                          validate_trimmed_surface_charts_binding, face_derivatives_many,
                          chart_definition_fingerprint)
 try:
     from anygeometry import ExtrudedSurface
 except ImportError:
     ExtrudedSurface = ()
+try:
+    from anygeometry.nurbs import NurbsSurface
+except ImportError:
+    NurbsSurface = ()
 from .errors import MeshError
 
 
@@ -18,7 +22,14 @@ class AnalyticMetricChart:
         self.owner = geometry.source if callable(guard) else geometry
         self.face_id = int(face_id)
         face = self.owner.faces[self.face_id]
-        if type(face.surface) not in tuple(t for t in (Cone, ExtrudedSurface) if isinstance(t,type)) or face.parameterization is not None:
+        effective_support = (region_binding.region.support if region_binding is not None else face.surface)
+        nurbs = isinstance(effective_support, NurbsSurface)
+        curvilinear = region_binding is not None and region_binding.requires_curvilinear
+        implicit_plane = isinstance(effective_support, Plane) and curvilinear
+        if nurbs and not curvilinear:
+            raise MeshError('NURBS metric chart requires curvilinear owner authority')
+        if ((type(effective_support) not in tuple(t for t in (Cone, ExtrudedSurface, NurbsSurface) if isinstance(t,type))
+             and not implicit_plane) or (not nurbs and face.parameterization is not None)):
             raise MeshError('general analytic metric chart requires an unmodified owner support')
         self.check = cancellation_check
         self.region_binding = region_binding
@@ -36,12 +47,13 @@ class AnalyticMetricChart:
         collection_entry = (self.binding, source, source.source_checksum,
                             chart_definition_fingerprint(self.binding), region,
                             None if region is None else chart_definition_fingerprint(region))
+        self._reference_uv = (region_binding.reference_uv(cancellation_check) if curvilinear else (.5, .5))
         if region_binding is None:
-            du, dv = face_derivatives_many(self.owner, self.face_id, [[.5,.5]])
+            du, dv = face_derivatives_many(self.owner, self.face_id, [self._reference_uv])
         else:
             from anygeometry import evaluate_material_surface_region
             du, dv = evaluate_material_surface_region(
-                self.owner, self.binding, self.face_id, [[.5,.5]], derivatives=True,
+                self.owner, self.binding, self.face_id, [self._reference_uv], derivatives=True,
                 cancellation_check=self.check)
         if (self.owner is not owner_identity[0]
                 or str(self.owner.model_id) != owner_identity[1]
@@ -66,12 +78,21 @@ class AnalyticMetricChart:
         derivative = np.column_stack((du[0],dv[0]))
         try:
             self.transform = np.linalg.cholesky(derivative.T @ derivative)
+            if curvilinear:
+                # The full physical metric is supplied by jacobians below.
+                # Use a binary diagonal preconditioner for normalized NURBS
+                # charts so an exact boundary coordinate survives both chart
+                # conversions, without clipping a rounded value into [0,1].
+                scales = np.sqrt(np.sum(derivative * derivative, axis=0))
+                _mantissa, exponents = np.frexp(scales)
+                scales = np.ldexp(np.ones(2), exponents - 1)
+                self.transform = np.diag(scales)
             self.inverse = np.linalg.inv(self.transform)
         except np.linalg.LinAlgError as error:
             raise MeshError("analytic metric chart has a singular reference differential") from error
         if (not np.isfinite(self.transform).all() or not np.isfinite(self.inverse).all()
-                or not np.allclose(self.transform @ self.transform.T,
-                                   derivative.T @ derivative, rtol=64*np.finfo(float).eps, atol=0.)
+                or (not curvilinear and not np.allclose(self.transform @ self.transform.T,
+                                   derivative.T @ derivative, rtol=64*np.finfo(float).eps, atol=0.))
                 or not np.allclose(self.transform @ self.inverse, np.eye(2),
                                    rtol=64*np.finfo(float).eps,
                                    atol=64*np.finfo(float).eps)):
@@ -84,6 +105,12 @@ class AnalyticMetricChart:
         self.validate_reference()
 
     def _check_reference(self, entry, *, check_binding=True, check_revision=True):
+        from ._material_region_binding import _material_chart_snapshot
+        snapshot = _material_chart_snapshot(self)
+        if snapshot is not None:
+            if snapshot['data'].get('_authority') is not entry:
+                raise MeshError('analytic chart snapshot authority changed')
+            return
         (identity, binding, source, source_checksum, binding_checksum,
          region, region_checksum, derivative_bytes, transform_bytes,
          inverse_bytes) = entry
@@ -123,12 +150,25 @@ class AnalyticMetricChart:
         self._check_reference(entry)
         return self
 
+    def _numeric_view(self):
+        if self.region_binding is None or self.check is not None:
+            return None
+        from ._material_region_binding import _material_read_view
+        return _material_read_view(self.region_binding)
+
     def _current(self):
+        view = self._numeric_view()
+        if view is not None:
+            if view.reference_uv != self._reference_uv:
+                raise MeshError('NURBS certified reference anchor changed')
+            return
         if self.region_binding is None:
             validate_trimmed_surface_charts_binding(self.owner, self.binding,
                                                    cancellation_check=self.check)
         else:
             self.region_binding.validate(self.check)
+            if self.region_binding.requires_curvilinear and self.region_binding.reference_uv(self.check) != self._reference_uv:
+                raise MeshError('NURBS certified reference anchor changed')
 
     def _rows(self, points):
         rows = np.array(points, dtype=float, copy=True)
@@ -141,17 +181,23 @@ class AnalyticMetricChart:
         return rows
 
     def evaluate(self, points):
+        from ._material_region_binding import _material_chart_snapshot
+        snapshot = _material_chart_snapshot(self,create=True)
         entry = self._authority
         rows = self._rows(points)
         self._check_reference(entry, check_binding=False, check_revision=False)
-        inverse = self.inverse.copy()
+        inverse = self.inverse.copy() if snapshot is None else snapshot['inverse']
         if self.region_binding is None:
             values = np.asarray(self.owner.evaluate_face_many(self.face_id, rows @ inverse), dtype=float)
         else:
-            from anygeometry import evaluate_material_surface_region
-            values = np.asarray(evaluate_material_surface_region(
-                self.owner, self.binding, self.face_id, rows @ inverse,
-                cancellation_check=self.check), dtype=float)
+            view = self._numeric_view()
+            if view is not None:
+                values = np.asarray(view.evaluate(rows @ inverse), dtype=float)
+            else:
+                from anygeometry import evaluate_material_surface_region
+                values = np.asarray(evaluate_material_surface_region(
+                    self.owner, self.binding, self.face_id, rows @ inverse,
+                    cancellation_check=self.check), dtype=float)
         if self.region_binding is None:
             self._current()
         self._check_reference(entry)
@@ -160,17 +206,23 @@ class AnalyticMetricChart:
         return values
 
     def jacobians(self, points):
+        from ._material_region_binding import _material_chart_snapshot
+        snapshot = _material_chart_snapshot(self,create=True)
         entry = self._authority
         rows = self._rows(points)
         self._check_reference(entry, check_binding=False, check_revision=False)
-        inverse = self.inverse.copy()
+        inverse = self.inverse.copy() if snapshot is None else snapshot['inverse']
         if self.region_binding is None:
             du, dv = face_derivatives_many(self.owner, self.face_id, rows @ inverse)
         else:
-            from anygeometry import evaluate_material_surface_region
-            du, dv = evaluate_material_surface_region(
-                self.owner, self.binding, self.face_id, rows @ inverse,
-                derivatives=True, cancellation_check=self.check)
+            view = self._numeric_view()
+            if view is not None:
+                du, dv = view.evaluate(rows @ inverse, derivatives=True)
+            else:
+                from anygeometry import evaluate_material_surface_region
+                du, dv = evaluate_material_surface_region(
+                    self.owner, self.binding, self.face_id, rows @ inverse,
+                    derivatives=True, cancellation_check=self.check)
         values = np.stack((du, dv), axis=2) @ inverse.T
         if self.region_binding is None:
             self._current()
@@ -224,3 +276,9 @@ class AnalyticMetricChart:
                 f'analytic face {self.face_id} failed physical quality: '
                 f"{report['violation_counts']}, growth={growth}")
         return report
+
+
+_REFERENCE_ANALYTIC_EVALUATE = (AnalyticMetricChart.evaluate,AnalyticMetricChart.evaluate.__code__)
+from ._material_region_binding import _boundary_callable_pin
+_REFERENCE_ANALYTIC_HELPERS = tuple((name,_boundary_callable_pin(vars(AnalyticMetricChart)[name]))
+    for name in ('evaluate','_rows','_numeric_view','_check_reference','_current','validate_reference'))

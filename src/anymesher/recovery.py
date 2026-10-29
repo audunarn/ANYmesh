@@ -28,6 +28,12 @@ from .s3_quality import S3QualityError
 from .s3_repair import S3RepairError
 
 
+try:
+    from anygeometry.nurbs import NurbsSurface
+except ImportError:
+    NurbsSurface = ()
+
+
 AUTOMATION_CONTRACT_ID = "ANYMESHER_AUTOMATIC_RECOVERY_V1"
 
 
@@ -176,7 +182,7 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
         return recipes
     import anygeometry as owner
     types=tuple(kind for name in ('EllipticArc','CylinderIntersectionCurve',
-                                  'QuadricIntersectionCurve','BezierQuadricCurve')
+                                  'QuadricIntersectionCurve','BezierQuadricCurve','PlaneNurbsCurve')
                 if isinstance((kind:=getattr(owner,name,None)),type))
     selected = first.get('face_ids')
     faces = geometry.faces if selected is None else selected
@@ -185,11 +191,16 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
     # the owner still qualifies every material chart after preparation.
     region_candidates = tuple(kind for name in ('ExtrudedSurface', 'CoonsSurface')
                               if isinstance((kind := getattr(owner, name, None)), type))
+    if isinstance(NurbsSurface, type):
+        region_candidates += (NurbsSurface,)
     authored_regions = (bool(region_candidates)
         and callable(getattr(owner, 'query_material_surface_regions', None))
         and any(face in geometry.faces
                 and isinstance(geometry.faces[face].surface, region_candidates)
                 and geometry.faces[face].parameterization is None for face in faces))
+    authored_regions = authored_regions or any(
+        face in geometry.faces and isinstance(geometry.faces[face].parameterization,
+            NurbsSurface) for face in faces)
     analytic_curves = types and any(isinstance(edge.curve,types) for edge in geometry.edges.values())
     if not authored_regions and not analytic_curves:
         return recipes
@@ -210,11 +221,81 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
     return (('native',native),*(item for item in recipes if item[0]!='native'))
 
 
+def select_curvilinear_recovery_policy(
+    geometry, *, requested_strategy, order, certification_mode,
+    geometry_approximation_error, explicit_controls, automation=None,
+    face_ids=None, cancellation_check=None,
+):
+    """Select existing recovery only for new, owner-qualified curved domains.
+
+    Application intent is explicit input; constructed legacy controls do not
+    establish user intent. This selection grants no geometric cell authority.
+    """
+    if (automation is not None or explicit_controls or order != 'linear'
+            or str(getattr(certification_mode, 'value', certification_mode)) != 'interactive'
+            or str(getattr(requested_strategy, 'value', requested_strategy)) not in
+                ('auto', 'automatic', 'quad_first')
+            or geometry_approximation_error is None):
+        return automation, None
+    import anygeometry as owner
+    from ._material_region_binding import (checked_geometry_approximation_error,
+        face_requires_curvilinear, region_requires_curvilinear)
+    error = checked_geometry_approximation_error(geometry_approximation_error)
+    selected = tuple(geometry.faces if face_ids is None else face_ids)
+    candidates = tuple(face for face in selected
+        if face_requires_curvilinear(geometry, face))
+    if not candidates:
+        return automation, None
+    # A raw NURBS/display type is merely a query hint. Exact-Coons provenance
+    # and canonical material chart qualification remain with the owner.
+    regions = owner.query_material_surface_regions(
+        geometry, candidates, expected_revision=geometry.revision,
+        cancellation_check=cancellation_check)
+    owner.validate_material_surface_regions_binding(
+        geometry, regions, cancellation_check=cancellation_check)
+    admitted = {face.id for region in regions.regions
+                if region_requires_curvilinear(region) for face in region.faces}
+    if admitted != set(candidates):
+        raise MeshError('new curved recovery lacks complete owner material charts')
+    from ._parametric_tensor import nurbs_tensor_admission
+    tensor_faces = sorted(face for face in admitted if nurbs_tensor_admission(geometry, face).eligible)
+    reason = ('new owner-qualified NURBS material uses existing automatic native recipe'
+              if not tensor_faces else
+              'tensor-eligible NURBS faces use the quad-first tensor route; every other face and any '
+              'tensor refusal use the existing automatic native recipe')
+    return MeshAutomationOptions(strict_method=False, allow_inspection=False), {
+        'requested_strategy': str(getattr(requested_strategy, 'value', requested_strategy)),
+        'reason': reason,
+        'geometry_approximation_error': error,
+        'source_faces': sorted(admitted),
+        'nurbs_tensor_faces': tensor_faces,
+    }
+
+
+def _record_curvilinear_recovery(result, selection, method, recipe):
+    if selection is None:
+        return
+    from dataclasses import asdict, is_dataclass
+    def literal(value):
+        serializer = getattr(value, 'to_dict', None)
+        if callable(serializer):
+            return serializer()
+        return asdict(value) if is_dataclass(value) else value
+    record = dict(selection)
+    record.update(selected_method=method, effective_strategy=recipe.get('strategy'),
+                  native_options=literal(recipe.get('native_options')),
+                  native_surface_options=literal(recipe.get('_native_surface_options')),
+                  recombine=recipe.get('recombine'),
+                  structured_options=literal(recipe.get('structured_options')))
+    result.mesh.hybrid_diagnostics['curvilinear_recovery'] = record
+
+
 def generate_automatic_mesh_result(
     geometry: GeometryModel,
     *,
     automation: MeshAutomationOptions | None = None,
     fallback_structured_options: Any | None = None,
+    curvilinear_recovery_selection: Mapping[str, Any] | None = None,
     **meshing_options: Any,
 ) -> AutomaticMeshResult:
     """Try bounded methods and retain a valid inspect-only mesh if needed.
@@ -230,14 +311,20 @@ def generate_automatic_mesh_result(
         None if policy.max_seconds is None else monotonic() + policy.max_seconds
     )
 
-    def check_budget(phase: str) -> None:
+    original_callback = meshing_options.get("cancellation_check")
+    from anygeometry import is_cancellation_signal
+    passive_signal = is_cancellation_signal(original_callback)
+
+    def check_budget(phase: str, *, invoke_callback=True) -> None:
         if deadline is not None and monotonic() >= deadline:
             raise MeshRecoveryIncomplete(
                 f"automatic meshing time budget expired during {phase}"
             )
-        callback = meshing_options.get("cancellation_check")
-        if callback is not None:
-            callback(phase)
+        if passive_signal:
+            if original_callback(phase):
+                raise MeshError(f"automatic meshing cancelled during {phase}")
+        elif invoke_callback and original_callback is not None:
+            original_callback(phase)
 
     check_budget("source geometry validation")
     problems = geometry.validate_topology()
@@ -251,6 +338,12 @@ def generate_automatic_mesh_result(
         recipes = recipes[:1]
     else:
         recipes = _prefer_analytic_trim_recipe(geometry, first, recipes)
+    if curvilinear_recovery_selection is not None:
+        tensor_mode = 'allowed' if curvilinear_recovery_selection.get('nurbs_tensor_faces') else None
+        recipes = tuple((method, dict(recipe, recombine=first.get('recombine', True),
+                                      **({} if tensor_mode is None else {'_nurbs_tensor': tensor_mode})))
+                        if method == 'native' else (method, recipe)
+                        for method, recipe in recipes)
     attempts: list[Mapping[str, object]] = []
     first_recoverable: Exception | None = None
     admission_error: S3QualityError | None = None
@@ -259,9 +352,17 @@ def generate_automatic_mesh_result(
     inspection_reason: str | None = None
     for method, recipe in recipes:
         check_budget(f"automatic meshing: {method}")
-        recipe["cancellation_check"] = check_budget
+        # No deadline adds no executable callback to owner proofs. Only the
+        # owner's exact live signal is passive; arbitrary callables retain the
+        # guarded callback route even if they advertise passive attributes.
+        recipe["cancellation_check"] = (original_callback
+            if deadline is None and (original_callback is None or passive_signal)
+            else check_budget)
         try:
             result = generate_hybrid_mesh_result(clone_prepared_geometry(geometry), **recipe)
+            # Check elapsed time/passive state after work without executing
+            # arbitrary caller code after the engine's final proof frontier.
+            check_budget("automatic meshing candidate complete", invoke_callback=False)
         except MeshError as error:
             mapped_rejection = (
                 method == "mapped"
@@ -318,6 +419,7 @@ def generate_automatic_mesh_result(
         attempts.append({"method": method, "status": "selected"})
         selected = AutomaticMeshResult(result, method, "ready", tuple(attempts))
         result.mesh.hybrid_diagnostics["automation"] = selected.to_dict()
+        _record_curvilinear_recovery(result, curvilinear_recovery_selection, method, recipe)
         return selected
 
     if policy.allow_inspection and (
@@ -339,10 +441,13 @@ def generate_automatic_mesh_result(
                 candidate = generate_hybrid_mesh_result(
                     clone_prepared_geometry(geometry), **candidate_options
                 )
+                check_budget("inspection candidate complete", invoke_callback=False)
             except _RECOVERABLE:
                 candidate = None
         if candidate is not None:
+            check_budget("inspection publication start", invoke_callback=False)
             quality = verify_mesh_quality(candidate.mesh)
+            check_budget("inspection quality complete", invoke_callback=False)
             attempts.append({
                 "method": method,
                 "status": "inspection_only",

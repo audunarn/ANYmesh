@@ -277,3 +277,41 @@ Canonical current record: sibling ANYgeometry `docs/WORKFLOW_2_PROJECT.md`.
 No merge, push, publication, sibling source changes or Workflow1 qualification
 changes. `docs/volume_qualification.json` separates current finite acceptance
 from remaining promotion/release obligations.
+
+## Committed-main reconciliation — 2026-10-29
+
+This isolated development candidate combines Workflow 2 parent
+`376bf3c8773e78ecfe04413a8625096e6f97fb10` and committed local main
+`d56cd2e1b68095b1f4ce838530c84e2e252c51b1`. The independent clone is
+`C:/ANYworkspaceWork/workflow2-reconcile-20261029/ANYmesh`; live dirty trees are
+excluded. The merge retains modern shell/material/tensor routing and public
+exports alongside the volume API and Workflow 2 atomic quad recovery repair.
+The fresh-process regression checks both public API families and provider/solver
+import independence. No new mesher production repair was needed.
+
+The new solid-volume owner/consumer lane now pins reconciled ANYgeometry
+`8b5e7e0363c8d4280f18d2b7d4dea1a632227a6b`. Historical CI pins remain unchanged.
+This owner commit is local only until separately authorized delivery; hosted CI
+cannot verify this new pair before the owner is available remotely. No hosted CI
+was dispatched for this reconciliation, and earlier green runs are not claims
+about this new source pair.
+
+Focused source checks passed 55 controlled-volume tests, 50 atomic-front/recovery
+tests and 25 modern tensor/recovery/option-guard tests (130 total). Exact commands
+are retained in `mesh-handoff.md` and the process identity/JUnit receipts at
+`C:/ANYworkspaceWork/workflow2-20261027/evidence/reconcile-main-20261029-a1`.
+Fresh pure Windows CPython 3.11 geometry/mesh wheels plus the unchanged ANYsolid
+wheel passed 87 copied installed tests outside source trees:
+
+```
+python -I -m pytest -q -o pythonpath= tests/test_volume_mesh.py tests/test_volume_consumer.py tests/test_installed_volume_example.py tests/test_reconciled_solid_codec.py
+```
+
+The standalone controlled P1/P2 example, installed origins/payload hashes and
+private dependency check passed. No real volume provider ran. Non-author source
+reviews of both repositories found no blocking integration finding; they are
+same-family development reviews. Earlier failure records, exact-case W2-DEV-001,
+scientific limits, full/native/platform/distribution gates and Workflow 1 NO_GO
+remain unchanged. No release, production-provider promotion, push, tag or merge
+into either live main is implied. Development wheel versions retain the current
+main values and are identified by hashes, not treated as published artifacts.

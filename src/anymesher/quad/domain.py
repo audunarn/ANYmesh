@@ -620,6 +620,42 @@ class ParametricQuadDomain:
         if str(geometry.model_id) != self.model_id or int(geometry.revision) != self.revision:
             raise MeshError("source geometry changed after parametric-domain capture")
 
+    def project_station(self, station):
+        """Project an authenticated boundary station without inverse drift."""
+        geometry = self.chart.geometry
+        self.assert_current(geometry)
+        mapper = getattr(geometry, "face_boundary_uv", None)
+        if not callable(mapper):
+            return self.project(station.position)
+        edge_id = None
+        parameter = None
+        if station.key.kind == "edge":
+            edge_id, parameter = int(station.key.entity_id), float(station.parameter)
+            if edge_id not in {candidate for candidate, _ in self.edge_uses}:
+                return self.project(station.position)
+        elif station.key.kind == "vertex":
+            vertex = int(station.key.entity_id)
+            for candidate, _ in self.edge_uses:
+                edge = geometry.edges[candidate]
+                if vertex == edge.start:
+                    edge_id, parameter = candidate, 0.
+                    break
+                if vertex == edge.end:
+                    edge_id, parameter = candidate, 1.
+                    break
+        if edge_id is None:
+            return self.project(station.position)
+        uv = mapper(self.face_id, edge_id, parameter)
+        if uv is None:
+            return self.project(station.position)
+        made = np.asarray(self.transform, dtype=float) @ np.asarray(uv, dtype=float)
+        lifted = np.asarray(self.lift(made), dtype=float)
+        existing = np.asarray(station.position, dtype=float)
+        scale = max(1., float(np.max(np.abs(existing))), float(np.max(np.abs(lifted))))
+        if not np.allclose(existing, lifted, rtol=0., atol=1.e-10 * scale):
+            raise MeshError("canonical boundary station has inconsistent owner chart coordinates")
+        return tuple(map(float, made))
+
     def project(self, point):
         self.assert_current(self.chart.geometry)
         projection = self.chart.project(

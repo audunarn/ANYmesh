@@ -10,6 +10,10 @@ import numpy as np
 
 from .errors import MeshError
 
+class _RejectedInsertionCavity(MeshError):
+    """Independently proven invalid candidate geometry; never source authority."""
+
+
 _BATCH = 4096
 _CELL_KEY = np.dtype([("a", np.int64), ("b", np.int64), ("c", np.int64)])
 _EDGE_KEY = np.dtype([("a", np.int64), ("b", np.int64)])
@@ -134,7 +138,7 @@ def validate_insertion(points, before, protected, candidate, raw_rows,
     if qualified is None:
         edges, counts = _edges_and_counts(rows)
         if np.any(counts > 2):
-            raise MeshError("native mutable T3 insertion returned non-manifold topology")
+            raise _RejectedInsertionCavity("native mutable T3 insertion returned non-manifold topology")
         if len(protected):
             ordered = np.sort(np.asarray(protected, dtype=np.int64), axis=1)
             if not np.all(np.isin(_keys(ordered, edge=True), _keys(edges, edge=True))):
@@ -174,3 +178,37 @@ def insertion_owners(before, after, owners, index, *, inserted_node, owner,
         result[row] = int(owner) if int(owner) != -1 else owners[sources[0]]
     _poll(cancellation_check, "native-v2 insertion owner mapping complete")
     return result
+
+
+# Finite immutable provenance slice: no result/callback exception is trusted by
+# class alone, and no replaced validator service can forge a proposal refusal.
+from . import _t3_local_validation as _local_rejection
+_CAVITY_VALIDATOR = validate_insertion
+_CAVITY_CODES = (validate_insertion.__code__,
+    _local_rejection.validate_changed_incidence.__code__,_local_rejection._changed_counts.__code__)
+
+
+def _genuine_cavity_rejection(error, validator, points, before, candidate, packet):
+    if (type(error) is not _RejectedInsertionCavity or validator is not _CAVITY_VALIDATOR
+            or validator.__code__ is not _CAVITY_CODES[0]):
+        return False
+    frames=[];trace=error.__traceback__
+    while trace is not None:
+        frames.append(trace.tb_frame);trace=trace.tb_next
+    matches=[i for i,frame in enumerate(frames) if frame.f_code is _CAVITY_CODES[0]]
+    if len(matches)!=1:
+        return False
+    chain=frames[matches[0]:];data=chain[0].f_locals
+    if (data.get('points') is not points or data.get('before') is not before
+            or data.get('candidate') is not candidate or data.get('raw_rows') is not packet):
+        return False
+    codes=tuple(frame.f_code for frame in chain)
+    # The validator raises directly on full incidence, or through its exact
+    # owned local-incidence chain. Any oracle/callback/wrapper frame refuses.
+    return codes==_CAVITY_CODES[:1] or (codes==_CAVITY_CODES and chain[-1].f_locals.get('_candidate') is True)
+
+
+# Snapshot this finite declaration bundle before any actual caller callback.
+# A renewal during the kernel cannot grant provenance to an opaque service.
+_CAVITY_PROVENANCE = (_CAVITY_VALIDATOR, _CAVITY_CODES,
+    _genuine_cavity_rejection, _genuine_cavity_rejection.__code__)

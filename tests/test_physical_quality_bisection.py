@@ -702,6 +702,12 @@ def test_cancellation_in_later_cell_preserves_refused_baseline(monkeypatch):
     ({'max_element_growth': 1.9, 'quality_violation_count': 3}, False),
     ({'max_element_growth': 1.9, 'elements_above_maximum_growth': 2}, False),
     ({'max_element_growth': 1.9, 'invalid_element_count': 1}, False),
+    ({'elements_above_maximum_growth': 0}, True),
+    ({'elements_above_maximum_growth': 0, 'max_element_growth': 1.9}, True),
+    ({'elements_above_maximum_growth': 0, 'max_element_growth': 2.1}, False),
+    ({'elements_above_maximum_growth': 0, 'violation_counts': {'aspect_ratio': 1}}, False),
+    ({'elements_above_maximum_growth': 0, 'quality_violation_count': 3}, False),
+    ({'elements_above_maximum_growth': 0, 'invalid_element_count': 1}, False),
     ({'max_element_growth': 2.1, 'violation_counts': {'minimum_angle': 1}}, True),
 ))
 def test_physical_progress_guard_exact_count_and_growth_contract(change, expected):
@@ -718,5 +724,7 @@ def test_physical_progress_guard_exact_count_and_growth_contract(change, expecte
         else:
             after[name] = value
     snapshot = json.dumps(before, sort_keys=True)
+    after_snapshot = json.dumps(after, sort_keys=True)
     assert _alternative_progress(before, after) is expected
     assert json.dumps(before, sort_keys=True) == snapshot
+    assert json.dumps(after, sort_keys=True) == after_snapshot

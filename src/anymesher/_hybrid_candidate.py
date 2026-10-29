@@ -32,7 +32,9 @@ class _HybridCandidateContext:
 
     ``mesh`` associations are keyed by the candidate's own working geometry.
     ``publication_guard`` is the candidate's own freshness check; it is invoked
-    exactly once, by finalization.  ``phase_seconds`` accumulates this
+    exactly once, by finalization, with the actual final mesh and registry
+    after copying, repair and source remapping, and the finalization callback.
+    ``phase_seconds`` accumulates this
     candidate's own phases, ``extra_diagnostics`` carries selection-stage
     diagnostics that finalization merges into the published record, and
     ``runtime`` carries additive execution-only counters covering the nested
@@ -43,7 +45,7 @@ class _HybridCandidateContext:
     working_geometry: Any
     view: Any
     pipeline: Any
-    publication_guard: Callable[[str], None]
+    publication_guard: Callable[[str, Any, Any, Any], None]
     mesh: Any
     preflight: tuple
     preparation_report: Any

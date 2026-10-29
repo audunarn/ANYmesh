@@ -567,6 +567,20 @@ def native_mutable_t3_insert(
     if not _complete_native_v2_available():
         return None
     kernel = _compiled.native_v2_mutable_t3_insert
+    # Capture the finite origin slice BEFORE the kernel's first callback.
+    # Validation keeps its historical late dispatch; changed/opaque services
+    # retain their own exception rather than acquiring refusal provenance.
+    from . import _t3_insertion_result as insertion_result
+    from types import FunctionType
+    origin_namespace = vars(insertion_result)
+    provenance = origin_namespace['_CAVITY_PROVENANCE']
+    declared_validator, declared_codes, origin_helper, origin_code = provenance
+    validator_code = declared_codes[0]
+    entry_validator = insertion_result.validate_insertion
+    entry_code = entry_validator.__code__ if type(entry_validator) is FunctionType else None
+    entry_defaults = entry_validator.__defaults__ if type(entry_validator) is FunctionType else None
+    entry_keywords = entry_validator.__kwdefaults__ if type(entry_validator) is FunctionType else None
+    rejected_type = insertion_result._RejectedInsertionCavity
     callback_error = None
 
     def checkpoint(phase):
@@ -616,12 +630,35 @@ def native_mutable_t3_insert(
         if message.startswith(_NATIVE_V2_GEOMETRY_LIMITED_PREFIX):
             return None
         raise
-    from ._t3_insertion_result import validate_insertion
-
-    return validate_insertion(
-        made_points, made_triangles, made_protected, value, raw_rows,
-        diagnostics, orientation_oracle, checkpoint,
-    )
+    if (origin_namespace.get('validate_insertion') is not entry_validator
+            or type(entry_validator) is FunctionType and (
+                entry_validator.__code__ is not entry_code
+                or entry_validator.__defaults__ is not entry_defaults
+                or entry_validator.__kwdefaults__ is not entry_keywords)):
+        raise MeshError("insertion validator service changed during callback")
+    validate_insertion = entry_validator
+    try:
+        return validate_insertion(
+            made_points, made_triangles, made_protected, value, raw_rows,
+            diagnostics, orientation_oracle, checkpoint,
+        )
+    except rejected_type as error:
+        unchanged = (origin_namespace.get('_CAVITY_PROVENANCE') is provenance
+            and origin_namespace.get('_CAVITY_VALIDATOR') is declared_validator
+            and origin_namespace.get('_CAVITY_CODES') is declared_codes
+            and origin_namespace.get('_genuine_cavity_rejection') is origin_helper
+            and origin_namespace.get('_RejectedInsertionCavity') is rejected_type
+            and type(declared_validator) is FunctionType
+            and validate_insertion is declared_validator
+            and origin_namespace.get('validate_insertion') is declared_validator
+            and declared_validator.__code__ is validator_code
+            and type(origin_helper) is FunctionType and origin_helper.__code__ is origin_code
+            and origin_helper.__defaults__ is None and origin_helper.__kwdefaults__ is None)
+        if (error is callback_error or not unchanged or not origin_helper(
+                error, validate_insertion, made_points, made_triangles, value, raw_rows)):
+            raise  # Caller/oracle/opaque-service exceptions are never proposal proof.
+        from .native_v2 import _GeometryLimited
+        raise _GeometryLimited(str(error)) from error
 
 
 def _orientation_rows(

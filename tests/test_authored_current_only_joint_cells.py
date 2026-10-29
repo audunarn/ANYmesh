@@ -200,8 +200,8 @@ def test_supplied_association_is_pinned_before_owner_callbacks(mutation):
 
 
 @pytest.mark.parametrize("mutation", (
-    "repair_component", "corrupt_component", "repair_mesh", "corrupt_mesh",
-))
+    "repair_component", "corrupt_component", "corrupt_mesh",
+))  # repair_mesh removed: >=300 s native run (owner decision 2026-10-28)
 def test_component_and_mesh_are_pinned_before_owner_callbacks(mutation):
     geometry, valid_component, mesh, registry, faces = candidate()
     component = (replace(valid_component, current_face_ids=())
