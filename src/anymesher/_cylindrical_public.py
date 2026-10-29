@@ -9,6 +9,14 @@ from anygeometry import (
     EllipticArc, CylinderIntersectionCurve, query_joint_edge,
     CylinderAtlasPolicy, CylinderPatchPolicy,
 )
+try:                                    # the retained plane-chart trace family (ANYgeometry plane_ruled_support/1)
+    from anygeometry import BezierQuadricCurve
+except ImportError:                     # an older owner never produces that family
+    BezierQuadricCurve = None
+
+# Exact analytic trace families that activate (and generalize) the trimmed-cylinder route.
+EXACT_TRACE_CURVES = tuple(item for item in (EllipticArc, CylinderIntersectionCurve, BezierQuadricCurve)
+                           if item is not None)
 
 from ._cylindrical_atlas import prepare_cylindrical_atlas
 from ._cylindrical_patch import prepare_cylindrical_patch
@@ -29,7 +37,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
     owner=_owner(geometry)
     activated = remaining if native_options.point_placement == "frontal_delaunay" else {
         face for face in remaining
-        if geometry.faces[face].holes or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        if geometry.faces[face].holes or any(isinstance(geometry.edges[use.edge].curve, EXACT_TRACE_CURVES)
                or query_joint_edge(owner,use.edge).declared
                for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
                for use in loop)}
@@ -66,7 +74,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
         # Its finite evidence scope must not become a primary workflow count cap.
         exceeds_legacy_scope = occurrences > legacy_policy.max_occurrences or (
             len(selected) > 1 and len(selected) > legacy_policy.max_face_uses)
-        generalized=exceeds_legacy_scope or any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        generalized=exceeds_legacy_scope or any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve, EXACT_TRACE_CURVES)
             for face in component for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
             for use in loop)
         generalized=generalized or any(
