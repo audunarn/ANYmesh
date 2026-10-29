@@ -315,3 +315,23 @@ scientific limits, full/native/platform/distribution gates and Workflow 1 NO_GO
 remain unchanged. No release, production-provider promotion, push, tag or merge
 into either live main is implied. Development wheel versions retain the current
 main values and are identified by hashes, not treated as published artifacts.
+
+### Hosted delivery repair — 2026-10-29
+
+The first reconciled-head CI results are retained. The existing development smoke
+used geometry dda8c70a, which lacks the newer main's _detached_geometry_read
+module and prevented collection. Only that development pin and the new
+solid-volume owner pin now select immutable geometry
+28c359ed10d82bba7326d2d298e06aaa7077aa1b. All six historical qualification pins
+in ci.yml remain a534b0d3 unchanged. The owner delivery repair removes exactly
+one terminal blank line rejected by the PR whitespace gate; its complete AST and
+source coordinates are unchanged, and original bytes/evidence are retained.
+
+Against the paired current owner, local development smoke ran 19 tests: 18 passed
+and one failed (test_final_corner_edits_keep_owner_proof_through_attempt_clone,
+prepared partition source lineage stale/changed). One isolated frozen-main pair
+comparison reproduced the identical failure on geometry e7c2c419 / mesh d56cd2e1
+with an identical test file. This is an unresolved committed-main gate, not a
+waiver or a Workflow 2 numerical failure reclassification; no unrelated repair or
+test suppression was performed. Evidence and exact commands are under the
+hosted-reconciled-20261029-a1/delivery-repair record and its process references.
