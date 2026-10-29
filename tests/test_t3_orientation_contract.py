@@ -39,7 +39,7 @@ def test_positive_rows_are_rotated_to_the_canonical_start_keeping_order_and_owne
 def test_winding_repair_is_an_explicit_opt_in():
     topology = MutableT3Topology(POINTS, [(0, 1, 2), (3, 2, 0)], [], normalize_winding=True)
     assert all(value > 0. for value in rows_orientation(topology))
-    assert topology.triangles.tolist() == [[0, 1, 2], [0, 3, 2]]
+    assert topology.triangles.tolist() == [[0, 1, 2], [0, 2, 3]]
 
 
 def test_normalize_winding_must_be_a_bool():
