@@ -275,12 +275,36 @@ class Mesh:
         if local.kind == "edge":
             nodes.extend(self.offset_nodes_of_edge.get(local.id, ()))
         elif local.kind == "vertex":
+            axis_nodes = set(nodes)
+            paired: Dict[int, set[int]] = {}
+            coupled = set()
+            for coupling in self.couplings.values():
+                coupled.add(coupling.beam_node)
+                if coupling.is_node_to_node:
+                    paired.setdefault(coupling.beam_node, set()).add(coupling.plate_node)
             for offset_nodes, edge_nodes in (
                 (self.offset_nodes_of_edge.get(edge_id, ()), sequence)
                 for edge_id, sequence in self.nodes_of_edge.items()
             ):
-                for offset_node, edge_node in zip(offset_nodes, edge_nodes):
-                    if edge_node in nodes and offset_node not in nodes:
+                if not axis_nodes.intersection(edge_nodes):
+                    continue
+                aligned = len(offset_nodes) == len(edge_nodes)
+                for index, offset_node in enumerate(offset_nodes):
+                    masters = paired.get(offset_node)
+                    if masters is not None:
+                        at_vertex = bool(axis_nodes.intersection(masters))
+                    elif not aligned:
+                        raise MeshError(
+                            f"sparse offset node {offset_node} has no exact node-to-node coupling for vertex support"
+                        )
+                    elif offset_node in coupled:
+                        # An interpolating attachment is not any one of its
+                        # masters' physical points. Never turn it into a pair.
+                        at_vertex = False
+                    else:
+                        # Older aligned meshes did not persist couplings.
+                        at_vertex = edge_nodes[index] in axis_nodes
+                    if at_vertex and offset_node not in nodes:
                         nodes.append(offset_node)
         return sorted(set(nodes))
 

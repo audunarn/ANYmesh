@@ -32,3 +32,44 @@ def validated_complementary_trim_domains(
         and result.complementary is True
         and result.boundary is TrimBoundaryContact.CURVE
     )
+
+
+def validated_prepared_partition_disjoint_interiors(
+    geometry, first, second, *, cancellation_check=None,
+) -> bool:
+    """Consume only the owner's live common-parent partition/injectivity proof.
+
+    Unknown or unavailable capability leaves the ordinary overlap audit intact.
+    A shared support, historical replacement or trim metadata grants no proof.
+    """
+    import anygeometry as owner
+    from .errors import MeshError
+    query = getattr(owner, 'query_prepared_partition_disjoint_interiors', None)
+    if query is None:
+        return False
+    result = query(geometry, geometry.handle('face', first),
+                   geometry.handle('face', second), cancellation_check=cancellation_check)
+    if type(result) is not bool:
+        raise MeshError('owner partition query returned a malformed classification')
+    return result
+
+
+def validated_same_support_material_disjoint_interiors(
+    geometry, first, second, *, cancellation_check=None,
+) -> bool:
+    """Consume a fresh owner material-domain proof, independent of lineage.
+
+    Unsupported or unavailable capability retains the actual overlap audit.
+    Only an exact bool classification is accepted; owner refusal, mutation and
+    caller cancellation exceptions propagate without translation or fallback.
+    """
+    import anygeometry as owner
+    from .errors import MeshError
+    query = getattr(owner, 'query_same_support_material_disjoint_interiors', None)
+    if query is None:
+        return False
+    result = query(geometry, geometry.handle('face', first),
+                   geometry.handle('face', second), cancellation_check=cancellation_check)
+    if type(result) is not bool:
+        raise MeshError('owner same-support material query returned a malformed classification')
+    return result

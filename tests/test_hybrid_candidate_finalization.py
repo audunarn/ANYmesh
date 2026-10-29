@@ -148,6 +148,22 @@ def _deferred_candidate(geometry, **extra):
     return result
 
 
+def test_publication_guard_receives_actual_replacement_mesh_and_final_registry():
+    geometry, _face = _plate_model()
+    carrier = _deferred_candidate(geometry)
+    replacement = deepcopy(carrier.mesh)
+    carrier = carrier.with_mesh(replacement)
+    original_guard, seen = carrier.publication_guard, []
+    def observe(stage, mesh, registry, cancellation_check):
+        seen.append((mesh, registry))
+        original_guard(stage, mesh, registry, cancellation_check)
+    carrier.publication_guard = observe
+    result = hybrid._finalize_hybrid_candidate(carrier)
+    assert len(seen) == 1
+    assert seen[0][0] is result.mesh is replacement
+    assert seen[0][1] is result.mesh.boundary_registry
+
+
 def test_with_mesh_invalidates_prior_admission_record_by_default():
     geometry, _face = _plate_model()
     carrier = _deferred_candidate(geometry)

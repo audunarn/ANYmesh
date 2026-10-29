@@ -13,6 +13,8 @@ import numpy as np
 
 from . import native_cpp as _native_cpp
 from .core import MeshCore, corner_edges
+from ._stage_cancellation import (check_stage as _check_cancellation,
+    preserve_stage_cancellation as _preserve_stage_cancellation, stage_scope as _stage_scope)
 from .errors import MeshError
 from .native import NativeBoundary
 from .native_v2 import NativeMeshingOptions, frontal_delaunay_refine
@@ -354,6 +356,34 @@ def _canonical_segments(
         return (*min(first, second), *max(first, second))
 
     return tuple(sorted(raw, key=key))
+
+
+def _protected_diametral_seed_filter(points, outer, holes, constraints, *,
+        cancellation_check=None):
+    """Keep free seeds compatible with native protected-segment insertion.
+
+    Native frontal insertion refuses strict diametral encroachment of fixed
+    segments. Apply that same predicate to generated seeds before the initial
+    CDT, so reducing interior spacing does not bypass its boundary transition.
+    Mandatory input rows are deliberately not accepted by this helper.
+    """
+    points = np.asarray(points, dtype=float).reshape((-1, 2))
+    segments = _canonical_segments(outer, holes, constraints)
+    if not len(points) or not segments:
+        return points.copy()
+    radius = max(float(np.linalg.norm(b-a)) for a, b in segments) * .5
+    grid = _SegmentGrid(segments, radius)
+    retained = []
+    for index, point in enumerate(points):
+        if cancellation_check is not None and index % 256 == 0:
+            _check_cancellation(cancellation_check, 'native protected free-seed clearance')
+        key = tuple(np.floor(point / grid.cell_size).astype(int))
+        if any(float((point-first) @ (point-second)) < 0.
+               for first, second in (grid.segments[segment]
+                   for segment in grid.cells.get(key, ()))):
+            continue
+        retained.append(index)
+    return points[retained].copy()
 
 
 def _domain_contains(
@@ -935,7 +965,7 @@ def _target_points(
     distance_checks = 0
     for row, y in enumerate(ys):
         if cancellation_check is not None and row % 256 == 0:
-            cancellation_check("native target lattice")
+            _check_cancellation(cancellation_check, "native target lattice")
         offset = 0.5 * x_spacing if row % 2 else 0.0
         xs = np.arange(
             minimum[0] + 0.5 * x_spacing + offset,
@@ -1557,6 +1587,418 @@ def _physical_quality_candidate_from_xyz(candidate, settings, xyz):
                    aspect_ratios=quality.triangles.aspect_ratio)
 
 
+# Only the canonical, callback-free chart quality implementation can omit work
+# whose output the physical scorer immediately replaces. Unknown contexts keep
+# the complete original composition, including its diagnostics and failures.
+_COMBINED_NUMPY_NAMES=("abs","all","allclose","any","arccos","argmax","argmin",
+    "array_equal","asarray","ascontiguousarray","bincount","clip","column_stack",
+    "concatenate","count_nonzero","degrees","finfo","flatnonzero","float64",
+    "geterr","int64","isfinite","max","maximum","mean","min","minimum",
+    "ndarray","ones","ptp","sum","zeros","unique","sort","stack","empty",
+    "argsort","searchsorted","dtype","void","lexsort","repeat","roll","arange","where","errstate")
+
+
+def _physical_full_quality_services():
+    from . import quality_v2
+    from ._material_region_binding import _boundary_callable_pin
+    pins = tuple(_boundary_callable_pin(function) for function in
+        (evaluate_quality,quality_v2.validate_mesh,quality_v2.mesh_quality,quality_v2.evaluate_quality,
+         quality_v2._certified_linear_validity,quality_v2._validate_mesh_with_triangle_metrics))
+    return None if any(pin is None for pin in pins) else pins
+
+
+def _combined_quality_context():
+    functions=tuple(getattr(np,name) for name in _COMBINED_NUMPY_NAMES)+(_make_candidate,_triangle_quality,_native_cpp.native_element_quality,
+        _native_cpp.triangle_edge_incidence,np.linalg.norm,acos,
+        _quality_patch_reuse_available,_quality_growth_bindings_available,
+        _physical_quality_candidate_from_xyz,_physical_chart_invalid_count,
+        _combined_quality_context,_physical_full_quality_services,_QualityCandidate.__init__,SurfaceMeshOptions.__getattribute__)
+    return (tuple(getattr(np,name) for name in _COMBINED_NUMPY_NAMES),
+        np.linalg,_native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE,_native_cpp._compiled,getattr(_native_cpp._compiled,'element_quality',None),
+        getattr(_native_cpp._compiled,'triangle_adjacency',None),_QualityCandidate,
+        tuple((f,getattr(f,'__code__',None),getattr(f,'__defaults__',None),
+               tuple(sorted((getattr(f,'__kwdefaults__',None) or {}).items()))) for f in functions))
+
+
+def _physical_chart_invalid_count(points,triangles):
+    """Same signed-area/short-edge law and arithmetic as _triangle_quality."""
+    scale=max(float(np.ptp(points,axis=0).max()),1.0) if len(points) else 1.0
+    area_tolerance=np.finfo(np.float64).eps*scale*scale*32.0
+    if _native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE:
+        coordinates=points[triangles]
+        lengths=np.linalg.norm(coordinates[:,(1,2,0)]-coordinates,axis=2)
+        first=coordinates[:,1]-coordinates[:,0]
+        second=coordinates[:,2]-coordinates[:,0]
+        double_area=first[:,0]*second[:,1]-first[:,1]*second[:,0]
+        minimum_length=np.min(lengths,axis=1)
+        return int(np.count_nonzero((double_area<=area_tolerance)|(minimum_length<=0.0)))
+    invalid=0
+    for triangle in triangles:
+        coordinates=points[triangle]
+        lengths=np.asarray((np.linalg.norm(coordinates[1]-coordinates[0]),
+            np.linalg.norm(coordinates[2]-coordinates[1]),
+            np.linalg.norm(coordinates[0]-coordinates[2])),dtype=np.float64)
+        first=coordinates[1]-coordinates[0];second=coordinates[2]-coordinates[0]
+        double_area=float(first[0]*second[1]-first[1]*second[0])
+        if double_area<=area_tolerance or float(np.min(lengths))<=0.0:invalid+=1
+    return invalid
+
+
+_COMBINED_QUALITY_CONTEXT=_combined_quality_context()
+from .quality_v2 import triangle_quality as _reference_physical_triangle_quality
+_REFERENCE_PHYSICAL_TRIANGLE_QUALITY=(_reference_physical_triangle_quality,_reference_physical_triangle_quality.__code__)
+_REFERENCE_PHYSICAL_REPORT_SERVICES=tuple((function,function.__code__) for function in
+    (_published_quality_report,_quality_threshold_report,_physical_chart_invalid_count))
+_REFERENCE_PHYSICAL_FULL_SERVICES = _physical_full_quality_services()
+
+
+_PAIRING_NO_VALUE=np._NoValue
+
+def _physical_pairing_services():
+    """Finite callback-free calculation slice added by physical pairing."""
+    from . import _physical_pairing_topology as pairing, _physical_corner_cavity as cavity
+    from . import native_v2, _physical_t3_refinement, _physical_mixed_sizing as sizing, quality_v2
+    from . import _physical_shape_patches as shape, _physical_mixed_repair as mixed
+    from ._analytic_metric_chart import AnalyticMetricChart
+    from ._material_region_binding import _boundary_callable_pin
+    topology = vars(native_v2).get('MutableT3Topology')
+    guard_kind = vars(shape).get('_OriginalStars')
+    if type(topology) is not type or type(guard_kind) is not type:
+        return None
+    functions = (vars(pairing).get('repair_two_triangle_fans'),
+        vars(pairing).get('repair_active_triangle_flips'),
+        vars(cavity).get('_core'), vars(cavity).get('_score'),
+        vars(_physical_t3_refinement).get('_alternative_progress'),
+        vars(topology).get('__init__'), vars(topology).get('flip_edge'),
+        vars(native_v2).get('orient2d'), vars(pairing).get('replace'),
+        _quality_threshold_report, _published_quality_report, _physical_chart_invalid_count,
+        quality_v2.triangle_quality, quality_v2.quad_candidate_quality,
+        vars(AnalyticMetricChart).get('evaluate'),
+        *(vars(shape).get(name) for name in ('_check_context','_capture_context','_patch','_world_core','_admissible','repair_shape_patches','_eligible_chart','_score','_positive','_closed_mixed_link','_alternative_progress','replace','_STAR_CALL')),
+        *(vars(guard_kind).get(name) for name in ('__init__','__call__','__setattr__')),
+        *(vars(mixed).get(name) for name in ('_batch_chart','_growth_descent','_project_growth_halfspaces','_constraint_operation_pin','_constraint_numpy_current','_constraint_topology','_prepare_constraint_layout','_constraint_growth_vector','_physical_constraint_values','repair_mixed_core_coordinates','repair_mixed_coordinates')),
+        np.abs,np.all,np.any,np.argmax,np.array,np.column_stack,np.frombuffer,np.hypot,np.max,np.min,np.minimum,np.sqrt,np.sum,np.where,np.zeros,np.zeros_like,
+        *(vars(sizing).get(name) for name in ('_edges','_boundary','_positive','_eligible_chart','_cover','_frontier','_key','_children','_assemble','_score','_covered_report','_shape_clear','_debt_closure','repair_mixed_sizing','_star_objective','_place_new_rows','_retriangulate_cavity','_neighbour_sizes','_search_order')),
+        np.asarray,np.array_equal,np.flatnonzero,np.roll,np.unique,np.linalg.norm,
+        np.vstack,np.concatenate,np.arange,np.full,np.ones,np.log,np.maximum,np.isfinite,np.empty)
+    def owned_pin(function):
+        from types import FunctionType,BuiltinFunctionType
+        from ._material_region_binding import _boundary_literal_pin,_BOUNDARY_ARRAY_DISPATCH_TYPE
+        def literal(value):
+            if value is _PAIRING_NO_VALUE:return ('numpy_no_value',id(_PAIRING_NO_VALUE))
+            kind=type(value)
+            if not (kind is type(None) or kind is bool or kind is int or kind is str or kind is bytes or kind is float or kind is tuple and not value):return None
+            return _boundary_literal_pin(value)
+        if (type(function) is BuiltinFunctionType or type(function) is np.ufunc):return ('native',id(function),id(type(function)))
+        if type(function) is _BOUNDARY_ARRAY_DISPATCH_TYPE:
+            wrapped=object.__getattribute__(function,'__wrapped__')
+            if (type(wrapped) is BuiltinFunctionType or type(wrapped) is np.ufunc):return ('dispatch_native',id(function),id(wrapped),id(type(wrapped)))
+            if type(wrapped) is not FunctionType:return None
+            identity=('dispatch',id(function));function=wrapped
+        elif type(function) is FunctionType:identity=('python',)
+        else:return None
+        defaults=function.__defaults__;keywords=function.__kwdefaults__
+        if defaults is not None and type(defaults) is not tuple:return None
+        if keywords is not None and type(keywords) is not dict:return None
+        positional=tuple(literal(v) for v in defaults) if defaults is not None else ()
+        named=tuple((_boundary_literal_pin(k),literal(v)) for k,v in keywords.items()) if keywords is not None else ()
+        if any(v is None for v in positional) or any(k is None or v is None for k,v in named):return None
+        return identity+(id(function),id(function.__code__),positional,named)
+    pins = tuple(owned_pin(function) for function in functions)
+    return None if any(pin is None for pin in pins) else (id(topology),id(vars(pairing).get('np')),id(vars(pairing).get('Counter')),id(vars(sizing).get('np')),id(vars(sizing).get('Counter')),id(vars(sizing).get('replace')),id(vars(shape).get('np')),id(vars(mixed).get('np')),id(vars(mixed).get('Fraction')),id(np.float64),id(np.int64),id(np.ndarray),tuple(id(vars(guard_kind).get(name)) for name in ('_data','__getattribute__','__getattr__','__slots__')),tuple(id(vars(SurfaceMeshOptions).get(name)) for name in ('__getattribute__','__getattr__','min_angle','max_angle','min_scaled_jacobian','max_aspect_ratio','max_warpage','max_element_growth')),pins)
+
+
+_REFERENCE_PHYSICAL_PAIRING_SERVICES = None  # frozen after all owned functions are defined
+_PHYSICAL_FULL_BUILDER_REF = _physical_full_quality_services
+_PHYSICAL_FULL_BUILDER_CODE = _physical_full_quality_services.__code__
+_PHYSICAL_PAIRING_BUILDER_REF = _physical_pairing_services
+_PHYSICAL_PAIRING_BUILDER_CODE = _physical_pairing_services.__code__
+_COMBINED_CANDIDATE_MAKER=_make_candidate
+_COMBINED_PHYSICAL_SCORER=_physical_quality_candidate_from_xyz
+
+
+def _make_physical_candidate(points,triangles,settings,xyz,*,flips=0,moved_nodes=(),
+                             added_points=0,rounds=0,statistics=None,
+                             _candidate_maker=None,_physical_scorer=None):
+    """Equivalent final candidate without discarded canonical chart scoring."""
+    # Resolve the outer scorer before calling the maker, as in the old
+    # nested composition; the observer passes its already captured references.
+    scorer=_physical_quality_candidate_from_xyz if _physical_scorer is None else _physical_scorer
+    maker=_make_candidate if _candidate_maker is None else _candidate_maker
+    def original():
+        metadata=dict(flips=flips,moved_nodes=moved_nodes,added_points=added_points,
+                      rounds=rounds,settings=settings)
+        if statistics is not None:metadata['statistics']=statistics
+        return scorer(maker(points,triangles,**metadata),settings,xyz)
+    try: known_context=_combined_quality_context()==_COMBINED_QUALITY_CONTEXT
+    except (AttributeError,TypeError,ValueError):known_context=False
+    if (not known_context or maker is not _COMBINED_CANDIDATE_MAKER
+            or scorer is not _COMBINED_PHYSICAL_SCORER
+            or type(points) is not np.ndarray or type(triangles) is not np.ndarray
+            or type(xyz) is not np.ndarray
+            or points.dtype!=np.float64 or triangles.dtype!=np.int64
+            or points.ndim!=2 or points.shape[1]!=2
+            or triangles.ndim!=2 or triangles.shape[1]!=3
+            or xyz.dtype!=np.float64 or xyz.shape!=(len(points),3)
+            or not points.flags.c_contiguous or not triangles.flags.c_contiguous
+            or not len(triangles) or not len(points)
+            or type(settings) is not SurfaceMeshOptions
+            or any(type(getattr(settings,name)) not in (int,float) for name in
+                ('min_angle','max_angle','min_scaled_jacobian','max_aspect_ratio','max_element_growth'))
+            or type(settings.prefer_quality_policy) is not bool
+            or (statistics is not None and (type(statistics) is not dict
+                or type(statistics.get('quality_evaluations',0)) is not int))
+            or np.geterr()!=dict(divide='warn',over='warn',under='ignore',invalid='warn')):
+        return original()
+    # Extreme/nonfinite operands retain original warning/refusal order. The
+    # magnitude ceiling is fast-path eligibility only, never a validity gate.
+    if (not np.isfinite(points).all() or not np.isfinite(xyz).all()
+            or np.max(np.abs(points))>1.e100
+            or np.min(triangles)<0 or np.max(triangles)>=len(points)):
+        return original()
+    # Nonmanifold connectivity keeps the old native incidence diagnostics.
+    edges=np.sort(np.concatenate((triangles[:,(0,1)],triangles[:,(1,2)],triangles[:,(2,0)])),axis=1)
+    if np.any(np.unique(edges,axis=0,return_counts=True)[1]>2):return original()
+    invalid=_physical_chart_invalid_count(points,triangles)
+    if invalid:return original()
+    if statistics is not None:statistics['quality_evaluations']=statistics.get('quality_evaluations',0)+1
+    candidate=_QualityCandidate(np.ascontiguousarray(points,dtype=np.float64),
+        np.ascontiguousarray(triangles,dtype=np.int64),{'invalid_element_count':invalid},
+        (),np.empty(0,dtype=np.float64),flips=flips,moved_nodes=moved_nodes,
+        added_points=added_points,rounds=rounds)
+    return scorer(candidate,settings,xyz)
+
+
+def _mixed_preview_key(core):
+    return tuple(getattr(core, name).tobytes() for name in (
+        'node_coordinates', 'node_ids', 'triangle_connectivity', 'quad_connectivity',
+        'triangle_ids', 'quad_ids', 'node_active', 'triangle_active', 'quad_active'))
+
+
+def _analytic_preview_chart(evaluator):
+    """Scheduler eligibility is independent of NN-only coordinate batching."""
+    from ._analytic_metric_chart import AnalyticMetricChart
+    from ._material_region_binding import MaterialRegionBinding
+    chart = getattr(evaluator, '__self__', None)
+    if (type(chart) is not AnalyticMetricChart
+            or getattr(evaluator, '__func__', None) is not AnalyticMetricChart.evaluate
+            or type(chart.region_binding) is not MaterialRegionBinding
+            or not chart.region_binding.requires_curvilinear):
+        return None
+    chart._current()
+    return chart
+
+
+def _curvilinear_mixed_preview(best, triangulation, settings, evaluator, explicit, check, *, topology_remaining=None, insertion_remaining=None):
+    from types import FunctionType
+    # Capture original declarations before any actual operation/callback. A
+    # callback cannot renew a replacement builder's authority via module aliases.
+    full_builder, full_code = _PHYSICAL_FULL_BUILDER_REF, _PHYSICAL_FULL_BUILDER_CODE
+    pairing_builder, pairing_code = _PHYSICAL_PAIRING_BUILDER_REF, _PHYSICAL_PAIRING_BUILDER_CODE
+    full_services = _REFERENCE_PHYSICAL_FULL_SERVICES
+    pairing_services = _REFERENCE_PHYSICAL_PAIRING_SERVICES
+    chart = getattr(evaluator, '__self__', None)
+    binding = getattr(chart, 'region_binding', None)
+    if not (settings.recombine and binding is not None and binding.requires_curvilinear):
+        return None
+    from ._physical_mixed_repair import repair_mixed_coordinates
+    chart._current()
+    xyz = evaluator(best.points)
+    pairing_triangles = best.triangles
+    fan_work = 0; fan_facts = None
+    # General curvilinear owner scheduling; NN-only coordinate batching remains
+    # independent. Unknown/callback routes retain their original sequence.
+    if (topology_remaining is not None and check is None and chart.check is None
+            and _analytic_preview_chart(evaluator) is chart
+            and _physical_full_quality_services is full_builder
+            and type(full_builder) is FunctionType
+            and full_builder.__code__ is full_code
+            and full_builder.__defaults__ is None
+            and full_builder.__kwdefaults__ is None
+            and _physical_pairing_services is pairing_builder
+            and type(pairing_builder) is FunctionType
+            and pairing_builder.__code__ is pairing_code
+            and pairing_builder.__defaults__ is None
+            and pairing_builder.__kwdefaults__ is None
+            and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+            and pairing_builder() == pairing_services):
+        from ._physical_pairing_topology import repair_two_triangle_fans
+        pinned = _fixed_rows(best.points, triangulation.segments,
+            np.empty((0, 2)) if explicit is None else explicit)
+        pairing_triangles, fan_work, fan_facts = repair_two_triangle_fans(
+            best.points, best.triangles, xyz, settings, pinned,
+            triangulation.segments, topology_remaining=topology_remaining)
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical pairing calculation changed during recovery')
+        # No chart/source authority is inferred from a detached numerical pass.
+        chart._current()
+        fresh = evaluator(best.points)
+        if not np.array_equal(fresh, xyz):
+            raise MeshError('physical fan recovery owner coordinates changed')
+        xyz = fresh
+    core = MeshCore(xyz, pairing_triangles)
+    report, _ = _qualified_recombination(core, triangulation.segments,
+        settings, check, physical_growth=True)
+    fixed = _fixed_rows(best.points, triangulation.segments,
+                        np.empty((0, 2)) if explicit is None else explicit)
+    if fan_facts is not None:
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical pairing calculation changed before mixed recovery')
+        from ._physical_pairing_topology import repair_active_triangle_flips
+        report, flip_work, flip_facts = repair_active_triangle_flips(
+            best.points, report, settings, triangulation.segments,
+            topology_remaining=max(0,topology_remaining-fan_work))
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical pairing calculation changed during mixed recovery')
+        fan_work += flip_work
+        fan_facts = dict(two_triangle_fans=fan_facts,active_triangle_flips=flip_facts)
+        pairing_triangles = report.mesh.triangle_connectivity
+        chart._current()
+    points = best.points
+    shape_facts=None
+    if fan_facts is not None and insertion_remaining is not None:
+        # Known owned services already passed the finite entry inventory.
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical shape calculation changed before dispatch')
+        from ._physical_shape_patches import repair_shape_patches
+        points,report,shape_facts=repair_shape_patches(points,report,settings,evaluator,fixed,cancellation_check=check)
+        pairing_triangles=report.mesh.triangle_connectivity
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical shape calculation changed after dispatch')
+    sizing_work = sizing_nodes = 0; sizing_facts = None
+    if fan_facts is not None and insertion_remaining is not None:
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical pairing calculation changed before published sizing')
+        from ._physical_mixed_sizing import repair_mixed_sizing
+        points, report, sizing_work, sizing_nodes, sizing_facts = repair_mixed_sizing(
+            points, report, settings, evaluator, triangulation.segments,
+            topology_remaining=max(0,topology_remaining-fan_work),
+            insertion_remaining=insertion_remaining)
+        if not (_physical_full_quality_services is full_builder
+                and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code
+                and full_builder.__defaults__ is None
+                and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder
+                and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code
+                and pairing_builder.__defaults__ is None
+                and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+            and full_builder() == full_services
+                and pairing_builder() == pairing_services):
+            raise MeshError('physical pairing calculation changed during published sizing')
+        pairing_triangles = report.mesh.triangle_connectivity
+    current_quality = _quality_threshold_report(evaluate_quality(report.mesh),settings)
+    _, current_growth_poor = _published_growth(report.mesh,settings.max_element_growth)
+    if not (current_quality['accepted'] and not current_growth_poor):
+        points, report = repair_mixed_coordinates(points, pairing_triangles,
+            report, settings, evaluator, fixed, cancellation_check=check)
+    xyz = evaluator(points)
+    old = report.mesh
+    physical = MeshCore(xyz, old.triangle_connectivity, old.quad_connectivity,
+        node_ids=old.node_ids, triangle_ids=old.triangle_ids, quad_ids=old.quad_ids,
+        node_active=old.node_active, triangle_active=old.triangle_active, quad_active=old.quad_active,
+        owner_table=old.owner_table,node_owner_handles=old.node_owner_handles,
+        triangle_owner_handles=old.triangle_owner_handles,quad_owner_handles=old.quad_owner_handles)
+    report = replace(report, mesh=physical)
+    corner_work=fan_work+sizing_work; corner_facts=fan_facts
+    if topology_remaining is not None:
+        from ._physical_mixed_repair import _batch_chart
+        if _batch_chart(evaluator,check) is not None:
+            from ._physical_corner_cavity import repair_corner_cavities
+            points,report,extra_work,extra_facts=repair_corner_cavities(points,report,settings,
+                evaluator,fixed,triangulation.segments,topology_remaining=max(0,topology_remaining-fan_work-sizing_work))
+            corner_work+=extra_work
+            corner_facts=dict(two_triangle_fans=fan_facts,other=extra_facts)
+            physical=report.mesh
+    quality = _quality_threshold_report(evaluate_quality(physical), settings)
+    growth, poor = _published_growth(physical, settings.max_element_growth)
+    chart._current()
+    return dict(accepted=quality['accepted'] and not poor,
+        growth=growth, growth_poor=tuple(sorted(poor)),
+        triangles=physical.triangle_connectivity.copy(),corner_work=corner_work,corner_facts=corner_facts,
+        sizing_nodes=sizing_nodes,sizing_facts=sizing_facts,shape_facts=shape_facts,
+        points=points.copy(), points_key=points.tobytes(),
+        triangles_key=physical.triangle_connectivity.tobytes(), segments_key=triangulation.segments.tobytes(),
+        fixed=fixed, fixed_key=best.points[list(fixed)].tobytes(),
+        settings=settings, settings_key=repr(settings), report=report,
+        mesh_key=_mixed_preview_key(physical), quality=quality)
+
+
 def _polish_quality_candidate(candidate, protected_edges, explicit_points, settings, statistics):
     """Bounded local target improvement with exact fixed-node preservation.
 
@@ -1673,6 +2115,7 @@ def _optimize_candidate(
     prefer_growth: bool = False,
     statistics: dict[str, int] | None = None,
     polish_quality: bool = False,
+    protect_free_rows: bool = False,
 ) -> _QualityCandidate:
     """Run the fixed flip/smooth/flip sequence and publish only improvements."""
 
@@ -1728,6 +2171,8 @@ def _optimize_candidate(
         _candidate_selection_key(smoothed, prefer_growth=prefer_growth)
         < _candidate_selection_key(best, prefer_growth=prefer_growth)
         and smoothed.score[0] == 0
+        and (not protect_free_rows or _protected_free_rows_admissible(
+            smoothed.points, protected_edges, explicit_points))
     ):
         best = smoothed
     if not moved_nodes and first_flip.converged:
@@ -1759,10 +2204,23 @@ def _optimize_candidate(
         _candidate_selection_key(finished, prefer_growth=prefer_growth)
         < _candidate_selection_key(best, prefer_growth=prefer_growth)
         and finished.score[0] == 0
+        and (not protect_free_rows or _protected_free_rows_admissible(
+            finished.points, protected_edges, explicit_points))
     ):
         best = finished
-    return (_polish_quality_candidate(best, protected_edges, explicit_points, settings, statistics)
-            if polish_quality else best)
+    polished = (_polish_quality_candidate(best, protected_edges, explicit_points, settings, statistics)
+                if polish_quality else best)
+    return (best if protect_free_rows and not _protected_free_rows_admissible(
+        polished.points, protected_edges, explicit_points) else polished)
+
+
+def _protected_free_rows_admissible(points, protected_edges, explicit_points):
+    """Mandatory rows stay fixed; only detached movable rows need clearance."""
+    fixed = _fixed_rows(points, protected_edges, explicit_points)
+    free = np.asarray([row for row in range(len(points)) if row not in fixed], dtype=int)
+    retained = _protected_diametral_seed_filter(points[free], np.empty((0, 2)), (),
+        tuple(points[np.asarray(edge, dtype=int)] for edge in protected_edges))
+    return len(retained) == len(free)
 
 
 def _refinement_midpoints(
@@ -1845,6 +2303,7 @@ def _run_quality_path(
     preserve_protected_cells: bool = False,
     polish_quality: bool = False,
     protected_node_ids: Mapping[int, int] | None = None,
+    protect_generated_seed_disks: bool = False,
 ) -> dict[str, Any]:
     """Triangulate and optimize one detached deterministic point candidate."""
 
@@ -1877,9 +2336,9 @@ def _run_quality_path(
     triangulation_seconds = perf_counter() - triangulation_started
 
     optimization_started = perf_counter()
+    _check_cancellation(cancellation_check, "native surface triangulation complete")
     if cancellation_check is not None and name == "staggered_chart":
-        cancellation_check("native surface triangulation complete")
-        cancellation_check("native surface quality optimization start")
+        _check_cancellation(cancellation_check, "native surface quality optimization start")
     initial = _make_candidate(
         triangulation.points,
         triangulation.triangles,
@@ -1894,6 +2353,7 @@ def _run_quality_path(
         prefer_growth=preserve_protected_cells,
         statistics=work_statistics,
         polish_quality=polish_quality,
+        **({'protect_free_rows': True} if protect_generated_seed_disks else {}),
     )
     best = min(
         (initial, current),
@@ -1910,7 +2370,7 @@ def _run_quality_path(
         if not best.report["poor_element_ids"] or attempted_added_points >= point_budget:
             break
         if cancellation_check is not None:
-            cancellation_check(
+            _check_cancellation(cancellation_check,
                 f"native surface {name} refinement round {round_number} start"
             )
         remaining_budget = point_budget - attempted_added_points
@@ -1925,6 +2385,9 @@ def _run_quality_path(
             round_budget,
             preserve_protected_cells=preserve_protected_cells,
         )
+        if protect_generated_seed_disks:
+            additions = _protected_diametral_seed_filter(additions, outer, holes,
+                constraints, cancellation_check=cancellation_check)
         if not len(additions):
             break
         protected_nodes = {
@@ -1971,6 +2434,7 @@ def _run_quality_path(
             prefer_growth=preserve_protected_cells,
             statistics=work_statistics,
             polish_quality=polish_quality,
+            **({'protect_free_rows': True} if protect_generated_seed_disks else {}),
         )
         current = retry
         triangulation = retry_triangulation
@@ -1987,10 +2451,15 @@ def _run_quality_path(
             best = retry
             best_triangulation = retry_triangulation
         if cancellation_check is not None:
-            cancellation_check(
+            _check_cancellation(cancellation_check,
                 f"native surface {name} refinement round {round_number} complete"
             )
 
+    if protect_generated_seed_disks:
+        # The selected candidate may have smoothed rows or flipped cells.
+        # Native refinement must consume that same complete detached state.
+        best_triangulation = replace(best_triangulation,
+            points=best.points, triangles=best.triangles)
     return {
         "name": name,
         "generated": generated,
@@ -2037,6 +2506,7 @@ def _run_frontal_quality_path(
     preserve_spatial_refinement: bool = False,
     explicit_points: np.ndarray | None = None,
     coordinate_batch_size: int = 1,
+    protect_free_rows: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply native-v2 local insertion to the qualified legacy CDT seed."""
 
@@ -2044,6 +2514,43 @@ def _run_frontal_quality_path(
         raise MeshError("frontal_delaunay point placement requires target_size")
     started = perf_counter()
     physical_evaluator = metric_to_physical if preserve_spatial_refinement else None
+    from ._physical_mixed_repair import _batch_chart
+    early_pair=(settings.recombine and preserve_spatial_refinement
+        and settings.native_options.metric_mode == 'isotropic_spatial'
+        and _analytic_preview_chart(physical_evaluator) is not None)
+    # A canonical mixed repair owns the published-cell growth objective. Other
+    # routes retain the existing optional all-T3 native growth queue.
+    from types import FunctionType
+    from ._material_region_binding import _boundary_callable_pin
+    full_builder,full_code=_PHYSICAL_FULL_BUILDER_REF,_PHYSICAL_FULL_BUILDER_CODE
+    pairing_builder,pairing_code=_PHYSICAL_PAIRING_BUILDER_REF,_PHYSICAL_PAIRING_BUILDER_CODE
+    full_services,pairing_services=_REFERENCE_PHYSICAL_FULL_SERVICES,_REFERENCE_PHYSICAL_PAIRING_SERVICES
+    preview_ref,preview_code,preview_pin=_CANONICAL_MIXED_PREVIEW,_CANONICAL_MIXED_PREVIEW_CODE,_CANONICAL_MIXED_PREVIEW_PIN
+    qualify_ref,qualify_code,qualify_pin=_CANONICAL_QUALIFIED_RECOMBINATION,_CANONICAL_QUALIFIED_RECOMBINATION_CODE,_CANONICAL_QUALIFIED_RECOMBINATION_PIN
+    driver_ref,driver_code,driver_pin=_CANONICAL_FRONTAL_DRIVER,_CANONICAL_FRONTAL_DRIVER_CODE,_CANONICAL_FRONTAL_DRIVER_PIN
+    mixed_deferred=False; mixed_chart=None
+    if (early_pair and frontal_delaunay_refine is driver_ref and type(driver_ref) is FunctionType
+            and driver_ref.__code__ is driver_code and driver_pin is not None and _boundary_callable_pin(driver_ref)==driver_pin
+            and cancellation_check is None
+            and (automatically_seeded_shared_segments is None or type(automatically_seeded_shared_segments) is dict)
+            and _physical_full_quality_services is full_builder and type(full_builder) is FunctionType
+            and full_builder.__code__ is full_code and full_builder.__defaults__ is None and full_builder.__kwdefaults__ is None
+            and _physical_pairing_services is pairing_builder and type(pairing_builder) is FunctionType
+            and pairing_builder.__code__ is pairing_code and pairing_builder.__defaults__ is None and pairing_builder.__kwdefaults__ is None
+            and full_services is not None and pairing_services is not None
+                and full_builder()==full_services and pairing_builder()==pairing_services
+            and _curvilinear_mixed_preview is preview_ref and type(preview_ref) is FunctionType
+            and preview_ref.__code__ is preview_code and _boundary_callable_pin(preview_ref)==preview_pin
+            and _qualified_recombination is qualify_ref and type(qualify_ref) is FunctionType
+            and qualify_ref.__code__ is qualify_code and _boundary_callable_pin(qualify_ref)==qualify_pin):
+        from ._physical_mixed_sizing import _eligible_chart
+        mixed_chart=_eligible_chart(physical_evaluator)
+        mixed_deferred=mixed_chart is not None
+    if early_pair:
+        carried=baseline.get('_curvilinear_mixed_spent',0)
+        if (type(carried) is not int or carried!=0
+                or baseline.get('_curvilinear_mixed_preview') is not None):
+            raise MeshError('early pair scheduling requires a fresh baseline without carried mixed work')
     if physical_evaluator is not None:
         physical_baseline = _physical_quality_candidate(baseline['best'], settings, physical_evaluator)
         baseline = dict(baseline, best=physical_baseline,
@@ -2054,6 +2561,14 @@ def _run_frontal_quality_path(
         from ._analytic_metric_chart import AnalyticMetricChart
         owner_short_edge = (isinstance(getattr(metric_to_physical, '__self__', None), AnalyticMetricChart)
                             and getattr(metric_to_physical, '__func__', None) is AnalyticMetricChart.evaluate)
+    from ._material_region_binding import _material_native_dispatch_guard
+    if (not (_material_native_dispatch_guard is _MATERIAL_NATIVE_DISPATCH_GUARD
+            and type(_material_native_dispatch_guard) is FunctionType
+            and _material_native_dispatch_guard.__code__ is _MATERIAL_NATIVE_DISPATCH_CODE
+            and _material_native_dispatch_guard.__defaults__ is None
+            and _material_native_dispatch_guard.__kwdefaults__ is None)):
+        raise MeshError('material native dispatch guard changed before invocation')
+    _MATERIAL_NATIVE_DISPATCH_GUARD()
     triangulation, report = frontal_delaunay_refine(
         baseline["triangulation"],
         settings.native_options,
@@ -2069,6 +2584,7 @@ def _run_frontal_quality_path(
         qualified_seed=bool(baseline["target_met"]),
         minimum_angle_target=settings.min_angle,
         short_edge_offcentre=owner_short_edge,
+        **({'_physical_growth_limit':None if mixed_deferred else settings.max_element_growth} if owner_short_edge else {}),
     )
     work_statistics = {
         "full_triangulations": 0,
@@ -2087,6 +2603,7 @@ def _run_frontal_quality_path(
         np.empty((0, 2), dtype=np.float64) if explicit_points is None else explicit_points,
         settings,
         statistics=work_statistics,
+        **({'protect_free_rows': True} if protect_free_rows else {}),
     )
     if physical_evaluator is not None:
         initial = _physical_quality_candidate(initial, settings, physical_evaluator)
@@ -2097,7 +2614,51 @@ def _run_frontal_quality_path(
             candidate, prefer_growth=False
         ),
     )
-    if (preserve_spatial_refinement
+    mixed_preview=None; mixed_spent=0; mixed_accepted=False
+    if mixed_deferred:
+        if not (frontal_delaunay_refine is driver_ref and type(driver_ref) is FunctionType
+                and driver_ref.__code__ is driver_code and _boundary_callable_pin(driver_ref)==driver_pin
+                and _physical_full_quality_services is full_builder and type(full_builder) is FunctionType
+                and full_builder.__code__ is full_code and full_builder.__defaults__ is None and full_builder.__kwdefaults__ is None
+                and _physical_pairing_services is pairing_builder and type(pairing_builder) is FunctionType
+                and pairing_builder.__code__ is pairing_code and pairing_builder.__defaults__ is None and pairing_builder.__kwdefaults__ is None
+                and full_services is not None and pairing_services is not None
+                and full_builder()==full_services and pairing_builder()==pairing_services
+                and _curvilinear_mixed_preview is preview_ref and type(preview_ref) is FunctionType
+                and preview_ref.__code__ is preview_code and _boundary_callable_pin(preview_ref)==preview_pin
+                and _qualified_recombination is qualify_ref and type(qualify_ref) is FunctionType
+                and qualify_ref.__code__ is qualify_code and _boundary_callable_pin(qualify_ref)==qualify_pin):
+            raise MeshError('deferred mixed physical repair changed during native refinement')
+        if _eligible_chart(physical_evaluator) is not mixed_chart:
+            raise MeshError('deferred mixed physical owner changed during native refinement')
+        report=dict(report,physical_growth_deferred_to_mixed=True)
+    if early_pair:
+        used=report.get('topology_operations',0)
+        if type(used) is not int or used<0:
+            raise MeshError('early pair preview found invalid topology work receipt')
+        remaining_nodes=None
+        if mixed_deferred:
+            staged=report.get('staged_point_insertions',report.get('insertions',0)+report.get('reserved_node_reuses',0))
+            if type(staged) is not int or staged<0 or staged>settings.native_options.max_insertions:
+                raise MeshError('mixed physical repair has an invalid consumed insertion receipt')
+            remaining_nodes=settings.native_options.max_insertions-staged
+        mixed_preview=_curvilinear_mixed_preview(best,triangulation,settings,
+            physical_evaluator,explicit_points,cancellation_check,
+            topology_remaining=max(0,settings.native_options.max_topology_operations-used),
+            insertion_remaining=remaining_nodes)
+        mixed_spent=mixed_preview['report'].exchange_work
+        new_nodes=mixed_preview.get('sizing_nodes',0)
+        if (type(new_nodes) is not int or new_nodes<0
+                or remaining_nodes is not None and new_nodes>remaining_nodes):
+            raise MeshError('mixed physical repair exceeded its insertion allowance')
+        report=dict(report,topology_operations=used+mixed_preview['corner_work'],
+            insertions=report.get('insertions',0)+new_nodes,
+            early_pair_mixed_preview=dict(accepted=mixed_preview['accepted'],
+                exchange_work=mixed_spent,corner=mixed_preview['corner_facts'],mixed_sizing=mixed_preview.get('sizing_facts')))
+        if 'staged_point_insertions' in report:
+            report['staged_point_insertions']+=new_nodes
+        mixed_accepted=mixed_preview['accepted']
+    if (not mixed_accepted and preserve_spatial_refinement
             and settings.native_options.metric_mode == "isotropic_spatial"
             and best.report["poor_element_ids"]):
         from ._frontal_transition_quality import repair_frontal_transition
@@ -2125,7 +2686,29 @@ def _run_frontal_quality_path(
                            candidate_moved_nodes=[],
                            pinned_input_rejection=True, final_quality=dict(best.report))
             report['chart_transition_repair'] = receipt
-    if physical_evaluator is not None and best.report['poor_element_ids']:
+    if not mixed_accepted and physical_evaluator is not None:
+        remaining=settings.max_recombination_work-mixed_spent
+        if remaining>0:
+            preview_settings=(settings if mixed_spent==0 else
+                replace(settings,max_recombination_work=remaining))
+            later=_curvilinear_mixed_preview(best,triangulation,preview_settings,
+                physical_evaluator,explicit_points,cancellation_check)
+            if later is not None:
+                later['report']=replace(later['report'],
+                    exchange_work=later['report'].exchange_work+mixed_spent)
+                later['settings']=settings; later['settings_key']=repr(settings)
+                mixed_spent=later['report'].exchange_work
+            mixed_preview=later
+        else:
+            mixed_preview=None
+        mixed_accepted=mixed_preview is not None and mixed_preview['accepted']
+    if mixed_accepted:
+        points = mixed_preview['points']
+        triangles=mixed_preview['triangles']
+        best = _physical_quality_candidate(_make_candidate(points, triangles,
+            settings=settings), settings, physical_evaluator)
+        triangulation = replace(triangulation, points=points,triangles=triangles)
+    if physical_evaluator is not None and best.report['poor_element_ids'] and not mixed_accepted:
         from ._physical_t3_refinement import refine_physical_candidate
         from ._analytic_metric_chart import AnalyticMetricChart
         best, triangulation, report = refine_physical_candidate(
@@ -2137,12 +2720,13 @@ def _run_frontal_quality_path(
         preserve_spatial_refinement
         and settings.native_options.metric_mode == "isotropic_spatial"
         and best.report["invalid_element_count"] == 0
-        and not best.report["poor_element_ids"]
+        and (not best.report["poor_element_ids"] or mixed_accepted)
     )
     if not accepted_spatial_refinement and report["shared_segment_splits"] == 0 and _candidate_selection_key(
         best, prefer_growth=False
     ) > _candidate_selection_key(baseline["best"], prefer_growth=False):
         guarded = dict(baseline)
+        guarded['_curvilinear_mixed_spent'] = mixed_spent
         guarded["name"] = "frontal_delaunay_quality_guard"
         report = {
             **report,
@@ -2165,7 +2749,11 @@ def _run_frontal_quality_path(
             else best.report["elements_above_aspect_ratio_5"] == 0
         )
     )
-    report = {**report, "published_insertions": int(report["insertions"])}
+    # Consumed/staged work includes detached proposals that were not retained.
+    # Count only retained new chart rows, excluding reused physical identities.
+    retained_insertions=max(0,len(best.points)-len(baseline["triangulation"].points)
+                            -int(report.get("reserved_node_reuses",0)))
+    report = {**report, "published_insertions": retained_insertions}
     return {
         "name": "frontal_delaunay",
         "generated": baseline["generated"],
@@ -2175,7 +2763,9 @@ def _run_frontal_quality_path(
         "attempted_added_points": int(report["insertions"]),
         "attempted_rounds": 0,
         "point_budget": settings.native_options.max_insertions,
-        "target_met": target_met,
+        "target_met": target_met or mixed_accepted,
+        "_curvilinear_mixed_preview": mixed_preview,
+        "_curvilinear_mixed_spent": 0 if mixed_accepted else mixed_spent,
         "triangulation_seconds": baseline["triangulation_seconds"],
         "optimization_seconds": perf_counter() - started,
         "native_v2": report,
@@ -2331,7 +2921,8 @@ def _active_connectivity_key(mesh: MeshCore) -> tuple[Any, ...]:
     return triangles, quads
 
 
-def _qualified_recombination(core, protected_edges, settings, cancellation_check):
+def _qualified_recombination(core, protected_edges, settings, cancellation_check,
+                            *, physical_growth=False):
     """The existing recombination and qualification operation, without publication."""
     report = recombine_triangles_with_report(
         core,
@@ -2343,10 +2934,44 @@ def _qualified_recombination(core, protected_edges, settings, cancellation_check
         max_warpage=settings.max_warpage,
         cancellation_check=cancellation_check,
         max_exchange_work=settings.max_recombination_work,
+        **({'_physical_growth_limit': settings.max_element_growth,
+            '_use_native': False} if physical_growth else {}),
     )
     assert_valid_mesh(report.mesh)
     quality = _quality_threshold_report(evaluate_quality(report.mesh), settings)
     return report, quality
+
+
+def _qualified_physical_triangle_retention(points, triangles, report, settings,
+                                           evaluate, cancellation_check):
+    """Freshly qualify retained T3; recombine=True permits unpaired triangles."""
+    before=points.tobytes(),triangles.tobytes()
+    settings_entry=repr(settings)
+    _check_cancellation(cancellation_check,'physical triangle retention start')
+    chart_candidate=_make_candidate(points,triangles,settings=settings)
+    xyz=np.asarray(evaluate(points),dtype=float)
+    if xyz.shape!=(len(points),3) or not np.isfinite(xyz).all():
+        raise MeshError('physical triangle retention requires finite (n, 3) coordinates')
+    core=MeshCore(xyz,triangles)
+    core_entry=core.node_coordinates.tobytes(),core.triangle_connectivity.tobytes()
+    evaluated=evaluate_quality(core,check_validity=False)
+    quality=_quality_threshold_report(evaluated,settings)
+    growth,poor=_published_growth(core,settings.max_element_growth)
+    accepted=(chart_candidate.report['invalid_element_count']==0
+        and not evaluated.validity.errors and quality['accepted'] and not poor)
+    evidence=dict(retained=bool(accepted),reason='mixed physical quality or growth failed',
+        triangle_quality=quality,triangle_growth=float(growth),
+        triangle_growth_poor_ids=sorted(poor),triangle_validity_errors=len(evaluated.validity.errors),
+        triangle_chart_invalid_count=chart_candidate.report['invalid_element_count'],
+        discarded_pair_count=report.pair_count,consumed_exchange_work=report.exchange_work)
+    _check_cancellation(cancellation_check,'physical triangle retention complete')
+    if (before!=(points.tobytes(),triangles.tobytes()) or settings_entry!=repr(settings)
+            or core_entry!=(core.node_coordinates.tobytes(),core.triangle_connectivity.tobytes())):
+        raise MeshError('physical triangle retention source rows or policy changed')
+    if not accepted:return None,evidence
+    pairs=np.empty((0,2),dtype=np.int64);ids=np.empty(0,dtype=np.int64);scores=np.empty(0,dtype=float)
+    for values in (pairs,ids,scores):values.setflags(write=False)
+    return replace(report,mesh=core,paired_triangle_ids=pairs,created_quad_ids=ids,scores=scores),evidence
 
 
 def _prepare_recombined_path(
@@ -2357,18 +2982,117 @@ def _prepare_recombined_path(
     settings: SurfaceMeshOptions,
     cancellation_check: Callable[[str], None] | None,
     physical_evaluator=None,
+    explicit_points=None,
 ) -> dict[str, Any]:
     best: _QualityCandidate = path["best"]
     triangulation: PlanarTriangulation = path["triangulation"]
+    original_best,original_triangulation=best,triangulation
+    original_rows=best.points.tobytes(),best.triangles.tobytes(),triangulation.segments.tobytes()
     core = MeshCore(plane.lift(best.points) if physical_evaluator is None
                     else physical_evaluator(best.points), best.triangles)
     started = perf_counter()
-    report, quality = _qualified_recombination(
-        core, triangulation.segments, settings, cancellation_check
-    )
+    preview = path.get('_curvilinear_mixed_preview')
+    reused_preview = preview is not None and preview['accepted']
+    if reused_preview:
+        chart = getattr(physical_evaluator, '__self__', None)
+        if chart is None:
+            raise MeshError('curvilinear mixed preview lost its owner evaluator')
+        chart._current()
+        fixed = _fixed_rows(best.points, triangulation.segments,
+            np.empty((0, 2)) if explicit_points is None else explicit_points)
+        if (preview['settings'] is not settings or preview['settings_key'] != repr(settings)
+                or preview['points_key'] != best.points.tobytes()
+                or preview['triangles_key'] != best.triangles.tobytes()
+                or preview['segments_key'] != triangulation.segments.tobytes()
+                or preview['fixed'] != fixed or preview['fixed_key'] != best.points[list(fixed)].tobytes()
+                or preview['mesh_key'] != _mixed_preview_key(preview['report'].mesh)
+                or not np.array_equal(core.node_coordinates, preview['report'].mesh.node_coordinates)):
+            raise MeshError('curvilinear mixed preview changed before publication')
+        report, quality = preview['report'], preview['quality']
+        chart._current()
+    else:
+        spent = path.get('_curvilinear_mixed_spent', 0)
+        if spent >= settings.max_recombination_work:
+            raise MeshError('curvilinear mixed preview exhausted recombination work')
+        remaining_settings = (settings if not spent else replace(settings,
+            max_recombination_work=settings.max_recombination_work-spent))
+        report, quality = _qualified_recombination(
+            core, triangulation.segments, remaining_settings, cancellation_check,
+            physical_growth=bool(getattr(getattr(getattr(physical_evaluator,
+                '__self__', None), 'region_binding', None), 'requires_curvilinear', False)))
+        if spent:
+            report = replace(report, exchange_work=report.exchange_work+spent)
+    chart = getattr(physical_evaluator, '__self__', None)
+    region_binding = getattr(chart, 'region_binding', None)
+    if (not reused_preview and physical_evaluator is not None and region_binding is not None
+            and region_binding.requires_curvilinear):
+        from ._physical_mixed_repair import repair_mixed_coordinates
+        fixed = _fixed_rows(best.points, triangulation.segments,
+            np.empty((0, 2)) if explicit_points is None else explicit_points)
+        points, repaired_report = repair_mixed_coordinates(best.points,
+            best.triangles, report, settings, physical_evaluator, fixed,
+            cancellation_check=cancellation_check)
+        if points is not best.points and not np.array_equal(points, best.points):
+            best = _physical_quality_candidate(_make_candidate(points,
+                best.triangles, settings=settings), settings, physical_evaluator)
+            triangulation = replace(triangulation, points=points)
+            path = dict(path, best=best, triangulation=triangulation)
+            old = repaired_report.mesh
+            physical_core = MeshCore(physical_evaluator(points),
+                old.triangle_connectivity, old.quad_connectivity,
+                node_ids=old.node_ids, triangle_ids=old.triangle_ids,
+                quad_ids=old.quad_ids, node_active=old.node_active,
+                triangle_active=old.triangle_active, quad_active=old.quad_active)
+            report = replace(repaired_report, mesh=physical_core)
+            assert_valid_mesh(report.mesh)
+            quality = _quality_threshold_report(evaluate_quality(report.mesh), settings)
+        else:
+            report = repaired_report
+    from ._physical_mixed_repair import _batch_chart
+    if not reused_preview and _batch_chart(physical_evaluator,cancellation_check) is not None:
+        from ._physical_corner_cavity import repair_corner_cavities
+        fixed = _fixed_rows(best.points,triangulation.segments,
+            np.empty((0,2)) if explicit_points is None else explicit_points)
+        native_report = dict(path.get('native_v2',{}))
+        topology_spent = native_report.get('topology_operations',0)
+        if type(topology_spent) is not int or topology_spent < 0:
+            raise MeshError('corner cavity found an invalid topology work receipt')
+        points,corner_report,corner_work,corner_facts = repair_corner_cavities(
+            best.points,report,settings,physical_evaluator,fixed,triangulation.segments,
+            topology_remaining=max(0,settings.native_options.max_topology_operations-topology_spent),
+            cancellation_check=cancellation_check)
+        report = corner_report
+        if corner_facts['enabled']:
+            native_report['topology_operations'] = topology_spent+corner_work
+            native_report['physical_corner_cavity'] = corner_facts
+            path = dict(path,native_v2=native_report)
+        if corner_facts['commits']:
+            best = _physical_quality_candidate(_make_candidate(points,
+                report.mesh.triangle_connectivity,settings=settings),settings,physical_evaluator)
+            triangulation = replace(triangulation,points=points,triangles=report.mesh.triangle_connectivity)
+            path = dict(path,best=best,triangulation=triangulation)
+            quality = _quality_threshold_report(evaluate_quality(report.mesh),settings)
     published_growth, growth_poor = _published_growth(
         report.mesh, settings.max_element_growth
     )
+    from ._analytic_metric_chart import AnalyticMetricChart
+    mandatory_physical=(type(chart) is AnalyticMetricChart
+        and getattr(physical_evaluator,'__func__',None) is AnalyticMetricChart.evaluate
+        and region_binding is not None and region_binding.requires_curvilinear)
+    retention=None
+    if mandatory_physical and (not quality['accepted'] or growth_poor):
+        if original_rows!=(original_best.points.tobytes(),original_best.triangles.tobytes(),original_triangulation.segments.tobytes()):
+            raise MeshError('pre-recombination triangle correspondence changed')
+        discarded_quality,discarded_growth=quality,float(published_growth)
+        retained,retention=_qualified_physical_triangle_retention(original_best.points,
+            original_best.triangles,report,settings,physical_evaluator,cancellation_check)
+        retention.update(discarded_mixed_quality=discarded_quality,discarded_mixed_growth=discarded_growth)
+        if retained is not None:
+            report=retained
+            best,triangulation=original_best,original_triangulation
+            path=dict(path,best=best,triangulation=triangulation)
+            quality=retention['triangle_quality']
+            published_growth=retention['triangle_growth'];growth_poor=set()
     outer_edges, hole_edges = _boundary_edge_groups(outer, holes)
     published = report.mesh
     if physical_evaluator is not None:
@@ -2382,6 +3106,9 @@ def _prepare_recombined_path(
         "core": published,
         "report": report,
         "quality_policy": quality,
+        "mandatory_physical_quality": mandatory_physical,
+        "physical_admissible": bool(quality["accepted"] and not growth_poor),
+        "physical_triangle_retention": retention,
         "outer_alignment": _boundary_alignment(
             published, best.points, outer_edges
         ),
@@ -2408,6 +3135,7 @@ def _recombined_path_key(value: dict[str, Any]) -> tuple[Any, ...]:
         else 0
     )
     return (
+        1 if value.get("mandatory_physical_quality",False) and not value.get("physical_admissible",False) else 0,
         0 if value["quality_eligible"] and value["alignment_qualified"] else 1,
         float(outer["maximum_normal_error_degrees"]),
         float(outer["mean_normal_error_degrees"]),
@@ -2609,7 +3337,7 @@ def _cartesian_rectangle_points(outer, max_points, cancellation_check):
     values = []
     for y in ys:
         if cancellation_check is not None:
-            cancellation_check("native Cartesian rectangle row")
+            _check_cancellation(cancellation_check, "native Cartesian rectangle row")
         values.extend(vertices[0] + xs[:, None]*axes[0] - y*axes[3])
     return np.asarray(values, dtype=float)
 
@@ -2629,6 +3357,7 @@ def _cartesian_regularity_better(candidate, baseline):
     return departure(new_quality) < departure(old_quality)
 
 
+@_stage_scope
 def mesh_planar_surface(
     outer: Any,
     holes: Sequence[Any] = (),
@@ -2664,6 +3393,8 @@ def mesh_planar_surface(
     _protected_node_ids: Mapping[int, int] | None = None,
     _respect_growth_limit: bool = False,
     _cartesian_rectangle_candidate: bool = False,
+    _protect_generated_seed_disks: bool = False,
+    _mandatory_only_frontal_seed: bool = False,
 ) -> MeshCore:
     """Build a valid hybrid mesh of a 2D polygon or a planar 3D surface.
 
@@ -2675,7 +3406,7 @@ def mesh_planar_surface(
     """
 
     if cancellation_check is not None:
-        cancellation_check("native surface preprocessing")
+        _check_cancellation(cancellation_check, "native surface preprocessing")
     if type(_coordinate_batch_size) is not int or not 1 <= _coordinate_batch_size <= 8:
         raise ValueError("invalid owner coordinate batch size")
 
@@ -2717,6 +3448,14 @@ def mesh_planar_surface(
         for values in all_values:
             if len(values) and np.max(np.abs((values - plane.origin) @ normal)) > scale * 1.0e-10:
                 raise MeshError("surface points are not coplanar")
+    if type(_mandatory_only_frontal_seed) is not bool:
+        raise MeshError("invalid mandatory-only frontal seed option")
+    if _mandatory_only_frontal_seed:
+        if (not _boundary_is_seeded or _protected_node_ids is None
+                or settings.native_options.point_placement != "frontal_delaunay"
+                or settings.native_options.metric_mode != "isotropic_spatial"
+                or _analytic_preview_chart(_metric_to_physical) is None):
+            raise MeshError("mandatory-only frontal seeds require canonical owner input rows")
     planar_outer = plane.project(raw_outer)
     planar_holes = [plane.project(hole) for hole in raw_holes]
     planar_constraints = [plane.project(segment) for segment in raw_constraints]
@@ -2739,7 +3478,13 @@ def mesh_planar_surface(
             perf_counter() - densification_started
         )
         target_points_started = perf_counter()
-        if settings.native_options.point_placement == "frontal_delaunay":
+        if _mandatory_only_frontal_seed:
+            # Only optional target lattice rows are omitted. Explicit pins,
+            # constraint/junction endpoints and shared owner boundaries retain
+            # their input positions and IDs; frontal insertion owns free rows.
+            lattice_statistics['seed_strategy'] = 'boundary_and_mandatory'
+            lattice_statistics['optional_lattice_points'] = 0
+        elif settings.native_options.point_placement == "frontal_delaunay":
             frame_origin = planar_outer[0].copy()
             frame_first = planar_outer[1] - frame_origin
             frame_first /= max(float(np.linalg.norm(frame_first)), 1.0e-30)
@@ -2779,11 +3524,19 @@ def mesh_planar_surface(
                 cancellation_check=cancellation_check,
                 statistics=lattice_statistics,
             )
+        if _protect_generated_seed_disks:
+            if not _boundary_is_seeded or _protected_node_ids is None:
+                raise MeshError('protected free-seed clearance requires authoritative input rows')
+            before = len(generated)
+            generated = _protected_diametral_seed_filter(generated,
+                planar_outer, planar_holes, planar_constraints,
+                cancellation_check=cancellation_check)
+            lattice_statistics['protected_diametral_removed'] = before-len(generated)
         phase_seconds["target_point_generation"] = (
             perf_counter() - target_points_started
         )
     if cancellation_check is not None:
-        cancellation_check("native surface triangulation start")
+        _check_cancellation(cancellation_check, "native surface triangulation start")
     baseline_path = _run_quality_path(
             "staggered_chart",
             planar_outer,
@@ -2796,6 +3549,8 @@ def mesh_planar_surface(
             polish_quality=(_polish_quality_candidates and not _preserve_spatial_refinement and
                             settings.native_options.point_placement == "legacy_lattice"),
             protected_node_ids=_protected_node_ids,
+            allow_refinement=not _mandatory_only_frontal_seed,
+            **({'protect_generated_seed_disks': True} if _protect_generated_seed_disks else {}),
         )
     candidate_paths = [baseline_path]
     native_v2_report: dict[str, Any] | None = None
@@ -2814,6 +3569,7 @@ def mesh_planar_surface(
             preserve_spatial_refinement=_preserve_spatial_refinement,
             explicit_points=explicit_interior,
             coordinate_batch_size=_coordinate_batch_size,
+            **({'protect_free_rows': True} if _protect_generated_seed_disks else {}),
         )
         candidate_paths = [frontal_path]
     guide_diagnostics: dict[str, Any] = {
@@ -2882,6 +3638,7 @@ def mesh_planar_surface(
                                     settings.native_options.point_placement == "legacy_lattice"),
                 )
             except MeshError as error:
+                _preserve_stage_cancellation(error)
                 outer_report = {
                     **outer_report,
                     "accepted": False,
@@ -2924,6 +3681,7 @@ def mesh_planar_surface(
                                         settings.native_options.point_placement == "legacy_lattice"),
                     )
                 except MeshError as error:
+                    _preserve_stage_cancellation(error)
                     complete_report = {
                         **complete_report,
                         "accepted": False,
@@ -3008,6 +3766,7 @@ def mesh_planar_surface(
                 settings,
                 cancellation_check,
                 physical_evaluator=(_metric_to_physical if _preserve_spatial_refinement else None),
+                explicit_points=explicit_interior,
             )
             for path in candidate_paths
         ]
@@ -3050,7 +3809,7 @@ def mesh_planar_surface(
             def candidate_cancel(phase):
                 if cancellation_check is not None:
                     try:
-                        cancellation_check(phase)
+                        _check_cancellation(cancellation_check, phase)
                     except BaseException as error:
                         cancellation_error.append(error)
                         raise
@@ -3060,7 +3819,8 @@ def mesh_planar_surface(
                     allow_refinement=False, preserve_protected_cells=True)
                 published = _prepare_recombined_path(path, plane, planar_outer, (),
                     settings, candidate_cancel)
-            except MeshError:
+            except MeshError as _stage_error:
+                _preserve_stage_cancellation(_stage_error)
                 if cancellation_error:
                     raise
                 pass
@@ -3087,7 +3847,7 @@ def mesh_planar_surface(
         float(path["optimization_seconds"]) for path in candidate_paths
     )
     if cancellation_check is not None:
-        cancellation_check("native surface quality candidate selection complete")
+        _check_cancellation(cancellation_check, "native surface quality candidate selection complete")
     quality_diagnostics = {
         "initial_quality": dict(initial_candidate.report),
         "final_quality": dict(best.report),
@@ -3177,10 +3937,13 @@ def mesh_planar_surface(
                         published["max_element_growth"]
                     ),
                     "published_growth": dict(published["published_growth"]),
+                    "mandatory_physical_quality": published.get("mandatory_physical_quality",False),
+                    "physical_admissible": published.get("physical_admissible",False),
+                    "physical_triangle_retention": published.get("physical_triangle_retention"),
                 }
             )
     if cancellation_check is not None:
-        cancellation_check("native surface quality optimization complete")
+        _check_cancellation(cancellation_check, "native surface quality optimization complete")
     owner_table = () if owner is None else (owner,)
     owner_handle = -1 if owner is None else 0
     if selected_published is None:
@@ -3228,15 +3991,16 @@ def mesh_planar_surface(
             "exchange_work": recombination_report.exchange_work,
             "exchange_truncated": recombination_report.exchange_truncated,
             "pair_count": recombination_report.pair_count,
+            "physical_triangle_retention": selected_published.get("physical_triangle_retention"),
         }
         if cancellation_check is not None:
-            cancellation_check("native surface recombination complete")
+            _check_cancellation(cancellation_check, "native surface recombination complete")
     if settings.quadratic:
         promotion_started = perf_counter()
         core = insert_midside_nodes(core)
         phase_seconds["quadratic_promotion"] = perf_counter() - promotion_started
         if cancellation_check is not None:
-            cancellation_check("native surface quadratic promotion complete")
+            _check_cancellation(cancellation_check, "native surface quadratic promotion complete")
     validation_started = perf_counter()
     assert_valid_mesh(core)
     output_origin = None
@@ -3307,7 +4071,7 @@ def mesh_planar_surface(
             }
         )
     if cancellation_check is not None:
-        cancellation_check("native surface validation complete")
+        _check_cancellation(cancellation_check, "native surface validation complete")
     if output_origin is not None:
         if (getattr(core, "_output_row_provenance", None) is not output_origin
                 or (output_origin.source_by_row, output_origin.source_to_row)
@@ -3319,3 +4083,22 @@ def mesh_planar_surface(
 
 surface_mesh = mesh_planar_surface
 generate_surface_mesh = mesh_planar_surface
+
+
+# Complete module initialization precedes every canonical mixed scheduling call.
+_REFERENCE_PHYSICAL_PAIRING_SERVICES = _PHYSICAL_PAIRING_BUILDER_REF()
+_CANONICAL_MIXED_PREVIEW = _curvilinear_mixed_preview
+_CANONICAL_MIXED_PREVIEW_CODE = _curvilinear_mixed_preview.__code__
+_CANONICAL_QUALIFIED_RECOMBINATION = _qualified_recombination
+_CANONICAL_QUALIFIED_RECOMBINATION_CODE = _qualified_recombination.__code__
+
+from ._material_region_binding import _boundary_callable_pin as _mixed_boundary_pin
+_CANONICAL_MIXED_PREVIEW_PIN = _mixed_boundary_pin(_CANONICAL_MIXED_PREVIEW)
+_CANONICAL_QUALIFIED_RECOMBINATION_PIN = _mixed_boundary_pin(_CANONICAL_QUALIFIED_RECOMBINATION)
+
+_CANONICAL_FRONTAL_DRIVER = frontal_delaunay_refine
+_CANONICAL_FRONTAL_DRIVER_CODE = frontal_delaunay_refine.__code__
+_CANONICAL_FRONTAL_DRIVER_PIN = _mixed_boundary_pin(frontal_delaunay_refine)
+
+from ._material_region_binding import _material_native_dispatch_guard as _MATERIAL_NATIVE_DISPATCH_GUARD
+_MATERIAL_NATIVE_DISPATCH_CODE = _MATERIAL_NATIVE_DISPATCH_GUARD.__code__

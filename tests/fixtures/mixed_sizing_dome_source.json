@@ -1,0 +1,863 @@
+{
+  "schema": "anygeometry",
+  "version": 7,
+  "model_id": "4902738c-f6e9-4558-9fd8-82be434d2d98",
+  "revision": 1,
+  "coordinates": {
+    "units": "m",
+    "local_origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "coordinate_transform": null,
+    "crs": {}
+  },
+  "tolerance": {
+    "length": 1e-09,
+    "merge_length": 1e-07,
+    "coincidence": 1e-09,
+    "healing": 1e-07,
+    "angular": 1e-10,
+    "parameter": 1e-10,
+    "area": 1e-18,
+    "surface_residual": 1e-08,
+    "curve_fit_residual": 1e-08,
+    "aabb_padding": 1e-09,
+    "relative_length": 1e-12,
+    "relative_area": 1e-14
+  },
+  "id_state": {
+    "vertex": 5,
+    "edge": 5,
+    "face": 2,
+    "part": 2,
+    "sheet": 2,
+    "face_use": 2,
+    "coedge": 5,
+    "member": 1,
+    "member_edge_use": 1,
+    "attachment": 1,
+    "junction": 1
+  },
+  "vertices": [
+    {
+      "id": 1,
+      "position": [
+        -1.0,
+        -1.0,
+        2.0
+      ]
+    },
+    {
+      "id": 2,
+      "position": [
+        1.0,
+        -1.0,
+        2.0
+      ]
+    },
+    {
+      "id": 3,
+      "position": [
+        1.0,
+        1.0,
+        2.0
+      ]
+    },
+    {
+      "id": 4,
+      "position": [
+        -1.0,
+        1.0,
+        2.0
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "start": 1,
+      "end": 2,
+      "curve": {
+        "type": "curve_on_surface",
+        "support": {
+          "type": "nurbs_surface",
+          "degree_u": 2,
+          "degree_v": 2,
+          "knots_u": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "knots_v": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              [
+                -1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              [
+                -1.0,
+                1.0,
+                2.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                -2.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                1.0,
+                2.0
+              ]
+            ]
+          ],
+          "weights": null,
+          "u_range": [
+            0.0,
+            1.0
+          ],
+          "v_range": [
+            0.0,
+            1.0
+          ]
+        },
+        "pcurve": {
+          "type": "nurbs_pcurve",
+          "degree": 1,
+          "knots": [
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0
+            ]
+          ],
+          "weights": null,
+          "domain": [
+            0.0,
+            1.0
+          ]
+        },
+        "also_on": [],
+        "transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "start": 2,
+      "end": 3,
+      "curve": {
+        "type": "curve_on_surface",
+        "support": {
+          "type": "nurbs_surface",
+          "degree_u": 2,
+          "degree_v": 2,
+          "knots_u": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "knots_v": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              [
+                -1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              [
+                -1.0,
+                1.0,
+                2.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                -2.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                1.0,
+                2.0
+              ]
+            ]
+          ],
+          "weights": null,
+          "u_range": [
+            0.0,
+            1.0
+          ],
+          "v_range": [
+            0.0,
+            1.0
+          ]
+        },
+        "pcurve": {
+          "type": "nurbs_pcurve",
+          "degree": 1,
+          "knots": [
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              1.0,
+              0.0
+            ],
+            [
+              1.0,
+              1.0
+            ]
+          ],
+          "weights": null,
+          "domain": [
+            0.0,
+            1.0
+          ]
+        },
+        "also_on": [],
+        "transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "start": 3,
+      "end": 4,
+      "curve": {
+        "type": "curve_on_surface",
+        "support": {
+          "type": "nurbs_surface",
+          "degree_u": 2,
+          "degree_v": 2,
+          "knots_u": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "knots_v": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              [
+                -1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              [
+                -1.0,
+                1.0,
+                2.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                -2.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                1.0,
+                2.0
+              ]
+            ]
+          ],
+          "weights": null,
+          "u_range": [
+            0.0,
+            1.0
+          ],
+          "v_range": [
+            0.0,
+            1.0
+          ]
+        },
+        "pcurve": {
+          "type": "nurbs_pcurve",
+          "degree": 1,
+          "knots": [
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              1.0,
+              1.0
+            ],
+            [
+              0.0,
+              1.0
+            ]
+          ],
+          "weights": null,
+          "domain": [
+            0.0,
+            1.0
+          ]
+        },
+        "also_on": [],
+        "transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "start": 4,
+      "end": 1,
+      "curve": {
+        "type": "curve_on_surface",
+        "support": {
+          "type": "nurbs_surface",
+          "degree_u": 2,
+          "degree_v": 2,
+          "knots_u": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "knots_v": [
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              [
+                -1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              [
+                -1.0,
+                1.0,
+                2.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                -2.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                -1.0,
+                2.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                1.0,
+                2.0
+              ]
+            ]
+          ],
+          "weights": null,
+          "u_range": [
+            0.0,
+            1.0
+          ],
+          "v_range": [
+            0.0,
+            1.0
+          ]
+        },
+        "pcurve": {
+          "type": "nurbs_pcurve",
+          "degree": 1,
+          "knots": [
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ],
+          "controls": [
+            [
+              0.0,
+              1.0
+            ],
+            [
+              0.0,
+              0.0
+            ]
+          ],
+          "weights": null,
+          "domain": [
+            0.0,
+            1.0
+          ]
+        },
+        "also_on": [],
+        "transform": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      }
+    }
+  ],
+  "faces": [
+    {
+      "id": 1,
+      "loop": [
+        [
+          1,
+          true
+        ],
+        [
+          2,
+          true
+        ],
+        [
+          3,
+          true
+        ],
+        [
+          4,
+          true
+        ]
+      ],
+      "corners": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "holes": [],
+      "surface": {
+        "type": "nurbs_surface",
+        "degree_u": 2,
+        "degree_v": 2,
+        "knots_u": [
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "knots_v": [
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "controls": [
+          [
+            [
+              -1.0,
+              -1.0,
+              2.0
+            ],
+            [
+              -1.0,
+              0.0,
+              0.0
+            ],
+            [
+              -1.0,
+              1.0,
+              2.0
+            ]
+          ],
+          [
+            [
+              0.0,
+              -1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              -2.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0
+            ]
+          ],
+          [
+            [
+              1.0,
+              -1.0,
+              2.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              1.0,
+              2.0
+            ]
+          ]
+        ],
+        "weights": null,
+        "u_range": [
+          0.0,
+          1.0
+        ],
+        "v_range": [
+          0.0,
+          1.0
+        ]
+      },
+      "parameterization": null,
+      "metadata": {}
+    }
+  ],
+  "structural": {
+    "parts": [
+      {
+        "id": 1,
+        "sheet_ids": [
+          1
+        ],
+        "member_ids": [],
+        "name": "",
+        "metadata": {}
+      }
+    ],
+    "sheets": [
+      {
+        "id": 1,
+        "part_id": 1,
+        "face_use_ids": [
+          1
+        ],
+        "policy": {
+          "boundary": "allow",
+          "non_manifold": "reject",
+          "connectivity": "require_connected"
+        },
+        "declared_non_manifold_edges": [],
+        "name": "assigned plate 1",
+        "metadata": {}
+      }
+    ],
+    "face_uses": [
+      {
+        "id": 1,
+        "sheet_id": 1,
+        "face_id": 1,
+        "loops": [
+          [
+            1,
+            2,
+            3,
+            4
+          ]
+        ],
+        "orientation": "forward",
+        "metadata": {}
+      }
+    ],
+    "coedges": [
+      {
+        "id": 1,
+        "face_use_id": 1,
+        "edge_id": 1,
+        "orientation": "forward",
+        "metadata": {}
+      },
+      {
+        "id": 2,
+        "face_use_id": 1,
+        "edge_id": 2,
+        "orientation": "forward",
+        "metadata": {}
+      },
+      {
+        "id": 3,
+        "face_use_id": 1,
+        "edge_id": 3,
+        "orientation": "forward",
+        "metadata": {}
+      },
+      {
+        "id": 4,
+        "face_use_id": 1,
+        "edge_id": 4,
+        "orientation": "forward",
+        "metadata": {}
+      }
+    ],
+    "members": [],
+    "member_edge_uses": [],
+    "attachments": [],
+    "junctions": []
+  },
+  "groups": {},
+  "tags": [],
+  "replacement_history": [],
+  "structural_replacement_history": [],
+  "construction_vertices": [],
+  "extensions": {},
+  "features": {
+    "version": 1,
+    "next_id": 1,
+    "baseline": null,
+    "records": []
+  },
+  "checksum": {
+    "algorithm": "sha256",
+    "value": "1af75632d0b8180a480c12d9fb22d4d6a4483f8d98507db8fbfb997d8b2575f3"
+  }
+}

@@ -26,6 +26,7 @@ from anygeometry.entities import EntityRef, OrientedEdge
 from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
 from anygeometry.surfaces import CoonsSurface, Cone, Cylinder, Plane, RuledSurface
+from anygeometry.nurbs import NurbsSurface
 try:
     from anygeometry.surfaces import ExtrudedSurface
 except ImportError:  # Older supported ANYgeometry builds predate schema 6.
@@ -513,6 +514,7 @@ def _ensure_edge_registry(
     seeding: Seeding,
     size_field: SizeField,
     order: str,
+    *, owner_stations=None,
 ) -> None:
     next_node = _next_identifier(mesh.nodes)
     steps_per_division = 2 if order == "quadratic" else 1
@@ -520,32 +522,32 @@ def _ensure_edge_registry(
         if edge_id not in seeding.divisions:
             raise MeshError(f"seeding has no division count for edge {edge_id}")
         sequence = mesh.nodes_of_edge.get(edge_id)
+        targets = None if owner_stations is None else owner_stations.get(edge_id)
         if sequence is None:
             edge = geometry.edges[edge_id]
             for vertex_id in (edge.start, edge.end):
                 if vertex_id not in mesh.node_of_vertex:
                     mesh.node_of_vertex[vertex_id] = next_node
-                    mesh.nodes[next_node] = np.asarray(
-                        geometry.vertex_position(vertex_id), dtype=float
-                    )
+                    point = (geometry.vertex_position(vertex_id) if targets is None else
+                             targets[0. if vertex_id == edge.start else 1.])
+                    mesh.nodes[next_node] = np.asarray(point, dtype=float)
                     next_node += 1
             stations = int(seeding[edge_id]) * steps_per_division
-            parameters = _station_parameters(
-                geometry, edge_id, stations, size_field
-            )
+            parameters = (np.asarray(sorted(targets), dtype=float) if targets is not None else
+                          _station_parameters(geometry, edge_id, stations, size_field))
             sequence = [mesh.node_of_vertex[edge.start]]
             if len(parameters) > 2:
-                points = geometry.sample_edge(edge_id, parameters[1:-1])
+                points = (geometry.sample_edge(edge_id, parameters[1:-1]) if targets is None else
+                          np.asarray([targets[float(t)] for t in parameters[1:-1]]))
                 for point in points:
                     mesh.nodes[next_node] = np.asarray(point, dtype=float)
                     sequence.append(next_node)
                     next_node += 1
             sequence.append(mesh.node_of_vertex[edge.end])
             mesh.nodes_of_edge[edge_id] = sequence
-        parameters = _station_parameters(
-            geometry, edge_id, len(sequence) - 1, size_field
-        )
-        if isinstance(geometry.edges[edge_id].curve, Straight):
+        parameters = (np.asarray(sorted(targets), dtype=float) if targets is not None else
+                      _station_parameters(geometry, edge_id, len(sequence) - 1, size_field))
+        if targets is None and isinstance(geometry.edges[edge_id].curve, Straight):
             # Existing straight-edge nodes can include canonical B3 chord
             # midpoints. Register their actual owner parameters rather than
             # regrading the doubled station count independently.
@@ -562,6 +564,10 @@ def _ensure_edge_registry(
             raise MeshError(
                 f"edge {edge_id} boundary registry length disagrees with its seeding"
             )
+        if targets is not None and any(
+                tuple(map(float, mesh.nodes[node])) != tuple(targets[float(parameter)])
+                for node, parameter in zip(sequence, parameters)):
+            raise MeshError('NURBS registry station does not match its owner literal target')
         registry.register_many(
             edge_id,
             parameters,
@@ -1670,7 +1676,66 @@ def _publish_native_face_elements(mesh, face_id, core, core_to_global):
     mesh.elements_of_face[face_id] = elements
 
 
-def _mesh_native_face(
+def _mesh_native_face(geometry, mesh, face_id, **options):
+    """Rebuild only a refused face at bounded finer interior spacing.
+
+    No candidate from a failed owner proof survives. Boundary/global identities
+    are restored before rebuilding and any new station still uses the normal
+    owner-authored shared-edge publication route.
+    """
+    binding = options.get('_material_region_binding')
+    if binding is None or not binding.requires_curvilinear:
+        return _mesh_native_face_once(geometry, mesh, face_id, **options)
+    from ._publication_snapshot import PublicationSnapshot
+    from ._material_region_binding import _SourceCellResolutionRequired
+    from anygeometry import is_cancellation_signal
+    original_check = options.get('cancellation_check')
+    callback_errors = []
+    def checked(phase):
+        try:
+            result = original_check(phase)
+        except BaseException as error:
+            callback_errors.append(error)
+            raise
+        if result is True:
+            raise MeshError(f'{phase} cancelled')
+        # Legacy native consumers accept void callbacks; normalize every
+        # non-cancellation return so they cannot apply broader truthiness.
+        return None
+    if original_check is not None and not is_cancellation_signal(original_check):
+        options = dict(options, cancellation_check=checked)
+    snapshot = PublicationSnapshot(mesh, options['boundary_registry'],
+        options['component_seed_registry'], binding, binding._curvilinear_state)
+    for retry in range(4):
+        try:
+            binding.validate(None)
+            if snapshot.changed():
+                raise MeshError('source-cell attempt state changed before callback')
+            check = options.get('cancellation_check')
+            phase = f'native face {face_id} source-cell resolution attempt {retry}'
+            if check is not None and check(phase) is True:
+                raise MeshError(f'{phase} cancelled')
+            if snapshot.changed():
+                raise MeshError('source-cell attempt state changed during callback')
+            binding.validate(None)
+            diagnostics = _mesh_native_face_once(geometry, mesh, face_id,
+                **options, _interior_resolution_scale=2. ** -retry)
+            if retry:
+                diagnostics['source_cell_resolution'] = {
+                    'refinement_retries': retry,
+                    'interior_scale': 2. ** -retry,
+                }
+            return diagnostics
+        except _SourceCellResolutionRequired as error:
+            snapshot.restore()
+            if any(error is original for original in callback_errors) or retry == 3:
+                raise
+        except BaseException:
+            snapshot.restore()
+            raise
+
+
+def _mesh_native_face_once(
     geometry: GeometryModel,
     mesh: Mesh,
     face_id: int,
@@ -1694,6 +1759,7 @@ def _mesh_native_face(
     _material_region_binding: Any = None,
     _material_input_eligibility: Any = None,
     _respect_growth_limit: bool = False,
+    _interior_resolution_scale: float = 1.,
 ) -> dict[str, Any]:
     if getattr(component_seed_registry, "_deferred_cylindrical_components", None):
         from ._cylindrical_recombine import assert_face_open
@@ -1770,7 +1836,9 @@ def _mesh_native_face(
         )
     analytic_chart = None
     if (native_options.point_placement == "frontal_delaunay" and not quadratic
-            and (isinstance(face.surface, Cone) or isinstance(face.surface, ExtrudedSurface))):
+            and (isinstance(face.surface, Cone) or isinstance(face.surface, ExtrudedSurface)
+                 or (_material_region_binding is not None
+                     and _material_region_binding.requires_curvilinear))):
         from ._analytic_metric_chart import AnalyticMetricChart
         analytic_chart = AnalyticMetricChart(geometry, face_id, cancellation_check,
                                            region_binding=_material_region_binding)
@@ -1782,7 +1850,7 @@ def _mesh_native_face(
             cylindrical_chart.circumferential_length,
             cylindrical_chart.axial_length,
         ))
-    if planar_support is not None:
+    if planar_support is not None and analytic_chart is None:
         # The chart is the physical metric of the plane, so the target size is
         # applied in metres whatever else the model contains.
         u_vector = np.asarray(planar_support.u_vector, dtype=float)
@@ -1828,7 +1896,7 @@ def _mesh_native_face(
     if cylindrical_chart is not None:
         physical_jacobian = cylindrical_chart.jacobians
         metric_to_physical = cylindrical_chart.evaluate
-    if planar_support is not None:
+    if planar_support is not None and analytic_chart is None:
         metric_origin = np.asarray(planar_support.origin, dtype=np.float64)
         metric_u = np.asarray(planar_support.u_vector, dtype=np.float64)
         metric_v = np.asarray(planar_support.v_vector, dtype=np.float64)
@@ -1920,6 +1988,34 @@ def _mesh_native_face(
             "frontal_delaunay activation is currently limited to planar faces"
         )
     size_metric_spec = MetricFieldSpec.from_size_field(size_field)
+    if (analytic_chart is not None and _material_region_binding is not None
+            and native_options.metric_mode == "isotropic_spatial"):
+        # Owner-refined boundary stations can be much finer than the nominal
+        # field. Carry their scale into curved NURBS interior proposals instead
+        # of filling a finely sampled boundary with cells that fail the separate
+        # source-to-linear-mesh error requirement. This grants no proof: final
+        # cell, conformity and physical-quality gates remain mandatory.
+        proposed = _material_region_binding.interior_size_proposal(
+            size_metric_spec.global_control.target_size, cancellation_check)
+        proposed *= _interior_resolution_scale
+        size_metric_spec = replace(size_metric_spec,
+            global_control=IsotropicMetricControl(proposed))
+        if type(face.surface) is NurbsSurface:
+            # Seed the free interior at the proposed physical spacing too.
+            # Sampled stretch is only a mesher heuristic; owner cell proofs
+            # still certify the resulting approximation over whole cells.
+            seed_world_size = proposed
+            if native_options.metric_field is not None:
+                seed_world_size = min(seed_world_size,
+                    native_options.metric_field.global_control.target_size)
+            jacobians = analytic_chart.jacobians(np.vstack(chart_loops))
+            try:
+                stretch = float(np.max(np.linalg.svd(jacobians, compute_uv=False)))
+            except np.linalg.LinAlgError as exc:
+                raise MeshError('NURBS interior seed stretch could not be evaluated') from exc
+            if not np.isfinite(stretch) or stretch <= 0.:
+                raise MeshError('NURBS interior seed stretch must be finite and positive')
+            chart_size = min(chart_size, seed_world_size / stretch)
     supplemental_metric_field = None
     if (
         native_options.metric_mode == "isotropic_spatial"
@@ -2051,6 +2147,9 @@ def _mesh_native_face(
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
             _respect_growth_limit=_respect_growth_limit,
+            _protect_generated_seed_disks=(_interior_resolution_scale < 1.
+                and _material_region_binding is not None
+                and _material_region_binding.requires_curvilinear),
             _cartesian_rectangle_candidate=(
                 type(geometry) is GeometryModel and type(face.surface) is Plane
                 and face.parameterization is None
@@ -2144,6 +2243,9 @@ def _mesh_native_face(
             _boundary_is_seeded=seeded_general_chart,
             _protected_node_ids=protected_input_rows,
             _respect_growth_limit=_respect_growth_limit,
+            _protect_generated_seed_disks=(_interior_resolution_scale < 1.
+                and _material_region_binding is not None
+                and _material_region_binding.requires_curvilinear),
         )
         if _material_region_binding is not None:
             primary_output_origin = getattr(core, '_output_row_provenance', None)
@@ -2353,7 +2455,11 @@ def _mesh_native_face(
             parameter = float(Fraction(numerator, denominator))
             if not 0. < parameter < 1.:
                 raise MeshError("cylindrical split station must be strictly inside its source edge")
-            edge_point = geometry.sample_edge(edge_id, np.asarray([parameter]))[0]
+            if _material_region_binding is not None and _material_region_binding.requires_curvilinear:
+                _owner_uv, edge_point = _material_region_binding.curvilinear_station(
+                    edge_id, Fraction(numerator, denominator), cancellation_check)
+            else:
+                edge_point = geometry.sample_edge(edge_id, np.asarray([parameter]))[0]
             distance = float(np.linalg.norm(candidate - edge_point))
         else:
             edge_point, parameter, distance = geometry.closest_edge_point(edge_id, candidate)
@@ -2361,6 +2467,10 @@ def _mesh_native_face(
             raise MeshError("native-v2 shared split left its topology-owned edge")
         exact_point = np.asarray(edge_point, dtype=float)
         previous_point = mesh.nodes.get(node_id)
+        if (previous_point is not None and _material_region_binding is not None
+                and _material_region_binding.requires_curvilinear
+                and not np.array_equal(previous_point, exact_point)):
+            raise MeshError('NURBS shared station changed its owner literal target')
         if previous_point is not None and not np.allclose(
             previous_point, exact_point, rtol=0.0, atol=tolerance
         ):
@@ -2438,6 +2548,9 @@ def _mesh_native_face(
         next_node += 1
 
     _publish_native_face_elements(mesh, face_id, core, core_to_global)
+    if _material_region_binding is not None:
+        _material_region_binding.record_curvilinear_rows(coordinates[:, :2] @ chart_inverse, core_to_global)
+        _material_region_binding.certify_curvilinear_published(mesh, boundary_registry, cancellation_check)
     if _material_region_binding is not None:
         _material_region_binding.validate(cancellation_check)
         region = _material_region_binding.region
@@ -2723,6 +2836,63 @@ def _promote_linear_beam_result_to_b3(
     return replace(legacy_result, mesh=mesh)
 
 
+def _validate_linear_boundary_beam_ownership(
+    geometry: Any, mesh: Mesh, quad_faces: frozenset[int],
+    cancellation_check: Any = None,
+) -> None:
+    """Verify B2 coverage against source-owned shell boundary segments.
+
+    Station matching alone proves node identity, but cannot prove that the
+    shell cells actually consume every segment of the published chain. Build
+    each incident face's topological boundary once; coordinates never identify
+    owners or weld nodes. Offset chains retain their separate beam identities.
+    """
+    from collections import Counter
+
+    shared = {
+        int(edge): tuple(int(face) for face in geometry.faces_using_edge(int(edge))
+                         if int(face) in quad_faces)
+        for edge, elements in mesh.elements_of_edge.items()
+        if any(int(element) in mesh.beams for element in elements)
+    }
+    shared = {edge: faces for edge, faces in shared.items() if faces}
+    if not shared:
+        return
+    boundaries = {}
+    for face in sorted({face for faces in shared.values() for face in faces}):
+        _check_cancellation(cancellation_check, "quad-first:boundary-beam-validation")
+        segments = Counter()
+        for index, element in enumerate(mesh.elements_of_face[face]):
+            if index % 256 == 0:
+                _check_cancellation(cancellation_check, "quad-first:boundary-beam-validation")
+            body = mesh.quads.get(element)
+            if body is None:
+                body = mesh.tris[element]
+            for first, second in zip(body, (*body[1:], body[0])):
+                segments[frozenset((int(first), int(second)))] += 1
+        boundaries[face] = {segment for segment, count in segments.items() if count == 1}
+    owners = {}
+    for edge, faces in shared.items():
+        _check_cancellation(cancellation_check, "quad-first:boundary-beam-validation")
+        axis = mesh.nodes_of_edge[edge]
+        chain = mesh.offset_nodes_of_edge.get(edge) or axis
+        elements = mesh.elements_of_edge[edge]
+        if len(chain) != len(axis) or len(elements) != len(axis) - 1:
+            raise MeshError(f"edge {edge} has incomplete linear boundary beam coverage")
+        for position, element in enumerate(elements):
+            if position % 256 == 0:
+                _check_cancellation(cancellation_check, "quad-first:boundary-beam-validation")
+            element = int(element)
+            if element in owners:
+                raise MeshError(f"beam element {element} has multiple source-edge owners")
+            owners[element] = edge
+            if tuple(mesh.beams.get(element, ())) != tuple(chain[position:position + 2]):
+                raise MeshError(f"edge {edge} beam connectivity disagrees with its station chain")
+            segment = frozenset(map(int, axis[position:position + 2]))
+            if len(segment) != 2 or any(segment not in boundaries[face] for face in faces):
+                raise MeshError(f"edge {edge} beam segment is not an incident shell boundary")
+
+
 def _merge_quad_first_and_legacy(
     geometry: Any,
     *,
@@ -2731,6 +2901,7 @@ def _merge_quad_first_and_legacy(
     quad_result: "HybridMeshResult",
     legacy_result: "HybridMeshResult",
     curved_beam_edges: frozenset[int] = frozenset(),
+    cancellation_check: Any = None,
 ) -> "HybridMeshResult":
     """Combine the quad-first and legacy neutral meshes on exact geometry IDs.
 
@@ -3008,6 +3179,11 @@ def _merge_quad_first_and_legacy(
     )
     if legacy_mesh.seeding is not None:
         merged_mesh.seeding = legacy_mesh.seeding
+
+    if merged_mesh.order == "linear" and merged_mesh.beams:
+        _validate_linear_boundary_beam_ownership(
+            geometry, merged_mesh, quad_faces, cancellation_check
+        )
 
     # The merged beam IDs/nodes have a new namespace. Rebuild member groups
     # from authoritative source edge uses, not the pre-merge numeric IDs.
@@ -3799,6 +3975,9 @@ _QUAD_FIRST_MAX_NORMAL_ERROR_DEGREES = 5.0
 
 
 _REPAIR_NATIVE_MAPPING = evaluate_mapping
+_REPAIR_NORMAL_LOOKAHEAD = 16
+_REPAIR_NATIVE_DOMAIN_PROJECT = ParametricQuadDomain.project
+_REPAIR_NATIVE_DOMAIN_LIFT = ParametricQuadDomain.lift
 
 
 def _repair_coordinates_only_safe(nodes, normal, family):
@@ -3827,6 +4006,57 @@ def _repair_coordinates_only_safe(nodes, normal, family):
     return float(np.linalg.norm(normal)) > 0.0
 
 
+def _quality_boundary_midpoints(mesh, geometry, boundary_parameters=None):
+    """Use exact station provenance where supplied, retaining legacy queries."""
+    boundary_midpoints = {}
+    for edge_id, chain in mesh.nodes_of_edge.items():
+        known = dict((boundary_parameters or {}).get(edge_id, {}))
+        if any(node not in chain for node in known):
+            raise MeshError("quality repair station parameter is not on its declared edge chain")
+        tagged = [(index, known[node]) for index, node in enumerate(chain) if node in known]
+        if any(not np.isfinite(value) or not 0. <= value <= 1. for _, value in tagged):
+            raise MeshError("quality repair station parameter is invalid")
+        if any(b <= a for (_, a), (_, b) in zip(tagged, tagged[1:])):
+            raise MeshError("quality repair station parameters do not follow the ordered edge chain")
+        if tagged:
+            expected = np.asarray(geometry.sample_edge(edge_id, np.asarray([value for _, value in tagged])), dtype=float)
+            for (index, _), point in zip(tagged, expected):
+                actual = np.asarray(mesh.nodes[chain[index]], dtype=float)
+                scale = max(1., float(np.max(np.abs(actual))), float(np.max(np.abs(point))))
+                if not np.allclose(actual, point, rtol=0., atol=1.e-10*scale):
+                    raise MeshError("quality repair station parameter disagrees with source geometry")
+        for first, second in zip(chain, chain[1:]):
+            key = (min(first, second), max(first, second))
+            t0 = known[first] if first in known else geometry.closest_edge_point(edge_id, mesh.nodes[first])[1]
+            t1 = known[second] if second in known else geometry.closest_edge_point(edge_id, mesh.nodes[second])[1]
+            point = np.asarray(geometry.sample_edge(edge_id, np.asarray([(t0+t1)/2]))[0], dtype=float)
+            old = boundary_midpoints.get(key)
+            if old is not None and not np.allclose(old, point, atol=1e-12, rtol=0):
+                raise MeshError("quad-first quality repair has conflicting source midsides")
+            boundary_midpoints[key] = point
+    return boundary_midpoints
+
+
+class _RepairTrialCache:
+    """Call-local exact-coordinate bindings, never a persisted quality proof."""
+    def __init__(self, maximum):
+        self.maximum = max(1, int(maximum))
+        self.entries = {}
+
+    def get(self, key, nodes):
+        entry = self.entries.get(key)
+        if (entry is None or entry[0].shape != nodes.shape or entry[0].dtype != nodes.dtype
+                or not np.array_equal(entry[0], nodes)):
+            return None
+        return entry[1], entry[2].copy()
+
+    def put(self, key, nodes, quality, normal):
+        if key not in self.entries and len(self.entries) >= self.maximum:
+            self.entries.pop(next(iter(self.entries)))
+        self.entries[key] = (np.frombuffer(nodes.tobytes(), dtype=nodes.dtype).reshape(nodes.shape),
+                             quality, np.frombuffer(normal.tobytes(), dtype=normal.dtype).reshape(normal.shape))
+
+
 def _repair_quad_first_quality(
     mesh, geometry, domains_by_face, cancellation_check=None,
     protected_interior_nodes=(),
@@ -3834,6 +4064,8 @@ def _repair_quad_first_quality(
     protected_regular_nodes=(),
     regular_cells=(),
     t3_minimum_angle=15.0,
+    boundary_parameters=None,
+    _batch_initial_normals=True,
 ):
     """Replace a low-quality Q4 by its best certified T3 diagonal.
 
@@ -3857,17 +4089,7 @@ def _repair_quad_first_quality(
                                for b in np.linspace(-1., 1., 9)], dtype=float)
     tri_samples = np.asarray([(i/8, j/8) for i in range(9)
                               for j in range(9-i)], dtype=float)
-    boundary_midpoints = {}
-    for edge_id, chain in mesh.nodes_of_edge.items():
-        for first, second in zip(chain, chain[1:]):
-            key = (min(first, second), max(first, second))
-            _, t0, _ = geometry.closest_edge_point(edge_id, mesh.nodes[first])
-            _, t1, _ = geometry.closest_edge_point(edge_id, mesh.nodes[second])
-            point = np.asarray(geometry.sample_edge(edge_id, np.asarray([(t0+t1)/2]))[0], dtype=float)
-            old = boundary_midpoints.get(key)
-            if old is not None and not np.allclose(old, point, atol=1e-12, rtol=0):
-                raise MeshError("quad-first quality repair has conflicting source midsides")
-            boundary_midpoints[key] = point
+    boundary_midpoints = _quality_boundary_midpoints(mesh, geometry, boundary_parameters)
 
     # Quality repair revisits the same corner through many incident cells and
     # candidate moves.  A chart projection rebuilds the face trim, so cache it
@@ -3898,12 +4120,24 @@ def _repair_quad_first_quality(
         return .5 * (np.asarray(a) + np.asarray(b))
 
     sampled_by_nodes: dict[int, tuple[np.ndarray, Any]] = {}
+    trial_cache = _RepairTrialCache(max(64, 2*len(mesh.shells)))
 
     def trial(face_id, corners, family, samples, *, coordinates_only=False):
         nodes = np.asarray([mesh.nodes[n] for n in corners] + [
             midpoint(face_id, corners[i], corners[(i+1) % len(corners)])
             for i in range(len(corners))], dtype=float)
         domain = domains_by_face[face_id]
+        cache_key = None
+        if (not isinstance(domain, PlanarQuadDomain) and type(geometry) is GeometryModel
+                and evaluate_mapping is _REPAIR_NATIVE_MAPPING
+                and getattr(geometry.face_local_uv, '__func__', None) is GeometryModel.face_local_uv
+                and getattr(geometry.face_normal, '__func__', None) is GeometryModel.face_normal
+                and getattr(geometry.face_point, '__func__', None) is GeometryModel.face_point):
+            cache_key = (face_id, tuple(corners), family, samples.shape, samples.dtype.str, samples.tobytes(),
+                         geometry.model_id, geometry.revision, tuple(sorted(np.geterr().items())))
+            cached = trial_cache.get(cache_key, nodes)
+            if cached is not None:
+                return cached[0], nodes, cached[1]
         if isinstance(domain, PlanarQuadDomain):
             normal = np.asarray(domain.normal, dtype=float)
         else:
@@ -3918,6 +4152,8 @@ def _repair_quad_first_quality(
             return None, nodes, normal
         sampled = evaluate_mapping(nodes, family, samples, reference_normal=normal)
         quality = float(np.min(sampled.normalized_quality))
+        if cache_key is not None:
+            trial_cache.put(cache_key, nodes, quality, normal)
         # Keep the exact immutable trial array alive until its normal check.
         # A moved corner creates a new array, so no old mapping is reused.
         sampled_by_nodes[id(nodes)] = (nodes, sampled)
@@ -3926,9 +4162,95 @@ def _repair_quad_first_quality(
             sampled_by_nodes[id(nodes)] = (nodes, sampled)
         return quality, nodes, normal
 
+    owner_normal_cache = {}
+
+    def normal_key(face_id, nodes, family, samples, reference_normal):
+        capability = getattr(geometry, 'supports_topology_face_batch', None)
+        domain = domains_by_face[face_id]
+        if (not _batch_initial_normals
+                or np.geterr() != {'divide': 'warn', 'over': 'warn', 'under': 'ignore', 'invalid': 'warn'}
+                or np.geterrcall() is not None
+                or type(geometry) is not GeometryModel
+                or type(domain) is not ParametricQuadDomain
+                or evaluate_mapping is not _REPAIR_NATIVE_MAPPING
+                or getattr(capability, '__func__', None) is not getattr(GeometryModel, 'supports_topology_face_batch', None)
+                or getattr(domain.project, '__func__', None) is not _REPAIR_NATIVE_DOMAIN_PROJECT
+                or getattr(domain.lift, '__func__', None) is not _REPAIR_NATIVE_DOMAIN_LIFT
+                or not callable(capability) or not capability(face_id)
+                or any(getattr(getattr(geometry, name), '__func__', None)
+                       is not getattr(GeometryModel, name) for name in
+                       ('face_local_uv', 'face_local_uv_many', 'face_normal',
+                        'face_normal_many', 'face_point', 'evaluate_face_many',
+                        'face_derivatives_many'))):
+            return None
+        return (face_id, id(domain), geometry.model_id, geometry.revision,
+                tuple(sorted(np.geterr().items())), id(np.geterrcall()),
+                family, samples.shape, samples.dtype.str, samples.tobytes(),
+                nodes.shape, nodes.dtype.str, nodes.tobytes(),
+                reference_normal.shape, reference_normal.dtype.str, reference_normal.tobytes())
+
+    def prefetch_normals(face_id, elements):
+        # At most16 initial cells. Publication is all-or-nothing, and cached
+        # evidence is consumed only after the original per-cell cancellation.
+        owner_normal_cache.clear()
+        pending = []
+        if normal_key(face_id, np.empty((0, 3)), 'Q8', quad_samples, np.empty(3)) is None:
+            return
+        try:
+            cells = []
+            for element in elements:
+                body = mesh.quads.get(element)
+                if body is None:
+                    continue
+                nodes = np.asarray([mesh.nodes[n] for n in body] + [
+                    midpoint(face_id, body[i], body[(i+1) % len(body)])
+                    for i in range(len(body))], dtype=float)
+                cells.append((body, nodes))
+            if not cells:
+                return
+            centres = np.asarray([np.mean(nodes[:len(body)], axis=0) for body, nodes in cells])
+            centre_uv = geometry.face_local_uv_many(face_id, centres)
+            for (body, nodes), uv in zip(cells, centre_uv):
+                # Retain the original finite-difference scalar owner normal.
+                normal = geometry.face_normal(face_id, *uv)
+                key = normal_key(face_id, nodes, 'Q8', quad_samples, normal)
+                if key is None:
+                    return
+                sampled = evaluate_mapping(nodes, 'Q8', quad_samples, reference_normal=normal)
+                quality = float(np.min(sampled.normalized_quality))
+                trial_key = (face_id, tuple(body), 'Q8', quad_samples.shape,
+                             quad_samples.dtype.str, quad_samples.tobytes(),
+                             geometry.model_id, geometry.revision, tuple(sorted(np.geterr().items())))
+                trial_cache.put(trial_key, nodes, quality, normal)
+                if np.any(np.linalg.norm(sampled.jacobian_vector, axis=1) <= 0.):
+                    continue
+                pending.append((key, sampled))
+            if pending:
+                points = np.concatenate([item[1].points for item in pending], axis=0)
+                uv = geometry.face_local_uv_many(face_id, points)
+                normals = geometry.face_normal_many(face_id, uv)
+                offset = 0
+                made = {}
+                for key, sampled in pending:
+                    count = len(sampled.points)
+                    made[key] = (sampled, normals[offset:offset+count].copy())
+                    offset += count
+                owner_normal_cache.update(made)
+        except (GeometryError, MeshError, ValueError, TypeError,
+                FloatingPointError, np.linalg.LinAlgError):
+            # Replay supported owner failures at their original cell, after
+            # its cancellation callback, without exposing partial lookahead.
+            owner_normal_cache.clear()
+            trial_cache.entries.clear()
+            sampled_by_nodes.clear()
+            chart_positions.clear()
+
     def normal_error(face_id, nodes, family, samples, reference_normal):
+        key = normal_key(face_id, nodes, family, samples, reference_normal)
+        cached_normal = owner_normal_cache.get(key) if key is not None else None
         entry = sampled_by_nodes.get(id(nodes))
-        sampled = (entry[1] if entry is not None and entry[0] is nodes else
+        sampled = (cached_normal[0] if cached_normal is not None else
+                   entry[1] if entry is not None and entry[0] is nodes else
                    evaluate_mapping(nodes, family, samples,
                                     reference_normal=reference_normal))
         jacobians = np.asarray(sampled.jacobian_vector, dtype=float)
@@ -3941,7 +4263,9 @@ def _repair_quad_first_quality(
                                             jacobians.shape)
         else:
             batch_uv = getattr(geometry, "face_local_uv_many", None)
-            if batch_uv is None:
+            if cached_normal is not None:
+                owner_normals = cached_normal[1]
+            elif batch_uv is None:
                 # ANYgeometry 0.4.3 did not yet expose this optional batch
                 # API. Preserve the scalar owner result on that supported
                 # dependency line.
@@ -3951,7 +4275,8 @@ def _repair_quad_first_quality(
                 ).reshape((-1, 2))
             else:
                 uv = batch_uv(face_id, sampled.points)
-            owner_normals = geometry.face_normal_many(face_id, uv)
+            if cached_normal is None:
+                owner_normals = geometry.face_normal_many(face_id, uv)
         cosines = np.einsum("ij,ij->i", jacobians / lengths[:, None], owner_normals)
         return float(np.max(np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))))
 
@@ -3968,13 +4293,15 @@ def _repair_quad_first_quality(
     next_element = max((*mesh.quads, *mesh.tris), default=-1) + 1
     for face_id, elements in list(mesh.elements_of_face.items()):
         replacement = []
-        for element_id in elements:
+        for element_index, element_id in enumerate(elements):
             body = mesh.quads.get(element_id)
             if body is None:
                 replacement.append(element_id)
                 continue
             if cancellation_check is not None:
                 cancellation_check("quad-first:quality-repair")
+            if element_index % _REPAIR_NORMAL_LOOKAHEAD == 0 and _batch_initial_normals:
+                prefetch_normals(face_id, elements[element_index:element_index+_REPAIR_NORMAL_LOOKAHEAD])
             current, current_nodes, current_normal = trial(face_id, body, "Q8", quad_samples)
             current_normal_error = normal_error(
                 face_id, current_nodes, "Q8", quad_samples, current_normal)
@@ -4671,12 +4998,23 @@ def _quad_first_execute(
                 domain = ParametricQuadDomain.from_geometry(geometry, face_id)
                 family = "extruded"
             elif isinstance(surface, (RuledSurface, CoonsSurface)):
-                try:
-                    domain = PlanarQuadDomain.from_geometry(geometry, face_id)
-                    family = "planar"
-                except MeshError:
+                boundary_map = getattr(geometry, "face_boundary_uv", None)
+                known_sweep = (
+                    isinstance(surface, CoonsSurface) and callable(boundary_map)
+                    and boundary_map(face_id, geometry.faces[face_id].loop[0].edge, 0.) is not None
+                )
+                # A translational curved strip has coplanar corner vertices;
+                # those corners cannot qualify its curved owner as a plane.
+                if known_sweep:
                     domain = ParametricQuadDomain.from_geometry(geometry, face_id)
-                    family = "ruled" if isinstance(surface, RuledSurface) else "coons"
+                    family = "coons"
+                else:
+                    try:
+                        domain = PlanarQuadDomain.from_geometry(geometry, face_id)
+                        family = "planar"
+                    except MeshError:
+                        domain = ParametricQuadDomain.from_geometry(geometry, face_id)
+                        family = "ruled" if isinstance(surface, RuledSurface) else "coons"
             else:
                 domain = PlanarQuadDomain.from_geometry(geometry, face_id)
                 family = "planar"
@@ -4767,6 +5105,7 @@ def _quad_first_execute(
     face_q5: dict[int, dict[str, Any]] = {}
     transition_original_xyz: dict[int, np.ndarray] = {}
     transition_face_states: dict[int, Any] = {}
+    boundary_parameters: dict[int, dict[int, float]] = {}
     # One mesh invocation sees many identical, geometry-derived integer MCF
     # instances. Reuse only validated successful answers from earlier faces.
     q4_solution_cache: dict[tuple[Any, Any], Any] = {}
@@ -4911,6 +5250,20 @@ def _quad_first_execute(
                 global_nodes[global_id] = lifted
                 local_to_global[local_node] = global_id
 
+        for edge_id, _ in domain.edge_uses:
+            parameters = boundary_parameters.setdefault(edge_id, {})
+            for station in face_registry.chain(edge_id, True):
+                local = seed.station_to_node.get(station.key)
+                if local is None:
+                    raise MeshError("quality repair boundary station was not present in its face seed")
+                node = local_to_global[local]
+                if node != global_node_of_station[station.key]:
+                    raise MeshError("quality repair boundary station has inconsistent global identity")
+                value = float(station.parameter)
+                if node in parameters and parameters[node] != value:
+                    raise MeshError("quality repair shared station has inconsistent source parameters")
+                parameters[node] = value
+
         face_q5[domain.face_id]["moved_node_ids"] = [
             local_to_global[int(node)]
             for node in face_q5[domain.face_id]["resident_moved_node_ids"]
@@ -5021,6 +5374,7 @@ def _quad_first_execute(
                 cancellation_check=cancellation_check,
                 protected_interior_nodes=protected_interior_nodes,
                 allow_corner_relocation=layout_policy == "adaptive",
+                boundary_parameters=boundary_parameters,
             )
         else:
             smart_mapped.audit_mesh("before_repair", mesh)
@@ -5032,6 +5386,7 @@ def _quad_first_execute(
                 protected_regular_nodes=smart_mapped.protected_nodes(),
                 regular_cells=smart_mapped.regular_cells(),
                 t3_minimum_angle=t3_minimum_angle,
+                boundary_parameters=boundary_parameters,
             )
     if smart_mapped is not None:
         smart_mapped.audit_mesh("after_repair", mesh)
@@ -5326,6 +5681,40 @@ def _finalize_hybrid_candidate(
     incomplete candidate can escape the public API.
     """
 
+    # The existing source-association remapper reconstructs registry parameters
+    # by closest-point projection. Curvilinear authority requires declared,
+    # owner-qualified source-parameter transport before that route can admit it.
+    from ._material_region_binding import (face_requires_curvilinear,
+                                          curvilinear_reference_candidates)
+    curvilinear_generation = bool(curvilinear_reference_candidates(candidate.mesh)) or (
+        bool(getattr(candidate.mesh, 'tris', {}) or getattr(candidate.mesh, 'quads', {}))
+        and any(face_requires_curvilinear(candidate.working_geometry, face)
+                                           for face in candidate.working_geometry.faces))
+    if curvilinear_generation:
+        # Labels are not authority to select a proximity-based remapper.
+        # Validate retained actual cells before any repair or publication.
+        from .material_source_transfer import _validated_curvilinear_reference_uv
+        from .s3_production import _element_face_map
+        _element_face_map(candidate.mesh)
+        _validated_curvilinear_reference_uv(candidate.working_geometry, candidate.mesh)
+        if candidate.defer_qualified_s3:
+            raise MeshError('deferred curvilinear S3 repair requires fresh owner cell qualification')
+    curvilinear_faces = tuple(face for face, cells in candidate.mesh.elements_of_face.items()
+            if cells and face_requires_curvilinear(candidate.working_geometry, face))
+    identity_curvilinear = bool(curvilinear_faces) and (
+        candidate.source_geometry is candidate.working_geometry
+        and set(candidate.source_to_final_faces) == set(candidate.source_geometry.faces)
+        and all(tuple(children) == (face,) for face, children in candidate.source_to_final_faces.items())
+        and set(candidate.source_to_final_edges) == set(candidate.source_geometry.edges)
+        and all(tuple(children) == (edge,) for edge, children in candidate.source_to_final_edges.items()))
+    clone_curvilinear = bool(curvilinear_faces) and (
+        candidate.source_geometry is not candidate.working_geometry
+        and set(candidate.source_to_final_faces) == set(candidate.source_geometry.faces)
+        and all(tuple(children) == (face,) for face, children in candidate.source_to_final_faces.items())
+        and set(candidate.source_to_final_edges) == set(candidate.source_geometry.edges)
+        and all(tuple(children) == (edge,) for edge, children in candidate.source_to_final_edges.items()))
+    if curvilinear_faces and not (identity_curvilinear or clone_curvilinear):
+        raise MeshError('NURBS source association remapping requires qualified source-parameter transport')
     mesh = candidate.mesh
     geometry = candidate.working_geometry
     source_geometry = candidate.source_geometry
@@ -5410,7 +5799,16 @@ def _finalize_hybrid_candidate(
             candidate.preparation_report,
             candidate.prepared_to_final_edges,
         )
-    if (
+    if clone_curvilinear:
+        from .material_source_transfer import _publish_identity_source_transfer
+        mesh.boundary_registry = candidate.boundary_registry
+        boundary_registry = _publish_identity_source_transfer(
+            source_geometry, geometry, mesh, candidate.boundary_registry)
+        if qualified_s3_record is not None:
+            from .material_source_transfer import _qualify_identity_source_s3
+            qualified_s3_record = _qualify_identity_source_s3(source_geometry, geometry, mesh)
+        triangulation_backend_by_face = candidate.triangulation_backend_by_face
+    elif not identity_curvilinear and (
         candidate.preparation_report is not None
         or candidate.structured_report is not None
     ):
@@ -5609,7 +6007,7 @@ def _finalize_hybrid_candidate(
             'cylindrical_shared_boundary_final_repair'
         ] = candidate.final_cylindrical_repairs
     mesh.boundary_registry = boundary_registry
-    candidate.publication_guard(publication_stage)
+    candidate.publication_guard(publication_stage, mesh, boundary_registry, cancellation_check)
     return result
 
 
@@ -5629,6 +6027,7 @@ def generate_hybrid_mesh_result(
     recombine: bool = True,
     native_backend: Any = "auto",
     native_options: NativeMeshingOptions | Mapping[str, Any] | None = None,
+    geometry_approximation_error: float | None = None,
     structured_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
@@ -5661,12 +6060,15 @@ def generate_hybrid_mesh_result(
     isolated mesh-job closure and may be finalized in place.
     """
 
+    from ._material_region_binding import checked_geometry_approximation_error
+    geometry_approximation_error = checked_geometry_approximation_error(geometry_approximation_error)
     phase_seconds: dict[str, float] = {}
     operation_counts = new_operation_counts()
     _check_cancellation(cancellation_check, "hybrid generation start")
     target_size = float(target_size)
     if not np.isfinite(target_size) or target_size <= 0.0:
         raise MeshError("target_size must be finite and positive")
+    default_native_controls = native_options is None
     native_options = NativeMeshingOptions.coerce(native_options)
     if order not in ELEMENT_ORDERS:
         raise MeshError(
@@ -5777,6 +6179,24 @@ def generate_hybrid_mesh_result(
     preflight_started = perf_counter()
     source_view = GeometryMeshingView(source_geometry)
     source_faces = _face_ids(source_geometry, requested_face_ids)
+    from ._material_region_binding import face_requires_curvilinear
+    nurbs_selected = any(face_requires_curvilinear(source_geometry, face) for face in source_faces)
+    if nurbs_selected:
+        if geometry_approximation_error is None:
+            raise MeshError('NURBS approximation requires explicit geometry_approximation_error')
+        if quad_options is not None:
+            raise QuadPublicUnsupported('NURBS cut cells require the owner-bound native reference-cell route')
+        if strategy is MeshingStrategy.MAPPED:
+            raise MeshError('NURBS material approximation does not admit the generic mapped route')
+        if strategy is MeshingStrategy.AUTO:
+            strategy = MeshingStrategy.NATIVE
+        if default_native_controls:
+            native_options = replace(native_options, point_placement='frontal_delaunay',
+                                     metric_mode='isotropic_spatial')
+        if order != 'linear' or native_options.point_placement != 'frontal_delaunay':
+            raise MeshError('NURBS approximation requires linear frontal material regions')
+        if structured_options is not None:
+            raise MeshError('NURBS reference cells require native topology without structured layout planning')
     source_beams = _member_edges(
         source_view, requested_beam_edges, requested_member_ids
     )
@@ -5969,6 +6389,7 @@ def generate_hybrid_mesh_result(
         _check_cancellation(cancellation_check, "quad-mixed:legacy")
         legacy_result = generate_hybrid_mesh_result(
             source_geometry,
+            geometry_approximation_error=geometry_approximation_error,
             target_size=target_size,
             strategy=strategy,
             overrides={**_mixed_pins, **dict(overrides or {})} if _mixed_pins else overrides,
@@ -6001,6 +6422,7 @@ def generate_hybrid_mesh_result(
             legacy_faces=frozenset(_legacy_selected),
             quad_result=quad_result,
             legacy_result=legacy_result,
+            cancellation_check=cancellation_check,
         )
 
         def _validate_merged(candidate: HybridMeshResult) -> None:
@@ -6079,6 +6501,7 @@ def generate_hybrid_mesh_result(
                 beam_overrides[int(edge_id)] = (len(chain) - 1) // station_stride
         beam_result = generate_hybrid_mesh_result(
             source_geometry,
+            geometry_approximation_error=geometry_approximation_error,
             target_size=target_size,
             # The beam pass owns no faces: it must not re-enter SmartMapped.
             strategy=(
@@ -6125,6 +6548,7 @@ def generate_hybrid_mesh_result(
             quad_result=quad_result,
             legacy_result=beam_result,
             curved_beam_edges=frozenset(scoped_curved_beams),
+            cancellation_check=cancellation_check,
         )
         if _remaining_overrides and _independent_beams:
             from ._independent_beams import apply_independent_beams
@@ -6430,7 +6854,7 @@ def generate_hybrid_mesh_result(
     )
 
     view = GeometryMeshingView(geometry)
-    def finish_publication(stage: str) -> None:
+    def finish_publication(stage: str, mesh: Mesh, boundary_registry, cancellation_check) -> None:
         # Internal working-copy preparation may advance the source revision.
         # A user callback may not change either publication authority afterward.
         owners = (source_geometry,) if geometry is source_geometry else (source_geometry, geometry)
@@ -6438,7 +6862,30 @@ def generate_hybrid_mesh_result(
             (owner, owner.model_id, owner.revision, owner.tolerance)
             for owner in owners
         )
+        curvilinear = tuple(binding for binding in
+            {id(item): item for item in material_region_bindings.values()}.values()
+            if binding.requires_curvilinear)
+        if curvilinear:
+            # These are generation-owned authorities captured by this closure;
+            # mutable deferred-candidate selections/reports cannot grant transfer.
+            if geometry is not source_geometry:
+                from .material_source_transfer import _validate_identity_source_publication
+                _validate_identity_source_publication(source_geometry, geometry, mesh, boundary_registry)
+            from ._authored_component_stage import _mesh_digest
+            from ._material_region_binding import boundary_registry_pin
+            entry_mesh = _mesh_digest(mesh)
+            entry_registry = boundary_registry_pin(boundary_registry)
+            if getattr(mesh, 'boundary_registry', None) is not boundary_registry:
+                raise MeshError('NURBS final mesh has another boundary registry')
+            registry_owner = boundary_registry.view.source
+            if not any(registry_owner is owner for owner in owners):
+                raise MeshError('NURBS final registry has another geometry owner')
+            boundary_registry.view.assert_current(registry_owner)
         _check_cancellation(cancellation_check, stage)
+        if curvilinear and (_mesh_digest(mesh) != entry_mesh
+                or boundary_registry_pin(boundary_registry) != entry_registry
+                or getattr(mesh, 'boundary_registry', None) is not boundary_registry):
+            raise MeshError('NURBS final mesh or registry changed during publication callback')
         if not reuse_prepared_working_copy:
             source_view.assert_current()
         view.assert_current()
@@ -6447,6 +6894,12 @@ def generate_hybrid_mesh_result(
                 raise MeshError("cannot publish a mesh during an open geometry transaction")
             if (owner.model_id, owner.revision, owner.tolerance) != (model_id, revision, tolerance):
                 raise MeshError("cannot publish a stale geometry-bound mesh after the final callback")
+        for binding in {id(item): item for item in material_region_bindings.values()}.values():
+            if binding.requires_curvilinear and binding.geometry_approximation_error != geometry_approximation_error:
+                raise MeshError('NURBS publication differs from requested approximation limit')
+            binding.validate_curvilinear_publication(mesh)
+        if curvilinear and geometry is not source_geometry:
+            _validate_identity_source_publication(source_geometry, geometry, mesh, boundary_registry)
     active_sheets, active_members = _active_structural_owners(view, faces, beams)
     pipeline = StructuralMeshingPipeline(
         view,
@@ -6534,7 +6987,8 @@ def generate_hybrid_mesh_result(
     material_region_bindings = prepare_material_regions(
         geometry, native_faces, source_to_final_faces, order=order,
         native_options=native_options, supplied_seeding=supplied_seeding,
-        edge_overrides=final_overrides or {}, cancellation_check=cancellation_check)
+        edge_overrides=final_overrides or {}, cancellation_check=cancellation_check,
+        geometry_approximation_error=geometry_approximation_error)
     cancelled_region_edges = {handle.id for binding in material_region_bindings.values()
                               for handle in binding.region.cancelled_seams}
     boundary_registry = GlobalEdgeBoundaryRegistry(view)
@@ -6548,6 +7002,29 @@ def generate_hybrid_mesh_result(
         }
         for face_id in mapped_faces
     }
+    owner_stations = {}
+    curvilinear_bindings = tuple(binding for binding in
+        {id(item): item for item in material_region_bindings.values()}.values()
+        if binding.requires_curvilinear)
+    # Source parameters are identities, not a grading hint. Refine the actual
+    # FE stations through the owner, then authenticate their shared-edge union
+    # on every incident material region before allocating any mesh nodes.
+    shared_parameters = {}
+    for binding in curvilinear_bindings:
+        if not binding.requires_curvilinear:
+            continue
+        parameter_rows = {int(path.source_edge): _station_parameters(
+            geometry, int(path.source_edge), int(seeding[int(path.source_edge)]), size_field)
+            for loop in binding.region.boundaries for path in loop}
+        for edge, targets in binding.prepare_curvilinear_seed(parameter_rows, cancellation_check).items():
+            shared_parameters.setdefault(edge, set()).update(targets)
+    for binding in curvilinear_bindings:
+        for edge, targets in binding.prepare_curvilinear_seed(
+                {edge: tuple(sorted(parameters)) for edge, parameters in shared_parameters.items()},
+                cancellation_check, refine=False).items():
+            previous = owner_stations.setdefault(edge, targets)
+            if previous != targets:
+                raise MeshError('incident NURBS faces disagree on owner source stations')
     _ensure_edge_registry(
         geometry,
         view,
@@ -6557,7 +7034,17 @@ def generate_hybrid_mesh_result(
         seeding,
         size_field,
         order,
+        owner_stations=owner_stations,
     )
+    for binding in {id(item): item for item in material_region_bindings.values()}.values():
+        binding.prepare_curvilinear_chords(mesh, boundary_registry, cancellation_check)
+    # Every canonical NURBS face requires the receipt route, including direct
+    # native requests whose controls are outside its admitted linear scope.
+    missing_nurbs = [face for face in native_faces
+                     if face_requires_curvilinear(geometry, face)
+                     and face not in material_region_bindings]
+    if missing_nurbs:
+        raise MeshError('NURBS approximation requires linear owner-bound frontal material regions')
     prepared_declared_junction_edges = set(
         _geometry_plate_junction_edge_ids(geometry)
     ) | (
@@ -6801,7 +7288,15 @@ def generate_hybrid_mesh_result(
         and structured_report is not None
         and not selection_quality["accepted"]
     )
+    def retain_material_cells():
+        from ._material_region_binding import retain_curvilinear_reference_candidates
+        retain_curvilinear_reference_candidates(mesh, tuple(
+            (binding.geometry, binding.collection, binding._curvilinear_state['chords'],
+             binding._curvilinear_state['cells'])
+            for binding in {id(item): item for item in material_region_bindings.values()}.values()
+            if binding.requires_curvilinear), boundary_registry=boundary_registry)
     if qualified_s3 and not defer_qualified_s3:
+        retain_material_cells()
         qualified_s3_started = perf_counter()
         _check_cancellation(
             cancellation_check, "qualified S3 production preparation start"
@@ -6820,6 +7315,9 @@ def generate_hybrid_mesh_result(
             perf_counter() - qualified_s3_started
         )
 
+    # External identity cache preserves canonical Mesh schema. Copies and
+    # serialization acquire no authority; all use requires fresh owner checks.
+    retain_material_cells()
     candidate_runtime = new_candidate_runtime()
     candidate_runtime["operation_counts"] = operation_counts
     candidate = _HybridCandidateContext(
@@ -6853,6 +7351,8 @@ def generate_hybrid_mesh_result(
         phase_seconds=phase_seconds,
         runtime=candidate_runtime,
     )
+    if geometry_approximation_error is not None:
+        candidate.extra_diagnostics['geometry_approximation_error'] = geometry_approximation_error
     if _defer_finalization:
         # Deferred candidate generation: the caller owns candidate selection
         # and applies connectivity exactly once, to the selected candidate
@@ -6934,6 +7434,7 @@ def generate_hybrid_mesh_result(
 
     fallback = _adopt(generate_hybrid_mesh_result(
         source_geometry,
+        geometry_approximation_error=geometry_approximation_error,
         target_size=target_size,
         strategy=MeshingStrategy.AUTO,
         native_options=native_options,
@@ -7019,6 +7520,7 @@ def generate_hybrid_mesh_result(
         else:
             refined = _adopt(generate_hybrid_mesh_result(
                 source_geometry,
+                geometry_approximation_error=geometry_approximation_error,
                 target_size=target_size,
                 strategy=MeshingStrategy.AUTO,
                 native_options=native_options,
@@ -7062,6 +7564,7 @@ def generate_hybrid_mesh_result(
             else:
                 conservative = _adopt(generate_hybrid_mesh_result(
                     source_geometry,
+                    geometry_approximation_error=geometry_approximation_error,
                     target_size=target_size,
                     strategy=MeshingStrategy.AUTO,
                     native_options=native_options,
@@ -7141,6 +7644,7 @@ def generate_hybrid_mesh_result(
             # for S3 only once selected, below.
             growth_limited = _adopt(generate_hybrid_mesh_result(
                 source_geometry,
+                geometry_approximation_error=geometry_approximation_error,
                 target_size=target_size,
                 strategy=MeshingStrategy.AUTO,
                 native_options=native_options,

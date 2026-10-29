@@ -248,6 +248,8 @@ def _certified_linear_validity(
     mesh: MeshCore,
     tolerance: float | None,
     declared: tuple[Sequence[int], ...],
+    *,
+    _triangle_metrics: ElementQuality | None = None,
 ) -> ValidityReport | None:
     """Vectorized certification of a fully valid linear mesh.
 
@@ -302,11 +304,19 @@ def _certified_linear_validity(
         )
         if len(triangles):
             rows = np.flatnonzero(mesh.triangle_active)
-            metrics = triangle_quality(
-                mesh.node_coordinates,
-                mesh.triangle_connectivity[rows],
-                mesh.triangle_ids[rows],
-            )
+            metrics = _triangle_metrics
+            if metrics is None:
+                metrics = triangle_quality(
+                    mesh.node_coordinates,
+                    mesh.triangle_connectivity[rows],
+                    mesh.triangle_ids[rows],
+                )
+            elif (type(metrics) is not ElementQuality
+                  or not np.array_equal(metrics.element_ids, mesh.triangle_ids[rows])
+                  or any(getattr(metrics, name).shape != (len(rows),) for name in
+                         ("area", "aspect_ratio", "minimum_angle", "maximum_angle",
+                          "scaled_jacobian", "warpage"))):
+                return None
             if not (
                 np.all(np.isfinite(metrics.area))
                 and np.all(metrics.area > area_tolerance)
@@ -441,6 +451,21 @@ def validate_mesh(
     if certified is not None:
         return certified
     return _scan_mesh_validity(mesh, tolerance, raise_on_error, declared)
+
+
+
+def _validate_mesh_with_triangle_metrics(mesh: MeshCore, metrics: ElementQuality) -> ValidityReport:
+    """Private calculation reuse for canonical, unchanged-prefix split trials.
+
+    The caller owns correspondence of every metric row to this exact mesh.
+    Structure and world-scale tolerance remain checked by the common certifier;
+    unknown/invalid forms retain the original complete diagnostic validator.
+    This is arithmetic reuse, not a receipt or an external validity assertion.
+    """
+    certified = _certified_linear_validity(mesh, None, (), _triangle_metrics=metrics)
+    if certified is not None:
+        return certified
+    return validate_mesh(mesh, raise_on_error=False)
 
 
 def assert_valid_mesh(

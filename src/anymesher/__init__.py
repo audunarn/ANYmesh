@@ -39,7 +39,17 @@ from .coupling import (
     shape_functions_4node,
     shape_functions_8node,
 )
+from .boundary_orientation import (
+    BOUNDARY_ORIENTATION_CONTRACT,
+    BoundaryOrientationError,
+    BoundaryOrientationResult,
+    generate_displacement_boundary_mesh_result,
+    orient_displacement_boundary,
+)
 from .errors import GeometryError, MeshError
+from .material_source_transfer import (validate_material_source_transfer_for_mesh,
+    publish_model_closure_mesh_to_source, requires_material_source_transfer,
+    qualify_model_closure_source_publication)
 from .geometry import (
     Arc,
     ArcFrame,
@@ -366,7 +376,18 @@ __all__ = [
     "triangle_to_quads",
     "verify_mesh_quality",
     "validate_prepared_current_component_associations",
+    "validate_material_source_transfer_for_mesh",
+    "publish_model_closure_mesh_to_source",
+    "qualify_model_closure_source_publication",
+    "requires_material_source_transfer",
+    "BOUNDARY_ORIENTATION_CONTRACT",
+    "BoundaryOrientationError",
+    "BoundaryOrientationResult",
+    "generate_displacement_boundary_mesh_result",
+    "orient_displacement_boundary",
 ]
 
-from .material_source_transfer import requires_material_source_transfer
-__all__.append("requires_material_source_transfer")
+from .approximation_policy import (GeometryApproximationPolicy, GeometryApproximationResolution,
+    resolve_geometry_approximation, validate_geometry_approximation_binding)
+__all__ += ["GeometryApproximationPolicy", "GeometryApproximationResolution",
+    "resolve_geometry_approximation", "validate_geometry_approximation_binding"]

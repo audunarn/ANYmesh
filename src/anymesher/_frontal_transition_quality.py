@@ -89,15 +89,15 @@ def repair_frontal_transition(candidate, protected, settings, report,
                 raise MeshError("invalid frontal chart-transition trial")
             moved = tuple(node for node in range(len(points))
                           if points[node].tobytes() != candidate.points[node].tobytes())
-            from .surface_mesh import _physical_quality_candidate_from_xyz
+            from .surface_mesh import _make_physical_candidate, _physical_quality_candidate_from_xyz
             from ._physical_t3_refinement import _alternative_progress
             scoring_started = perf_counter()
             receipt['candidate_scorings'] += 1
             try:
-                trial = _make_candidate(points.copy(), candidate.triangles, flips=candidate.flips,
+                trial = _make_physical_candidate(points.copy(), candidate.triangles, settings, xyz, flips=candidate.flips,
                     moved_nodes=tuple(sorted(set(candidate.moved_nodes) | set(moved))),
-                    added_points=candidate.added_points, rounds=candidate.rounds, settings=settings)
-                trial = _physical_quality_candidate_from_xyz(trial, settings, xyz)
+                    added_points=candidate.added_points, rounds=candidate.rounds,
+                    _candidate_maker=_make_candidate, _physical_scorer=_physical_quality_candidate_from_xyz)
             finally:
                 receipt['candidate_scoring_seconds'] += perf_counter() - scoring_started
             checkpoint()

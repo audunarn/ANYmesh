@@ -7,8 +7,8 @@ from fractions import Fraction
 from hashlib import sha256
 import heapq
 import json
-from math import acos, sqrt
-from numbers import Integral
+from math import acos, sqrt, tan, radians
+from numbers import Integral, Real
 from threading import RLock
 from typing import Any, Callable, Mapping, Sequence
 
@@ -426,6 +426,12 @@ class MutableT3Topology:
         self.quality_cache: dict[tuple[int, int, int], tuple[float, ...]] = {}
         self._shared_node_ids: dict[int, tuple[int, int, Fraction]] = {}
         self.validate()
+        # The native insertion protocol canonicalizes retained cells as well
+        # as new ones. Normalize our owned copy before exact correspondence
+        # and incidence snapshots, retaining row order and each row's owner.
+        self._triangles = np.asarray([
+            _canonical_triangle(row, self._points) for row in self._triangles
+        ], dtype=np.int64).reshape((-1, 3))
         self._topology_index = T3IncidenceIndex(self._triangles)
 
     @property
@@ -683,6 +689,7 @@ class MutableT3Topology:
         owner: int = -1,
         cancellation_check: Callable[[str], None] | None = None,
         preserve_splittable: bool = False,
+        _validate_candidate=None,
     ) -> dict[str, Any]:
         if type(preserve_splittable) is not bool:
             raise MeshError('invalid constraint-preserving insertion option')
@@ -735,6 +742,11 @@ class MutableT3Topology:
             self.triangle_owners = reference_owners
             from ._t3_insertion_transaction import validate_insertion_transaction
 
+            candidate_stamp = None
+            if _validate_candidate is not None:
+                candidate_stamp = (self._points.shape,self._points.dtype.str,self._points.tobytes(),
+                    self._triangles.shape,self._triangles.dtype.str,self._triangles.tobytes())
+                _validate_candidate(self._points, self._triangles)
             validate_insertion_transaction(
                 self._points, self._triangles, self.node_owners,
                 self.triangle_owners, old_points, old_triangles,
@@ -748,6 +760,10 @@ class MutableT3Topology:
             )
             from ._t3_local_validation import bind_qualified_commit
 
+            if candidate_stamp is not None and candidate_stamp != (
+                    self._points.shape,self._points.dtype.str,self._points.tobytes(),
+                    self._triangles.shape,self._triangles.dtype.str,self._triangles.tobytes()):
+                raise MeshError('insertion candidate changed after physical validation')
             bind_qualified_commit(self)
         except BaseException:
             self._points, self._triangles = old_points, old_triangles
@@ -1122,9 +1138,14 @@ def _metric_segment_penetration(candidate, first, second, endpoint_tensors, *, _
 
 
 def _offcentre(coordinates: np.ndarray, tensors: np.ndarray, fallback_size: float, *,
-               short_edge_metric: bool = False) -> np.ndarray:
+               short_edge_metric: bool = False, _minimum_angle_target: float | None = None) -> np.ndarray:
     if type(short_edge_metric) is not bool:
         raise MeshError('invalid short-edge offcentre option')
+    if _minimum_angle_target is not None and (
+            isinstance(_minimum_angle_target, (bool, np.bool_))
+            or not isinstance(_minimum_angle_target, Real)
+            or not np.isfinite(_minimum_angle_target) or not 0. < _minimum_angle_target < 90.):
+        raise MeshError('short-edge apex angle target must be finite and in (0, 90)')
     if short_edge_metric:
         from .metric import _validate_spd
         coordinates = np.asarray(coordinates, dtype=np.float64)
@@ -1167,7 +1188,18 @@ def _offcentre(coordinates: np.ndarray, tensors: np.ndarray, fallback_size: floa
             desired_chart_height = sqrt(max(target * target - (.5 * chart_edge_length) ** 2,
                                             (.35 * target) ** 2))
             desired_metric_height = sqrt(max(1. - (.5 * length) ** 2, .35 ** 2))
-            height = min(sqrt(3.) * .5 * length, desired_metric_height,
+            # For an isosceles metric triangle alpha=2*atan(b/(2H)).
+            # H<=b/(2*tan(theta/2)) permits graded growth while bounding its
+            # apex angle. Other size/cavity bounds and final physical gates
+            # remain authoritative; this is not a physical-angle certificate.
+            angle_height = sqrt(3.) * .5 * length
+            if _minimum_angle_target is not None and _minimum_angle_target < 60.:
+                half_tangent = tan(.5 * radians(float(_minimum_angle_target)))
+                # A subnormal positive angle can round its half-angle to zero;
+                # then the apex allowance is nonbinding, not a division error.
+                angle_height = (float('inf') if half_tangent == 0. else
+                                .5 * length / half_tangent)
+            height = min(angle_height, desired_metric_height,
                          desired_chart_height / chart_length)
             candidate = origin + np.linalg.solve(transform.T, midpoint + height * normal)
         except (np.linalg.LinAlgError, OverflowError) as error:
@@ -1214,6 +1246,40 @@ def _circumcentre(coordinates: np.ndarray) -> np.ndarray | None:
     return first + np.linalg.solve(2.0 * matrix, rhs)
 
 
+
+def _physical_growth_frontier(cells, xyz, limit, cancellation_check=None):
+    """Fresh proposal priorities from actual adjacent physical cell sizes.
+
+    No retained qualification: callers discard the frontier after any topology
+    change. This proposes refinement, never certifies final physical quality.
+    """
+    if cancellation_check is not None:
+        cancellation_check('native-v2 physical growth frontier')
+    coordinates = xyz[cells]
+    lengths = np.linalg.norm(np.roll(coordinates,-1,axis=1)-coordinates,axis=2).mean(axis=1)
+    edges = np.sort(np.stack((cells,np.roll(cells,-1,axis=1)),axis=2).reshape(-1,2),axis=1)
+    owners = np.repeat(np.arange(len(cells)),3)
+    order = np.lexsort((edges[:,1],edges[:,0]))
+    sorted_edges = edges[order]
+    starts = np.r_[0,1+np.flatnonzero(np.any(sorted_edges[1:]!=sorted_edges[:-1],axis=1))]
+    counts = np.diff(np.r_[starts,len(order)])
+    starts = starts[counts==2]
+    first,second = owners[order[starts]],owners[order[starts+1]]
+    with np.errstate(divide='ignore',invalid='ignore'):
+        ratios = np.where(np.minimum(lengths[first],lengths[second])>0,
+            np.maximum(lengths[first]/lengths[second],lengths[second]/lengths[first]),np.inf)
+    failed = ratios>limit
+    larger = np.where(lengths[first]>=lengths[second],first,second)
+    priority = np.ones(len(cells))
+    np.maximum.at(priority,larger[failed],ratios[failed]/limit)
+    frontier = [(-float(priority[row]),1,tuple(map(int,cells[row])),0)
+                for row in np.flatnonzero(priority>1.)]
+    heapq.heapify(frontier)
+    if cancellation_check is not None:
+        cancellation_check('native-v2 physical growth frontier complete')
+    return frontier
+
+
 def frontal_delaunay_refine(
     triangulation: PlanarTriangulation,
     options: NativeMeshingOptions,
@@ -1232,6 +1298,7 @@ def frontal_delaunay_refine(
     qualified_seed: bool = False,
     minimum_angle_target: float = 30.0,
     short_edge_offcentre: bool = False,
+    _physical_growth_limit: float | None = None,
     _split_proposal: Callable[
         [int, Fraction, Fraction], tuple[Fraction, Any, int | None] | None
     ] | None = None,
@@ -1242,6 +1309,11 @@ def frontal_delaunay_refine(
         raise MeshError("minimum angle target must be finite and in (0, 90)")
     if type(short_edge_offcentre) is not bool:
         raise MeshError('invalid frontal short-edge offcentre option')
+    if _physical_growth_limit is not None and (
+            isinstance(_physical_growth_limit,(bool,np.bool_))
+            or not isinstance(_physical_growth_limit,Real)
+            or not np.isfinite(_physical_growth_limit) or _physical_growth_limit<1.):
+        raise MeshError('invalid private physical growth limit')
     if short_edge_offcentre and not callable(metric_to_physical):
         raise MeshError('short-edge offcentre requires owner coordinates')
     if options.point_placement != "frontal_delaunay":
@@ -1281,6 +1353,12 @@ def frontal_delaunay_refine(
 
     owner_metric_encroachment = (short_edge_offcentre and owner_xyz_eligible
                                  and options.metric_mode == 'isotropic_spatial')
+    growth_limit = None
+    if _physical_growth_limit is not None and owner_metric_encroachment:
+        from ._material_region_binding import _material_chart_snapshot
+        if _material_chart_snapshot(metric_to_physical.__self__,create=True) is not None:
+            growth_limit = float(_physical_growth_limit)
+    growth_frontier_rounds = growth_proposals = growth_insertions = 0
     callback_failure = None
     if owner_metric_encroachment and cancellation_check is not None:
         incoming_check = cancellation_check
@@ -1497,7 +1575,7 @@ def frontal_delaunay_refine(
             operations += 1
             split_shared_edge(edge)
             continue
-        if qualified_seed and operations == 0:
+        if qualified_seed and operations == 0 and growth_limit is None:
             qualified_lengths = _metric_lengths(
                 points,
                 topology_edges,
@@ -1561,18 +1639,39 @@ def frontal_delaunay_refine(
                     geometry_limited += 1
                 continue
         queue.finish_round()
-        if not queue:
+        growth_frontier = []
+        growth_scanned = False
+        if not queue and growth_limit is not None:
+            growth_frontier = _physical_growth_frontier(
+                topology._triangles,physical_quality_points,growth_limit,cancellation_check)
+            growth_frontier_rounds += 1
+            growth_scanned = True
+        if not queue and not growth_frontier:
             if geometry_limited:
                 route = "frontal_delaunay_geometry_limited"
             break
         accepted = False
         if cancellation_check is not None:
             cancellation_check("native-v2 triangle lookup scan")
-        while queue and operations < options.max_topology_operations:
+        while (queue or growth_frontier or (growth_limit is not None and not growth_scanned)) and operations < options.max_topology_operations:
+            # Ordinary proposals can all be refused without changing topology.
+            # They must not suppress the still-unexamined physical growth queue.
+            # This frontier is attempted only once for this exact topology;
+            # successful insertions/splits restart the outer owner-XYZ refresh.
+            if not queue and not growth_frontier and not growth_scanned:
+                growth_frontier = _physical_growth_frontier(
+                    topology._triangles,physical_quality_points,growth_limit,cancellation_check)
+                growth_frontier_rounds += 1
+                growth_scanned = True
+                if not growth_frontier:
+                    break
             if cancellation_check is not None and operations % options.cancellation_interval == 0:
                 cancellation_check("native-v2 triangle queue processing")
-            negative_severity, _, identity, generation = queue.pop()
+            growth_only = not queue
+            negative_severity, _, identity, generation = (
+                heapq.heappop(growth_frontier) if growth_only else queue.pop())
             operations += 1
+            growth_proposals += int(growth_only)
             # Experimental providers historically receive a disposable writable array.
             coordinates = topology._topology_index.geometry(points, identity).coordinates.copy()
             # Spatial queue severity and point placement must use the same
@@ -1584,7 +1683,8 @@ def frontal_delaunay_refine(
                 and isinstance(provider, SpatialMetricField)
                 else evaluate_metric(coordinates)
             )
-            proposals = ([_offcentre(coordinates, local_tensors, target_size, short_edge_metric=True)]
+            proposals = ([_offcentre(coordinates, local_tensors, target_size, short_edge_metric=True,
+                                     _minimum_angle_target=minimum_angle_target)]
                          if short_edge_offcentre else [_offcentre(coordinates, local_tensors, target_size)])
             circumcentre = _circumcentre(coordinates)
             if (
@@ -1608,7 +1708,7 @@ def frontal_delaunay_refine(
                 ):
                     proposals = []
             if circumcentre is not None:
-                proposals.append(circumcentre)
+                proposals = ([circumcentre,*proposals] if growth_only else [*proposals,circumcentre])
             for candidate in proposals:
                 key = tuple(np.rint(candidate / max(target_size * 1.0e-8, 1.0e-14)).astype(np.int64))
                 if key in rejected:
@@ -1669,6 +1769,7 @@ def frontal_delaunay_refine(
                     geometry_limited += 1
                     continue
                 insertions += 1
+                growth_insertions += int(growth_only)
                 accepted = True
                 break
             if accepted:
@@ -1721,6 +1822,9 @@ def frontal_delaunay_refine(
         report["reserved_node_reuses"] = reserved_node_reuses
         report["staged_point_insertions"] = insertions + reserved_node_reuses
         report["refused_shared_edges"] = sorted(refused_shared_edges)
+    if growth_limit is not None:
+        report['physical_growth_frontier'] = dict(limit=growth_limit,
+            rounds=growth_frontier_rounds,proposals=growth_proposals,insertions=growth_insertions)
     if short_edge_offcentre:
         report['short_edge_offcentre'] = True
     if owner_xyz_cache is not None:
@@ -1738,3 +1842,4 @@ def frontal_delaunay_refine(
         fallback_reason=triangulation.fallback_reason, native_diagnostics=native_diagnostics,
         protected_node_rows=triangulation.protected_node_rows,
     ), report
+

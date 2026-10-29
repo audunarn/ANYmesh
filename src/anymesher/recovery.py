@@ -28,6 +28,12 @@ from .s3_quality import S3QualityError
 from .s3_repair import S3RepairError
 
 
+try:
+    from anygeometry.nurbs import NurbsSurface
+except ImportError:
+    NurbsSurface = ()
+
+
 AUTOMATION_CONTRACT_ID = "ANYMESHER_AUTOMATIC_RECOVERY_V1"
 
 
@@ -176,7 +182,7 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
         return recipes
     import anygeometry as owner
     types=tuple(kind for name in ('EllipticArc','CylinderIntersectionCurve',
-                                  'QuadricIntersectionCurve','BezierQuadricCurve')
+                                  'QuadricIntersectionCurve','BezierQuadricCurve','PlaneNurbsCurve')
                 if isinstance((kind:=getattr(owner,name,None)),type))
     selected = first.get('face_ids')
     faces = geometry.faces if selected is None else selected
@@ -185,11 +191,16 @@ def _prefer_analytic_trim_recipe(geometry, first, recipes):
     # the owner still qualifies every material chart after preparation.
     region_candidates = tuple(kind for name in ('ExtrudedSurface', 'CoonsSurface')
                               if isinstance((kind := getattr(owner, name, None)), type))
+    if isinstance(NurbsSurface, type):
+        region_candidates += (NurbsSurface,)
     authored_regions = (bool(region_candidates)
         and callable(getattr(owner, 'query_material_surface_regions', None))
         and any(face in geometry.faces
                 and isinstance(geometry.faces[face].surface, region_candidates)
                 and geometry.faces[face].parameterization is None for face in faces))
+    authored_regions = authored_regions or any(
+        face in geometry.faces and isinstance(geometry.faces[face].parameterization,
+            NurbsSurface) for face in faces)
     analytic_curves = types and any(isinstance(edge.curve,types) for edge in geometry.edges.values())
     if not authored_regions and not analytic_curves:
         return recipes
@@ -272,7 +283,6 @@ def _record_curvilinear_recovery(result, selection, method, recipe):
     result.mesh.hybrid_diagnostics['curvilinear_recovery'] = record
 
 
-
 def generate_automatic_mesh_result(
     geometry: GeometryModel,
     *,
@@ -294,14 +304,20 @@ def generate_automatic_mesh_result(
         None if policy.max_seconds is None else monotonic() + policy.max_seconds
     )
 
-    def check_budget(phase: str) -> None:
+    original_callback = meshing_options.get("cancellation_check")
+    from anygeometry import is_cancellation_signal
+    passive_signal = is_cancellation_signal(original_callback)
+
+    def check_budget(phase: str, *, invoke_callback=True) -> None:
         if deadline is not None and monotonic() >= deadline:
             raise MeshRecoveryIncomplete(
                 f"automatic meshing time budget expired during {phase}"
             )
-        callback = meshing_options.get("cancellation_check")
-        if callback is not None:
-            callback(phase)
+        if passive_signal:
+            if original_callback(phase):
+                raise MeshError(f"automatic meshing cancelled during {phase}")
+        elif invoke_callback and original_callback is not None:
+            original_callback(phase)
 
     check_budget("source geometry validation")
     problems = geometry.validate_topology()
@@ -327,9 +343,17 @@ def generate_automatic_mesh_result(
     inspection_reason: str | None = None
     for method, recipe in recipes:
         check_budget(f"automatic meshing: {method}")
-        recipe["cancellation_check"] = check_budget
+        # No deadline adds no executable callback to owner proofs. Only the
+        # owner's exact live signal is passive; arbitrary callables retain the
+        # guarded callback route even if they advertise passive attributes.
+        recipe["cancellation_check"] = (original_callback
+            if deadline is None and (original_callback is None or passive_signal)
+            else check_budget)
         try:
             result = generate_hybrid_mesh_result(clone_prepared_geometry(geometry), **recipe)
+            # Check elapsed time/passive state after work without executing
+            # arbitrary caller code after the engine's final proof frontier.
+            check_budget("automatic meshing candidate complete", invoke_callback=False)
         except MeshError as error:
             mapped_rejection = (
                 method == "mapped"
@@ -408,10 +432,13 @@ def generate_automatic_mesh_result(
                 candidate = generate_hybrid_mesh_result(
                     clone_prepared_geometry(geometry), **candidate_options
                 )
+                check_budget("inspection candidate complete", invoke_callback=False)
             except _RECOVERABLE:
                 candidate = None
         if candidate is not None:
+            check_budget("inspection publication start", invoke_callback=False)
             quality = verify_mesh_quality(candidate.mesh)
+            check_budget("inspection quality complete", invoke_callback=False)
             attempts.append({
                 "method": method,
                 "status": "inspection_only",

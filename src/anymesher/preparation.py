@@ -818,8 +818,16 @@ def prepare_structural_closure(
         for pair in _face_pairs(geometry, source_faces,
                             maximum_candidates=policy.maximum_candidate_pairs,
                             cancellation_check=cancellation_check):
-            from ._owner_trim_domains import validated_complementary_trim_domains
+            from ._owner_trim_domains import (validated_complementary_trim_domains,
+                validated_prepared_partition_disjoint_interiors,
+                validated_same_support_material_disjoint_interiors)
             _cancel(cancellation_check, "structural preparation overlap narrow phase")
+            if validated_prepared_partition_disjoint_interiors(geometry, *pair,
+                    cancellation_check=cancellation_check):
+                continue
+            if validated_same_support_material_disjoint_interiors(geometry, *pair,
+                    cancellation_check=cancellation_check):
+                continue
             if validated_complementary_trim_domains(geometry, *pair,
                                                 cancellation_check=cancellation_check):
                 continue
@@ -850,8 +858,37 @@ def prepare_structural_closure(
     owned=(not policy.declare_missing_owners or (
         all(geometry._face_structural_uses.get(face) for face in source_faces)
         and all(geometry.members_using_edge(edge) for edge in source_edges)))
-    working = (geometry if reuse_working_copy and no_automatic and owned else
-               geometry.clone(include_features=False, preserve_identity=reuse_working_copy))
+    new_native_preparation_epoch = False
+    if reuse_working_copy and no_automatic and owned:
+        working = geometry
+    elif no_automatic and owned:
+        from ._material_region_binding import face_requires_curvilinear
+        if any(face_requires_curvilinear(geometry, face) for face in source_faces):
+            # Only the geometry owner's genuine clone boundary can issue
+            # source correspondence; an ordinary clone grants none.
+            from anygeometry import clone_prepared_geometry
+            working = clone_prepared_geometry(geometry)
+        else:
+            working = geometry.clone(include_features=False, preserve_identity=reuse_working_copy)
+    else:
+        from anygeometry.nurbs import NurbsSurface
+        literal_nurbs_face_job = (
+            policy.automatic_face_connections and not reuse_working_copy
+            and not source_edges and not geometry.members
+            and bool(source_faces) and all(
+                type(face.surface) is NurbsSurface and face.parameterization is None
+                for face in geometry.faces.values()))
+        if literal_nurbs_face_job:
+            # Loaded/current material cells are the immediate authored source
+            # of this detached attempt. Only the owner can issue its new epoch
+            # and source correspondence; historical replacement IDs grant none.
+            from anygeometry import clone_prepared_geometry
+            working = clone_prepared_geometry(geometry, new_preparation_epoch=True)
+            new_native_preparation_epoch = True
+        else:
+            # In-place isolated-job adoption cannot inherit a foreign UUID or
+            # its opaque epoch/source receipts through a topology-only restore.
+            working = geometry.clone(include_features=False, preserve_identity=reuse_working_copy)
     temporary_sheets: list[int] = []
     temporary_members: list[int] = []
     diagnostics: list[str] = []
@@ -963,7 +1000,9 @@ def prepare_structural_closure(
             _cancel(cancellation_check,"structural intersection batch")
             return False
         batch_policy = IntersectionBatchPolicy(ConnectionIntent.CONNECT,
-            max_candidate_pairs=policy.maximum_candidate_pairs, cancellation_check=cancelled,
+            max_candidate_pairs=policy.maximum_candidate_pairs,
+            cancellation_check=(None if new_native_preparation_epoch
+                and cancellation_check is None else cancelled),
             face_connections=policy.automatic_face_connections,
             member_connections=policy.automatic_member_connections,
             member_face_connections=policy.automatic_member_sheet_connections)

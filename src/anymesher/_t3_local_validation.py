@@ -146,10 +146,13 @@ def source_for_validation(points, rows, protected):
     return source
 
 
-def _changed_counts(source, changes):
+def _changed_counts(source, changes, *, _candidate=False):
     values = {edge: source.counts.get(edge, 0) + delta
               for edge, delta in changes.items()}
     if any(value > 2 for value in values.values()):
+        if _candidate:
+            from ._t3_insertion_result import _RejectedInsertionCavity
+            raise _RejectedInsertionCavity("native mutable T3 insertion returned non-manifold topology")
         raise MeshError("native mutable T3 insertion returned non-manifold topology")
     if any(value < 0 for value in values.values()):
         raise MeshError("native mutable T3 insertion source incidence is inconsistent")
@@ -164,7 +167,7 @@ def validate_changed_incidence(source, old_edges, old_counts, new_edges, new_cou
         for edge, count in zip(edges, counts):
             key = tuple(map(int, edge))
             changes[key] = changes.get(key, 0) + sign * int(count)
-    _changed_counts(source, changes)
+    _changed_counts(source, changes, _candidate=True)
 
 
 def stage_qualified_commit(points, rows, old_points, old_rows, old_index, changes):

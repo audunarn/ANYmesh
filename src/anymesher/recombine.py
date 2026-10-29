@@ -250,6 +250,7 @@ def recombine_triangles_with_report(
     max_warpage: float = 0.10,
     cancellation_check: Callable[[str], None] | None = None,
     max_exchange_work: int = 1_000_000,
+    _physical_growth_limit: float | None = None,
     _use_native: bool | None = None,
 ) -> RecombinationReport:
     """Pair adjacent triangles greedily from best quality to worst.
@@ -280,10 +281,18 @@ def recombine_triangles_with_report(
         mesh = MeshCore(mesh_or_points, triangles)
     if mesh.triangle_connectivity.shape[1] not in (3, 6):
         raise MeshError("only T3/T6 triangles can be recombined")
+    if _physical_growth_limit is not None:
+        if (mesh.triangle_connectivity.shape[1] != 3
+                or np.any(mesh.quad_active) or not np.all(mesh.triangle_active)):
+            raise MeshError('physical matching repair requires active linear triangles without active input quads')
+        if (isinstance(_physical_growth_limit, bool)
+                or not np.isfinite(_physical_growth_limit)
+                or _physical_growth_limit < 1.):
+            raise MeshError('physical matching growth limit must be finite and at least one')
     supplied_edges = protected_edges if constraints is None else constraints
     protected = _protected_rows(mesh, supplied_edges, edges_are_ids)
     native = None
-    if _use_native is not False:
+    if _use_native is not False and _physical_growth_limit is None:
         if (
             COMPILED_QUALITY_PIPELINE_AVAILABLE
             and cancellation_check is not None
@@ -303,7 +312,7 @@ def recombine_triangles_with_report(
             max_warpage=max_warpage,
             max_exchange_work=max_exchange_work,
         )
-    if native is not None:
+    if native is not None and _physical_growth_limit is None:
         selected = [
             _Candidate(
                 int(row[0]),
@@ -475,6 +484,21 @@ def recombine_triangles_with_report(
         exchange_count += 1
         if cancellation_check is not None and exchange_count % 256 == 0:
             cancellation_check("triangle recombination exchange")
+
+    if _physical_growth_limit is not None:
+        from ._physical_matching import repair_matching
+        selected, repair_work, repair_commits, repair_truncated = repair_matching(
+            mesh, candidates, list(active.values()),
+            min_scaled_jacobian=min_scaled_jacobian,
+            max_aspect_ratio=max_aspect_ratio, min_angle=min_angle,
+            max_angle=max_angle, max_warpage=max_warpage,
+            max_growth=_physical_growth_limit,
+            work_limit=max(0, max_exchange_work-exchange_work),
+            cancellation_check=cancellation_check)
+        active = {candidate_key(candidate): candidate for candidate in selected}
+        exchange_work += repair_work
+        exchange_count += repair_commits
+        exchange_truncated = exchange_truncated or repair_truncated
 
     selected = sorted(
         active.values(),

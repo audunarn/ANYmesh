@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -76,16 +77,23 @@ def _vector_tuple(
     )  # type: ignore[return-value]
 
 
+def _exact_identifier(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise S3OwnerAuthorityError(f'{label} must be an integer identifier')
+    return int(value)
+
+
 def _element_face_map(mesh: Mesh) -> dict[int, int]:
-    shell_ids = set(mesh.shells)
+    shell_ids = {_exact_identifier(value, 'shell element ID') for value in mesh.shells}
     faces_by_element: dict[int, list[int]] = {
         element_id: [] for element_id in shell_ids
     }
-    for face_id, element_ids in sorted(mesh.elements_of_face.items()):
+    for face_id, element_ids in mesh.elements_of_face.items():
+        face_id = _exact_identifier(face_id, 'geometry face ID')
         for element_id in element_ids:
-            made_id = int(element_id)
+            made_id = _exact_identifier(element_id, 'face element ID')
             if made_id in faces_by_element:
-                faces_by_element[made_id].append(int(face_id))
+                faces_by_element[made_id].append(face_id)
     result: dict[int, int] = {}
     for element_id in sorted(shell_ids):
         face_ids = tuple(sorted(set(faces_by_element[element_id])))
@@ -112,6 +120,7 @@ def _physical_owner_normal(
     element_id: int,
     face_id: int,
     face_use_ids: Mapping[int, Sequence[int]],
+    projected_uv=None,
 ) -> tuple[float, float, float]:
     uses = tuple(int(value) for value in face_use_ids.get(face_id, ()))
     if not uses:
@@ -139,7 +148,10 @@ def _physical_owner_normal(
         )
     centroid = np.mean(corners, axis=0)
     try:
-        _projected, uv, _distance = geometry.project_to_face(face_id, centroid)
+        if projected_uv is None:
+            _projected, uv, _distance = geometry.project_to_face(face_id, centroid)
+        else:
+            uv = projected_uv
         geometric = np.asarray(geometry.face_normal(face_id, *uv), dtype=float)
     except (GeometryError, KeyError, TypeError, ValueError) as error:
         raise S3OwnerAuthorityError(
@@ -171,15 +183,68 @@ def _physical_owner_normal(
     )
 
 
+def _shell_owner_projection_uv(geometry, mesh, face_by_element):
+    """Batch only the owner-qualified topology sweep projection capability.
+
+    Missing capabilities, custom scalar protocols and unsupported faces retain
+    scalar evaluation. Expected batch errors replay the original scalar route
+    so its element-specific authority rejection remains unchanged.
+    """
+    if (type(geometry) is not GeometryModel
+            or getattr(geometry.project_to_face, '__func__', None) is not GeometryModel.project_to_face
+            or getattr(geometry.face_normal, '__func__', None) is not GeometryModel.face_normal):
+        return {}
+    project = getattr(geometry, 'project_to_face_many', None)
+    boundary = getattr(geometry, 'face_boundary_uv', None)
+    if not callable(project) or not callable(boundary):
+        return {}
+    groups = {}
+    supported = {}
+    try:
+        for element in sorted(face_by_element):
+            face_id = face_by_element[element]
+            face = geometry.faces[face_id]
+            if face_id not in supported:
+                supported[face_id] = boundary(face_id, face.loop[0].edge, 0.) is not None
+            if not supported[face_id]:
+                continue
+            corners = np.asarray([mesh.nodes[node] for node in mesh.corners_of(element)], dtype=float)
+            if corners.ndim != 2 or corners.shape[1:] != (3,) or not np.all(np.isfinite(corners)):
+                return {}
+            groups.setdefault(face_id, []).append((element, np.mean(corners, axis=0)))
+        made = {}
+        for face_id, rows in groups.items():
+            _, uv, _ = project(face_id, np.asarray([point for _, point in rows]))
+            uv = np.asarray(uv, dtype=float)
+            if uv.shape != (len(rows), 2) or not np.all(np.isfinite(uv)):
+                return {}
+            made.update((element, coordinates) for (element, _), coordinates in zip(rows, uv))
+        return made
+    except (GeometryError, KeyError, TypeError, ValueError):
+        return {}
+
+
 def _shell_owner_authority(
     geometry: GeometryModel,
     mesh: Mesh,
+    *,
+    _certified_uv=None,
 ) -> tuple[
     dict[int, tuple[float, float, float]],
     dict[int, dict[str, Any]],
 ]:
     face_by_element = _element_face_map(mesh)
     face_use_ids = _face_use_ids(geometry)
+    from .material_source_transfer import _validated_curvilinear_reference_uv
+    certified_uv = (_validated_curvilinear_reference_uv(geometry, mesh)
+                    if _certified_uv is None else _certified_uv)
+    # Curvilinear cells use the owner's proven source reference map, never
+    # a nearest-point projection of their flat physical centroid.
+    ordinary = {element: face for element, face in face_by_element.items()
+                if element not in certified_uv}
+    projected_uv = (_shell_owner_projection_uv(geometry, mesh, ordinary)
+                    if ordinary else {})
+    projected_uv.update(certified_uv)
     normals = {
         element_id: _physical_owner_normal(
             geometry,
@@ -187,6 +252,7 @@ def _shell_owner_authority(
             element_id=element_id,
             face_id=face_by_element[element_id],
             face_use_ids=face_use_ids,
+            projected_uv=projected_uv.get(element_id),
         )
         for element_id in sorted(mesh.shells)
     }
@@ -265,7 +331,7 @@ def prepare_qualified_s3_mesh(
         raise TypeError("prepare_qualified_s3_mesh expects an anymesher.Mesh")
     if not isinstance(geometry, GeometryModel):
         raise TypeError("prepare_qualified_s3_mesh expects an ANYgeometry model")
-    triangle_ids = tuple(sorted(int(value) for value in mesh.tris))
+    triangle_ids = tuple(sorted(_exact_identifier(value, 'triangle element ID') for value in mesh.tris))
     if not triangle_ids:
         return mesh, {
             "admission": {
@@ -287,9 +353,24 @@ def prepare_qualified_s3_mesh(
             "status": "NOT_APPLICABLE_NO_TRIANGLES",
         }
 
-    shell_owners, _ = _shell_owner_authority(geometry, mesh)
+    from .material_source_transfer import _validated_curvilinear_reference_uv, _publication_pin
+    # Reject invalid labels before a routing hint indexes geometry by them.
+    _element_face_map(mesh)
+    certified_uv = _validated_curvilinear_reference_uv(geometry, mesh)
+    before_cells = _publication_pin(mesh) if certified_uv else None
+    shell_owners, _ = _shell_owner_authority(geometry, mesh, _certified_uv=certified_uv)
+    repair_input = mesh
+    if certified_uv:
+        # The live boundary registry owns immutable geometry views and proof
+        # identity. Repair receives only copied canonical mesh data; copying
+        # transient authority is neither necessary nor a grant of authority.
+        from copy import deepcopy
+        from dataclasses import fields
+        repair_input = Mesh(**deepcopy({
+            field.name: getattr(mesh, field.name) for field in fields(Mesh)
+        }))
     repair = repair_s3_admission(
-        mesh,
+        repair_input,
         element_ids=triangle_ids,
         element_owner_normals={
             element_id: shell_owners[element_id] for element_id in triangle_ids
@@ -299,7 +380,9 @@ def prepare_qualified_s3_mesh(
         target_policy=target_policy,
     )
     made = repair.mesh
-    shell_owners, owner_sources = _shell_owner_authority(geometry, made)
+    if certified_uv and (_publication_pin(mesh) != before_cells or _publication_pin(made) != before_cells):
+        raise S3OwnerAuthorityError('curvilinear S3 repair requires fresh owner cell qualification')
+    shell_owners, owner_sources = _shell_owner_authority(geometry, made, _certified_uv=certified_uv)
     final_admission = assert_s3_admissible(
         made,
         element_ids=repair.element_ids,
