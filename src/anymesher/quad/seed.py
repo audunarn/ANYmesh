@@ -11,7 +11,7 @@ from ..errors import MeshError
 from ..refinement import SizeField
 from ..triangulation import PlanarTriangulation, orient2d, triangulate_polygon
 from .boundary import BoundaryStationKey, BoundaryStationRegistry
-from .domain import CylindricalQuadDomain, PlanarQuadDomain, Vec2
+from .domain import CylindricalQuadDomain, PlanarQuadDomain, Vec2, face_query_frame
 from .state import QuadMeshState
 from .rectangle_seed import rectangle_seed_data
 from .edge_aligned_seed import edge_aligned_seed_data
@@ -330,16 +330,18 @@ def source_chart_axis_lengths(
     """Physical axis lengths on opposite source edges.
 
     Long edges set grid density; the shorter edge governs whether a grid or
-    an interior point has enough physical room on a tapered face.
+    an interior point has enough physical room on a tapered face. A
+    support-frame cylinder (MESH-B A2) measures its support axes.
     """
     values = np.linspace(0.0, 1.0, 65)
+    frame = face_query_frame(geometry, domain)
 
     def length(along_u: bool) -> float:
         lengths = []
         for fixed in (0.0, 1.0):
             xyz = np.asarray([
-                geometry.face_point(domain.face_id, float(t), fixed)
-                if along_u else geometry.face_point(domain.face_id, fixed, float(t))
+                frame.face_point(domain.face_id, float(t), fixed)
+                if along_u else frame.face_point(domain.face_id, fixed, float(t))
                 for t in values
             ])
             lengths.append(float(np.linalg.norm(np.diff(xyz, axis=0), axis=1).sum()))
@@ -388,9 +390,12 @@ def _source_aligned_point_lattice(
     tol = 1.0e-10 * max(1.0, *bounds)
     points = []
     grid: dict[tuple[int, int], Vec2] = {}
+    # ``cut`` and this lattice are in the frame of face_query_frame (the
+    # support for a MESH-B A2 cylinder; hybrid converts attachment cuts).
+    frame = face_query_frame(geometry, domain)
     for j, v in enumerate(vs[1:-1], start=1):
         for i, u in enumerate(us[1:-1], start=1):
-            xyz = geometry.face_point(domain.face_id, float(u), float(v))
+            xyz = frame.face_point(domain.face_id, float(u), float(v))
             point = domain.project(xyz)
             if not _strict_inside(point, outer, tol):
                 raise MeshError("source-aligned point seed leaves the meshed face")

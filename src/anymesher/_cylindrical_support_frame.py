@@ -19,12 +19,18 @@ from __future__ import annotations
 import numpy as np
 from anygeometry import GeometryError, GeometryModel
 from anygeometry.curves import Straight
-from anygeometry.surfaces import Cylinder, _evaluate_surface_many, _surface_derivatives_many
+from anygeometry.surfaces import CoonsSurface, Cylinder, _evaluate_surface_many, _surface_derivatives_many
 
 from .errors import MeshError
 
 # GeometryModel.face_trim_loops_uv default, used by project_to_face(_many).
 _TRIM_CURVE_SAMPLES = 17
+
+
+def _signed_area(loop) -> float:
+    points = np.asarray(loop, dtype=float)
+    x, y = points[:, 0], points[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 
 class CylinderSupportFrame:
@@ -46,6 +52,46 @@ class CylinderSupportFrame:
         self.face = face
         self.surface = surface
         self._trim_loops = None
+        self._admit_orientation()
+
+    def _admit_orientation(self) -> None:
+        """Refuse unless the face's own orientation provably matches the support's.
+
+        The support-frame mesh is oriented by the support normal (du x dv of
+        the support), exactly like the twin's. The face's own normal comes from
+        its parameterization, so a reversed parameterization would publish
+        elements against the face normal. Admission is decided only where the
+        orientation follows from the loop: a topology Coons map sends the unit
+        square's counter-clockwise boundary onto the outer loop in loop order
+        (ANYgeometry ``_topology_face_point_and_derivatives``), so its degree is
+        the winding of that loop in the support (u, v) plane. Any other
+        parameterization is undecided and refused. The loop must wind
+        positively both as its vertex polygon and as its sampled trim polygon,
+        and the parameterization normal at its centre must agree with the
+        support normal there; otherwise the face is refused (fail closed).
+        Folding (a sign change inside a positively wound map) is not decided
+        here.
+        """
+        face, owner = self.face, self.owner
+        parameterization = face.parameterization
+        if (type(parameterization) is not CoonsSurface or parameterization.has_boundaries
+                or len(face.corners) != 4):
+            raise MeshError("support-frame cylinder chart admits only a topology Coons face "
+                            "parameterization (its orientation relative to the support is undecided)")
+        vertices = np.asarray([
+            self.face_local_uv(self.face_id, owner.vertex_position(owner.oriented_start_vertex(item)))
+            for item in face.loop], dtype=float)
+        loops = (vertices, self.face_trim_loops_uv(self.face_id)[0])
+        if any(len(loop) < 3 or not _signed_area(loop) > 0.0 for loop in loops):
+            raise MeshError("support-frame cylinder chart refuses a face parameterization whose "
+                            "orientation is reversed relative to its support")
+        centre = np.asarray(owner.face_point(self.face_id, .5, .5), dtype=float)
+        support_normal = self.face_normal_many(
+            self.face_id, np.asarray([self.face_local_uv(self.face_id, centre)], dtype=float))[0]
+        own_normal = np.asarray(owner.face_normal(self.face_id, .5, .5), dtype=float)
+        if not float(own_normal @ support_normal) > 0.0:
+            raise MeshError("support-frame cylinder chart refuses a face parameterization whose "
+                            "orientation is reversed relative to its support")
 
     def _check(self, face_id) -> None:
         if int(face_id) != self.face_id:

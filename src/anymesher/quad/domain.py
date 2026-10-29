@@ -235,6 +235,22 @@ def _cylinder_chart_projector(chart):
     return chart.face_chart.project
 
 
+def face_query_frame(geometry, domain):
+    """Owner of face-uv queries (face_point, face_local_uv, ...) for a quad-first domain.
+
+    A cylindrical domain whose chart works in its support frame (a distinct
+    face parameterization, MESH-B A2) answers them from the support, so every
+    source-parametric heuristic (axis lengths, point-seed lattices, normals)
+    sees the same frame as its unparameterized twin. Every other domain keeps
+    the source geometry and runs the unchanged calls.
+    """
+    if isinstance(domain, CylindricalQuadDomain):
+        view = getattr(domain.chart, "support_view", None)
+        if view is not None:
+            return view
+    return geometry
+
+
 @dataclass(frozen=True)
 class CylindricalQuadDomain:
     """Owner-qualified cylindrical face expressed in physical chart metres."""

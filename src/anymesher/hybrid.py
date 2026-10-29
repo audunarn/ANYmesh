@@ -69,7 +69,8 @@ from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from ._component_reservations import ComponentNodeReservationPool
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.timing import record_quad_stage, timed_quad_call
-from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain
+from .quad.domain import (ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain,
+                          face_query_frame)
 from .quad.driver import run_planar_quad_driver
 from .quad import high_order as _high_order
 from .quad.high_order import (
@@ -296,11 +297,7 @@ def _quad_face_frame(geometry: Any, domain: Any) -> Any:
     face parameterization, MESH-B A2) answers them from the support; every
     other domain keeps the source geometry.
     """
-    if isinstance(domain, CylindricalQuadDomain):
-        view = getattr(domain.chart, "support_view", None)
-        if view is not None:
-            return view
-    return geometry
+    return face_query_frame(geometry, domain)
 
 
 def _native_chart_uv(geometry: GeometryModel, face: Any, face_id: int, point: Any) -> tuple[float, float]:
@@ -5245,6 +5242,8 @@ def _quad_first_execute(
 
     point_seed_cuts: dict[int, tuple[float, float]] = {}
     point_attachment_face_id: int | None = None
+    # Frame of point_seed_cuts on the attachment face (face_query_frame).
+    point_attachment_frame: Any = geometry
     if options.quality_model == "shape_jacobian":
         point_attachments = [
             item for item in geometry.attachments.values()
@@ -5275,9 +5274,15 @@ def _quad_first_execute(
                     continue
                 if min(source_chart_axis_lengths(geometry, domain, shortest=True)) >= 4.0 * h:
                     point_seed_cuts[domain.face_id] = (.5, .5)
-            point_seed_cuts[int(item.target_id)] = tuple(
-                parameter.start for parameter in item.target_parameters
-            )
+            cut = tuple(parameter.start for parameter in item.target_parameters)
+            point_attachment_frame = _quad_face_frame(geometry, owner)
+            if point_attachment_frame is not geometry:
+                # MESH-B A2: attachment parameters stay in the face frame (owner
+                # contract). The seed works in the support frame, so carry the
+                # same physical anchor over into support coordinates.
+                anchor = geometry.face_point(int(item.target_id), *cut)
+                cut = tuple(point_attachment_frame.face_local_uv(int(item.target_id), anchor))
+            point_seed_cuts[int(item.target_id)] = cut
             point_attachment_face_id = int(item.target_id)
 
 
@@ -5557,7 +5562,7 @@ def _quad_first_execute(
     protected_interior_nodes = ()
     if options.quality_model == "shape_jacobian":
         if point_attachment_face_id is not None:
-            anchor_xyz = np.asarray(geometry.face_point(
+            anchor_xyz = np.asarray(point_attachment_frame.face_point(
                 point_attachment_face_id,
                 *point_seed_cuts[point_attachment_face_id],
             ), dtype=float)
