@@ -14,7 +14,8 @@ def test_owned_rows_preserve_cells_row_owners_and_caller_arrays(reverse):
         rows[:, [1, 2]] = rows[:, [2, 1]]
     saved = rows.copy()
     made = native_v2.MutableT3Topology(original.points, rows,
-        sorted(sorted(original.protected_edges)), triangle_owners=original.triangle_owners)
+        sorted(sorted(original.protected_edges)), triangle_owners=original.triangle_owners,
+        normalize_winding=True)
     np.testing.assert_array_equal(rows, saved)
     np.testing.assert_array_equal(made.triangles, original.triangles)
     np.testing.assert_array_equal(made.triangle_owners, original.triangle_owners)

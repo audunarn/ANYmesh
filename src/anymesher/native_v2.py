@@ -55,6 +55,13 @@ def _canonical_triangle(values: Sequence[int], points: np.ndarray) -> tuple[int,
     return tuple(triangle[start:] + triangle[:start])  # type: ignore[return-value]
 
 
+def _rotated_to_canonical_start(values: Sequence[int]) -> tuple[int, int, int]:
+    """Rotate a triangle row to start at its smallest node id; winding is kept."""
+    triangle = [int(value) for value in values]
+    start = min(range(3), key=lambda row: triangle[row])
+    return tuple(triangle[start:] + triangle[:start])  # type: ignore[return-value]
+
+
 class _GeometryLimited(MeshError):
     """A deterministic candidate rejection, distinct from an operational failure."""
 
@@ -390,7 +397,10 @@ class MutableT3Topology:
             tuple[int, int], int | tuple[int, Any, Any]
         ] | None = None,
         seed_registry: ComponentSeedRegistry | None = None,
+        normalize_winding: bool = False,
     ) -> None:
+        if type(normalize_winding) is not bool:
+            raise MeshError("normalize_winding must be a bool")
         self._points = np.ascontiguousarray(points, dtype=np.float64).copy()
         self._triangles = np.ascontiguousarray(triangles, dtype=np.int64).reshape((-1, 3)).copy()
         self._protected_edges = set(_edge(int(a), int(b)) for a, b in np.asarray(protected_edges, dtype=np.int64).reshape((-1, 2)))
@@ -429,8 +439,14 @@ class MutableT3Topology:
         # The native insertion protocol canonicalizes retained cells as well
         # as new ones. Normalize our owned copy before exact correspondence
         # and incidence snapshots, retaining row order and each row's owner.
+        # By default only the start vertex is canonicalized: the winding is the
+        # caller's input and is never repaired, so an inverted row stays
+        # inverted for every consumer that refuses inverted cells. A trusted
+        # caller that owns reversed rows opts in to the winding repair.
+        canonicalize = ((lambda row: _canonical_triangle(row, self._points)) if normalize_winding
+                        else _rotated_to_canonical_start)
         self._triangles = np.asarray([
-            _canonical_triangle(row, self._points) for row in self._triangles
+            canonicalize(row) for row in self._triangles
         ], dtype=np.int64).reshape((-1, 3))
         self._topology_index = T3IncidenceIndex(self._triangles)
 
