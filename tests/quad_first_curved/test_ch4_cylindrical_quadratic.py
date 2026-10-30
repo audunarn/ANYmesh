@@ -25,6 +25,7 @@ def _generate(model, face_ids, target_size, *, order="linear", cancellation_chec
         recombine=True,
         order=order,
         quad_options=QuadMeshingOptions(),
+        layout_policy="existing",  # Frozen legacy seed/topology reference.
         cancellation_check=cancellation_check,
     )
 

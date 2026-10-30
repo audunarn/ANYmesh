@@ -100,6 +100,11 @@ from .recovery import (
     generate_automatic_mesh_result,
 )
 from .mesh import Coupling, Mesh
+from .volume import (
+    VolumeMesh, VolumeMeshError, VolumeBackendUnavailable,
+    UnsupportedVolumeGeometry, InvalidVolumeMesh, VolumeMeshingTimeout,
+    VolumeMeshingCancelled, generate_volume_mesh, validate_volume_mesh,
+)
 from .prepared_current_associations import (
     PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA,
     PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
@@ -375,6 +380,9 @@ __all__ = [
     "surface_point",
     "triangle_to_quads",
     "verify_mesh_quality",
+    "VolumeMesh", "VolumeMeshError", "VolumeBackendUnavailable",
+    "UnsupportedVolumeGeometry", "InvalidVolumeMesh", "VolumeMeshingTimeout",
+    "VolumeMeshingCancelled", "generate_volume_mesh", "validate_volume_mesh",
     "validate_prepared_current_component_associations",
     "validate_material_source_transfer_for_mesh",
     "publish_model_closure_mesh_to_source",

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "status": "PROSPECTIVE_REQUIRED_GEOMETRY_REFINEMENT",
+  "authority": "Workflow2 continuation2026-10-28; distinct5cases, no reuse of consumed2callbudget",
+  "backend": "pytetwild==0.4.2+anyworkflow2.exact1",
+  "backend_wheel": "evidence/exact-envelope-20261028-a1/wheels/pytetwild-0.4.2+anyworkflow2.exact1-cp312-abi3-linux_x86_64.whl",
+  "backend_identity": {"native_sha256":"cd6f2fa00f42c18b03b628e85c492fd11bead3caaf6fa8932001abc95e8c0cd5", "wheel_sha256":"56886d352d99175ccb178c491e7845befd178b280144c30e0e598a953a413146"},
+  "options": {"simplify":false,"coarsen":false,"optimize":true,"num_threads":1},
+  "execution": {"maximum_native_calls":5,"native_calls_per_case":1,"maximum_native_process_seconds":120,"complete_process_budget_seconds":900,"retries":0},
+  "limits": {"maximum_cells":100000,"maximum_relative_volume_error":0.001,"maximum_relative_face_area_error":0.001,"maximum_face_normal_degrees":1},
+  "quality_resolution": {"mean_ratio":"12*(3*V)^(2/3)/sum(six edge lengths squared), regular tet1; min,p01,p05,median,p95,p99,max", "spacing":"six edge lengths/h and tet axial span/h and/thickness distributions; nominal local extents/h and thickness/h", "classification":"descriptive resolution/quality evidence; no invented FEaccuracy or targeth maximum guarantee; unchanged production positive/nondegenerate predicate remains mandatory"},
+  "predicates": ["unchanged_production_topology_overlap_ownership_coverage", "analytic_volume", "source_face_areas", "normals", "physical_boundary_delta", "bounds", "persistent_face_and_region_groups"],
+  "cases": [
+    {"id":"cube","kind":"rectangle","input_units":"m","input_dimensions":[0.1,0.1,0.1],"target_edge_length":0.025,"boundary_tolerance":0.00001},
+    {"id":"pentagon","kind":"pentagon","input_units":"m","radius":0.1,"height":0.06,"target_edge_length":0.02,"boundary_tolerance":0.000006},
+    {"id":"rotated_negative_mm","kind":"rectangle","input_units":"mm","input_dimensions":[300,200,-60],"input_offset":12.5,"input_origin":[700,-300,1200],"rotation":{"rz":0.37,"rx":0.61},"target_edge_length":0.02,"boundary_tolerance":0.000006},
+    {"id":"box_refinement","kind":"rectangle","input_units":"m","input_dimensions":[1,0.5,0.25],"target_edge_length":0.1,"boundary_tolerance":0.000025},
+    {"id":"thin_refinement","kind":"rectangle","input_units":"m","input_dimensions":[0.4,0.1,0.02],"target_edge_length":0.008,"boundary_tolerance":0.000002}
+  ],
+  "limits_of_claim":"NoFE/nativeguardpromotion/release. Raw and production-admitted arrays separate; eachonce. All source/input/snapshot/runner/backend identities frozen before native calls. Failed predicates or budgets cannot be waived."
+}

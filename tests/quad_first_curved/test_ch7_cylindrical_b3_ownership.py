@@ -43,6 +43,7 @@ def _generate(model, faces, member, *, cancellation_check=None):
         native_backend="python",
         quad_options=QuadMeshingOptions(),
         order="quadratic",
+        layout_policy="existing",  # Frozen legacy seed/topology reference.
         cancellation_check=cancellation_check,
     ).mesh
 

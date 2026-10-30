@@ -111,6 +111,7 @@ def _public_result(points: tuple, *, h: float, max_local: int, refinements=()):
         target_size=float(h),
         face_ids=(face,),
         quad_options=options,
+        layout_policy="existing",  # Q5 causality holds the legacy seed fixed.
         refinements=tuple(refinements),
     )
 

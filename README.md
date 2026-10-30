@@ -12,6 +12,14 @@ development, use the editable setup below.
 The repository is `ANYmesh`, but `anymesh` was already taken on PyPI, so the
 distribution is **`ANYmesher`** and the import package is **`anymesher`**.
 
+Candidate volume-mesh contracts and the headless
+[controlled Tet4 → ANYsolid P1/P2 example](examples/solid_volume_controlled.py)
+are documented in [docs/volume_mesh.md](docs/volume_mesh.md). The example uses
+explicit fixture cells and an optional installed ANYsolid consumer. Real native
+execution and finite E2E studies have been measured, while the public volume
+provider remains blocked pending the remaining gates. Installing the published
+`solids-pytetwild` extra does not supply the local Workflow 2 provider artifact.
+
 ## Quick start
 
 A stiffened panel needs no geometry model:

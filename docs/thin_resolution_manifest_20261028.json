@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "status": "READY_REVIEWED_PROSPECTIVE_THIN_STUDY",
+  "backend": "pytetwild==0.4.2+anyworkflow2.exact1",
+  "backend_wheel": "evidence/exact-envelope-20261028-a1/wheels/pytetwild-0.4.2+anyworkflow2.exact1-cp312-abi3-linux_x86_64.whl",
+  "backend_identity": {"native_sha256":"cd6f2fa00f42c18b03b628e85c492fd11bead3caaf6fa8932001abc95e8c0cd5", "wheel_sha256":"56886d352d99175ccb178c491e7845befd178b280144c30e0e598a953a413146"},
+  "options": {"simplify":false,"coarsen":false,"optimize":true,"num_threads":1},
+  "execution": {"maximum_native_calls":2,"native_calls_per_case":1,"maximum_native_process_seconds":120,"complete_case_seconds":480,"complete_process_budget_seconds":1200,"retries":0},
+  "limits": {"maximum_cells":100000,"maximum_coefficients":150000,"maximum_relative_volume_error":0.001,"maximum_relative_face_area_error":0.001,"maximum_face_normal_degrees":1,"maximum_axial_span_fraction":0.5,"maximum_regular_tet_condition":32,"residual":1e-9,"work_symmetry":1e-10,"resultant":1e-8,"patch_tensors":1e-10,"solved_displacement":1e-7},
+  "metric_definitions": {"director":"unit signed physical extrusion vector after SI conversion","thickness":"absolute signed extrusion thickness in SI","axial_span_fraction":"(max_i(x_i dot director)-min_i(x_i dot director))/thickness for every tetrahedron","condition":"sigma_max(J W^-1)/sigma_min(J W^-1), J edge columns, W regular-tet edge columns from (0,0,0),(1,0,0),(1/2,sqrt(3)/2,0),(1/2,sqrt(3)/6,sqrt(2/3)); all singular values finite and positive","interpretation":"geometric sampling/conditioning only, not uniform layers or universal FE accuracy; interval consequence applies only to covered segments with axial extent>thickness/2"},
+  "acceptance": "Conjunction of every geometry,ownership,group,quality,resolution and P1/P2 predicate. Any failure/nonfinite value/incomplete execution gives NO_GO for this envelope. Before native calls freeze runner,worker,helper,production,source/input/snapshot hashes and effective backend/runtime identities.",
+  "cases": [
+    {"id":"thin_sampling_aligned","kind":"rectangle","input_units":"m","input_dimensions":[0.08,0.03,0.01],"target_edge_length":0.0025,"boundary_tolerance":0.000001},
+    {"id":"thin_sampling_rotated_negative_offset","kind":"rectangle","input_units":"mm","input_dimensions":[80,30,-10],"input_offset":4,"input_origin":[300,-200,700],"rotation":{"rz":0.29,"rx":0.43},"target_edge_length":0.0025,"boundary_tolerance":0.000001}
+  ],
+  "scope": "Fresh prospective geometric sampling/conditioning envelope with unchanged P1/P2 finite-case checks; not general FE accuracy, not retrospective acceptance, not provider promotion. Isolated native worker kernel peak RSS includes interpreter/imports. Prior native-call registrations remain closed."
+}

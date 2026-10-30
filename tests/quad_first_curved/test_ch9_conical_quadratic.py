@@ -11,7 +11,9 @@ from anymesher.quad.domain import ConicalQuadDomain
 from anymesher.quad.high_order import ValidityStatus, certify_mapping_validity
 from anymesher.quad.options import QuadMeshingOptions
 from anymesher.quad.public_integration import QuadPublicUnsupported
-from quad_first_curved.test_ch8_conical_public import _generate, _support_residual
+from quad_first_curved.test_ch8_conical_public import _support_residual
+# Same generator arguments as CH8, bound to the frozen legacy seed policy.
+from quad_first_curved.test_ch4_cylindrical_quadratic import _generate
 
 
 def _corners(body: tuple[int, ...]) -> tuple[int, ...]:

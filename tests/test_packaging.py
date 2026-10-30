@@ -50,6 +50,12 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
+def test_optional_solid_provider_is_explicit_and_outside_base_requirements() -> None:
+    project = _pyproject()['project']
+    assert project['optional-dependencies']['solids-pytetwild'] == ['pytetwild==0.4.2']
+    assert not any('pytetwild' in requirement.lower() for requirement in project['dependencies'])
+
+
 def test_release_metadata_is_0_5_0_alpha_and_mpl_2_0() -> None:
     project = _pyproject()["project"]
     assert project["version"] == "0.5.1"
@@ -146,7 +152,14 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
     )
 
     assert ci.count("repository: audunarn/ANYgeometry") == 7
-    assert ci.count(f"ref: {geometry_ref}") == 7
+    # The existing smoke lane intentionally exercises the newer owner chart
+    # contract. The six historical qualification lanes retain their frozen pin.
+    smoke_ref = "dda8c70a1f6205ae601e8288a1624f52aa76e24a"
+    assert ci.count(f"ref: {geometry_ref}") == 6
+    assert ci.count(f"ref: {smoke_ref}") == 1
+    smoke = ci.split("\n  smoke:\n", 1)[1].split("\n  native-v2-contract:\n", 1)[0]
+    assert f"ref: {smoke_ref}" in smoke
+    assert f"ref: {geometry_ref}" not in smoke
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {geometry_ref}") == 1
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci

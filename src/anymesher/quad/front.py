@@ -301,31 +301,21 @@ def classify(
 # Front driver: stage + commit one front step atomically
 # ---------------------------------------------------------------------------
 
-def front_step(
-    state: QuadMeshState,
-    edge: Sequence[int],
-    options: QuadMeshingOptions | Mapping[str, Any] | None = None,
-) -> tuple[int, tuple[int, int, int, int]]:
-    """Advance the front at ``edge`` by one step, committed atomically.
-
-    Returns ``(new_cell_id, body)`` of the published ``Q4``.  On a rejected
-    candidate or a missing source/partner, the state is left unmodified and a
-    typed :class:`FrontNoCandidate` is raised — never a silent "no-op success".
-    An unexpected commit failure raises :class:`~anymesher.errors.MeshError`
-    with the base untouched (transaction atomicity).
-    """
+def _stage_front_step(tx: Transaction, edge: Sequence[int], options=None):
+    """Stage the production front step inside an existing atomic transaction."""
+    view = tx.view
     if options is not None and not isinstance(options, (QuadMeshingOptions, Mapping)):
         raise MeshError("options must be None, QuadMeshingOptions or a mapping")
 
     fe = edge_key(int(edge[0]), int(edge[1]))
-    if not state.is_front_edge(fe):
+    if not view.is_front_edge(fe):
         raise FrontNoCandidate(f"edge {tuple(fe)} is not on the active front")
     try:
-        source = find_source_cell(state, fe)
+        source = find_source_cell(view, fe)
     except FrontRejected as exc:
         raise FrontNoCandidate(str(exc)) from exc
 
-    partners = candidate_partners(state, source)
+    partners = candidate_partners(view, source)
     if not partners:
         raise FrontNoCandidate(
             f"front edge {tuple(fe)}: source {source} has no T3 partner across a non-front edge"
@@ -335,7 +325,7 @@ def front_step(
     last_reject: str | None = None
     for partner in partners:
         try:
-            quad = classify(state, fe, source, partner)
+            quad = classify(view, fe, source, partner)
         except FrontRejected as exc:
             last_reject = str(exc)
             continue
@@ -351,24 +341,46 @@ def front_step(
     # Local (O(touched)) front update: capture the incident edge sets *before*
     # the removals are staged, since removals drop the triangles from the base
     # the moment commit applies the delta.
-    s_body = tuple(int(x) for x in state.cell(source))
-    p_body = tuple(int(x) for x in state.cell(partner))
+    s_body = tuple(int(x) for x in view.cell(source))
+    p_body = tuple(int(x) for x in view.cell(partner))
     touched = set(body_edges(s_body)) | set(body_edges(p_body)) | set(body_edges(quad))
 
-    new_id = -1
-    with state.transaction() as tx:
-        tx.remove_cell(source)
-        tx.remove_cell(partner)
-        new_id = tx.allocate_cell(quad, "Q4")
-
-        for k in sorted(touched):
-            is_front_now = _is_residual_front(tx.view, k)
-            was_front = state.is_front_edge(k)
-            if is_front_now and not was_front:
-                tx.add_front_edge(k[0], k[1])
-            elif (not is_front_now) and was_front:
-                tx.remove_front_edge(k[0], k[1])
-
-        tx.commit()  # atomic: prevalidates (incl. front residency) then applies
-
+    # A recovery may consume a triangle allocated earlier in this same delta.
+    # Cancel that provisional addition instead of publishing add+remove aliases.
+    for cid in (source, partner):
+        if cid in tx.delta.add_cells:
+            tx.delta.add_cells.pop(cid)
+            tx.delta.add_cell_kinds.pop(cid, None)
+        else:
+            tx.remove_cell(cid)
+    new_id = tx.allocate_cell(quad, "Q4")
+    for k in sorted(touched):
+        is_front_now = _is_residual_front(tx.view, k)
+        was_front = tx.base.is_front_edge(k)
+        # Compose against the resident base, not earlier provisional front edits.
+        tx.delta.add_front.discard(k)
+        tx.delta.remove_front.discard(k)
+        if is_front_now and not was_front:
+            tx.add_front_edge(k[0], k[1])
+        elif (not is_front_now) and was_front:
+            tx.remove_front_edge(k[0], k[1])
     return new_id, tuple(quad)
+
+
+def front_step(
+    state: QuadMeshState,
+    edge: Sequence[int],
+    options: QuadMeshingOptions | Mapping[str, Any] | None = None,
+) -> tuple[int, tuple[int, int, int, int]]:
+    """Advance the front at ``edge`` by one step, committed atomically.
+
+    Returns ``(new_cell_id, body)`` of the published ``Q4``.  On a rejected
+    candidate or a missing source/partner, the state is left unmodified and a
+    typed :class:`FrontNoCandidate` is raised — never a silent "no-op success".
+    An unexpected commit failure raises :class:`~anymesher.errors.MeshError`
+    with the base untouched (transaction atomicity).
+    """
+    with state.transaction() as tx:
+        new_id, body = _stage_front_step(tx, edge, options)
+        tx.commit()
+    return new_id, body

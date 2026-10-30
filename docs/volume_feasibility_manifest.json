@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "status": "PROSPECTIVE_FEASIBILITY_NOT_QUALIFICATION",
+  "backend": "pytetwild==0.4.2",
+  "options": {"simplify": false, "coarsen": false, "optimize": true, "num_threads": 1},
+  "limits": {"wall_seconds_per_case": 120, "maximum_cells": 100000, "maximum_relative_volume_error": 0.001, "maximum_face_normal_degrees": 1, "maximum_relative_face_area_error": 0.001},
+  "cases": [
+    {"id": "box", "dimensions": [1, 0.5, 0.25], "target_edge_length": 0.125, "boundary_tolerance": 0.000025},
+    {"id": "thin", "dimensions": [0.4, 0.1, 0.02], "target_edge_length": 0.01, "boundary_tolerance": 0.000002}
+  ],
+  "predicates": ["positive_normalized_cells_after_explicit_ordering", "complete_unambiguous_planar_face_ownership", "source_bounds", "face_areas", "normal_error", "analytic_volume", "unchanged_ANYsolid_constructor"],
+  "limits_of_claim": "Raw axis-aligned fixtures only. Independent overlap/coverage validation, native identity, cancellation and full numerical qualification remain separate gates. No rerun-until-pass or physical tolerance changes."
+}

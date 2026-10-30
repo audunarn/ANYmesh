@@ -460,3 +460,75 @@ def test_q4_t3_conforming_recovery_failed_retile_rolls_back(monkeypatch):
     assert state.generation == before_generation
     assert state.next_node_id == before_node_id
     assert state.next_cell_id == before_cell_id
+
+
+def test_conforming_recovery_uses_new_midpoint_front_and_publishes_once():
+    _geometry,face,seed,state=_conforming_recovery_fixture()
+    before_generation=state.generation
+    for parent in _q4_t3_interface_edges(state):
+        try:
+            report=recover_then_front_step(state,parent,options=QuadMeshingOptions())
+            break
+        except RecoveryExhausted:
+            continue
+    else:
+        pytest.fail('no conforming midpoint-front recovery')
+    assert report.midpoint_id in report.enabling_edge
+    assert not set(report.enabling_edge).intersection(parent)
+    assert state.generation==before_generation+1
+    from anymesher.quad.validate import validate_planar_quad_result
+    result=validate_planar_quad_result(state,face=face,reference_area=12.,seed=seed)
+    assert result.cell_area_sum==pytest.approx(12.)
+
+
+@pytest.mark.parametrize('cancel',[False,True])
+def test_final_front_stage_failure_rolls_back_split_and_allocators(monkeypatch,cancel):
+    import anymesher.quad.recovery as recovery
+    from anymesher.quad.state import CancellationRequested
+    flag=[False]
+    state=QuadMeshState(nodes={0:(0.,0.),1:(2.,0.),2:(1.,.3),3:(1.,1.)},
+                       cells={0:(0,1,2),1:(0,2,3)},initial_front=[(0,1),(1,2),(2,3),(0,3)],
+                       is_cancelled=lambda:flag[0])
+    before=(state.digest(),state.generation,state.next_node_id,state.next_cell_id)
+    original=recovery._stage_front_step
+    def failed_stage(tx,*args,**kwargs):
+        result=original(tx,*args,**kwargs)
+        if cancel:
+            flag[0]=True
+            return result
+        raise MeshError('forced failure after actual front staging')
+    monkeypatch.setattr(recovery,'_stage_front_step',failed_stage)
+    with pytest.raises(CancellationRequested if cancel else MeshError):
+        recovery.recover_then_front_step(state,(0,1),ratios=(.4,))
+    assert (state.digest(),state.generation,state.next_node_id,state.next_cell_id)==before
+
+@pytest.mark.parametrize('cancel',[False,True])
+def test_conforming_final_front_stage_failure_is_atomic(monkeypatch,cancel):
+    import anymesher.quad.recovery as recovery
+    from anymesher.quad.state import CancellationRequested
+    _geometry,_face,_seed,state=_conforming_recovery_fixture()
+    flag=[False]
+    monkeypatch.setattr(state,'_is_cancelled',lambda:flag[0])
+    before=(state.digest(),state.generation,state.next_node_id,state.next_cell_id)
+    original=recovery._stage_front_step
+    staged=[]
+    def failed_stage(tx,*args,**kwargs):
+        result=original(tx,*args,**kwargs)
+        staged.append(result)
+        if cancel:
+            flag[0]=True
+            return result
+        raise MeshError('forced conforming final-stage failure')
+    monkeypatch.setattr(recovery,'_stage_front_step',failed_stage)
+    for edge in _q4_t3_interface_edges(state):
+        try:
+            recovery.recover_then_front_step(state,edge)
+        except RecoveryExhausted:
+            continue
+        except (CancellationRequested if cancel else MeshError):
+            assert staged
+            break
+        else:
+            pytest.fail('final staged recovery unexpectedly committed')
+    assert staged,'conforming candidate must reach the actual final front staging'
+    assert (state.digest(),state.generation,state.next_node_id,state.next_cell_id)==before
