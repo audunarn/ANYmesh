@@ -9,9 +9,12 @@ replacement lineage is retained for later association publication.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
+import os
 from types import MappingProxyType
 from typing import Any
 
@@ -47,6 +50,24 @@ __all__ = [
 ]
 
 CancellationCheck = Callable[[str], None]
+
+_preparation_evidence = ContextVar('anymesher_preparation_evidence',default=())
+
+
+@contextmanager
+def _collect_preparation_evidence():
+    """Private passive qualification scope; inactive preparation is unchanged."""
+    rows=[]
+    token=_preparation_evidence.set((*_preparation_evidence.get(),rows))
+    try:yield rows
+    finally:_preparation_evidence.reset(token)
+
+
+def _record_preparation_plan(plan):
+    collectors=_preparation_evidence.get()
+    if not collectors:return
+    checksum=plan.content_checksum
+    for rows in collectors:rows.append(dict(plan_checksum=checksum,plan=plan))
 
 
 def _cancel(callback: CancellationCheck | None, phase: str) -> None:
@@ -859,6 +880,7 @@ def prepare_structural_closure(
         all(geometry._face_structural_uses.get(face) for face in source_faces)
         and all(geometry.members_using_edge(edge) for edge in source_edges)))
     new_native_preparation_epoch = False
+    planning_clone_decline = None
     if reuse_working_copy and no_automatic and owned:
         working = geometry
     elif no_automatic and owned:
@@ -888,7 +910,18 @@ def prepare_structural_closure(
         else:
             # In-place isolated-job adoption cannot inherit a foreign UUID or
             # its opaque epoch/source receipts through a topology-only restore.
-            working = geometry.clone(include_features=False, preserve_identity=reuse_working_copy)
+            ordinary_opt_in=(os.environ.get('ANYGEOMETRY_EXPERIMENTAL_PARALLEL_PLANNING', '1')=='1'
+                and bool(geometry.faces) and all(type(face.surface) in (Plane,Cylinder) for face in geometry.faces.values())
+                and all(getattr(policy,name) is None for name in ('maximum_candidate_pairs','maximum_applications',
+                    'maximum_face_records','maximum_edge_records')))
+            if ordinary_opt_in:
+                from anygeometry._planning_model_state import clone_for_planning
+                from anygeometry._planning_qualification import QualificationDecline
+                try:working=clone_for_planning(geometry,preserve_identity=reuse_working_copy)
+                except QualificationDecline as error:
+                    planning_clone_decline='caller clone preflight: '+str(error)[:800]
+                    working=geometry.clone(include_features=False,preserve_identity=reuse_working_copy)
+            else:working = geometry.clone(include_features=False, preserve_identity=reuse_working_copy)
     temporary_sheets: list[int] = []
     temporary_members: list[int] = []
     diagnostics: list[str] = []
@@ -1001,15 +1034,19 @@ def prepare_structural_closure(
             return False
         batch_policy = IntersectionBatchPolicy(ConnectionIntent.CONNECT,
             max_candidate_pairs=policy.maximum_candidate_pairs,
-            cancellation_check=(None if new_native_preparation_epoch
-                and cancellation_check is None else cancelled),
+            cancellation_check=None if cancellation_check is None else cancelled,
             face_connections=policy.automatic_face_connections,
             member_connections=policy.automatic_member_connections,
             member_face_connections=policy.automatic_member_sheet_connections)
         try:
             if policy.automatic_face_connections and len(faces)>1:
                 _cancel(cancellation_check,'structural preparation overlap narrow phase')
-            plan=plan_intersections(working,operands,policy=batch_policy)
+            scope=nullcontext()
+            if planning_clone_decline is not None:
+                from anygeometry._planning_controller import _initial_decline
+                scope=_initial_decline(planning_clone_decline)
+            with scope:plan=plan_intersections(working,operands,policy=batch_policy)
+            _record_preparation_plan(plan)
             face_pairs=set()
             member_face_pairs=set()
             member_pairs=set()
