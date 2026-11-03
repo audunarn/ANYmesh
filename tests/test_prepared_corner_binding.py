@@ -1,6 +1,6 @@
 import pytest
 
-from anygeometry import (GeometryModel, clone_prepared_geometry,
+from anygeometry import (GeometryError, GeometryModel, clone_prepared_geometry,
     has_current_intersection_preparation, to_dict)
 from anygeometry.generators import cylinder
 from anymesher import preparation
@@ -36,5 +36,7 @@ def test_final_corner_edits_keep_owner_proof_through_attempt_clone(monkeypatch):
     preparation.prepare_structural_closure(attempt, options=False)
     attempt.add_point(100,100,100)
     assert not has_current_intersection_preparation(attempt)
-    with pytest.raises(AssertionError, match='reclassified'):
+    changed = to_dict(attempt)
+    with pytest.raises(GeometryError, match='prepared partition source lineage is stale or changed'):
         preparation.prepare_structural_closure(attempt, options=False)
+    assert to_dict(attempt) == changed
