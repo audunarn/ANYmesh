@@ -6223,6 +6223,70 @@ from .approximation_policy import _resolve_public_approximation
 
 
 @_stage_scope
+def validate_mesh_quality(
+    geometry: GeometryModel | None,
+    mesh: Mesh,
+    *,
+    quality_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
+    cancellation_check: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
+    """Validate final mesh quality without changing its producer or grid.
+
+    None requests no validation. The returned report grants no geometry,
+    source-transfer or solver-admission authority. A live geometry is required
+    when a cancellation callback needs source guarding.
+    """
+    if quality_options is None:
+        return None
+    options = StructuredMeshingOptions.create(quality_options)
+    if cancellation_check is not None:
+        if geometry is None:
+            raise MeshError("quality callback requires live geometry")
+        from ._authored_component_stage import _mesh_digest
+        from ._material_region_binding import boundary_registry_pin
+        view = GeometryMeshingView(geometry)
+        mesh_pin = _mesh_digest(mesh)
+        registry = getattr(mesh, "boundary_registry", None)
+        registry_pin = None if registry is None else boundary_registry_pin(registry)
+        def poll(phase):
+            _check_cancellation(cancellation_check, phase)
+            view.assert_current()
+            if (_mesh_digest(mesh) != mesh_pin
+                    or getattr(mesh, "boundary_registry", None) is not registry
+                    or (registry is not None and boundary_registry_pin(registry) != registry_pin)):
+                raise MeshError("mesh or registry changed during quality callback")
+        poll("mesh quality validation start")
+    report = _structured_quality_report(mesh, options)
+    if cancellation_check is not None:
+        poll("mesh quality validation complete")
+    if not report["accepted"]:
+        raise MeshError(
+            "explicit mesh quality policy failed: "
+            + str(report["violation_counts"])
+            + "; growth violations=" + str(report["growth_violation_count"]))
+    return report
+
+
+def _admit_requested_quality(function):
+    """Admit a complete result without selecting a different grid or route."""
+    from functools import wraps
+    @wraps(function)
+    def admitted(*args, quality_options=None, **kwargs):
+        requested = quality_options
+        if requested is None and kwargs.get("quad_options") is not None:
+            requested = kwargs.get("structured_options")
+        options = None if requested is None else StructuredMeshingOptions.create(requested)
+        result = function(*args, **kwargs)
+        if options is not None:
+            source = args[0] if args else kwargs.get("geometry")
+            validate_mesh_quality(source, result.mesh, quality_options=options,
+                                  cancellation_check=kwargs.get("cancellation_check"))
+        return result
+    return admitted
+
+
+@_stage_scope
+@_admit_requested_quality
 @_resolve_public_approximation
 def generate_hybrid_mesh_result(
     geometry: GeometryModel,
@@ -6245,6 +6309,8 @@ def generate_hybrid_mesh_result(
     geometry_approximation_resolution=None,
     geometry_approximation_source=None,
     structured_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
+    # Final admission only: this request never changes layout or route selection.
+    quality_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
     ) = None,

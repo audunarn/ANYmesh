@@ -806,6 +806,15 @@ def prepare_structural_closure(
         limit=getattr(policy,name)
         if limit is not None and count>limit:
             raise MeshError(f"structural preparation exceeds explicit {name}={limit}")
+    # Capture initial eligibility before temporary owner declarations on the clone.
+    from anygeometry.nurbs import NurbsCurve
+    raw_unassigned_sweeps = (not geometry.sheets and not geometry.members and not source_edges
+        and set(source_faces)==set(geometry.faces) and len(source_faces)>1
+        and all(type(geometry.faces[face].surface) is CoonsSurface
+            and not geometry.faces[face].surface.has_boundaries
+            and geometry.faces[face].parameterization is None and not geometry.faces[face].holes
+            and any(type(geometry.edges[use.edge].curve) is NurbsCurve for use in geometry.faces[face].loop)
+            for face in source_faces))
     # Classification belongs to the atomic owner batch. Legacy discretization
     # and callers disabling that batch retain the independent overlap audit.
     def audit_overlaps():
@@ -970,110 +979,131 @@ def prepare_structural_closure(
         faces = _selected_descendant_faces(working,source_faces)
         operands = (*[working.handle("face",face) for face in faces],
                     *[working.handle("member",member) for member in members])
-        legacy_curved_only = False
-        chart_errors: dict[int, str | None] | None = None
-        if not members and len(faces) > 1:
-            # One batched qualification serves every branch below for this
-            # unchanged preparation state; nothing is cached beyond it.
-            # The isolated single-face route never queries charts.
-            chart_errors = _face_chart_errors(
-                working, faces, cancellation_check, working.revision
-            )
-        if not members and len(faces)>1 and all(isinstance(working.faces[face].surface,
-                (CoonsSurface, Cone, RuledSurface)) for face in faces):
-            unavailable = set()
-            for face in faces:
-                error = chart_errors.get(face)
-                if error is None:
-                    continue
-                if error not in (f"face {face} has curved Coons boundaries",
-                        f"face {face} is not planar", f"face {face} has an unsupported intersection surface"):
-                    raise GeometryError(error)
-                unavailable.add(face)
-            legacy_curved_only = len(unavailable) == len(faces)
-        if legacy_curved_only:
-            if policy.automatic_face_connections:
-                audit_overlaps()
-            # Existing Coons/Cone/Ruled authoring and trim operations keep their
-            # explicit boundary topology and established discretization route.
-            # They are outside the general Plane/Cylinder interior-joint contract.
-            operands = ()
-            diagnostics.append("legacy curved topology discretization; no automatic interior joints")
-        elif len(faces)==1 and not members:
-            # One isolated surface has no operand pair to prepare. Preserve
-            # native Cone/Ruled meshing without claiming their intersections
-            # are part of the Plane/Cylinder batch contract.
-            operands=()
-        elif not members:
-            # Existing curved-boundary welds remain a supported compatibility
-            # path. General interior Coons intersections are not inferred.
-            from anygeometry import query_intersection
-            retained=[]
-            for face_id in faces:
-                error = chart_errors.get(face_id)
-                if error is not None:
-                    if error not in (f'face {face_id} has curved Coons boundaries',
-                                          f'face {face_id} is not planar'):
-                        raise GeometryError(error)
-                    compatible=True
-                    for other in faces:
-                        if other==face_id:continue
-                        result=query_intersection(working,face_id,other)
-                        shared=_shared_boundary_edges(working,face_id,other)
-                        if (not result.classified or (result.components and
-                                ('existing_shared_boundary_curve' not in result.diagnostics or not shared))):
-                            compatible=False
-                            break
-                    if compatible:
-                        diagnostics.append(f'face:{face_id} retains existing qualified curved-boundary joints')
+        if raw_unassigned_sweeps and not members and policy.automatic_face_connections:
+            # Only the fresh strong public owner proof licenses pair omission.
+            from anygeometry import query_translational_profile_interfaces
+            count=len(faces)*(len(faces)-1)//2
+            if policy.maximum_candidate_pairs is not None and count>policy.maximum_candidate_pairs:
+                raise MeshError('strong sweep interfaces exceed explicit maximum_candidate_pairs')
+            evidence=query_translational_profile_interfaces(working,faces,
+                expected_revision=working.revision,cancellation_check=cancellation_check)
+            if evidence is None:
+                raise MeshError('raw unassigned sweep interfaces are not strongly certified')
+            expected={tuple(sorted((a,b))) for i,a in enumerate(faces) for b in faces[i+1:]}
+            if ({tuple(row['faces']) for row in evidence['pairs']}!=expected
+                    or tuple(evidence['face_ids'])!=tuple(sorted(faces))
+                    or evidence['source_model_id']!=str(working.model_id)
+                    or evidence['source_revision']!=working.revision):
+                raise MeshError('strong sweep interface scope differs from the working closure')
+            queries=len(evidence['pairs'])
+            declared_face_connection_edges.update(edge for row in evidence['pairs'] for edge in row['shared_edges'])
+            diagnostics.append('fresh strong rational sweep interfaces; complete boundary-only pair coverage')
+            # No empty intersection plan/application and no S3 preparation stamp.
+        else:
+            legacy_curved_only = False
+            chart_errors: dict[int, str | None] | None = None
+            if not members and len(faces) > 1:
+                # One batched qualification serves every branch below for this
+                # unchanged preparation state; nothing is cached beyond it.
+                # The isolated single-face route never queries charts.
+                chart_errors = _face_chart_errors(
+                    working, faces, cancellation_check, working.revision
+                )
+            if not members and len(faces)>1 and all(isinstance(working.faces[face].surface,
+                    (CoonsSurface, Cone, RuledSurface)) for face in faces):
+                unavailable = set()
+                for face in faces:
+                    error = chart_errors.get(face)
+                    if error is None:
                         continue
-                retained.append(working.handle('face',face_id))
-            operands=tuple(retained)
-        def cancelled():
-            _cancel(cancellation_check,"structural intersection batch")
-            return False
-        batch_policy = IntersectionBatchPolicy(ConnectionIntent.CONNECT,
-            max_candidate_pairs=policy.maximum_candidate_pairs,
-            cancellation_check=None if cancellation_check is None else cancelled,
-            face_connections=policy.automatic_face_connections,
-            member_connections=policy.automatic_member_connections,
-            member_face_connections=policy.automatic_member_sheet_connections)
-        try:
-            if policy.automatic_face_connections and len(faces)>1:
-                _cancel(cancellation_check,'structural preparation overlap narrow phase')
-            scope=nullcontext()
-            if planning_clone_decline is not None:
-                from anygeometry._planning_controller import _initial_decline
-                scope=_initial_decline(planning_clone_decline)
-            with scope:plan=plan_intersections(working,operands,policy=batch_policy)
-            _record_preparation_plan(plan)
-            face_pairs=set()
-            member_face_pairs=set()
-            member_pairs=set()
-            for arrangement in plan.arrangements:
-                for path in arrangement.paths:
-                    face_pairs.update(tuple(sorted((first,second))) for index,first in enumerate(path.owners)
-                                      for second in path.owners[index+1:])
-                    member_face_pairs.update((member,arrangement.face_id) for member in path.member_ids)
-            for contact in plan.contacts:
-                selected=sorted({member for member,_parameter in contact.member_parameters})
-                member_pairs.update((first,second) for index,first in enumerate(selected)
-                                    for second in selected[index+1:])
-                if contact.face_id is not None:
-                    member_face_pairs.update((member,contact.face_id) for member in selected)
-            application=apply_intersections(working,plan,policy=batch_policy)
-            declared_face_connection_edges.update(handle.id for handle in application.joint_edges
-                                                  if len(working.faces_using_edge(handle.id))>1)
-            applications=int(not application.reused)
-            face_connections=len(face_pairs)*applications
-            member_connections=len(member_pairs)*applications
-            member_sheet_connections=len(member_face_pairs)*applications
-            queries=len(face_pairs)+len(member_pairs)+len(member_face_pairs)
-        except GeometryError as error:
-            if 'positive-area overlap' in str(error):
-                raise MeshError('positive-area overlap requires Fragment Overlaps to select ownership before meshing: '
-                                +str(error)) from error
-            raise MeshError(f"automatic intersection batch preparation failed: {error}") from error
+                    if error not in (f"face {face} has curved Coons boundaries",
+                            f"face {face} is not planar", f"face {face} has an unsupported intersection surface"):
+                        raise GeometryError(error)
+                    unavailable.add(face)
+                legacy_curved_only = len(unavailable) == len(faces)
+            if legacy_curved_only:
+                if policy.automatic_face_connections:
+                    audit_overlaps()
+                # Existing Coons/Cone/Ruled authoring and trim operations keep their
+                # explicit boundary topology and established discretization route.
+                # They are outside the general Plane/Cylinder interior-joint contract.
+                operands = ()
+                diagnostics.append("legacy curved topology discretization; no automatic interior joints")
+            elif len(faces)==1 and not members:
+                # One isolated surface has no operand pair to prepare. Preserve
+                # native Cone/Ruled meshing without claiming their intersections
+                # are part of the Plane/Cylinder batch contract.
+                operands=()
+            elif not members:
+                # Existing curved-boundary welds remain a supported compatibility
+                # path. General interior Coons intersections are not inferred.
+                from anygeometry import query_intersection
+                retained=[]
+                for face_id in faces:
+                    error = chart_errors.get(face_id)
+                    if error is not None:
+                        if error not in (f'face {face_id} has curved Coons boundaries',
+                                              f'face {face_id} is not planar'):
+                            raise GeometryError(error)
+                        compatible=True
+                        for other in faces:
+                            if other==face_id:continue
+                            result=query_intersection(working,face_id,other)
+                            shared=_shared_boundary_edges(working,face_id,other)
+                            if (not result.classified or (result.components and
+                                    ('existing_shared_boundary_curve' not in result.diagnostics or not shared))):
+                                compatible=False
+                                break
+                        if compatible:
+                            diagnostics.append(f'face:{face_id} retains existing qualified curved-boundary joints')
+                            continue
+                    retained.append(working.handle('face',face_id))
+                operands=tuple(retained)
+            def cancelled():
+                _cancel(cancellation_check,"structural intersection batch")
+                return False
+            batch_policy = IntersectionBatchPolicy(ConnectionIntent.CONNECT,
+                max_candidate_pairs=policy.maximum_candidate_pairs,
+                cancellation_check=None if cancellation_check is None else cancelled,
+                face_connections=policy.automatic_face_connections,
+                member_connections=policy.automatic_member_connections,
+                member_face_connections=policy.automatic_member_sheet_connections)
+            try:
+                if policy.automatic_face_connections and len(faces)>1:
+                    _cancel(cancellation_check,'structural preparation overlap narrow phase')
+                scope=nullcontext()
+                if planning_clone_decline is not None:
+                    from anygeometry._planning_controller import _initial_decline
+                    scope=_initial_decline(planning_clone_decline)
+                with scope:plan=plan_intersections(working,operands,policy=batch_policy)
+                _record_preparation_plan(plan)
+                face_pairs=set()
+                member_face_pairs=set()
+                member_pairs=set()
+                for arrangement in plan.arrangements:
+                    for path in arrangement.paths:
+                        face_pairs.update(tuple(sorted((first,second))) for index,first in enumerate(path.owners)
+                                          for second in path.owners[index+1:])
+                        member_face_pairs.update((member,arrangement.face_id) for member in path.member_ids)
+                for contact in plan.contacts:
+                    selected=sorted({member for member,_parameter in contact.member_parameters})
+                    member_pairs.update((first,second) for index,first in enumerate(selected)
+                                        for second in selected[index+1:])
+                    if contact.face_id is not None:
+                        member_face_pairs.update((member,contact.face_id) for member in selected)
+                application=apply_intersections(working,plan,policy=batch_policy)
+                declared_face_connection_edges.update(handle.id for handle in application.joint_edges
+                                                      if len(working.faces_using_edge(handle.id))>1)
+                applications=int(not application.reused)
+                face_connections=len(face_pairs)*applications
+                member_connections=len(member_pairs)*applications
+                member_sheet_connections=len(member_face_pairs)*applications
+                queries=len(face_pairs)+len(member_pairs)+len(member_face_pairs)
+            except GeometryError as error:
+                if 'positive-area overlap' in str(error):
+                    raise MeshError('positive-area overlap requires Fragment Overlaps to select ownership before meshing: '
+                                    +str(error)) from error
+                raise MeshError(f"automatic intersection batch preparation failed: {error}") from error
         for name,count in (("maximum_face_records",len(working.faces)),
                            ("maximum_edge_records",len(working.edges))):
             limit=getattr(policy,name)

@@ -43,6 +43,9 @@ PARAMETERS = {
     'geometry_approximation_resolution': ('neutral', 'resolved before the gate'),
     'geometry_approximation_source': ('neutral', 'resolved before the gate'),
     'structured_options': ('none',),
+    # The outer final-admission wrapper consumes explicit policies; the producer
+    # receives only its None default. Never silently honour a bypassed policy.
+    'quality_options': ('none',),
     'structural_preparation': ('object',),
     'qualified_s3': ('neutral', 'post-mesh admission'),
     'quad_options': ('custom', 'whole-object equality'),
