@@ -75,8 +75,27 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
+    env:
+      ANYMESHER_REQUIRE_S0_BASELINE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: f645523c8006efe61e94678a5056fba3c9a6a39d
+          path: .s0-old-geometry
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYmesh
+          ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
+          path: .s0-old-mesher
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
@@ -91,6 +110,17 @@ jobs:
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev,planar]"
       - run: python -c "import anygeometry, anymesher; print(anygeometry.__version__, anymesher.__version__)"
+      - name: Produce one cold frozen-source six-face S0 baseline
+        shell: bash
+        run: |
+          python -m pip install 'psutil>=5.9'
+          python -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env "$GITHUB_ENV"
+      - name: Retain cold S0 identity and partial process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s0-cold-${{ matrix.os }}-${{ matrix.python-version }}
+          path: ci-s0-baseline
       - name: Enter the MSVC developer environment for the quad workers
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -221,8 +251,27 @@ jobs:
       startsWith(github.ref, 'refs/tags/v'))
     needs: wheel
     runs-on: ubuntu-latest
+    env:
+      ANYMESHER_REQUIRE_S0_BASELINE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: f645523c8006efe61e94678a5056fba3c9a6a39d
+          path: .s0-old-geometry
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYmesh
+          ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
+          path: .s0-old-mesher
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
@@ -246,6 +295,17 @@ jobs:
           python -I -B -c "import anymesher, importlib.util, pathlib, sys;
           assert pathlib.Path(anymesher.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve());
           assert importlib.util.find_spec('anymesher._native') is not None"
+      - name: Produce one cold frozen-source six-face S0 baseline
+        shell: bash
+        run: |
+          python -m pip install 'psutil>=5.9'
+          python -I -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env "$GITHUB_ENV"
+      - name: Retain cold S0 identity and partial process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s0-cold-installed-linux
+          path: ci-s0-baseline
       - name: Build the optional quad-first workers outside the installed package
         run: python tools/build_quad_workers.py
       - name: Qualify the installed wheel against the full suite

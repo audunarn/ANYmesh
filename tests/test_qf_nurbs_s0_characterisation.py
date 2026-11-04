@@ -93,7 +93,10 @@ def build(name):
 
 @pytest.mark.parametrize('name', sorted(GOLDEN))
 def test_default_outputs_are_bit_identical_to_baseline(name):
-    assert digest(build(name)) == GOLDEN[name]
+    # CI compares this warm build to frozen old source on the SAME image.
+    # Local development without a sealed baseline retains the historical GOLDEN.
+    from _s0_baseline_contract import assert_output
+    assert_output(name, build(name), GOLDEN, digest=digest)
 
 
 @pytest.mark.parametrize('kind', ['triangle'])
