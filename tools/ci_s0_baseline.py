@@ -47,7 +47,7 @@ def lf(body):
 
 
 def compiler_proof(old_repo, current_repo):
-    """Exact Git blobs plus current working inputs; only two adopted metadata deltas."""
+    """Exact Git blobs plus current working inputs; only three adopted metadata deltas."""
     rows = {}
     for name in BUILD_FILES:
         old = git_bytes(old_repo, 'show', contract.REFS['mesher'] + ':' + name)
@@ -64,7 +64,9 @@ def compiler_proof(old_repo, current_repo):
     dev = configs[1]['project']['optional-dependencies']['dev']
     assert dev.count('setuptools>=77.0.3') == 1
     dev.remove('setuptools>=77.0.3')
-    assert configs[0] == configs[1], 'build-system/version/config differs beyond two adopted metadata exceptions'
+    assert dev.count('wheel') == 1, 'expected exactly one literal dev wheel addition'
+    dev.remove('wheel')
+    assert configs[0] == configs[1], 'build-system/version/config differs beyond three adopted metadata exceptions'
     tree = ast.parse(git_bytes(old_repo, 'show', contract.REFS['mesher'] + ':setup.py').decode())
     imports = sorted({n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)} |
                      {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names})
@@ -72,7 +74,8 @@ def compiler_proof(old_repo, current_repo):
                for name in imports), 'setup imports geometry/build-generated owner constants'
     return dict(exact_git_blobs=rows, setup_imports=imports,
                 pyproject_sha256=[contract.hash_bytes(old_py), contract.hash_bytes(current_py)],
-                exceptions=dict(runtime_dependencies=deps, dev_addition='setuptools>=77.0.3'),
+                exceptions=dict(runtime_dependencies=deps, dev_addition='setuptools>=77.0.3',
+                                dev_wheel_addition='wheel'),
                 remaining_parsed_build_version_config_equal=True,
                 newline_policy='working checkout CRLF is recorded; Git compiler blobs compare byte-for-byte')
 
