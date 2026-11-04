@@ -398,7 +398,9 @@ def _conforming_recovery_fixture():
         ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (3.0, 4.0, 0.0), (1.0, 4.0, 0.0))
     )
     face = geometry.add_plate(vertices)
-    seed = build_planar_quad_seed(geometry, face, 0.75)
+    # This seed has a genuine child-front-admissible conforming recovery;
+    # the finer .75 seed exhausts the unchanged ratio/quality contract.
+    seed = build_planar_quad_seed(geometry, face, 1.0)
     result = run_planar_quad_driver(seed, QuadMeshingOptions(), allow_recovery=False)
     return geometry, face, seed, result.state
 
