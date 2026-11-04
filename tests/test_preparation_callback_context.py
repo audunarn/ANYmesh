@@ -78,6 +78,7 @@ _INITIAL_ADMISSION_REASONS=frozenset((
     'NumPy context owner modules unavailable',
     'NumPy context source/native image outside profile',
     'runtime RLock state interface unavailable',
+    'host plus tree and 25 percent headroom exceed memory admission budget',
 ))
 
 
@@ -116,6 +117,38 @@ def test_unavailable_private_accounting_is_initial_serial_with_off_identity(monk
     assert reason=='Windows private-commit accounting unavailable'
     request.node.user_properties.extend((('execution_scope','simulated-initial-accounting-refusal'),
         ('postcapture_qualification',False),('numerical_worker_execution',False)))
+
+
+def test_fixed_memory_profile_refuses_before_dispatch_with_off_identity(monkeypatch,tmp_path,request):
+    from anygeometry import _planning_memory as memory, _planning_controller as controller
+    request.node.user_properties.extend((('execution_scope','simulated-admission-memory'),
+                                         ('parallel_qualification',False)))
+    observed = dict(host_peak_bytes=4*2**30, host_private_bytes=2**30, available_bytes=16*2**30)
+    monkeypatch.setattr(memory, 'observe_memory', lambda: dict(observed))
+    monkeypatch.setattr(controller, 'observe_memory', memory.observe_memory)
+    profile = controller.memory_profile()
+    assert profile.host_peak_estimate_bytes == observed['host_peak_bytes'] + 512*2**20
+    assert (profile.tree_limit_bytes, profile.total_limit_bytes, profile.free_fraction) == (4*2**30, 8*2**30, (1,2))
+    reason = _initial_serial_warm_closure_matches_identical_serial_owner(monkeypatch,tmp_path)
+    assert reason == 'host plus tree and 25 percent headroom exceed memory admission budget'
+
+
+@pytest.mark.parametrize('changed', ('disposition', 'attempted_stages', 'manifest_sha256', 'abandoned'))
+def test_memory_refusal_classification_never_covers_an_admitted_attempt(changed):
+    receipt = dict(schema='R5-production-v1', ci_verified=False, disposition='serial',
+        reason='host plus tree and 25 percent headroom exceed memory admission budget',
+        stages=[], attempted_stages=[], retired=True, costs=dict(abandoned={}))
+    _assert_initial_serial_receipt(receipt)
+    if changed == 'disposition':
+        receipt['disposition'] = 'terminal'
+    elif changed == 'attempted_stages':
+        receipt['attempted_stages'] = ['pair']
+    elif changed == 'manifest_sha256':
+        receipt['manifest_sha256'] = 'a'*64
+    else:
+        receipt['costs']['abandoned'] = {'orchestration':1.}
+    with pytest.raises(AssertionError):
+        _assert_initial_serial_receipt(receipt)
 
 
 def test_actual_parallel_warm_closure_matches_identical_serial_owner(monkeypatch,tmp_path,request):
