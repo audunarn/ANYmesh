@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: d45e1ca8dc0ae499538ec8eb5a4215f5c216dfb5
+          ref: e61701843cf9afd15f08e069d56896715eed58a9
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
