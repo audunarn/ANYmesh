@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from _held_capabilities import held_extrusion_contact
 
 from anygeometry import punch_hole as punch_neutral_hole
 from anygeometry.tolerance import TolerancePolicy
@@ -286,6 +287,7 @@ def test_mapped_face_split_records_one_semantic_replacement() -> None:
     assert all(len(model.faces[item.id].corners) == 4 for item in descendants)
 
 
+@held_extrusion_contact((2, 3))
 def test_curved_surface_operations_remain_exact_and_conformal() -> None:
     radius = 2.0
     model, _arc, face_id = _quarter_cylinder(radius=radius, height=3.0)
@@ -428,6 +430,7 @@ def test_stripping_needs_at_least_two_strips() -> None:
         strip_face(model, face, 2, 3)
 
 
+@held_extrusion_contact((3, 5))
 def test_stripping_a_cylinder_keeps_the_surface_exact() -> None:
     radius = 2.0
     model, _arc, face = _quarter_cylinder(radius=radius, height=4.0)
