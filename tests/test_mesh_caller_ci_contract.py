@@ -40,6 +40,7 @@ def verify_positive(path):
 def test_build_backend_is_available_only_in_dev_profile():
     config=tomllib.loads((ROOT/'pyproject.toml').read_text())
     assert 'setuptools>=77.0.3' in config['project']['optional-dependencies']['dev']
+    assert 'wheel' in config['project']['optional-dependencies']['dev']
     assert config['project']['dependencies']==['numpy>=1.26','ANYgeometry[planar]>=0.4.7,<0.5']
     assert config['build-system']==dict(requires=['setuptools>=77','wheel'],**{'build-backend':'setuptools.build_meta'})
 
@@ -53,6 +54,41 @@ def test_qualified_failure_receipt_is_exact_and_unelided(tmp_path, capsys):
     _persist_caller_parallel_receipt(tmp_path, receipt)
     assert json.loads((tmp_path / 'caller-parallel-receipt.json').read_text()) == receipt
     assert receipt['reason'] in capsys.readouterr().out
+
+
+def test_trial_artifact_patterns_match_actual_hosted_pytest_directory_names():
+    from fnmatch import fnmatchcase
+    blocks = jobs((ROOT / '.github/workflows/ci.yml').read_text())
+    # Actual completed Mac313/Mac314/Linux313 JUnit names, not inferred from
+    # the longer Python function name. Pytest truncates the temporary basename.
+    for job, base in [('pytest', 'ci-pytest-temp'),
+                      ('wheel-full-linux', 'installed-ci-pytest-temp')]:
+        patterns = [line.strip() for line in blocks[job].splitlines()
+                    if line.strip().startswith(base + '/')]
+        for directory in ('test_work_bearing_quadratic_tr2', 'test_work_bearing_quadratic_tr3'):
+            for name in ('trial.json', 'oracle.json'):
+                actual = f'{base}/{directory}/{name}'
+                assert any(fnmatchcase(actual, pattern) for pattern in patterns), actual
+
+
+def test_initial_refusal_receipt_precedes_unchanged_known_reason_gate():
+    import ast
+    from fnmatch import fnmatchcase
+    source = ast.parse((ROOT / 'tests/test_preparation_callback_context.py').read_text())
+    body = next(node for node in source.body if isinstance(node, ast.FunctionDef)
+                and node.name == '_initial_serial_warm_closure_matches_identical_serial_owner').body
+    def call_index(name):
+        return next(i for i, node in enumerate(body) if isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == name)
+    assert call_index('_persist_caller_parallel_receipt') < call_index('_assert_initial_serial_receipt')
+    blocks = jobs((ROOT / '.github/workflows/ci.yml').read_text())
+    for job, base in [('pytest', 'ci-pytest-temp'),
+                      ('wheel-full-linux', 'installed-ci-pytest-temp')]:
+        patterns = [line.strip() for line in blocks[job].splitlines()
+                    if line.strip().startswith(base + '/')]
+        actual = f'{base}/test_actual_parallel_warm_clos0/caller-parallel-receipt.json'
+        assert any(fnmatchcase(actual, pattern) for pattern in patterns)
 
 
 def test_qualified_lane_retains_only_own_receipt_and_status_artifacts():
@@ -91,7 +127,7 @@ def test_diagnostic_boolean_routes_only_diagnostic_and_retains_normal_full_condi
     assert '2d3b0f876976b4d2e970c531c4b71941f2bb78a6' in diagnostic
 
 
-CURRENT_GEOMETRY_REF='82a2efc0171cb1495d8d90293c0ecadbddb585c4'
+CURRENT_GEOMETRY_REF='ad9b11f591265dd9d3f9d7443cab923f4651f0cb'
 OLD_GEOMETRY_REF='f645523c8006efe61e94678a5056fba3c9a6a39d'
 OLD_MESHER_REF='aa19c0fa6b796a0d7cb1793a87840f52899dfa24'
 
@@ -133,9 +169,11 @@ def test_full_matrix_and_immutable_owner_pin_are_preserved():
     assert 'python -m pytest --durations=25' in blocks['pytest']
     assert '--junitxml=mesh-results.xml' in blocks['pytest']
     assert '--basetemp=ci-pytest-temp' in blocks['pytest']
-    assert 'ci-pytest-temp/test_work_bearing_quadratic_tri*/trial.json' in blocks['pytest']
+    assert '--basetemp=ci-pytest-temp --maxfail=1' in blocks['pytest']
+    assert 'ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json' in blocks['pytest']
     assert '--junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp' in blocks['wheel-full-linux']
-    assert 'installed-ci-pytest-temp/test_work_bearing_quadratic_tri*/trial.json' in blocks['wheel-full-linux']
+    assert '--basetemp=installed-ci-pytest-temp --maxfail=1' in blocks['wheel-full-linux']
+    assert 'installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json' in blocks['wheel-full-linux']
     from collections import Counter
     assert Counter(owner_checkout_pins(text))==Counter({
         ('ANYgeometry',CURRENT_GEOMETRY_REF,'.ecosystem/ANYgeometry'):8,
@@ -169,11 +207,13 @@ def test_required_positive_flag_cannot_classify_initial_refusal(qualified,requir
 
 
 @pytest.mark.parametrize('variant',['initial','unknown','staged','attempted','abandoned','manifest','model','infrastructure','unretired','parallel','legacy'])
-def test_simulated_initial_receipt_validation_never_claims_postcapture(variant):
+@pytest.mark.parametrize('reason',['planning resource helper requires Windows CPython with GIL',
+                                 'Windows private-commit accounting unavailable'])
+def test_simulated_initial_receipt_validation_never_claims_postcapture(variant,reason):
     from test_preparation_callback_context import _assert_initial_serial_receipt
     # Pure receipt validation only. This is not actual mocked-platform coverage.
     receipt=dict(schema='R5-production-v1',ci_verified=False,disposition='serial',
-        reason='planning resource helper requires Windows CPython with GIL',stages=[],attempted_stages=[],retired=True,costs={'abandoned':{}})
+        reason=reason,stages=[],attempted_stages=[],retired=True,costs={'abandoned':{}})
     if variant=='unknown':receipt['reason']='source-less module is not qualified'
     elif variant=='staged':receipt['stages']=['pair']
     elif variant=='attempted':receipt['attempted_stages']=['pair']

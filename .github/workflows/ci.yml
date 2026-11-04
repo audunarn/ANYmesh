@@ -31,7 +31,7 @@ jobs:
           repository: audunarn/ANYgeometry
           # Current consumer tests/builds require this owner API revision.
           # Numerical evidence corpus and its acceptance checks stay unchanged.
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - run: python -m pip install --upgrade pip
@@ -99,7 +99,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -126,7 +126,8 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build the optional quad-first MCF and TinyAD workers
         run: python tools/build_quad_workers.py
-      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp
+      # Red runs return the first full diagnostic promptly; green still runs all cases.
+      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp --maxfail=1
         env:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
       - uses: actions/upload-artifact@v4
@@ -135,8 +136,9 @@ jobs:
           name: mesh-results-${{ matrix.os }}-${{ matrix.python-version }}
           path: |
             mesh-results.xml
-            ci-pytest-temp/test_work_bearing_quadratic_tri*/trial.json
-            ci-pytest-temp/test_work_bearing_quadratic_tri*/oracle.json
+            ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json
+            ci-pytest-temp/test_work_bearing_quadratic_tr*/oracle.json
+            ci-pytest-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
 
   native-absent:
     name: Disabled native boundary is absence-only
@@ -153,7 +155,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -185,7 +187,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -225,7 +227,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -278,7 +280,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -320,7 +322,7 @@ jobs:
         run: >-
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
           --confcutdir=tests --import-mode=importlib tests --durations=25
-          --junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp
+          --junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp --maxfail=1
       - name: Retain installed wheel results and quadratic trial diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -328,8 +330,9 @@ jobs:
           name: installed-mesh-results
           path: |
             installed-mesh-results.xml
-            installed-ci-pytest-temp/test_work_bearing_quadratic_tri*/trial.json
-            installed-ci-pytest-temp/test_work_bearing_quadratic_tri*/oracle.json
+            installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json
+            installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/oracle.json
+            installed-ci-pytest-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
 
   qualified-caller-planning:
     name: Required positive caller planning (Windows immutable profile)
@@ -350,7 +353,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: 82a2efc0171cb1495d8d90293c0ecadbddb585c4
+          ref: ad9b11f591265dd9d3f9d7443cab923f4651f0cb
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5

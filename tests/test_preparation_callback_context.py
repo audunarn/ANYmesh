@@ -71,6 +71,7 @@ def test_private_plan_observer_is_inactive_and_nested():
 
 _CALLER_PROFILE_CONTRACT='mesh-warm-closure-qualified-v1'
 _INITIAL_ADMISSION_REASONS=frozenset((
+    'Windows private-commit accounting unavailable',
     'planning resource helper requires Windows CPython with GIL',
     "planning resource helper unavailable: No module named 'anygeometry._planning_native_core'",
     'NumPy array dispatcher interface unavailable',
@@ -105,6 +106,18 @@ def _assert_initial_serial_receipt(receipt):
     assert receipt['stages']==receipt['attempted_stages']==[] and receipt['retired'] is True
     assert receipt['costs']['abandoned']=={}
     assert not {'manifest_sha256','model_sha256','infrastructure'}.intersection(receipt)
+
+
+def test_unavailable_private_accounting_is_initial_serial_with_off_identity(monkeypatch,tmp_path,request):
+    from types import SimpleNamespace
+    from anygeometry import _planning_memory as memory
+    # Exercise the real observer's unsupported branch, not an invented decline.
+    # This is a simulated backend boundary, never a native/platform qualification.
+    monkeypatch.setattr(memory,'sys',SimpleNamespace(platform='unsupported-platform'))
+    reason=_initial_serial_warm_closure_matches_identical_serial_owner(monkeypatch,tmp_path)
+    assert reason=='Windows private-commit accounting unavailable'
+    request.node.user_properties.extend((('execution_scope','simulated-initial-accounting-refusal'),
+        ('postcapture_qualification',False),('numerical_worker_execution',False)))
 
 
 def test_actual_parallel_warm_closure_matches_identical_serial_owner(monkeypatch,tmp_path,request):
@@ -171,6 +184,7 @@ def _initial_serial_warm_closure_matches_identical_serial_owner(monkeypatch,tmp_
     with preparation._collect_preparation_evidence() as rows,collect_runtime_records() as records:
         working,report=prepare_structural_closure(source,face_ids=tuple(source.faces),reuse_working_copy=True)
     receipt=records['parallel_planning'][-1]
+    _persist_caller_parallel_receipt(tmp_path, receipt)
     _assert_initial_serial_receipt(receipt)
     assert receipt['costs']['callback_calls']==0 and len(rows)==1
     # This explicit working-copy API finalizes its owned input. The captured
