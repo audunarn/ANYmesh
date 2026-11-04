@@ -58,23 +58,10 @@ def _edges(mesh) -> set[tuple[int, int]]:
 
 
 def _deterministic_mesh_payload(mesh):
-    """Retain phase membership while excluding noncanonical elapsed samples."""
+    """Retain deterministic payload and membership, excluding elapsed samples."""
+    from _deterministic_mesh_payload import deterministic_mesh_payload
 
-    def normalize(value):
-        if isinstance(value, dict):
-            return {
-                key: (
-                    sorted(item)
-                    if key == "phase_seconds" and isinstance(item, dict)
-                    else normalize(item)
-                )
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [normalize(item) for item in value]
-        return value
-
-    return normalize(mesh_to_dict(mesh))
+    return deterministic_mesh_payload(mesh_to_dict(mesh))
 
 
 def _selected_mesh_digest(mesh) -> str:
