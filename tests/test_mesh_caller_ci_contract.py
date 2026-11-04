@@ -59,14 +59,61 @@ def test_diagnostic_boolean_routes_only_diagnostic_and_retains_normal_full_condi
     assert '2d3b0f876976b4d2e970c531c4b71941f2bb78a6' in diagnostic
 
 
+CURRENT_GEOMETRY_REF='d553a9698db96728de3474ad86e3f3bfd59ad101'
+OLD_GEOMETRY_REF='f645523c8006efe61e94678a5056fba3c9a6a39d'
+OLD_MESHER_REF='aa19c0fa6b796a0d7cb1793a87840f52899dfa24'
+
+
+def owner_checkout_pins(text):
+    """Bind every explicit owner checkout to its exact ref AND role path."""
+    rows=[]
+    for block in text.split('\n      - '):
+        repos=re.findall(r'^\s*repository: audunarn/(ANYgeometry|ANYmesh)\s*$',block,re.M)
+        if not repos:continue
+        refs=re.findall(r'^\s*ref: ([0-9a-f]{40})\s*$',block,re.M)
+        paths=re.findall(r'^\s*path: (\S+)\s*$',block,re.M)
+        assert len(repos)==len(refs)==len(paths)==1,'owner checkout must have exactly one immutable ref and role path'
+        rows.append((repos[0],refs[0],paths[0]))
+    return rows
+
+
+def test_owner_checkout_parser_binds_exact_ref_and_role_path():
+    text='\n      - uses: actions/checkout@v4\n        with:\n          repository: audunarn/ANYgeometry\n          ref: '+CURRENT_GEOMETRY_REF+'\n          path: .ecosystem/ANYgeometry\n'
+    assert owner_checkout_pins(text)==[('ANYgeometry',CURRENT_GEOMETRY_REF,'.ecosystem/ANYgeometry')]
+    altered=text.replace('.ecosystem/ANYgeometry','.s0-old-geometry')
+    assert owner_checkout_pins(altered)!=owner_checkout_pins(text)
+
+
+@pytest.mark.parametrize('mutation',['branch','short_sha','missing_path','duplicate_ref'])
+def test_owner_checkout_parser_rejects_missing_or_ambiguous_metadata(mutation):
+    text='\n      - uses: actions/checkout@v4\n        with:\n          repository: audunarn/ANYgeometry\n          ref: '+CURRENT_GEOMETRY_REF+'\n          path: .ecosystem/ANYgeometry\n'
+    if mutation=='branch':text=text.replace(CURRENT_GEOMETRY_REF,'main')
+    elif mutation=='short_sha':text=text.replace(CURRENT_GEOMETRY_REF,CURRENT_GEOMETRY_REF[:12])
+    elif mutation=='missing_path':text=text.replace('          path: .ecosystem/ANYgeometry\n','')
+    else:text+='          ref: '+OLD_GEOMETRY_REF+'\n'
+    with pytest.raises(AssertionError,match='exactly one'):owner_checkout_pins(text)
+
+
 def test_full_matrix_and_immutable_owner_pin_are_preserved():
     text=(ROOT/'.github/workflows/ci.yml').read_text();blocks=jobs(text)
     assert 'os: [windows-latest, ubuntu-latest, macos-latest]' in blocks['pytest']
     assert 'python-version: ["3.11", "3.12", "3.13", "3.14"]' in blocks['pytest']
     assert 'python -m pytest --durations=25' in blocks['pytest']
     assert '--junitxml=mesh-results.xml' in blocks['pytest']
-    pins=re.findall(r'\bref: ([0-9a-f]{40})',text)
-    assert pins and set(pins)=={'68a577ed37d07d9991018f973c2349c295463e4f'}
+    assert '--basetemp=ci-pytest-temp' in blocks['pytest']
+    assert 'ci-pytest-temp/test_work_bearing_quadratic_tri*/trial.json' in blocks['pytest']
+    assert '--junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp' in blocks['wheel-full-linux']
+    assert 'installed-ci-pytest-temp/test_work_bearing_quadratic_tri*/trial.json' in blocks['wheel-full-linux']
+    from collections import Counter
+    assert Counter(owner_checkout_pins(text))==Counter({
+        ('ANYgeometry',CURRENT_GEOMETRY_REF,'.ecosystem/ANYgeometry'):8,
+        ('ANYgeometry',OLD_GEOMETRY_REF,'.s0-old-geometry'):2,
+        ('ANYmesh',OLD_MESHER_REF,'.s0-old-mesher'):2})
+    for name in ('pytest','wheel-full-linux'):
+        assert set(owner_checkout_pins(blocks[name]))=={
+            ('ANYgeometry',CURRENT_GEOMETRY_REF,'.ecosystem/ANYgeometry'),
+            ('ANYgeometry',OLD_GEOMETRY_REF,'.s0-old-geometry'),
+            ('ANYmesh',OLD_MESHER_REF,'.s0-old-mesher')}
 
 
 def test_required_caller_lane_builds_only_geometry_planning_helper_and_pins_profile():
