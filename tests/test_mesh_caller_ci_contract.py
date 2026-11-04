@@ -224,10 +224,18 @@ def test_simulated_initial_receipt_validation_never_claims_postcapture(variant,r
     elif variant=='unretired':receipt['retired']=False
     elif variant=='parallel':receipt['disposition']='parallel'
     elif variant=='legacy':receipt['reason']='infrastructure function global owner'
-    import sys
-    if variant=='initial' or variant=='legacy' and sys.version_info[:2]<(3,14):_assert_initial_serial_receipt(receipt)
+    if variant=='initial':_assert_initial_serial_receipt(receipt)
     else:
         with pytest.raises(AssertionError):_assert_initial_serial_receipt(receipt)
+
+
+def test_unattributed_infrastructure_owner_failure_is_not_a_runtime_profile():
+    from test_preparation_callback_context import _assert_initial_serial_receipt
+    receipt=dict(schema='R5-production-v1',ci_verified=False,disposition='serial',
+        reason='infrastructure function global owner',stages=[],attempted_stages=[],
+        retired=True,costs={'abandoned':{}})
+    with pytest.raises(AssertionError):
+        _assert_initial_serial_receipt(receipt)
 
 
 @pytest.mark.parametrize('variant',['positive','missing','duplicate','failure','error','skipped','initial','false-body','missing-worker'])

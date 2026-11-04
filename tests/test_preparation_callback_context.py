@@ -99,9 +99,7 @@ def _assert_initial_serial_receipt(receipt):
     # Exact known INITIAL boundaries only. Unknown source/mutation/IO failures
     # remain failures and cannot stand in for an unsupported runtime image.
     assert receipt['schema']=='R5-production-v1' and receipt['ci_verified'] is False
-    import sys
-    known=receipt['reason'] in _INITIAL_ADMISSION_REASONS or (
-        sys.version_info[:2]<(3,14) and receipt['reason']=='infrastructure function global owner')
+    known=receipt['reason'] in _INITIAL_ADMISSION_REASONS
     assert receipt['disposition']=='serial' and known,receipt
     assert receipt['stages']==receipt['attempted_stages']==[] and receipt['retired'] is True
     assert receipt['costs']['abandoned']=={}
