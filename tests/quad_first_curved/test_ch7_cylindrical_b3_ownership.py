@@ -33,7 +33,7 @@ def _cylinder_member_fixture():
     return model, faces, face, member, edge, radial
 
 
-def _generate(model, faces, member, *, cancellation_check=None):
+def _generate(model, faces, member, *, cancellation_check=None, layout_policy=None):
     return generate_hybrid_mesh_result(
         model,
         target_size=0.5,
@@ -44,13 +44,15 @@ def _generate(model, faces, member, *, cancellation_check=None):
         quad_options=QuadMeshingOptions(),
         order="quadratic",
         cancellation_check=cancellation_check,
+        layout_policy=layout_policy,
     ).mesh
 
 
 def test_cylindrical_quadratic_quad_first_owns_straight_member_as_b3():
     model, faces, face, member, edge, radial = _cylinder_member_fixture()
     before = _persistent_state(model)
-    mesh = _generate(model, faces, member)
+    # B3 ownership/count assertions refer to the historical classic shell mesh.
+    mesh = _generate(model, faces, member, layout_policy="existing")
 
     assert mesh.order == "quadratic"
     assert (len(mesh.nodes), len(mesh.quads), len(mesh.tris), len(mesh.beams), len(mesh.couplings)) == (261, 64, 16, 2, 1)

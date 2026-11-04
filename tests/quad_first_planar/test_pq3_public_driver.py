@@ -19,20 +19,22 @@ def _diagnostics(mesh):
     return mesh.hybrid_diagnostics
 
 
-def _run(fixture, h):
+def _run(fixture, h, *, layout_policy=None):
     geometry, face_id = fixture()
     return generate_hybrid_mesh_result(
         geometry,
         target_size=h,
         face_ids=(face_id,),
         quad_options=QuadMeshingOptions(),
+        layout_policy=layout_policy,
     ).mesh
 
 
 @pytest.mark.parametrize("h", [1.0, 0.5, 0.25])
 def test_p01_public_driver_h_parametrized(h):
     h = float(h)
-    mesh = _run(p01_geometry, h)
+    # Exercise the classic driver/optimizer, not the adaptive tensor shortcut.
+    mesh = _run(p01_geometry, h, layout_policy="existing")
     n = _n_eq(mesh)
     scale = 60.0 / h**2
     assert 0.70 * scale <= n <= 1.40 * scale

@@ -46,13 +46,14 @@ def _seed(points=SKEW, h=0.5):
     return model, face, seed
 
 
-def _public(points=SKEW, h=0.5):
+def _public(points=SKEW, h=0.5, *, layout_policy=None):
     model, face = _geometry(points)
     result = generate_hybrid_mesh_result(
         model,
         target_size=h,
         face_ids=(face,),
         quad_options=QuadMeshingOptions(max_local_optimizations=0),
+        layout_policy=layout_policy,
     )
     return model, face, result
 
@@ -163,7 +164,7 @@ def test_mcf_stage_causally_reduces_real_front_work():
 
 @pytest.mark.quad_workers
 def test_public_route_reports_geometry_derived_mcf():
-    _model, face, result = _public()
+    _model, face, result = _public(layout_policy="existing")
     q4 = result.mesh.hybrid_diagnostics["q4"]
     assert q4["status"] == "APPLIED"
     assert q4["worker_calls"] == 2
@@ -179,7 +180,7 @@ def test_public_route_reports_geometry_derived_mcf():
 
 
 def test_uniform_p01_large_component_is_bounded_no_worker_call():
-    _model, _face, result = _public(P01, h=0.5)
+    _model, _face, result = _public(P01, h=0.5, layout_policy="existing")
     q4 = result.mesh.hybrid_diagnostics["q4"]
     assert q4["status"] == "NO_ELIGIBLE"
     assert q4["worker_calls"] == 0
@@ -270,6 +271,7 @@ def test_public_enabled_vs_disabled_mcf_is_causal(monkeypatch):
     enabled = generate_hybrid_mesh_result(
         model_e, target_size=0.5, face_ids=(face_e,),
         quad_options=QuadMeshingOptions(max_local_optimizations=0),
+        layout_policy="existing",
     )
     q4e = enabled.mesh.hybrid_diagnostics["q4"]
     bodies_e = {tuple(body) for body in enabled.mesh.quads.values()}
@@ -282,6 +284,7 @@ def test_public_enabled_vs_disabled_mcf_is_causal(monkeypatch):
     disabled = generate_hybrid_mesh_result(
         model_d, target_size=0.5, face_ids=(face_d,),
         quad_options=QuadMeshingOptions(max_local_optimizations=0),
+        layout_policy="existing",
     )
     q4d = disabled.mesh.hybrid_diagnostics["q4"]
     bodies_d = {tuple(body) for body in disabled.mesh.quads.values()}
