@@ -1,4 +1,5 @@
 """Actual source-bound mixed boundary-star phase, not a proof receipt fixture."""
+from _call_observer import observe_calls
 from pathlib import Path
 from dataclasses import replace
 import json,sys
@@ -60,17 +61,15 @@ def test_owned_core_change_refuses_before_unknown_numeric_observer(owner_chart,m
     model,chart=owner_chart;points,report,fixed=packet(chart);before=snapshot(points,report);settings=SurfaceMeshOptions(min_angle=15.,max_recombination_work=report.exchange_work+1);entered=[]
     def opaque(*args,**kwargs):entered.append(True);raise AssertionError('unknown observer entered')
     code=mixed.repair_mixed_core_coordinates.__code__
-    def mutate(current,offset):
-        frame=sys._getframe(1)
+    def mutate(frame):
         if mutation=='service':monkeypatch.setattr(quality_v2,'evaluate_quality',opaque)
         elif mutation=='guard':monkeypatch.setattr(shape._OriginalStars,'__call__',opaque)
         elif mutation=='descriptor':monkeypatch.setattr(shape._OriginalStars,'_data',property(opaque))
         else:object.__setattr__(frame.f_locals['_trial_guard'],'_data',())
-    sys.monitoring.use_tool_id(3,'owned core mutation');sys.monitoring.register_callback(3,sys.monitoring.events.PY_START,mutate);sys.monitoring.set_local_events(3,code,sys.monitoring.events.PY_START)
-    try:
+    with observe_calls(code,on_start=mutate,name='owned core mutation'):
         with pytest.raises(MeshError):
             with scope(model,chart,settings):shape.repair_shape_patches(points,report,settings,chart.evaluate,fixed)
-    finally:sys.monitoring.free_tool_id(3)
+
     assert not entered and snapshot(points,report)==before
 
 
@@ -86,13 +85,11 @@ def test_no_budget_or_unknown_callback_preserves_input(owner_chart):
 def test_phase_service_inventory_is_known_without_unknown_callbacks():
     from anymesher import surface_mesh
     missing=[];code=surface_mesh._physical_pairing_services.__code__
-    def observed(current,offset,value):
-        frame=sys._getframe(1)
+    def observed(frame,value):
         if 'functions' in frame.f_locals and 'pins' in frame.f_locals:
             missing.extend(getattr(function,'__qualname__',str(type(function))) for function,pin in zip(frame.f_locals['functions'],frame.f_locals['pins']) if pin is None)
-    sys.monitoring.use_tool_id(3,'finite inventory diagnostics');sys.monitoring.register_callback(3,sys.monitoring.events.PY_RETURN,observed);sys.monitoring.set_local_events(3,code,sys.monitoring.events.PY_RETURN)
-    try:context=surface_mesh._physical_pairing_services()
-    finally:sys.monitoring.free_tool_id(3)
+    with observe_calls(code,on_return=observed,name='finite inventory diagnostics'):
+        context=surface_mesh._physical_pairing_services()
     assert context is not None,missing
 
 
@@ -116,17 +113,17 @@ def test_exhausted_partial_trial_remains_charged_without_input_mutation(owner_ch
 @pytest.mark.parametrize('mutation',['source','construction','original_exception'])
 def test_owner_mutation_or_original_failure_cannot_publish(owner_chart,monkeypatch,mutation):
     model,chart=owner_chart;points,report,fixed=packet(chart);before=snapshot(points,report);settings=SurfaceMeshOptions(min_angle=15.,max_recombination_work=report.exchange_work+1);marker=RuntimeError('original failure');region=chart.region_binding.region;area=region.material_area;units=model._units
-    def changed(code,offset,value):
+    def changed(frame,value):
         if mutation=='source':model._units='mm'
         elif mutation=='construction':object.__setattr__(region,'material_area',area*2.)
         else:raise marker
-    sys.monitoring.use_tool_id(3,'owner final mutation');sys.monitoring.register_callback(3,sys.monitoring.events.PY_RETURN,changed);sys.monitoring.set_local_events(3,mixed.repair_mixed_core_coordinates.__code__,sys.monitoring.events.PY_RETURN)
     try:
-        with pytest.raises(RuntimeError if mutation=='original_exception' else (owner.GeometryError,MeshError)) as caught:
-            with scope(model,chart,settings):shape.repair_shape_patches(points,report,settings,chart.evaluate,fixed)
-        if mutation=='original_exception':assert caught.value is marker
+        with observe_calls(mixed.repair_mixed_core_coordinates.__code__,on_return=changed,name='owner final mutation'):
+            with pytest.raises(RuntimeError if mutation=='original_exception' else (owner.GeometryError,MeshError)) as caught:
+                with scope(model,chart,settings):shape.repair_shape_patches(points,report,settings,chart.evaluate,fixed)
+            if mutation=='original_exception':assert caught.value is marker
     finally:
-        sys.monitoring.free_tool_id(3);model._units=units;object.__setattr__(region,'material_area',area)
+        model._units=units;object.__setattr__(region,'material_area',area)
     assert snapshot(points,report)==before
 
 

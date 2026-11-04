@@ -1,4 +1,5 @@
 """Canonical mixed engine service admission and representation integrity."""
+from _call_observer import observe_calls
 import numpy as np
 import pytest
 from anymesher import surface_mesh as surface
@@ -156,17 +157,16 @@ def test_actual_native_entry_defers_only_eligible_canonical_mixed(owner_chart,mo
     model,chart=owner_chart;settings=SurfaceMeshOptions(target_size=.25,min_angle=15.,recombine=mode!='no_recombine',native_options=NativeMeshingOptions(point_placement='frontal_delaunay',metric_mode='isotropic_spatial'))
     baseline,_=caller_operands(chart,settings);original=surface.frontal_delaunay_refine;seen=[]
     class Observed(BaseException):pass
-    def observer(code,offset):
-        frame=sys._getframe(1);seen.append(frame.f_locals['_physical_growth_limit']);raise Observed()
+    def observer(frame):
+        seen.append(frame.f_locals['_physical_growth_limit']);raise Observed()
     if mode=='driver_wrapper':
         def wrapper(*args,**kwargs):return original(*args,**kwargs)
         monkeypatch.setattr(surface,'frontal_delaunay_refine',wrapper)
-    sys.monitoring.use_tool_id(3,'native argument observer');sys.monitoring.register_callback(3,sys.monitoring.events.PY_START,observer);sys.monitoring.set_local_events(3,original.__code__,sys.monitoring.events.PY_START)
-    try:
+    with observe_calls(original.__code__,on_start=observer,name='native argument observer'):
         with pytest.raises(Observed):
             with (contextlib.nullcontext() if mode=='outside_scope' else scope(model,chart,settings)):
                 run_caller(baseline,settings,chart,(lambda stage:None) if mode=='callback' else None)
-    finally:sys.monitoring.free_tool_id(3)
+
     assert seen==[None if mode=='eligible' else 1.5]
 
 
@@ -196,16 +196,15 @@ def test_actual_native_return_driver_change_refuses_before_unknown_helper(owner_
     settings=SurfaceMeshOptions(target_size=.25,min_angle=15.,native_options=options)
     baseline,_=caller_operands(chart,settings);original=surface.frontal_delaunay_refine;entered=[];marker=RuntimeError('original monitoring exception')
     def opaque(*args,**kwargs):entered.append(True);raise AssertionError('unknown driver entered')
-    def returned(code,offset,value):
+    def returned(frame,value):
         monkeypatch.setattr(surface,'frontal_delaunay_refine',opaque)
         if raises:raise marker
-    sys.monitoring.use_tool_id(3,'native return mutation');sys.monitoring.register_callback(3,sys.monitoring.events.PY_RETURN,returned);sys.monitoring.set_local_events(3,original.__code__,sys.monitoring.events.PY_RETURN)
-    try:
+    with observe_calls(original.__code__,on_return=returned,name='native return mutation'):
         with pytest.raises(RuntimeError if raises else MeshError) as caught:
             with scope(model,chart,settings):run_caller(baseline,settings,chart)
         if raises:assert caught.value is marker
         else:assert any(message in str(caught.value) for message in ('deferred mixed physical repair changed','material snapshot identity'))
-    finally:sys.monitoring.free_tool_id(3)
+
     assert not entered
 
 
@@ -557,15 +556,13 @@ def test_row_placement_arms_on_79_growth_debt_old_3_commits_growth_73_p1p2_and_d
     import sys
     summary={};reached={};calls=[]
     code=sizing._retriangulate_cavity.__code__
-    def spy(code_object,offset):calls.append(1)  # sys.monitoring observes without rebinding the pinned name
+    def spy(frame):calls.append(1)  # Observer does not rebind the pinned name
     for name,kwargs in (('old',dict(new_row_placement=False,local_retriangulation=False)),('p1_p2',dict(new_row_placement=True,local_retriangulation=True)),('default',{})):
         del calls[:]
-        sys.monitoring.use_tool_id(4,'p2 dispatch spy')
-        try:
-            sys.monitoring.register_callback(4,sys.monitoring.events.PY_START,spy);sys.monitoring.set_local_events(4,code,sys.monitoring.events.PY_START)
+        with observe_calls(code,on_start=spy,name='p2 dispatch spy'):
             with scope(model,chart,settings):
                 made,updated,used,admitted,facts=sizing.repair_mixed_sizing(points,report,settings,chart.evaluate,protected,topology_remaining=1200,insertion_remaining=64,**kwargs)
-        finally:sys.monitoring.free_tool_id(4)
+
         reached[name]=len(calls)
         with scope(model,chart,settings):
             after=sizing._score(updated.mesh,settings)[0]
@@ -728,16 +725,14 @@ def test_local_retriangulation_is_dispatched_only_when_opted_in_on_the_28_stall_
     from anymesher import _physical_mixed_sizing as sizing
     model,chart=owner_chart;points,mesh,report,protected=_load_state('mixed_growth_debt_28.npz');settings=surface.SurfaceMeshOptions(**_SETTINGS44)
     code=sizing._retriangulate_cavity.__code__;calls=[]
-    def spy(code_object,offset):calls.append(1)
+    def spy(frame):calls.append(1)
     result={}
     for name,kwargs in (('default',{}),('p1_p2',dict(new_row_placement=True,local_retriangulation=True))):
         del calls[:]
-        sys.monitoring.use_tool_id(4,'p2 dispatch spy')
-        try:
-            sys.monitoring.register_callback(4,sys.monitoring.events.PY_START,spy);sys.monitoring.set_local_events(4,code,sys.monitoring.events.PY_START)
+        with observe_calls(code,on_start=spy,name='p2 dispatch spy'):
             with scope(model,chart,settings):
                 made,updated,used,admitted,facts=sizing.repair_mixed_sizing(points,report,settings,chart.evaluate,protected,topology_remaining=2400,insertion_remaining=64,**kwargs)
-        finally:sys.monitoring.free_tool_id(4)
+
         result[name]=(len(calls),facts['commits'],used,facts['enabled'])
     # The default arm must have searched (work spent, repair enabled), so its zero P2 calls is not an early exit.
     assert result['default'][3] and result['default'][2]>0 and result['p1_p2'][3] and result['p1_p2'][2]>0
