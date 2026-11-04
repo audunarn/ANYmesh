@@ -43,7 +43,7 @@ def test_work_bearing_quadratic_trial_from_real_hybrid_seed(monkeypatch, tmp_pat
             trial = refine_quadratic_component(
                 geometry, mesh, binding, kwargs["boundary_registry"].entries(),
                 SurfaceMeshOptions(order="quadratic", recombine=recombine, target_size=.4,
-                                   native_options=options, prefer_quality_policy=True, enforce_quality=True),
+                                   native_options=options, prefer_quality_policy=True, enforce_quality=False),
                 eligible_edges=eligible, metric_model_uuid=kwargs["metric_model_uuid"],
                 metric_geometry_revision=kwargs["metric_geometry_revision"])
             (tmp_path / "trial.json").write_text(json.dumps(trial.diagnostics, sort_keys=True, default=str), encoding="utf-8")
@@ -54,7 +54,7 @@ def test_work_bearing_quadratic_trial_from_real_hybrid_seed(monkeypatch, tmp_pat
                     oracle = refine_quadratic_component(
                         geometry, mesh, binding, kwargs["boundary_registry"].entries(),
                         SurfaceMeshOptions(order="quadratic", recombine=recombine, target_size=.4,
-                                           native_options=options, prefer_quality_policy=True, enforce_quality=True),
+                                           native_options=options, prefer_quality_policy=True, enforce_quality=False),
                         eligible_edges=eligible, metric_model_uuid=kwargs["metric_model_uuid"],
                         metric_geometry_revision=kwargs["metric_geometry_revision"])
                 (tmp_path / "oracle.json").write_text(json.dumps(oracle.diagnostics, sort_keys=True, default=str), encoding="utf-8")

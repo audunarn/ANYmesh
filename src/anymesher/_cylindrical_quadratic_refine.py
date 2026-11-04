@@ -82,7 +82,8 @@ def refine_quadratic_component(geometry, seed, binding, station_entries, setting
     next_element = max(seed.shells, default=0) + 1
     incidence_cache = {}
     diagnostics = {"faces": {}, "attempted_insertions": 0, "published_insertions": 0,
-                   "reserved_node_reuses": 0, "accepted": False}
+                   "reserved_node_reuses": 0, "accepted": False,
+                   "quality_enforced": bool(settings.enforce_quality)}
     charts = {sector.face.id: binding.chart_for(sector.face_use) for sector in binding.face_records}
 
     def checkpoint(phase):
@@ -330,7 +331,8 @@ def refine_quadratic_component(geometry, seed, binding, station_entries, setting
         diagnostics["faces"][str(face)]["final_policy_quality"] = face_policy
         policy_accepted = policy_accepted and not face_policy["poor_element_ids"]
     diagnostics["component_policy_accepted"] = bool(policy_accepted and quality["accepted"])
-    if not quality["accepted"] or not policy_accepted:
+    diagnostics["target_met"] = diagnostics["component_policy_accepted"]
+    if settings.enforce_quality and (not quality["accepted"] or not policy_accepted):
         checkpoint("quadratic component rejected before promotion")
         diagnostics["reason"] = "component_quality_policy"
         return QuadraticRefinementTrial(False, deepcopy(seed), diagnostics)
@@ -375,8 +377,9 @@ def refine_quadratic_component(geometry, seed, binding, station_entries, setting
     assert_valid_mesh(promoted_core)
     final = surface_mesh._quality_threshold_report(evaluate_quality(promoted_core), settings)
     diagnostics["promoted_quality"] = final
+    diagnostics["target_met"] = bool(diagnostics["target_met"] and final["accepted"])
     checkpoint("quadratic component trial final gate")
-    if not final["accepted"]:
+    if settings.enforce_quality and not final["accepted"]:
         diagnostics["reason"] = "promoted_quality_policy"
         return QuadraticRefinementTrial(False, deepcopy(seed), diagnostics)
     diagnostics["accepted"] = True

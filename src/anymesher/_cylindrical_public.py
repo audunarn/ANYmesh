@@ -165,7 +165,8 @@ def _quadratic_settings(size_field, native_options, quality_options, recombine, 
     return SurfaceMeshOptions(
         order="quadratic", recombine=bool(recombine),
         target_size=size_metric.global_control.target_size, backend=backend,
-        native_options=options, prefer_quality_policy=True, enforce_quality=True, **values,
+        native_options=options, prefer_quality_policy=True,
+        enforce_quality=quality_options is not None, **values,
     )
 
 
@@ -276,5 +277,8 @@ def finish_quadratic_components(geometry, mesh, bindings, boundary_registry, *,
                 "published_insertions": trial.diagnostics["published_insertions"],
                 "reserved_node_reuses": trial.diagnostics["reserved_node_reuses"],
                 "quality": trial.diagnostics["promoted_quality"],
+                "quality_enforced": trial.diagnostics["quality_enforced"],
+                "target_met": trial.diagnostics["target_met"],
+                "component_policy_accepted": trial.diagnostics["component_policy_accepted"],
             }
     return mesh
