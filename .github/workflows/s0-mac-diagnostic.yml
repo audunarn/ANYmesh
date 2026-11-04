@@ -2,6 +2,7 @@ name: Diagnostic S0 Mac source comparison (manual only)
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

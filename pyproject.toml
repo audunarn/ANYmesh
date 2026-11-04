@@ -49,6 +49,7 @@ gmsh = ["gmsh>=4.11"]
 diagnostics = ["threadpoolctl>=3.0"]
 dev = [
   "build>=1.2",
+  "setuptools>=77.0.3",
   "pytest>=8",
   "twine>=5",
 ]

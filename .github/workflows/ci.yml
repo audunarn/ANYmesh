@@ -1,4 +1,5 @@
 name: Tests
+run-name: ${{ inputs.s0_diagnostic_only == true && 'DIAGNOSTIC ONLY - six S0 Mac faces' || 'Tests' }}
 
 on:
   push:
@@ -6,11 +7,17 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      s0_diagnostic_only:
+        type: boolean
+        default: false
+        description: 'Run only the bounded S0 Mac diagnostic; not the full CI or a release gate'
   schedule:
     - cron: "0 2 * * 0"
 
 jobs:
   smoke:
+    if: inputs.s0_diagnostic_only != true
     name: Development smoke
     runs-on: ubuntu-latest
     steps:
@@ -34,9 +41,10 @@ jobs:
   native-v2-contract:
     name: Native-v2 bounded evidence contract
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,9 +64,10 @@ jobs:
 
   pytest:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -87,16 +96,22 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build the optional quad-first MCF and TinyAD workers
         run: python tools/build_quad_workers.py
-      - run: python -m pytest --durations=25
+      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml
         env:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesh-results-${{ matrix.os }}-${{ matrix.python-version }}
+          path: mesh-results.xml
 
   native-absent:
     name: Disabled native boundary is absence-only
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     env:
       ANYMESHER_DISABLE_NATIVE: "1"
@@ -121,9 +136,10 @@ jobs:
 
   gmsh:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -162,9 +178,10 @@ jobs:
 
   wheel:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -198,9 +215,10 @@ jobs:
   wheel-full-linux:
     name: Installed Linux native wheel full suite
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     needs: wheel
     runs-on: ubuntu-latest
     steps:
@@ -239,3 +257,61 @@ jobs:
         run: >-
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
           --confcutdir=tests --import-mode=importlib tests --durations=25
+
+  qualified-caller-planning:
+    name: Required positive caller planning (Windows immutable profile)
+    if: >-
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v'))
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      ANYGEOMETRY_REQUIRE_QUALIFIED_PLANNING_TESTS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 68a577ed37d07d9991018f973c2349c295463e4f
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.2"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build the required geometry resource helper only
+        env:
+          ANYGEOMETRY_REQUIRE_PLANNING_NATIVE: "1"
+          ANYGEOMETRY_BUILD_NATIVE: "0"
+          ANYGEOMETRY_REQUIRE_NATIVE: "0"
+        run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]" 'numpy==2.4.6' 'scipy==1.17.1'
+      - name: Verify the immutable positive planning runtime
+        run: python .ecosystem/ANYgeometry/tools/ci_planning_profile.py --preflight --report caller-profile.json
+      - name: Execute all original caller parallel assertions
+        run: >-
+          python -m pytest
+          tests/test_preparation_callback_context.py::test_actual_parallel_warm_closure_matches_identical_serial_owner
+          -q --junitxml=caller-planning-positive.xml
+      - name: Require the actual positive caller JUnit case
+        run: python tests/test_mesh_caller_ci_contract.py --verify-positive caller-planning-positive.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualified-caller-planning
+          path: |
+            caller-profile.json
+            caller-planning-positive.xml
+
+  s0-diagnostic:
+    name: DIAGNOSTIC ONLY - six S0 Mac faces
+    if: inputs.s0_diagnostic_only == true
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/s0-mac-diagnostic.yml

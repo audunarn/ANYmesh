@@ -151,7 +151,9 @@ def test_public_refusal_preserves_one_shot_selection_semantics(
 
     monkeypatch.setattr(module, "_serial", record)
     result = generate_hybrid_mesh_result_parallel(
-        GeometryModel(),
+        # The one-shot IDs must name real entities: owner capability preflight
+        # validates selected faces before the executor refusal is considered.
+        _model(8, spacing=10.0),
         target_size=TARGET,
         parallel=ParallelOptions(executor=object()),
         face_ids=faces,
