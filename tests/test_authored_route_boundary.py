@@ -42,9 +42,15 @@ def test_missing_or_changed_protected_station_refuses():
     with pytest.raises(owner.GeometryError):
         plan_authored_component_boundaries(geometry, component, mesh, registry)
     geometry, component, mesh, registry, _cells = candidate()
+    revision = geometry.revision
     geometry.add_point(20, 20, 20)
-    with pytest.raises(MeshError, match="stale"):
+    assert geometry.revision > revision
+    after_mutation = owner.to_dict(geometry)
+    coordinates = {node: xyz.copy() for node, xyz in mesh.nodes.items()}
+    with pytest.raises(owner.GeometryError, match='^prepared face provenance requires a complete current preparation$'):
         plan_authored_component_boundaries(geometry, component, mesh, registry)
+    assert owner.to_dict(geometry) == after_mutation
+    assert all(np.array_equal(mesh.nodes[node], xyz) for node, xyz in coordinates.items())
 
 
 def test_detached_triangulation_retains_both_roots_global_station_ids_and_uv():

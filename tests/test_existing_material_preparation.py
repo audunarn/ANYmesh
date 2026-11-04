@@ -131,7 +131,9 @@ def test_new_epoch_does_not_broaden_reserved_or_unselected_routes(monkeypatch,le
         pytest.fail('new epoch crossed reserved/unsupported clone boundary')
     def observe(working,operands,**kwargs):
         assert working is not source
-        assert kwargs['policy'].cancellation_check is not None
+        # An absent caller callback remains absent on reserved serial routes.
+        # Supplied callback identity/failure is checked separately above.
+        assert kwargs['policy'].cancellation_check is None
         if legacy_boundary == 'reuse':
             assert working.model_id == source.model_id
         raise LegacyPlanningReached()
