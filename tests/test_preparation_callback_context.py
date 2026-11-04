@@ -79,6 +79,7 @@ _INITIAL_ADMISSION_REASONS=frozenset((
     'NumPy context source/native image outside profile',
     'runtime RLock state interface unavailable',
     'host plus tree and 25 percent headroom exceed memory admission budget',
+    'unsupported frozen collections.abc implementation alias',
 ))
 
 
@@ -105,6 +106,24 @@ def _assert_initial_serial_receipt(receipt):
     assert receipt['stages']==receipt['attempted_stages']==[] and receipt['retired'] is True
     assert receipt['costs']['abandoned']=={}
     assert not {'manifest_sha256','model_sha256','infrastructure'}.intersection(receipt)
+
+
+@pytest.mark.parametrize('reason',('infrastructure function global owner',
+    'unsupported frozen collections.abc implementation alias: foreign'))
+def test_unattributed_infrastructure_reason_stays_unknown(reason):
+    receipt=dict(schema='R5-production-v1',ci_verified=False,disposition='serial',
+        reason=reason,stages=[],attempted_stages=[],retired=True,costs=dict(abandoned={}))
+    with pytest.raises(AssertionError):_assert_initial_serial_receipt(receipt)
+
+
+def test_precise_frozen_alias_is_initial_only():
+    receipt=dict(schema='R5-production-v1',ci_verified=False,disposition='serial',
+        reason='unsupported frozen collections.abc implementation alias',
+        stages=[],attempted_stages=[],retired=True,costs=dict(abandoned={}))
+    _assert_initial_serial_receipt(receipt)
+    with pytest.raises(AssertionError):_caller_execution_scope(False,True)
+    receipt['attempted_stages']=['pair']
+    with pytest.raises(AssertionError):_assert_initial_serial_receipt(receipt)
 
 
 def test_unavailable_private_accounting_is_initial_serial_with_off_identity(monkeypatch,tmp_path,request):
