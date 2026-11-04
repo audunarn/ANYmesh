@@ -132,12 +132,12 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.5,<0.5"]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.7,<0.5"]
     assert project["optional-dependencies"]["planar"] == []
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "a534b0d3782af9007b71edb30b923fc96232be67"
+    geometry_ref = "68a577ed37d07d9991018f973c2349c295463e4f"
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
