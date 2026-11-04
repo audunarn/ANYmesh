@@ -16,7 +16,9 @@ def _generate(model, face, h, *, order="linear", cancellation_check=None):
     return generate_hybrid_mesh_result(
         model, face_ids=(face,), target_size=float(h), strategy="native",
         native_backend="python", recombine=True, order=order,
-        quad_options=QuadMeshingOptions(), cancellation_check=cancellation_check,
+        # Frozen CH10/CH11 counts describe the classic existing layout.
+        quad_options=QuadMeshingOptions(), layout_policy="existing",
+        cancellation_check=cancellation_check,
     ).mesh
 
 

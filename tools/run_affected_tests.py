@@ -61,7 +61,7 @@ def _exports(index: dict[str, Path]) -> dict[str, dict[str, str]]:
         if path.name != "__init__.py":
             continue
         names: dict[str, str] = {}
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom):
                 continue
@@ -78,7 +78,7 @@ def _exports(index: dict[str, Path]) -> dict[str, dict[str, str]]:
 def _imports(
     path: Path, current: str, index: dict[str, Path], exports: dict[str, dict[str, str]]
 ) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     dependencies: set[str] = set()
     package_aliases: set[str] = set()
     for node in ast.walk(tree):

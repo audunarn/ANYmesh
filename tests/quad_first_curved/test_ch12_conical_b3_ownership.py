@@ -49,7 +49,7 @@ def _generate_member(model, face, member, order, *, cancellation_check=None):
         native_backend="python",
         recombine=True,
         order=order,
-        quad_options=QuadMeshingOptions(),
+        quad_options=QuadMeshingOptions(), layout_policy="existing",
         cancellation_check=cancellation_check,
     ).mesh
 

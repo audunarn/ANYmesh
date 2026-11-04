@@ -49,7 +49,9 @@ def test_real_owner_proposals_are_submitted_to_unchanged_sampler(chart_fixture,m
     failure=RuntimeError('observed real sampler frontier; no proof issued')
     def observe(model_arg,collection,intervals,**kwargs):
         assert model_arg is model and collection is binding.collection
-        assert kwargs['chord_error']==.0025/4
+        assert kwargs['chord_error']==.0025
+        assert kwargs['error_measure']=='cell_reference'
+        assert kwargs['proposal_fraction']==.25
         submitted={handle.id:tuple(parameters) for handle,parameters in intervals}
         for edge,values in submitted.items():
             expected=issued.get(edge,requested[edge])

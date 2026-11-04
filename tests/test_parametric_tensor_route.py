@@ -24,10 +24,22 @@ def test_core_keeps_boundary_rows_and_covers_the_box():
     assert int(core.quad_active.sum()) == 7 * 5 and not core.triangle_active.any()
     q = core.quad_connectivity
     xy = core.node_coordinates[:, :2][q]
-    area = 0.5 * (np.cross(xy[:, 2] - xy[:, 0], xy[:, 3] - xy[:, 1]))
+    first = xy[:, 2] - xy[:, 0]
+    second = xy[:, 3] - xy[:, 1]
+    area = 0.5 * (first[:, 0] * second[:, 1] - first[:, 1] * second[:, 0])
     assert np.all(area > 0.0)
     assert np.isclose(area.sum(), 2.0 * 1.5)
     assert record.validate(core) == {row: node for row, node in rows.items()}
+
+
+def test_area_check_does_not_require_removed_numpy_2d_cross(monkeypatch):
+    original = np.cross
+    def cross_3d_only(first, second, *args, **kwargs):
+        if np.shape(first)[-1] == 2 and np.shape(second)[-1] == 2:
+            raise ValueError('NumPy cross requires 3-dimensional vectors')
+        return original(first, second, *args, **kwargs)
+    monkeypatch.setattr(np, 'cross', cross_3d_only)
+    test_core_keeps_boundary_rows_and_covers_the_box()
 
 
 @pytest.mark.parametrize('mutate', ['holes', 'constraints', 'pinned', 'unequal', 'skewed_top', 'trimmed', 'pole'])
