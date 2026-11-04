@@ -44,6 +44,38 @@ def test_build_backend_is_available_only_in_dev_profile():
     assert config['build-system']==dict(requires=['setuptools>=77','wheel'],**{'build-backend':'setuptools.build_meta'})
 
 
+def test_qualified_failure_receipt_is_exact_and_unelided(tmp_path, capsys):
+    import json
+    from test_preparation_callback_context import _persist_caller_parallel_receipt
+    receipt = dict(disposition='serial', reason='exact initial boundary ' + 'x' * 500,
+                   stages=[], attempted_stages=[], retired=True,
+                   costs={'abandoned': {}, 'callback_calls': 0})
+    _persist_caller_parallel_receipt(tmp_path, receipt)
+    assert json.loads((tmp_path / 'caller-parallel-receipt.json').read_text()) == receipt
+    assert receipt['reason'] in capsys.readouterr().out
+
+
+def test_qualified_lane_retains_only_own_receipt_and_status_artifacts():
+    import ast
+    source = ast.parse((ROOT / 'tests/test_preparation_callback_context.py').read_text())
+    body = next(node for node in source.body if isinstance(node, ast.FunctionDef)
+                and node.name == '_qualified_parallel_warm_closure_matches_identical_serial_owner').body
+    persist = next(i for i, node in enumerate(body) if isinstance(node, ast.Expr)
+                   and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                   and node.value.func.id == '_persist_caller_parallel_receipt')
+    assert persist < next(i for i, node in enumerate(body) if isinstance(node, ast.Assert))
+    block = jobs((ROOT / '.github/workflows/ci.yml').read_text())['qualified-caller-planning']
+    assert '--basetemp=caller-planning-temp' in block
+    assert 'if: always()' in block
+    prefix = 'caller-planning-temp/test_actual_parallel_warm_clos*/'
+    assert prefix + 'caller-parallel-receipt.json' in block
+    for name in ('receipt.json', 'initialization-phases.json', 'admitted-*.json',
+                 'cleanup.json', 'workers-cleanup.json'):
+        assert prefix + 'production/**/' + name in block
+    assert 'production/**/*.json' not in block
+    assert 'production/**/session.json' not in block
+
+
 def test_diagnostic_boolean_routes_only_diagnostic_and_retains_normal_full_conditions():
     text=(ROOT/'.github/workflows/ci.yml').read_text();blocks=jobs(text)
     assert re.search(r'workflow_dispatch:\s+inputs:\s+s0_diagnostic_only:\s+type: boolean\s+default: false',text)

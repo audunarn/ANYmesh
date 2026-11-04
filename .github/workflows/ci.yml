@@ -370,7 +370,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_preparation_callback_context.py::test_actual_parallel_warm_closure_matches_identical_serial_owner
-          -q --junitxml=caller-planning-positive.xml
+          -q --junitxml=caller-planning-positive.xml --basetemp=caller-planning-temp
       - name: Require the actual positive caller JUnit case
         run: python tests/test_mesh_caller_ci_contract.py --verify-positive caller-planning-positive.xml
       - uses: actions/upload-artifact@v4
@@ -380,6 +380,12 @@ jobs:
           path: |
             caller-profile.json
             caller-planning-positive.xml
+            caller-planning-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/receipt.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/initialization-phases.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/admitted-*.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/cleanup.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/workers-cleanup.json
 
   s0-diagnostic:
     name: DIAGNOSTIC ONLY - six S0 Mac faces

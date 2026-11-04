@@ -121,6 +121,14 @@ def test_actual_parallel_warm_closure_matches_identical_serial_owner(monkeypatch
         ('numerical_worker_execution',qualified),('postcapture_qualification',qualified)))
 
 
+def _persist_caller_parallel_receipt(tmp_path, receipt):
+    """Exact fixture-owned receipt, before any positive assertion can elide it."""
+    import json
+    text = json.dumps(receipt, sort_keys=True, indent=2, allow_nan=False)
+    (tmp_path / 'caller-parallel-receipt.json').write_text(text + '\n', encoding='utf-8')
+    print('[caller parallel receipt]\n' + text, flush=True)
+
+
 def _qualified_parallel_warm_closure_matches_identical_serial_owner(monkeypatch,tmp_path):
     import json
     from anygeometry import from_dict
@@ -133,6 +141,7 @@ def _qualified_parallel_warm_closure_matches_identical_serial_owner(monkeypatch,
     with preparation._collect_preparation_evidence() as rows,collect_runtime_records() as records:
         working,report=prepare_structural_closure(source,face_ids=tuple(source.faces),reuse_working_copy=True)
     receipt=records['parallel_planning'][-1]
+    _persist_caller_parallel_receipt(tmp_path, receipt)
     assert receipt['disposition']=='parallel',receipt
     assert receipt['workers']==receipt['startup_concurrency']==8 and receipt['retired'] is True
     assert receipt['costs']['callback_calls']==0 and len(rows)==1
