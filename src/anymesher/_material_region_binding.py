@@ -1856,11 +1856,96 @@ def _station_balance_splits(geometry, owner_stations, maximum_gradation):
     return tuple(sorted(splits))
 
 
+def _station_balance_batch(geometry, owner_stations, maximum_gradation):
+    """One bounded finishing proposal; coordinates here never issue a receipt.
+
+    Only source-identity components still requiring balancing participate.
+    Equal parameter pieces use chord lengths solely as a numerical proposal.
+    The owner must authenticate the complete result under the active allowance.
+    An oversized or unrepresentable complete proposal is ineligible.
+    """
+    offending = {edge for edge, _ in
+                 _station_balance_splits(geometry, owner_stations, maximum_gradation)}
+    if not offending:
+        return ()
+    intervals, vertices = {}, {}
+    for edge, targets in sorted(owner_stations.items()):
+        parameters = tuple(sorted(targets))
+        intervals[edge] = [(a, b, sum((Fraction(float(y))-Fraction(float(x)))**2
+                            for x, y in zip(targets[a], targets[b])))
+                           for a, b in zip(parameters, parameters[1:])]
+        source = geometry.edges[edge]
+        for vertex in (source.start, source.end):
+            vertices.setdefault(vertex, set()).add(edge)
+    remaining, proposals = set(intervals), set()
+    while remaining:
+        component, pending = set(), [min(remaining)]
+        while pending:
+            edge = pending.pop()
+            if edge in component:
+                continue
+            component.add(edge)
+            source = geometry.edges[edge]
+            for vertex in (source.start, source.end):
+                pending.extend(vertices[vertex]-component)
+        remaining.difference_update(component)
+        if not component & offending:
+            continue
+        minimum = min(squared for edge in component for _, _, squared in intervals[edge])
+        # n=ceil(L/((g-1)*m)), computed without a floating square root.
+        # Straight-chord pieces then differ by at most g. Curved owner chords
+        # are checked independently after fresh sampling; this is no proof.
+        scale = (Fraction(float(maximum_gradation))-1)**2 * minimum
+        for edge in sorted(component):
+            for a, b, squared in intervals[edge]:
+                low, high = 1, 4097
+                if squared > scale*high*high:
+                    return ()
+                while low < high:
+                    middle = (low+high)//2
+                    if squared <= scale*middle*middle:
+                        high = middle
+                    else:
+                        low = middle+1
+                count = low
+                if len(proposals)+count-1 > 4096:
+                    return ()
+                start, width = Fraction(float(a)), Fraction(float(b))-Fraction(float(a))
+                previous = a
+                for index in range(1, count):
+                    parameter = float(start+width*Fraction(index, count))
+                    if not previous < parameter < b:
+                        return ()
+                    proposals.add((edge, parameter))
+                    previous = parameter
+    return tuple(sorted(proposals))
+
+
 def _prepare_curvilinear_station_union(geometry,bindings,seeding,size_field,cancellation_check=None,*,maximum_gradation=None):
     """Authenticate a complete shared plan before allocating any boundary IDs."""
     from .hybrid import _station_parameters
     from contextlib import nullcontext
     from anygeometry.prepared_material_curvilinear import prepared_material_boundary_sampling_operation
+    # Strong entry references protect only the new finishing acceptance path.
+    # Ordinary successful paths retain their existing behavior even when an
+    # unknown runtime cannot be pinned.
+    finishing_functions = (_station_balance_splits, _station_balance_batch,
+                           _boundary_callable_pin, _boundary_literal_pin)
+    finishing_codes = tuple(getattr(function,'__code__',None) for function in finishing_functions)
+    finishing_fraction = Fraction
+    finishing_pin = _boundary_callable_pin
+    finishing_pins = tuple(finishing_pin(function) for function in finishing_functions)
+    def check_finishing_runtime():
+        current = (_station_balance_splits, _station_balance_batch,
+                   _boundary_callable_pin, _boundary_literal_pin)
+        if (Fraction is not finishing_fraction or finishing_pins is None
+                or any(a is not b for a,b in zip(current,finishing_functions))
+                or any(code is None or function.__code__ is not code
+                       for function,code in zip(finishing_functions,finishing_codes))):
+            raise MeshError('boundary station finishing runtime changed')
+        if (any(pin is None for pin in finishing_pins)
+                or tuple(finishing_pin(function) for function in finishing_functions) != finishing_pins):
+            raise MeshError('boundary station finishing runtime changed')
     bindings=tuple(bindings)
     scope = (nullcontext(None) if maximum_gradation is None else
              prepared_material_boundary_sampling_operation())
@@ -1891,7 +1976,35 @@ def _prepare_curvilinear_station_union(geometry,bindings,seeding,size_field,canc
                 for binding in bindings: binding.validate(None)
                 return owner_stations
             if round_number == depth_limit:
-                raise MeshError('boundary station balancing qualification depth exhausted')
+                # All formerly successful paths above retain their exact old
+                # proposals and owner query sequence. Only the formerly
+                # refused final state may attempt ONE complete new candidate.
+                # It remains inside this operation's original Work allowance;
+                # neither owner limits nor the outer round count are renewed.
+                check_finishing_runtime()
+                finishing = finishing_functions[1](geometry,owner_stations,maximum_gradation)
+                if not finishing:
+                    raise MeshError('boundary station balancing qualification depth exhausted')
+                for edge,parameter in finishing: shared_parameters[edge].add(parameter)
+                for binding in _pair_sampling_order(bindings):
+                    requested={edge:tuple(sorted(values)) for edge,values in shared_parameters.items()}
+                    for edge,targets in binding.prepare_curvilinear_seed(requested,cancellation_check).items():
+                        shared_parameters.setdefault(edge,set()).update(targets)
+                check_finishing_runtime()
+                owner_stations={}
+                for binding in bindings:
+                    for edge,targets in binding.prepare_curvilinear_seed(
+                            {edge:tuple(sorted(values)) for edge,values in shared_parameters.items()},
+                            cancellation_check,refine=False).items():
+                        previous=owner_stations.setdefault(edge,targets)
+                        if previous != targets:
+                            raise MeshError('incident NURBS faces disagree on owner source stations')
+                check_finishing_runtime()
+                if finishing_functions[0](geometry,owner_stations,maximum_gradation):
+                    raise MeshError('boundary station balancing qualification depth exhausted')
+                for binding in bindings: binding.validate(None)
+                check_finishing_runtime()
+                return owner_stations
             for edge,parameter in splits: shared_parameters[edge].add(parameter)
             # Every numerical split is processed by fresh owner sampling under
             # this ONE operation allowance, before any shared registry exists.
