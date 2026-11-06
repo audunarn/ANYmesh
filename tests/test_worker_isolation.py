@@ -18,4 +18,5 @@ def test_s0_cone_digest_ignores_a_present_q5_worker(monkeypatch, tmp_path):
     dummy = tmp_path / "quad_tinyad_optimizer.exe"
     dummy.write_bytes(b"not an executable")
     monkeypatch.setenv("ANYMESH_QUAD_TINYAD_WORKER", str(dummy))
-    assert digest(build("cone")) == GOLDEN["cone"]
+    from _s0_baseline_contract import assert_output
+    assert_output("cone", build("cone"), GOLDEN, digest=digest)

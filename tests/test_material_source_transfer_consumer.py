@@ -1,5 +1,5 @@
 """Actual owner cell receipts must bind actual live mesh coverage and callbacks."""
-from copy import deepcopy
+from copy import copy
 import pytest
 import anygeometry as owner
 from anymesher import validate_material_source_transfer_for_mesh
@@ -29,8 +29,13 @@ def test_actual_mesh_source_transfer_uses_owner_and_preserves_both_models():
 
 def test_copied_mesh_cannot_inherit_generation_source_transfer():
     source, prepared, mesh, _ = prepared_mesh()
+    from anymesher.mesh import Mesh
+    duplicate = copy(mesh)
+    assert type(duplicate) is Mesh and duplicate is not mesh
+    assert duplicate.nodes is mesh.nodes and duplicate.boundary_registry is mesh.boundary_registry
     with pytest.raises(MeshError, match='generation-owned'):
-        validate_material_source_transfer_for_mesh(source, prepared, deepcopy(mesh))
+        validate_material_source_transfer_for_mesh(source, prepared, duplicate)
+    assert validate_material_source_transfer_for_mesh(source, prepared, mesh).prepared_cells
 
 
 @pytest.mark.parametrize('change', ['empty_registry', 'edge_chain', 'registry_point'])

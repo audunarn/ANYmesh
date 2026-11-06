@@ -101,11 +101,15 @@ def test_shared_growth_exact_native_and_bounded_chunks(monkeypatch,quadratic,lim
 def test_standard_deepcopy_adds_only_empty_slot_cache_and_keeps_activation(monkeypatch):
     from copy import deepcopy
     from anymesher.mesh import _NATIVE_MESH_NAMESPACE
-    monkeypatch.delattr(Mesh,'__slotnames__',raising=False)
+    # Mesh eagerly anchors copyreg's empty cache before freezing its namespace.
+    cached = Mesh.__slotnames__
+    assert cached is dict(_NATIVE_MESH_NAMESPACE)['__slotnames__']
+    assert type(cached) is list and cached == []
     before = dict(vars(Mesh))
     mesh = deepcopy(strip(count=3))
     after = dict(vars(Mesh))
-    assert after.keys()-before.keys() == {'__slotnames__'}
+    assert after.keys() == before.keys()
+    assert after['__slotnames__'] is cached
     assert type(after['__slotnames__']) is list and after['__slotnames__'] == []
     assert all(after[name] is value for name,value in before.items())
     assert all(after[name] is value for name,value in _NATIVE_MESH_NAMESPACE)
@@ -118,6 +122,20 @@ def test_standard_deepcopy_adds_only_empty_slot_cache_and_keeps_activation(monke
     assert_exact(_element_growth(mesh,limit=1.),scalar_growth(mesh,limit=1.))
     if transition._native_norm_available() and transition._NATIVE_MEAN:
         assert calls == [True]
+
+
+def test_deepcopy_cannot_replace_anchored_slot_cache_and_keep_batching(monkeypatch):
+    from copy import deepcopy
+    from anymesher.mesh import _NATIVE_MESH_NAMESPACE
+    cached = Mesh.__slotnames__
+    assert cached is dict(_NATIVE_MESH_NAMESPACE)['__slotnames__']
+    monkeypatch.delattr(Mesh,'__slotnames__')
+    mesh = deepcopy(strip(count=3))
+    assert type(Mesh.__slotnames__) is list and Mesh.__slotnames__ == []
+    assert Mesh.__slotnames__ is not cached
+    monkeypatch.setattr(transition,'_characteristic_lengths',
+                        lambda *args:pytest.fail('recreated namespace cache was batched'))
+    assert_exact(_element_growth(mesh,limit=1.),scalar_growth(mesh,limit=1.))
 
 
 @pytest.mark.parametrize('name,value',[('__slotnames__',['custom']),('__slotnames__',()),

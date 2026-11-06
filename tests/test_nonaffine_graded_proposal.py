@@ -1,4 +1,5 @@
 """Explicit graded proposal is separate from actual affine-map qualification."""
+from _call_observer import observe_calls
 import pytest
 import anygeometry as owner
 from anymesher.errors import MeshError
@@ -42,17 +43,15 @@ def test_actual_native_entry_forwards_distinct_proposal_optin(monkeypatch,route)
         def foreign(points):raise AssertionError('provider not needed before native entry')
         request['native_options']=replace(request['native_options'],experimental_metric_provider=ExperimentalMetricProvider(foreign))
     calls=[]
-    def entered(code,offset):
-        frame=sys._getframe(1);calls.append({name:frame.f_locals[name] for name in ('_boundary_graded','_with_affine','_with_graded')})
+    def entered(frame):
+        calls.append({name:frame.f_locals[name] for name in ('_boundary_graded','_with_affine','_with_graded')})
     class NativeReached(BaseException):pass
     def native(*args,**kwargs):raise NativeReached()
     monkeypatch.setattr(hybrid,'mesh_planar_surface',native)
-    tool=next(i for i in range(5,-1,-1) if sys.monitoring.get_tool(i) is None)
-    code=MaterialRegionBinding.interior_size_proposal.__code__;sys.monitoring.use_tool_id(tool,'proposal-routing-test')
-    sys.monitoring.register_callback(tool,sys.monitoring.events.PY_START,entered);sys.monitoring.set_local_events(tool,code,sys.monitoring.events.PY_START)
-    try:
+    code=MaterialRegionBinding.interior_size_proposal.__code__
+    with observe_calls(code,on_start=entered,name='proposal-routing-test'):
         with pytest.raises(NativeReached):hybrid.generate_hybrid_mesh_result(model,**request)
-    finally:sys.monitoring.set_local_events(tool,code,0);sys.monitoring.free_tool_id(tool)
+
     if route=='legacy':
         # Existing legacy route bypasses the isotropic material-sizing block.
         assert not calls

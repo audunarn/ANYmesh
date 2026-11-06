@@ -70,6 +70,8 @@ def nurbs_tensor_admission(geometry, face_id) -> TensorAdmission:
     """Pure, read-only check that one face can ever feed the tensor core.
 
     Admits an untrimmed four-edge NURBS face whose sides are iso-parametric UV-box sides with no collapsed side.
+    An exact canonical sweep may supply the geometry owner's read-only NURBS view;
+    the source definition is never rewritten and all the same checks still apply.
     It proves nothing about stations, size field, junctions or quality; those are decided later by
     ``parametric_tensor_core`` and the final gates, each of which refuses with a typed error.
     """
@@ -81,7 +83,15 @@ def nurbs_tensor_admission(geometry, face_id) -> TensorAdmission:
         return no('no_such_face', f'face {face_id}')
     surface = face.surface if isinstance(face.surface, NurbsSurface) else face.parameterization
     if not isinstance(surface, NurbsSurface):
-        return no('not_nurbs_surface')
+        from anygeometry.nurbs_sweep_chart import source_sweep_chart_model
+        view = source_sweep_chart_model(geometry, face_id)
+        if view is None:
+            return no('not_nurbs_surface')
+        geometry = view
+        face = geometry.faces[face_id]
+        surface = face.surface if isinstance(face.surface, NurbsSurface) else face.parameterization
+        if not isinstance(surface, NurbsSurface):
+            return no('not_nurbs_surface')
     if len(face.holes):
         return no('holes')
     if len(face.loop) != 4:

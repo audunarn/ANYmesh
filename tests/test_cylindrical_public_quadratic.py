@@ -41,8 +41,12 @@ def test_public_quadratic_cylindrical_refinement(hole, recombine, tmp_path):
     for face, diagnostics in result.triangulation_backend_by_face.items():
         component = diagnostics["cylindrical_component"]
         assert component["accepted"] and component["published_insertions"] > 0
-        assert component["quality"]["accepted"]
-        assert diagnostics["cylindrical_refinement"]["final_policy_quality"]["poor_element_ids"] == []
+        assert component["quality_enforced"] is False
+        assert component["target_met"] is bool(component["component_policy_accepted"]
+                                                and component["quality"]["accepted"])
+        policy = diagnostics["cylindrical_refinement"]["final_policy_quality"]
+        assert policy["quality_scope"] == "physical_with_chart_validity"
+        assert (not policy["poor_element_ids"]) is policy["physical_quality"]["accepted"]
     for edge, sequence in mesh.nodes_of_edge.items():
         assert len(sequence) % 2 == 1 and len(sequence) == len(set(sequence))
         for face in model.faces_using_edge(edge):

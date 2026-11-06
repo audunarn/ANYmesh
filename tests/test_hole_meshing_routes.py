@@ -289,9 +289,32 @@ def test_neutral_hole_strip_meshes_through_the_anyfem_route(plate: bool, size: f
     assert mesh.structural_preparation["qualified_s3"]["status"] == "ADMITTED"
     assert _minimum_triangle_angle(mesh) >= 15.0
     assert _structured_quality_report(mesh, StructuredMeshingOptions())["accepted"]
-    selected = mesh.hybrid_diagnostics["growth_limited_native_candidate"]
-    assert selected["rejected_fallback_quality"]["growth_violation_count"]
-    assert selected["accepted_quality"]["accepted"]
+    diagnostics = mesh.hybrid_diagnostics
+    if size == 0.125:
+        # These coarse rows are accepted by the primary structured route.
+        assert diagnostics["structured_layout_status"] == "applied"
+        quality = diagnostics["structured_quality"]
+        assert "selected_mesh" not in quality
+        assert quality["accepted"] and quality["growth_violation_count"] == 0
+        assert not {"growth_limited_native_candidate", "planar_growth_fan_repair",
+                    "junction_growth_repair"}.intersection(diagnostics)
+    elif plate and size == 0.05:
+        # The plate row selects a committed repair before the last resort.
+        assert diagnostics["structured_layout_status"] == "rejected_fallback"
+        quality = diagnostics["structured_quality"]
+        assert quality["selected_mesh"] == "native_fallback"
+        repair = diagnostics["planar_growth_fan_repair"]
+        assert repair["kind"] == "planar_growth_fan"
+        assert repair["attempted"] and repair["committed"]
+        assert repair["initial_growth_violation_count"] > 0
+        assert repair["new_node_ids"] and repair["replaced_quads"]
+        assert repair["final_quality"]["accepted"]
+        assert repair["final_quality"]["growth_violation_count"] == 0
+        assert quality["accepted_fallback"] == repair["final_quality"]
+    else:
+        selected = mesh.hybrid_diagnostics["growth_limited_native_candidate"]
+        assert selected["rejected_fallback_quality"]["growth_violation_count"]
+        assert selected["accepted_quality"]["accepted"]
 
 
 # ----------------------------------------------------------------------

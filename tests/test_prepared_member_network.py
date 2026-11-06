@@ -16,8 +16,13 @@ from anymesher._prepared_member_network import (
     validate_prepared_member_network_stations as validate_stations,
 )
 
-HANDOFF = Path('C:/Github/ANYgeometry/reports/member-network-4dd5c51/chain_network_handoff.py')
+HANDOFF = Path(__file__).resolve().parent / 'fixtures' / 'chain_network_handoff.py'
 HANDOFF_SHA = '180a812625461a8f8f71c9b0c346bf08b56326da63dc4a1235aa0693691446ff'
+
+
+def test_handoff_fixture_is_repository_local_and_hash_pinned():
+    assert HANDOFF.resolve().is_relative_to(Path(__file__).resolve().parent)
+    assert hashlib.sha256(HANDOFF.read_bytes()).hexdigest() == HANDOFF_SHA
 
 
 def build(count=3, **options):

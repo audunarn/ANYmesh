@@ -99,7 +99,7 @@ def _q5_diagnostics(result) -> dict:
     return q5
 
 
-def _public_result(points: tuple, *, h: float, max_local: int, refinements=()):
+def _public_result(points: tuple, *, h: float, max_local: int, refinements=(), layout_policy=None):
     options = QuadMeshingOptions(max_local_optimizations=max_local)
     geometry = GeometryModel()
     vertices = geometry.add_points(
@@ -111,8 +111,8 @@ def _public_result(points: tuple, *, h: float, max_local: int, refinements=()):
         target_size=float(h),
         face_ids=(face,),
         quad_options=options,
-        layout_policy="existing",  # Q5 causality holds the legacy seed fixed.
         refinements=tuple(refinements),
+        layout_policy=layout_policy,
     )
 
 
@@ -181,8 +181,9 @@ def test_causal_graded_mesh_applies_q5_moves() -> None:
 
 @pytest.mark.quad_workers
 def test_perfect_p01_optimizer_noop() -> None:
-    disabled = _public_result(P01_POINTS, h=0.5, max_local=0)
-    enabled = _public_result(P01_POINTS, h=0.5, max_local=8)
+    # Both controls need the classic optimizer-eligible input topology.
+    disabled = _public_result(P01_POINTS, h=0.5, max_local=0, layout_policy="existing")
+    enabled = _public_result(P01_POINTS, h=0.5, max_local=8, layout_policy="existing")
 
     md, me = _mesh(disabled), _mesh(enabled)
     assert _cell_topology(me) == _cell_topology(md)

@@ -45,15 +45,23 @@ class TrimmedCylinderBinding:
         for selected,chart in self.charts:
             if selected==face_use:
                 chart._current()
+                if chart.support_view is not None:
+                    # Native/frontal consumers pair this chart with face-frame
+                    # uv; MESH-B A2 admits the support frame on quad-first only.
+                    raise MeshError("a support-frame cylinder chart (distinct face parameterization) "
+                                    "is admitted only on the quad-first route")
                 return chart
         raise MeshError("FaceUse is not selected in the general cylinder binding")
 
 
-def prepare_trimmed_cylinders(geometry,face_uses,*,cancellation_check=None):
+def prepare_trimmed_cylinders(geometry,face_uses,*,cancellation_check=None,
+                              support_frame_parameterizations=False):
     owner=_owner(geometry)
     result=query_trimmed_surface_charts(owner,face_uses,expected_revision=owner.revision,
                                        cancellation_check=cancellation_check)
-    charts=tuple((record.face_use,CylindricalMetricChart.from_geometry(geometry,record.face.id))
+    charts=tuple((record.face_use,CylindricalMetricChart.from_geometry(
+                       geometry,record.face.id,
+                       support_frame_parameterization=support_frame_parameterizations))
                  for record in result.charts)
     binding=TrimmedCylinderBinding(geometry,result,charts)
     binding.validate(cancellation_check=cancellation_check)

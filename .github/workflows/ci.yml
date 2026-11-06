@@ -1,4 +1,5 @@
 name: Tests
+run-name: ${{ inputs.s0_diagnostic_only == true && 'DIAGNOSTIC ONLY - six S0 Mac faces' || 'Tests' }}
 
 on:
   push:
@@ -6,11 +7,17 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      s0_diagnostic_only:
+        type: boolean
+        default: false
+        description: 'Run only the bounded S0 Mac diagnostic; not the full CI or a release gate'
   schedule:
     - cron: "0 2 * * 0"
 
 jobs:
   smoke:
+    if: inputs.s0_diagnostic_only != true
     name: Development smoke
     runs-on: ubuntu-latest
     steps:
@@ -22,8 +29,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          # Exercise the current owner chart/recovery contracts. Historical
-          # qualification jobs below retain their independently frozen inputs.
+          # Current consumer tests/builds require this owner API revision.
+          # Numerical evidence corpus and its acceptance checks stay unchanged.
           ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
@@ -34,9 +41,10 @@ jobs:
   native-v2-contract:
     name: Native-v2 bounded evidence contract
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +54,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - run: python -m pip install --upgrade pip
@@ -56,9 +64,10 @@ jobs:
 
   pytest:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -66,12 +75,31 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
+    env:
+      ANYMESHER_REQUIRE_S0_BASELINE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: f645523c8006efe61e94678a5056fba3c9a6a39d
+          path: .s0-old-geometry
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYmesh
+          ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
+          path: .s0-old-mesher
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -82,21 +110,43 @@ jobs:
       - run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
       - run: python -m pip install -e ".[dev,planar]"
       - run: python -c "import anygeometry, anymesher; print(anygeometry.__version__, anymesher.__version__)"
+      - name: Produce one cold frozen-source six-face S0 baseline
+        shell: bash
+        run: |
+          python -m pip install 'psutil>=5.9'
+          python -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env "$GITHUB_ENV"
+      - name: Retain cold S0 identity and partial process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s0-cold-${{ matrix.os }}-${{ matrix.python-version }}
+          path: ci-s0-baseline
       - name: Enter the MSVC developer environment for the quad workers
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build the optional quad-first MCF and TinyAD workers
         run: python tools/build_quad_workers.py
-      - run: python -m pytest --durations=25
+      # Red runs return the first full diagnostic promptly; green still runs all cases.
+      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp --maxfail=1
         env:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesh-results-${{ matrix.os }}-${{ matrix.python-version }}
+          path: |
+            mesh-results.xml
+            ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json
+            ci-pytest-temp/test_work_bearing_quadratic_tr*/oracle.json
+            ci-pytest-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
 
   native-absent:
     name: Disabled native boundary is absence-only
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     env:
       ANYMESHER_DISABLE_NATIVE: "1"
@@ -105,7 +155,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -121,9 +171,10 @@ jobs:
 
   gmsh:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -136,7 +187,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -162,9 +213,10 @@ jobs:
 
   wheel:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -175,7 +227,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: pypa/cibuildwheel@v4.1.1
@@ -198,17 +250,37 @@ jobs:
   wheel-full-linux:
     name: Installed Linux native wheel full suite
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      startsWith(github.ref, 'refs/tags/v')
+      startsWith(github.ref, 'refs/tags/v'))
     needs: wheel
     runs-on: ubuntu-latest
+    env:
+      ANYMESHER_REQUIRE_S0_BASELINE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: audunarn/ANYgeometry
-          ref: a534b0d3782af9007b71edb30b923fc96232be67
+          ref: f645523c8006efe61e94678a5056fba3c9a6a39d
+          path: .s0-old-geometry
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYmesh
+          ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
+          path: .s0-old-mesher
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
           path: .ecosystem/ANYgeometry
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -228,6 +300,17 @@ jobs:
           python -I -B -c "import anymesher, importlib.util, pathlib, sys;
           assert pathlib.Path(anymesher.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve());
           assert importlib.util.find_spec('anymesher._native') is not None"
+      - name: Produce one cold frozen-source six-face S0 baseline
+        shell: bash
+        run: |
+          python -m pip install 'psutil>=5.9'
+          python -I -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env "$GITHUB_ENV"
+      - name: Retain cold S0 identity and partial process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s0-cold-installed-linux
+          path: ci-s0-baseline
       - name: Build the optional quad-first workers outside the installed package
         run: python tools/build_quad_workers.py
       - name: Qualify the installed wheel against the full suite
@@ -239,3 +322,78 @@ jobs:
         run: >-
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
           --confcutdir=tests --import-mode=importlib tests --durations=25
+          --junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp --maxfail=1
+      - name: Retain installed wheel results and quadratic trial diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-mesh-results
+          path: |
+            installed-mesh-results.xml
+            installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json
+            installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/oracle.json
+            installed-ci-pytest-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
+
+  qualified-caller-planning:
+    name: Required positive caller planning (Windows immutable profile)
+    if: >-
+      inputs.s0_diagnostic_only != true &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v'))
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      ANYGEOMETRY_REQUIRE_QUALIFIED_PLANNING_TESTS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 8308a7d71c19ff00d5e0f1980d97fa4d79565b65
+          path: .ecosystem/ANYgeometry
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.2"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build the required geometry resource helper only
+        env:
+          ANYGEOMETRY_REQUIRE_PLANNING_NATIVE: "1"
+          ANYGEOMETRY_BUILD_NATIVE: "0"
+          ANYGEOMETRY_REQUIRE_NATIVE: "0"
+        run: python -m pip install --no-deps -e .ecosystem/ANYgeometry
+      - run: python -m pip install -e ".[dev,planar]" 'numpy==2.4.6' 'scipy==1.17.1'
+      - name: Verify the immutable positive planning runtime
+        run: python .ecosystem/ANYgeometry/tools/ci_planning_profile.py --preflight --report caller-profile.json
+      - name: Execute all original caller parallel assertions
+        run: >-
+          python -m pytest
+          tests/test_preparation_callback_context.py::test_actual_parallel_warm_closure_matches_identical_serial_owner
+          -q --junitxml=caller-planning-positive.xml --basetemp=caller-planning-temp
+      - name: Require the actual positive caller JUnit case
+        run: python tests/test_mesh_caller_ci_contract.py --verify-positive caller-planning-positive.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualified-caller-planning
+          path: |
+            caller-profile.json
+            caller-planning-positive.xml
+            caller-planning-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/receipt.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/initialization-phases.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/admitted-*.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/cleanup.json
+            caller-planning-temp/test_actual_parallel_warm_clos*/production/**/workers-cleanup.json
+
+  s0-diagnostic:
+    name: DIAGNOSTIC ONLY - six S0 Mac faces
+    if: inputs.s0_diagnostic_only == true
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/s0-mac-diagnostic.yml

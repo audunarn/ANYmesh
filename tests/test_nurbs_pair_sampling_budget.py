@@ -65,7 +65,7 @@ def test_pair_common_sampling_union_and_original_error_receipts(chart_fixture,mo
         _event(name+'.end',intervals=len(intervals))
         return result
     def measured(*args,**kwargs):
-        sampled.append(kwargs['chord_error'])
+        sampled.append((kwargs['chord_error'],kwargs['error_measure'],kwargs['proposal_fraction']))
         return traced('sampling',original,args,kwargs)
     def measured_chords(*args,**kwargs):
         return traced('chords',original_chords,args,kwargs)
@@ -92,7 +92,9 @@ def test_pair_common_sampling_union_and_original_error_receipts(chart_fixture,mo
         assert binding.geometry_approximation_error == .0025
         assert binding._curvilinear_state['chords'].chord_error == .0025
         if refine:
-            assert binding._curvilinear_state['sampling'].chord_error == .0025/4
+            assert binding._curvilinear_state['sampling'].chord_error == .0025
+            assert binding._curvilinear_state['sampling'].error_measure == 'cell_reference'
+            assert binding._curvilinear_state['sampling'].proposal_fraction == .25
             for edge,values in targets.items():
                 assert set(parameters[edge]) <= set(values)
                 requested_union.setdefault(edge,set()).update(values)
@@ -106,7 +108,7 @@ def test_pair_common_sampling_union_and_original_error_receipts(chart_fixture,mo
     monkeypatch.setattr(MaterialRegionBinding,'prepare_curvilinear_seed',observed_seed)
     stations=_prepare_curvilinear_station_union(model,bindings,seeding,size_field)
     union=requested_union
-    assert len(bindings)==4 and sampled==[.0025/4]*4
+    assert len(bindings)==4 and sampled==[(.0025,'cell_reference',.25)]*4
     assert len(first_pass)==4
     first=next(binding for binding in bindings if binding.representative==first_pass[0])
     assert sum(map(len,first.region.boundaries))==min(

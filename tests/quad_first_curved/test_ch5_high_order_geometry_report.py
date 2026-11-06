@@ -18,12 +18,12 @@ from quad_first_planar.test_pq4_general_domains import _p03_geometry
 def _face_id(model, use) -> int:
     return int(model.face_uses[use.id].face_id)
 
-def _generate(model, faces, h=0.5, *, order="quadratic", cancellation_check=None):
+def _generate(model, faces, h=0.5, *, order="quadratic", cancellation_check=None, layout_policy=None):
     return generate_hybrid_mesh_result(
         model, face_ids=tuple(faces), target_size=float(h), strategy="native",
         native_backend="python", recombine=True, order=order,
-        quad_options=QuadMeshingOptions(), layout_policy="existing",
-        cancellation_check=cancellation_check,
+        quad_options=QuadMeshingOptions(), cancellation_check=cancellation_check,
+        layout_policy=layout_policy,
     )
 
 def _certificate(mesh):
@@ -80,7 +80,8 @@ def test_ch5_p03_boundary_residual_and_station_provenance():
 
 def test_ch5_cylinder_sector_certificate_and_source_immutability():
     model, selected=_sector_model(False); before=_persistent_state(model)
-    face=_face_id(model,selected[0]); mesh=_generate(model,(face,)).mesh
+    # This certificate count is the historical classic topology contract.
+    face=_face_id(model,selected[0]); mesh=_generate(model,(face,),layout_policy="existing").mesh
     payload=_certificate(mesh); report=payload["reports"][0]
     assert (payload["q8_count"],payload["t6_count"],payload["unique_midside_count"])==(8,2,26)
     assert report["geometry_family"]=="cylindrical" and report["chart_kind"]=="CylindricalQuadDomain"
@@ -93,7 +94,7 @@ def test_ch5_cylinder_sector_certificate_and_source_immutability():
 def test_ch5_full_ring_canonical_boundary_ownership_is_unique():
     model, selected=_sector_model(False); before=_persistent_state(model)
     faces=tuple(_face_id(model,use) for use in selected)
-    payload=_certificate(_generate(model,faces).mesh)
+    payload=_certificate(_generate(model,faces,layout_policy="existing").mesh)
     assert (payload["q8_count"],payload["t6_count"],payload["unique_midside_count"])==(64,16,168)
     keys=[tuple(item["canonical_edge"]) for item in payload["boundary_midsides"]]
     assert len(keys)==len(set(keys))==payload["unique_boundary_midside_count"]

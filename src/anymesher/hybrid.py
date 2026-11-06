@@ -69,7 +69,8 @@ from .native_v2 import ComponentSeedRegistry, NativeMeshingOptions
 from ._component_reservations import ComponentNodeReservationPool
 from .quad.boundary import BoundaryStationKey, BoundaryStationRegistry
 from .quad.timing import record_quad_stage, timed_quad_call
-from .quad.domain import ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain
+from .quad.domain import (ConicalQuadDomain, CylindricalQuadDomain, ParametricQuadDomain, PlanarQuadDomain,
+                          face_query_frame)
 from .quad.driver import run_planar_quad_driver
 from .quad import high_order as _high_order
 from .quad.high_order import (
@@ -287,6 +288,16 @@ def _refuse_folded_topology_surface(geometry: GeometryModel, face_id: int) -> No
             "surface (for example GeometryModel.add_plate) or split the face "
             "into four-sided patches."
         )
+
+
+def _quad_face_frame(geometry: Any, domain: Any) -> Any:
+    """Owner of face-uv queries for a quad-first domain.
+
+    A cylindrical domain whose chart works in its support frame (a distinct
+    face parameterization, MESH-B A2) answers them from the support; every
+    other domain keeps the source geometry.
+    """
+    return face_query_frame(geometry, domain)
 
 
 def _native_chart_uv(geometry: GeometryModel, face: Any, face_id: int, point: Any) -> tuple[float, float]:
@@ -4318,8 +4329,9 @@ def _repair_quad_first_quality(
             normal = np.asarray(domain.normal, dtype=float)
         else:
             centre = np.mean(nodes[:len(corners)], axis=0)
-            u, v = geometry.face_local_uv(face_id, centre)
-            normal = geometry.face_normal(face_id, u, v)
+            frame = _quad_face_frame(geometry, domain)
+            u, v = frame.face_local_uv(face_id, centre)
+            normal = frame.face_normal(face_id, u, v)
         # The aspect scan uses only the rebuilt coordinates.  Preserve every
         # construction/conversion before admission and evaluate these same
         # arrays on fallback, rather than invoking owner protocols twice.
@@ -4438,7 +4450,8 @@ def _repair_quad_first_quality(
             owner_normals = np.broadcast_to(np.asarray(domain.normal, dtype=float),
                                             jacobians.shape)
         else:
-            batch_uv = getattr(geometry, "face_local_uv_many", None)
+            frame = _quad_face_frame(geometry, domain)
+            batch_uv = getattr(frame, "face_local_uv_many", None)
             if cached_normal is not None:
                 owner_normals = cached_normal[1]
             elif batch_uv is None:
@@ -4446,13 +4459,13 @@ def _repair_quad_first_quality(
                 # API. Preserve the scalar owner result on that supported
                 # dependency line.
                 uv = np.asarray(
-                    [geometry.face_local_uv(face_id, point) for point in sampled.points],
+                    [frame.face_local_uv(face_id, point) for point in sampled.points],
                     dtype=float,
                 ).reshape((-1, 2))
             else:
                 uv = batch_uv(face_id, sampled.points)
             if cached_normal is None:
-                owner_normals = geometry.face_normal_many(face_id, uv)
+                owner_normals = frame.face_normal_many(face_id, uv)
         cosines = np.einsum("ij,ij->i", jacobians / lengths[:, None], owner_normals)
         return float(np.max(np.degrees(np.arccos(np.clip(cosines, -1.0, 1.0)))))
 
@@ -5149,6 +5162,9 @@ def _quad_first_execute(
                 cylinder_face_ids,
                 NativeMeshingOptions(point_placement="frontal_delaunay"),
                 cancellation_check=cancellation_check,
+                # MESH-B A2: quad-first meshes a distinct face
+                # parameterization in the certified support frame.
+                support_frame_parameterizations=True,
             )
         except MeshError as exc:
             _preserve_stage_cancellation(exc)
@@ -5226,6 +5242,8 @@ def _quad_first_execute(
 
     point_seed_cuts: dict[int, tuple[float, float]] = {}
     point_attachment_face_id: int | None = None
+    # Frame of point_seed_cuts on the attachment face (face_query_frame).
+    point_attachment_frame: Any = geometry
     if options.quality_model == "shape_jacobian":
         point_attachments = [
             item for item in geometry.attachments.values()
@@ -5256,9 +5274,15 @@ def _quad_first_execute(
                     continue
                 if min(source_chart_axis_lengths(geometry, domain, shortest=True)) >= 4.0 * h:
                     point_seed_cuts[domain.face_id] = (.5, .5)
-            point_seed_cuts[int(item.target_id)] = tuple(
-                parameter.start for parameter in item.target_parameters
-            )
+            cut = tuple(parameter.start for parameter in item.target_parameters)
+            point_attachment_frame = _quad_face_frame(geometry, owner)
+            if point_attachment_frame is not geometry:
+                # MESH-B A2: attachment parameters stay in the face frame (owner
+                # contract). The seed works in the support frame, so carry the
+                # same physical anchor over into support coordinates.
+                anchor = geometry.face_point(int(item.target_id), *cut)
+                cut = tuple(point_attachment_frame.face_local_uv(int(item.target_id), anchor))
+            point_seed_cuts[int(item.target_id)] = cut
             point_attachment_face_id = int(item.target_id)
 
 
@@ -5538,7 +5562,7 @@ def _quad_first_execute(
     protected_interior_nodes = ()
     if options.quality_model == "shape_jacobian":
         if point_attachment_face_id is not None:
-            anchor_xyz = np.asarray(geometry.face_point(
+            anchor_xyz = np.asarray(point_attachment_frame.face_point(
                 point_attachment_face_id,
                 *point_seed_cuts[point_attachment_face_id],
             ), dtype=float)
@@ -6199,6 +6223,70 @@ from .approximation_policy import _resolve_public_approximation
 
 
 @_stage_scope
+def validate_mesh_quality(
+    geometry: GeometryModel | None,
+    mesh: Mesh,
+    *,
+    quality_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
+    cancellation_check: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
+    """Validate final mesh quality without changing its producer or grid.
+
+    None requests no validation. The returned report grants no geometry,
+    source-transfer or solver-admission authority. A live geometry is required
+    when a cancellation callback needs source guarding.
+    """
+    if quality_options is None:
+        return None
+    options = StructuredMeshingOptions.create(quality_options)
+    if cancellation_check is not None:
+        if geometry is None:
+            raise MeshError("quality callback requires live geometry")
+        from ._authored_component_stage import _mesh_digest
+        from ._material_region_binding import boundary_registry_pin
+        view = GeometryMeshingView(geometry)
+        mesh_pin = _mesh_digest(mesh)
+        registry = getattr(mesh, "boundary_registry", None)
+        registry_pin = None if registry is None else boundary_registry_pin(registry)
+        def poll(phase):
+            _check_cancellation(cancellation_check, phase)
+            view.assert_current()
+            if (_mesh_digest(mesh) != mesh_pin
+                    or getattr(mesh, "boundary_registry", None) is not registry
+                    or (registry is not None and boundary_registry_pin(registry) != registry_pin)):
+                raise MeshError("mesh or registry changed during quality callback")
+        poll("mesh quality validation start")
+    report = _structured_quality_report(mesh, options)
+    if cancellation_check is not None:
+        poll("mesh quality validation complete")
+    if not report["accepted"]:
+        raise MeshError(
+            "explicit mesh quality policy failed: "
+            + str(report["violation_counts"])
+            + "; growth violations=" + str(report["growth_violation_count"]))
+    return report
+
+
+def _admit_requested_quality(function):
+    """Admit a complete result without selecting a different grid or route."""
+    from functools import wraps
+    @wraps(function)
+    def admitted(*args, quality_options=None, **kwargs):
+        requested = quality_options
+        if requested is None and kwargs.get("quad_options") is not None:
+            requested = kwargs.get("structured_options")
+        options = None if requested is None else StructuredMeshingOptions.create(requested)
+        result = function(*args, **kwargs)
+        if options is not None:
+            source = args[0] if args else kwargs.get("geometry")
+            validate_mesh_quality(source, result.mesh, quality_options=options,
+                                  cancellation_check=kwargs.get("cancellation_check"))
+        return result
+    return admitted
+
+
+@_stage_scope
+@_admit_requested_quality
 @_resolve_public_approximation
 def generate_hybrid_mesh_result(
     geometry: GeometryModel,
@@ -6221,6 +6309,8 @@ def generate_hybrid_mesh_result(
     geometry_approximation_resolution=None,
     geometry_approximation_source=None,
     structured_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
+    # Final admission only: this request never changes layout or route selection.
+    quality_options: StructuredMeshingOptions | Mapping[str, Any] | None = None,
     structural_preparation: (
         StructuralPreparationOptions | Mapping[str, Any] | bool | None
     ) = None,

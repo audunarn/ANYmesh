@@ -366,6 +366,87 @@ def test_actual_spatial_linear_recombination(monkeypatch,tmp_path):
     original_refine=surface_mesh.frontal_delaunay_refine
     original_finalize=deferred.finalize_components
     retained={}
+    # Observe the complete accepted path without rebinding numerical services.
+    from fractions import Fraction
+    from pathlib import Path
+    from types import FunctionType
+    from anymesher import native_v2
+    from _call_observer import observe_calls
+    planar_export=surface_mesh.mesh_planar_surface
+    assert type(planar_export) is FunctionType
+    planar_body=planar_export.__wrapped__
+    assert type(planar_body) is FunctionType
+    closure=dict(zip(planar_export.__code__.co_freevars,
+        (cell.cell_contents for cell in planar_export.__closure__)))
+    assert closure['function'] is planar_body
+    assert Path(planar_export.__code__.co_filename).resolve()==Path(surface_mesh.__file__).with_name('_stage_cancellation.py').resolve()
+    functions=(surface_mesh._run_frontal_quality_path,planar_body,
+        hybrid._mesh_native_face_once,native_v2.ComponentSeedRegistry._resolve_and_publish)
+    for function,module,name in zip(functions,(surface_mesh,surface_mesh,hybrid,native_v2),
+            ('_run_frontal_quality_path','mesh_planar_surface','_mesh_native_face_once','_resolve_and_publish')):
+        assert type(function) is FunctionType
+        assert function.__code__.co_name==name
+        assert Path(function.__code__.co_filename).resolve()==Path(module.__file__).resolve()
+    quality_code,planar_code,native_code,resolve_code=(function.__code__ for function in functions)
+    paths=record['selected_paths']=[]
+    resolutions=record['identity_resolutions']=[]
+    quality_frames={};surface_frames={};path_objects={}
+    def entered(frame):
+        values=frame.f_locals
+        if frame.f_code is quality_code:
+            caller=frame.f_back
+            assert caller.f_code is planar_code
+            native_frame=caller.f_back
+            while native_frame is not None and native_frame.f_code is not native_code:
+                native_frame=native_frame.f_back
+            assert native_frame is not None
+            owner=native_frame.f_locals
+            assert caller.f_locals['owner'].id==owner['face_id']
+            assert values['model_uuid']==owner['metric_model_uuid']
+            assert values['geometry_revision']==owner['metric_geometry_revision']
+            registry=values['component_seed_registry']
+            assert registry is owner['component_seed_registry']
+            item={'face_id':owner['face_id'],'baseline_rows':len(values['baseline']['triangulation'].points),
+                  'registry_id':id(registry),'registry_before':registry.assigned_node_ids,'completed':False}
+            paths.append(item);quality_frames[id(frame)]=item;surface_frames[id(caller)]=item
+        elif frame.f_code is resolve_code:
+            registry=values['self']
+            resolutions.append({'registry_id':id(registry),'key':(values['edge_id'],values['numerator'],values['denominator']),
+                'existing_node_id':values['existing_node_id'],'assigned_before':registry.assigned_node_ids})
+    def returned(frame,value):
+        values=frame.f_locals
+        if frame.f_code is quality_code:
+            item=quality_frames[id(frame)];path,_report=value;path_objects[item['face_id']]=path
+            item.update(completed=True,final_rows=len(path['best'].points),
+                registry_after=values['component_seed_registry'].assigned_node_ids)
+        elif frame.f_code is planar_code:
+            item=surface_frames[id(frame)]
+            item.update(selected_same_path=values['selected'] is path_objects[item['face_id']],
+                selected_rows=len(values['best'].points),core_rows=value.num_nodes)
+        elif frame.f_code is native_code:
+            item=next(item for item in reversed(paths) if item['face_id']==values['face_id'])
+            mapping=values['core_to_global'];mesh=values['mesh']
+            owned={node for element in mesh.elements_of_face[item['face_id']]
+                   for node in mesh.tris.get(element,mesh.quads.get(element,()))}
+            item.update(mapped_nodes=tuple(sorted(mapping.values())),owned_nodes=tuple(sorted(owned)))
+    def published_growth(selected_paths,identity_resolutions):
+        assert len(selected_paths)==len(record['faces'])==8
+        assert {item['face_id'] for item in selected_paths}=={item['face_id'] for item in record['faces']}
+        assert all(item['completed'] and item['selected_same_path'] for item in selected_paths)
+        assert all(item['final_rows']==item['selected_rows']==item['core_rows'] for item in selected_paths)
+        assert all(len(set(item['mapped_nodes']))==len(item['mapped_nodes'])==item['core_rows']
+                   and item['mapped_nodes']==item['owned_nodes'] for item in selected_paths)
+        registry_ids={item['registry_id'] for item in selected_paths}
+        assert len(registry_ids)==1 and selected_paths[0]['registry_before']==()
+        # Establish zero reused physical identities from the ACTUAL registry,
+        # not from reserved_node_reuses or published_insertions diagnostics.
+        assert all(item['existing_node_id'] is None for item in identity_resolutions)
+        keys={(item['registry_id'],item['key'][0],Fraction(*item['key'][1:])) for item in identity_resolutions}
+        assert len(keys)==len(identity_resolutions)
+        assert all(item['registry_id'] in registry_ids and len(item['assigned_before'])==index
+                   for index,item in enumerate(identity_resolutions))
+        assert len(selected_paths[-1]['registry_after'])==len(identity_resolutions)
+        return sum(item['final_rows']-item['baseline_rows'] for item in selected_paths)
     def refine(*args,**kwargs):
         item={'input_points':len(args[0].points),'completed':False}
         record['refinements'].append(item)
@@ -406,8 +487,11 @@ def test_actual_spatial_linear_recombination(monkeypatch,tmp_path):
     centers=tuple((float(np.cos((i+.5)*np.pi/4)),float(np.sin((i+.5)*np.pi/4)),1.) for i in range(8))
     field=MetricFieldSpec(IsotropicMetricControl(.4),feature_controls=tuple(FeatureDistanceMetricControl((center,),.12,.35,1.5,f'interior-{i}') for i,center in enumerate(centers)))
     try:
-        result=hybrid.generate_hybrid_mesh_result(model,target_size=.4,strategy='native',native_backend='python',order='linear',recombine=True,
-            native_options=NativeMeshingOptions(point_placement='frontal_delaunay',metric_mode='isotropic_spatial',metric_field=field,max_insertions=128,max_topology_operations=20000))
+        with observe_calls(tuple(function.__code__ for function in functions),on_start=entered,on_return=returned,
+                name='selected insertion accounting') as observer:
+            record['observer_backend']=observer.backend
+            result=hybrid.generate_hybrid_mesh_result(model,target_size=.4,strategy='native',native_backend='python',order='linear',recombine=True,
+                native_options=NativeMeshingOptions(point_placement='frontal_delaunay',metric_mode='isotropic_spatial',metric_field=field,max_insertions=128,max_topology_operations=20000))
         mesh=result.mesh
         assert len(record['faces'])==8 and all(f['completed'] for f in record['faces'])
         assert mesh.quads and not mesh.is_quadratic
@@ -418,8 +502,18 @@ def test_actual_spatial_linear_recombination(monkeypatch,tmp_path):
         refinements=record['refinements']
         assert len(refinements)==len(record['faces'])
         assert all(item['completed'] for item in refinements)
-        assert committed==sum(item['output_points']-item['input_points'] for item in refinements),(
+        assert sum(item['intermediate_insertions'] for item in refinements)>0
+        expected_growth=published_growth(paths,resolutions)
+        assert committed==expected_growth,(
             'Published insertions must match actual refinement growth, excluding existing seeds')
+        # These are bookkeeping-negative controls, never synthetic geometry.
+        unselected=deepcopy(paths);unselected[0]['selected_same_path']=False
+        with pytest.raises(AssertionError):published_growth(unselected,resolutions)
+        missing_owner=deepcopy(paths);missing_owner[0]['owned_nodes']=()
+        with pytest.raises(AssertionError):published_growth(missing_owner,resolutions)
+        reused=[{'registry_id':paths[0]['registry_id'],'key':(1,1,2),
+                 'existing_node_id':1,'assigned_before':()}]
+        with pytest.raises(AssertionError):published_growth(paths,reused)
         assert len(mesh.nodes)==len(staged['nodes'])
         assert len(mesh.tris)+2*len(mesh.quads)==len(staged['tris'])
         assert all(v['physical_size']['accepted'] for v in record['finalization'].values())

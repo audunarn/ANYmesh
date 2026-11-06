@@ -1,4 +1,5 @@
 """Physical fixed-corner fan proposals retain UV/source row identity."""
+from _call_observer import observe_calls
 import numpy as np
 import pytest
 from anymesher.surface_mesh import SurfaceMeshOptions
@@ -265,18 +266,15 @@ def test_builder_is_checked_before_any_observer_entry(chart_fixture,monkeypatch,
     else:monkeypatch.setattr(original,'__kwdefaults__',{'unused':None})
     def downstream(*args,**kwargs):raise marker
     monkeypatch.setattr(surface,'_qualified_recombination',downstream)
-    def observe(code,offset):entered.append(True)
-    sys.monitoring.use_tool_id(3,'builder call observer')
-    sys.monitoring.register_callback(3,sys.monitoring.events.PY_START,observe)
-    sys.monitoring.set_local_events(3,original.__code__,sys.monitoring.events.PY_START)
-    try:
+    def observe(frame):entered.append(True)
+    with observe_calls(original.__code__,on_start=observe,name='builder call observer'):
         with pytest.raises(RuntimeError) as caught:
             with material_read_scope(chart.region_binding,dict(native_options=settings.native_options,
                     native_backend='python',size_field=SizeField(model,.5),cancellation_check=None)):
                 surface._curvilinear_mixed_preview(SimpleNamespace(points=uv,triangles=report.mesh.triangle_connectivity),
                     SimpleNamespace(segments=np.asarray(edges,dtype=np.int64)),settings,chart.evaluate,None,None,topology_remaining=4)
         assert caught.value is marker
-    finally:sys.monitoring.free_tool_id(3)
+
     assert not entered
 
 

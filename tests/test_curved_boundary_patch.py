@@ -356,12 +356,17 @@ def test_stale_owner_after_detached_scoring_never_returns_patch():
     data = fixture()
     topology, _, mesh, registry, _, _, model = data
     before = state(topology, mesh, registry, model)[:-1]
+    revision = model.revision
+    mutations = []
     work = dict(topology_operations=0, insertions=0, reserved_node_reuses=0)
     def mutate(phase):
         if phase == 'curved boundary staging final binding':
             model.add_point(8., 8., 8.)
-    with pytest.raises(GeometryError, match='stale'):
+            mutations.append(phase)
+    with pytest.raises(GeometryError, match='^material validation source changed during callback$'):
         stage(data, work, cancellation_check=mutate)
+    assert mutations == ['curved boundary staging final binding']
+    assert model.revision > revision
     assert state(topology, mesh, registry, model)[:-1] == before
     assert work == dict(topology_operations=1, insertions=1, reserved_node_reuses=0)
 

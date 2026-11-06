@@ -102,11 +102,12 @@ def requires_material_source_transfer(geometry, mesh):
     from ._material_region_binding import curvilinear_reference_candidates
     if bool(curvilinear_reference_candidates(mesh)):
         return True
-    face_ids = tuple(face for face, cells in getattr(mesh, 'elements_of_face', {}).items() if cells)
-    if not face_ids:
-        face_ids = tuple(geometry.faces)
-    if any(face not in geometry.faces for face in face_ids):
+    labels = tuple(face for face, cells in getattr(mesh, 'elements_of_face', {}).items() if cells)
+    if any(face not in geometry.faces for face in labels):
         return True
+    # The supplied closure defines the selection. Mutable cell labels cannot
+    # prove that an unlabelled curved face contributed no cells.
+    face_ids = tuple(geometry.faces)
     if any(face_requires_curvilinear(geometry, face) for face in face_ids):
         return True
     for key in face_ids:
@@ -117,8 +118,17 @@ def requires_material_source_transfer(geometry, mesh):
         if any(not isinstance(geometry.edges[use.edge].curve, (Straight, Arc, *EXACT_CURVES))
                for loop in (face.loop, *face.holes) for use in loop):
             return True
+    def implicit_straight_coons(face):
+        # GeometryModel's empty Coons marker obtains its bilinear chart from
+        # these four topology-owned straight edges. This is the existing generic
+        # generation definition, not an explicit/spline material-chart proof.
+        return (type(face.surface) is CoonsSurface and not face.surface.has_boundaries
+                and getattr(face, 'parameterization', None) is None
+                and len(face.loop) == 4 and not face.holes
+                and all(type(geometry.edges[use.edge].curve) is Straight for use in face.loop))
     candidates=tuple(face.id for face in (geometry.faces[key] for key in face_ids)
-                     if isinstance(face.surface,(ExtrudedSurface,CoonsSurface)))
+                     if isinstance(face.surface,(ExtrudedSurface,CoonsSurface))
+                     and not implicit_straight_coons(face))
     if candidates:
         try:
             regions=query_material_surface_regions(geometry,candidates)

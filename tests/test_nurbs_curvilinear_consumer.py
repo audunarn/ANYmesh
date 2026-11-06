@@ -592,7 +592,19 @@ def test_curvilinear_source_remap_refuses_before_proximity_registry(monkeypatch,
     request = options()
     request['target_size'] = 2.
     candidate = generate_hybrid_mesh_result(model, _defer_finalization=True, **request)
-    candidate.preparation_report = object()
+    from anymesher._material_region_binding import face_requires_curvilinear
+    from anymesher.material_source_transfer import _validated_curvilinear_reference_uv
+    assert face_requires_curvilinear(candidate.working_geometry, _face)
+    assert _validated_curvilinear_reference_uv(candidate.working_geometry, candidate.mesh)
+    assert all(tuple(children) == (face,) for face, children in candidate.source_to_final_faces.items())
+    assert set(candidate.source_to_final_edges) == set(model.edges)
+    assert all(tuple(children) == (edge,) for edge, children in candidate.source_to_final_edges.items())
+    # Identity/clone-identity publication is supported. Declare nonidentity
+    # transport between REAL existing edges without forging cell authority.
+    edge_a, edge_b = _edges[:2]
+    candidate.source_to_final_edges = dict(candidate.source_to_final_edges)
+    candidate.source_to_final_edges[edge_a] = (edge_b,)
+    candidate.source_to_final_edges[edge_b] = (edge_a,)
     if erase_selection:
         candidate.faces = ()
         candidate.preparation_report = None

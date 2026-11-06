@@ -30,7 +30,17 @@ def test_direct_test_edit_and_explicit_extra_are_included_once():
     assert reasons["tests/test_recovery.py"] == ["edited test"]
 
 
-def test_unknown_source_is_rejected_and_qualification_is_not_scheduled():
+def test_unknown_source_is_rejected_and_qualification_is_not_scheduled(tmp_path, monkeypatch):
+    from tools import run_affected_tests as runner
+    source = tmp_path / 'src' / 'anymesher'
+    source.mkdir(parents=True)
+    (source / '__init__.py').write_text('', encoding='utf-8')
+    gate = tmp_path / 'tests' / 'sg1' / 'test_gate.py'
+    gate.parent.mkdir(parents=True)
+    gate.write_text('def test_gate(): pass\n', encoding='utf-8')
+    monkeypatch.setattr(runner, 'ROOT', tmp_path)
+    monkeypatch.setattr(runner, 'SOURCE', source)
+    monkeypatch.setattr(runner, 'TESTS', tmp_path / 'tests')
     with pytest.raises(ValueError, match="No safe affected-test mapping"):
         select_tests(["src/anymesher/not_a_module.py"])
     with pytest.raises(ValueError, match="scientific gate"):
@@ -53,3 +63,17 @@ def test_package_attribute_import_resolves_to_export_owner(tmp_path):
     )
     index = _source_index()
     assert "anymesher.recovery" in _imports(consumer, "", index, _exports(index))
+
+
+def test_import_parser_accepts_utf8_bom(tmp_path):
+    consumer = tmp_path / 'consumer.py'
+    consumer.write_text('\ufeffimport anymesher.hybrid\n', encoding='utf-8')
+    index = {'anymesher.hybrid': tmp_path / 'hybrid.py'}
+    assert _imports(consumer, '', index, {}) == {'anymesher.hybrid'}
+
+
+def test_export_parser_accepts_utf8_bom(tmp_path):
+    package = tmp_path / '__init__.py'
+    package.write_text('\ufefffrom .producer import entry\n', encoding='utf-8')
+    index = {'anymesher': package, 'anymesher.producer': tmp_path / 'producer.py'}
+    assert _exports(index)['anymesher']['entry'] == 'anymesher.producer'

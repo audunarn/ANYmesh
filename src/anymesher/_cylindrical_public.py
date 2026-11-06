@@ -9,6 +9,14 @@ from anygeometry import (
     EllipticArc, CylinderIntersectionCurve, query_joint_edge,
     CylinderAtlasPolicy, CylinderPatchPolicy,
 )
+try:                                    # the retained plane-chart trace family (ANYgeometry plane_ruled_support/1)
+    from anygeometry import BezierQuadricCurve
+except ImportError:                     # an older owner never produces that family
+    BezierQuadricCurve = None
+
+# Exact analytic trace families that activate (and generalize) the trimmed-cylinder route.
+EXACT_TRACE_CURVES = tuple(item for item in (EllipticArc, CylinderIntersectionCurve, BezierQuadricCurve)
+                           if item is not None)
 
 from ._cylindrical_atlas import prepare_cylindrical_atlas
 from ._cylindrical_patch import prepare_cylindrical_patch
@@ -18,18 +26,21 @@ from .metric import IsotropicMetricControl, MetricFieldSpec
 from .surface_mesh import SurfaceMeshOptions
 
 
-def prepare_bindings(geometry, native_faces, native_options, cancellation_check=None):
+def prepare_bindings(geometry, native_faces, native_options, cancellation_check=None, *,
+                     support_frame_parameterizations=False):
     """Bind general analytic trims in physical charts for either point filler.
 
     Legacy cylinders without physical joints keep their original route. Exact
     curves and qualified joints need physical chart lengths with either filler.
+    ``support_frame_parameterizations`` (quad-first only) admits a distinct face
+    parameterization on the owner-certified trimmed route, in the support frame.
     """
     remaining = {int(face) for face in native_faces
                  if isinstance(geometry.faces[face].surface, Cylinder)}
     owner=_owner(geometry)
     activated = remaining if native_options.point_placement == "frontal_delaunay" else {
         face for face in remaining
-        if geometry.faces[face].holes or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        if geometry.faces[face].holes or any(isinstance(geometry.edges[use.edge].curve, EXACT_TRACE_CURVES)
                or query_joint_edge(owner,use.edge).declared
                for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
                for use in loop)}
@@ -66,7 +77,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
         # Its finite evidence scope must not become a primary workflow count cap.
         exceeds_legacy_scope = occurrences > legacy_policy.max_occurrences or (
             len(selected) > 1 and len(selected) > legacy_policy.max_face_uses)
-        generalized=exceeds_legacy_scope or any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve,(EllipticArc,CylinderIntersectionCurve))
+        generalized=exceeds_legacy_scope or any(geometry.faces[face].holes for face in component) or any(isinstance(geometry.edges[use.edge].curve, EXACT_TRACE_CURVES)
             for face in component for loop in (geometry.faces[face].loop,*geometry.faces[face].holes)
             for use in loop)
         generalized=generalized or any(
@@ -87,6 +98,7 @@ def prepare_bindings(geometry, native_faces, native_options, cancellation_check=
         if generalized:
             binding = prepare_trimmed_cylinders(
                 geometry, selected, cancellation_check=cancellation_check,
+                support_frame_parameterizations=support_frame_parameterizations,
             )
         elif len(selected)==1:
             binding=prepare_cylindrical_patch(geometry,selected,cancellation_check=cancellation_check)
@@ -153,7 +165,8 @@ def _quadratic_settings(size_field, native_options, quality_options, recombine, 
     return SurfaceMeshOptions(
         order="quadratic", recombine=bool(recombine),
         target_size=size_metric.global_control.target_size, backend=backend,
-        native_options=options, prefer_quality_policy=True, enforce_quality=True, **values,
+        native_options=options, prefer_quality_policy=True,
+        enforce_quality=quality_options is not None, **values,
     )
 
 
@@ -264,5 +277,8 @@ def finish_quadratic_components(geometry, mesh, bindings, boundary_registry, *,
                 "published_insertions": trial.diagnostics["published_insertions"],
                 "reserved_node_reuses": trial.diagnostics["reserved_node_reuses"],
                 "quality": trial.diagnostics["promoted_quality"],
+                "quality_enforced": trial.diagnostics["quality_enforced"],
+                "target_met": trial.diagnostics["target_met"],
+                "component_policy_accepted": trial.diagnostics["component_policy_accepted"],
             }
     return mesh

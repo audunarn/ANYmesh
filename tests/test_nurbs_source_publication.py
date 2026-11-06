@@ -1,5 +1,5 @@
 """Actual source publication consumes live owner receipts, never projections."""
-from copy import deepcopy
+from copy import copy
 import pytest
 import anygeometry as owner
 from anymesher.errors import MeshError
@@ -34,8 +34,12 @@ def test_identity_clone_source_publication_preserves_literal_stations(monkeypatc
 def test_published_source_transfer_cannot_move_to_other_mesh_or_changed_cells(change):
     source, prepared, mesh, _ = prepared_mesh()
     registry = _publish_identity_source_transfer(source, prepared, mesh, mesh.boundary_registry)
+    original = mesh
     if change == 'copy':
-        mesh = deepcopy(mesh)
+        from anymesher.mesh import Mesh
+        mesh = copy(mesh)
+        assert type(mesh) is Mesh and mesh is not original
+        assert mesh.nodes is original.nodes and mesh.boundary_registry is original.boundary_registry
     elif change == 'xyz':
         node = next(iter(mesh.nodes))
         xyz = tuple(mesh.nodes[node])
@@ -45,6 +49,8 @@ def test_published_source_transfer_cannot_move_to_other_mesh_or_changed_cells(ch
         object.__setattr__(entry, 'point', tuple(float(v)+.01 for v in entry.point))
     with pytest.raises(MeshError, match='authority|changed'):
         _validate_identity_source_publication(source, prepared, mesh, registry)
+    if change == 'copy':
+        assert _validate_identity_source_publication(source, prepared, original, registry).prepared_cells
 
 
 def test_public_source_final_callback_cannot_fractionally_edit_sheet_assignment(monkeypatch):

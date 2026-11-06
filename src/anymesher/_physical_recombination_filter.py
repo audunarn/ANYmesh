@@ -1,21 +1,25 @@
-"""Retain only physically qualified recombinations of an accepted T3 mesh."""
+"""Prefer physically qualified quads while preserving valid advisory T3 misses."""
 import copy
 from collections import Counter
 
-from .quality_v2 import evaluate_quality
+from .quality_v2 import assert_valid_mesh, evaluate_quality
 from .surface_mesh import _quality_threshold_report
 
 
 def retain_physical_recombination(mesh, triangulated, settings):
     from .hybrid import _neutral_shell_core
 
-    before = _quality_threshold_report(evaluate_quality(_neutral_shell_core(mesh)), settings)
-    rejected = sorted(int(v) for v in before["poor_element_ids"])
+    assert_valid_mesh(_neutral_shell_core(triangulated))
+    core = _neutral_shell_core(mesh)
+    before = _quality_threshold_report(evaluate_quality(core), settings)
+    poor = sorted(int(v) for v in before["poor_element_ids"])
+    if settings.enforce_quality and any(element not in mesh.quads for element in poor):
+        raise ValueError("physical recombination rejection includes a non-quad")
+    rejected = [element for element in poor if element in mesh.quads]
     if not rejected:
+        assert_valid_mesh(core)
         return {"rejected_quad_ids": [], "restored_triangle_count": 0,
                 "physical_quality_before": before, "physical_quality_after": before}
-    if any(element not in mesh.quads for element in rejected):
-        raise ValueError("physical recombination rejection includes a non-quad")
     owners = {}
     for face, elements in mesh.elements_of_face.items():
         for element in elements:
@@ -81,8 +85,10 @@ def retain_physical_recombination(mesh, triangulated, settings):
         for key, values in groups.items():
             groups[key] = [replacement for value in values
                            for replacement in replacements.get(value, [value])]
-    after = _quality_threshold_report(evaluate_quality(_neutral_shell_core(candidate)), settings)
-    if not after["accepted"]:
+    final_core = _neutral_shell_core(candidate)
+    assert_valid_mesh(final_core)
+    after = _quality_threshold_report(evaluate_quality(final_core), settings)
+    if settings.enforce_quality and not after["accepted"]:
         raise ValueError("restoring original triangle pairs did not preserve physical quality")
     mesh.tris = candidate.tris
     mesh.quads = candidate.quads

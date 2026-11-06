@@ -27,7 +27,7 @@ from anymesher.recovery import MeshAutomationOptions, generate_automatic_mesh_re
 from anymesher.serialize import mesh_from_dict, mesh_to_dict
 
 
-def _mesh(model: GeometryModel, face_ids: tuple[int, ...], order: str):
+def _mesh(model: GeometryModel, face_ids: tuple[int, ...], order: str, *, layout_policy=None):
     return generate_hybrid_mesh_result(
         model,
         face_ids=face_ids,
@@ -39,6 +39,7 @@ def _mesh(model: GeometryModel, face_ids: tuple[int, ...], order: str):
         recombine=True,
         order=order,
         quad_options=QuadMeshingOptions(),
+        layout_policy=layout_policy,
     ).mesh
 
 
@@ -75,8 +76,8 @@ def test_split_extrusion_keeps_shared_ids_and_quadratic_owner_mapping():
     assert document["version"] == 6
     assert to_dict(from_dict(document)) == document
 
-    linear = _mesh(model, faces, "linear")
-    quadratic = _mesh(model, faces, "quadratic")
+    linear = _mesh(model, faces, "linear", layout_policy="existing")
+    quadratic = _mesh(model, faces, "quadratic", layout_policy="existing")
     assert to_dict(model) == document
     assert linear.quads and linear.tris
     assert quadratic.quads and quadratic.tris
@@ -143,7 +144,7 @@ def test_bezier_quadric_joint_edge_is_sampled_from_its_owner():
     assert candidates
     document = to_dict(model)
     assert document["version"] == 6
-    mesh = _mesh(model, (candidates[0],), "quadratic")
+    mesh = _mesh(model, (candidates[0],), "quadratic", layout_policy="existing")
     assert to_dict(model) == document
     certificate = mesh.hybrid_diagnostics["high_order_geometry"]
     assert certificate["status"] == "CERTIFIED_POSITIVE"

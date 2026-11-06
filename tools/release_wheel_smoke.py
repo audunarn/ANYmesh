@@ -104,6 +104,7 @@ def main() -> int:
         native_model,
         target_size=0.25,
         strategy="native",
+        recombine=False,
         native_backend="native" if options.require_native else "python",
     )
     assert native.strategy_by_face == {native_face: "native"}

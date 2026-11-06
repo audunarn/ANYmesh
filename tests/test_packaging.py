@@ -138,12 +138,15 @@ def test_anygeometry_release_dependency_floor_is_exact() -> None:
         for requirement in project["dependencies"]
         if requirement.lower().startswith("anygeometry")
     ]
-    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.5,<0.5"]
+    assert geometry_requirements == ["ANYgeometry[planar]>=0.4.7,<0.5"]
     assert project["optional-dependencies"]["planar"] == []
 
 
 def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
-    geometry_ref = "a534b0d3782af9007b71edb30b923fc96232be67"
+    from collections import Counter
+    from test_mesh_caller_ci_contract import (CURRENT_GEOMETRY_REF,OLD_GEOMETRY_REF,
+        OLD_MESHER_REF,owner_checkout_pins,ORDINARY,FULL,condition)
+    geometry_ref = CURRENT_GEOMETRY_REF
     ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
         encoding="utf-8"
     )
@@ -151,17 +154,13 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         encoding="utf-8"
     )
 
-    assert ci.count("repository: audunarn/ANYgeometry") == 7
-    # The existing smoke lane intentionally exercises the newer owner chart
-    # contract. The six historical qualification lanes retain their frozen pin.
-    smoke_ref = "dda8c70a1f6205ae601e8288a1624f52aa76e24a"
-    assert ci.count(f"ref: {geometry_ref}") == 6
-    assert ci.count(f"ref: {smoke_ref}") == 1
-    smoke = ci.split("\n  smoke:\n", 1)[1].split("\n  native-v2-contract:\n", 1)[0]
-    assert f"ref: {smoke_ref}" in smoke
-    assert f"ref: {geometry_ref}" not in smoke
+    assert Counter(owner_checkout_pins(ci)) == Counter({
+        ('ANYgeometry',geometry_ref,'.ecosystem/ANYgeometry'):8,
+        ('ANYgeometry',OLD_GEOMETRY_REF,'.s0-old-geometry'):2,
+        ('ANYmesh',OLD_MESHER_REF,'.s0-old-mesher'):2})
     assert publish.count("repository: audunarn/ANYgeometry") == 1
     assert publish.count(f"ref: {geometry_ref}") == 1
+    assert owner_checkout_pins(publish) == [('ANYgeometry',geometry_ref,'.ecosystem/ANYgeometry')]
     assert 'ANYMESHER_DISABLE_NATIVE: "1"' in ci
     assert (
         "tests/test_packaging.py::test_disabled_native_build_is_absence_only"
@@ -170,7 +169,8 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
 
     assert ci.count(
         'python -m pip install -e ".[dev,planar]"'
-    ) == 4
+    ) == 5  # Four existing jobs plus the required immutable caller profile.
+    assert ci.count('python -m pip install -e ".[dev,planar]" \'numpy==2.4.6\' \'scipy==1.17.1\'') == 1
     assert ci.count(
         'python -m pip install -e ".[dev,gmsh,planar]"'
     ) == 1
@@ -195,7 +195,7 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         "tests/test_release_correctness_guards.py::"
         "test_gmsh_session_restores_callers_sigint"
     ) in gmsh_job
-    assert ci.startswith("name: Tests\n\non:\n  push:\n")
+    assert ci.startswith("name: Tests\nrun-name: ${{ inputs.s0_diagnostic_only == true && 'DIAGNOSTIC ONLY - six S0 Mac faces' || 'Tests' }}\n\non:\n  push:\n")
     assert "\n  pull_request:\n" in ci
     assert "\n  workflow_dispatch:\n" in ci
     assert "\n  schedule:\n" in ci
@@ -209,16 +209,11 @@ def test_release_workflows_pin_geometry_and_disabled_native_cell() -> None:
         for index, match in enumerate(job_starts)
     }
     assert "python tools/run_dev_smoke.py" in job_blocks["smoke"]
-    full_event_guard = (
-        "github.event_name == 'workflow_dispatch' ||\n"
-        "      github.event_name == 'schedule' ||\n"
-        "      startsWith(github.ref, 'refs/tags/v')"
-    )
-    assert set(job_blocks) == {
-        "smoke", "native-v2-contract", "pytest", "native-absent",
-        "gmsh", "wheel", "wheel-full-linux",
-    }
-    assert all(full_event_guard in job_blocks[name] for name in set(job_blocks) - {"smoke"})
+    assert set(job_blocks) == set(ORDINARY) | {'s0-diagnostic'}
+    assert condition(job_blocks['smoke']) == 'inputs.s0_diagnostic_only != true'
+    assert condition(job_blocks['s0-diagnostic']) == 'inputs.s0_diagnostic_only == true'
+    assert all(condition(job_blocks[name]) == 'inputs.s0_diagnostic_only != true && ('+FULL+')'
+               for name in ORDINARY[1:])
 
     assert publish.startswith(
         "name: Build release artifacts\n\non:\n  workflow_dispatch:\n"

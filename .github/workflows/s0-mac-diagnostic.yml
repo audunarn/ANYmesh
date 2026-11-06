@@ -1,0 +1,102 @@
+name: Diagnostic S0 Mac source comparison (manual only)
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnostic:
+    name: Diagnostic only - six S0 faces, old versus current
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      ANYGEOMETRY_EXPERIMENTAL_PARALLEL_PLANNING: '0'
+      ANYMESH_Q4_DISABLE_WORKER: '1'
+      ANYMESH_Q5_DISABLE_WORKER: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Minimal matching runtime (no solver or SciPy)
+        run: python -m pip install 'numpy==2.5.4' 'shapely==2.2.0' 'pytest>=8' psutil packaging
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: f645523c8006efe61e94678a5056fba3c9a6a39d
+          path: .sources/old-geometry
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: audunarn/ANYgeometry
+          ref: 2d3b0f876976b4d2e970c531c4b71941f2bb78a6
+          path: .sources/current-geometry
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
+          path: .sources/old-mesher
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: d4a8329997d8f700edca811f39b5a358950a6ba6
+          path: .sources/current-mesher
+          persist-credentials: false
+      - name: Read exact owned build-run provenance
+        id: artifact-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir provenance
+          gh api --hostname github.com repos/audunarn/ANYmesh/actions/runs/41751327690 > provenance/wheel-run.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          row=json.loads(Path('provenance/wheel-run.json').read_text())
+          assert row['id']==41751327690 and row['repository']['full_name']=='audunarn/ANYmesh'
+          with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
+              stream.write('commit='+row['head_sha']+'\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.artifact-source.outputs.commit }}
+          path: .sources/wheel-mesher
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: audunarn/ANYmesh
+          run-id: 41751327690
+          name: anymesher-wheels-macOS
+          path: provenance/wheels
+      - name: Two fresh bounded diagnostic children (not a release gate)
+        run: >-
+          python tools/diagnostic_s0_mac.py
+          --old-g .sources/old-geometry --current-g .sources/current-geometry
+          --old-m .sources/old-mesher --current-m .sources/current-mesher
+          --wheel-source .sources/wheel-mesher --wheel-run provenance/wheel-run.json
+          --wheels provenance/wheels --output diagnostic-s0
+          > provenance/diagnostic.stdout.txt 2> provenance/diagnostic.stderr.txt
+      - name: Retain actual and partial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-s0-mac-${{ github.run_id }}
+          path: |
+            diagnostic-s0/
+            provenance/wheel-run.json
+            provenance/diagnostic.stdout.txt
+            provenance/diagnostic.stderr.txt
+          if-no-files-found: error
+          retention-days: 14
