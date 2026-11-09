@@ -127,7 +127,7 @@ def test_diagnostic_boolean_routes_only_diagnostic_and_retains_normal_full_condi
     assert '2d3b0f876976b4d2e970c531c4b71941f2bb78a6' in diagnostic
 
 
-CURRENT_GEOMETRY_REF='002431aade55e615aa65e62ff22684aa84dee081'
+CURRENT_GEOMETRY_REF='19aa4750805f2dae5281bb1a7463779e2f960489'
 OLD_GEOMETRY_REF='f645523c8006efe61e94678a5056fba3c9a6a39d'
 OLD_MESHER_REF='aa19c0fa6b796a0d7cb1793a87840f52899dfa24'
 
