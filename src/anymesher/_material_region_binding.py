@@ -334,8 +334,27 @@ def _is_source_cell_resolution_request(error, cells, error_limit, *, geometry=No
                     and cell.face.model_id == geometry.model_id for cell in cells))
 
 
-def face_requires_curvilinear(geometry, face_id):
-    """Routing hint only; the geometry owner still proves the material chart."""
+def polynomial_tensor_chart(geometry, face_id):
+    """Return the geometry owner's exact tensor chart for an authored polynomial face."""
+    from anygeometry import CoonsSurface, ExtrudedSurface
+    from anygeometry.surfaces import RuledSurface
+    from anygeometry.curves import Straight
+    face = geometry.faces[face_id]
+    if type(face.surface) not in (ExtrudedSurface, RuledSurface, CoonsSurface):
+        return None
+    if (type(face.surface) is CoonsSurface and not face.surface.has_boundaries
+            and all(type(geometry.edges[use.edge].curve) is Straight for use in face.loop)):
+        return None
+    # Older geometry owners cannot supply this proof. Existing raw NURBS
+    # sweeps have their own admission below.
+    try:
+        from anygeometry import source_tensor_chart
+    except ImportError:
+        return None
+    return source_tensor_chart(geometry, face_id)
+
+
+def _existing_curvilinear_face(geometry, face_id):
     from anygeometry.nurbs import NurbsSurface, NurbsCurve
     from anygeometry import Plane, CoonsSurface
     from anygeometry.support_curves import PlaneNurbsCurve
@@ -353,11 +372,63 @@ def face_requires_curvilinear(geometry, face_id):
         for loop in (face.loop, *face.holes) for use in loop)
 
 
-def region_requires_curvilinear(region):
+def face_requires_curvilinear(geometry, face_id):
+    """Routing hint only; the geometry owner still proves the material chart."""
+    return (_existing_curvilinear_face(geometry, face_id)
+            or polynomial_tensor_chart(geometry, face_id) is not None)
+
+
+def straight_source_plane(geometry, face):
+    """Literal four-sided Plane eligible to join an independent curved closure."""
+    from anygeometry import Plane
+    from anygeometry.curves import Straight
+    definition = geometry.faces[face]
+    return (type(definition.surface) is Plane and definition.parameterization is None
+            and not definition.holes and len(definition.loop) == 4
+            and len({use.edge for use in definition.loop}) == 4
+            and all(type(geometry.edges[use.edge].curve) is Straight for use in definition.loop))
+
+
+def generation_curvilinear_faces(geometry, selected):
+    """Choose the source-cell route for tensor faces and independent literal planes.
+
+    Connected mixed preparations may create shared material constraints and
+    retain their existing generation route.
+    """
+    selected = tuple(selected)
+    existing = tuple(face for face in selected if _existing_curvilinear_face(geometry, face))
+    other = set(selected).difference(existing)
+    if other and all(polynomial_tensor_chart(geometry, face) is not None for face in other):
+        return selected
+    planes = {f for f in other if straight_source_plane(geometry, f)}
+    if planes and len(planes) < len(selected):
+        from .regional_source_faces import _ordinary_face, _vertex_faces
+        incidence = _vertex_faces(geometry)
+        if all(_ordinary_face(geometry, f, incidence) for f in selected):
+            return selected
+    return existing
+
+
+def published_material_faces(geometry, mesh):
+    """Source owners expected to account for every literal cell on their face."""
+    active = {f for f, cells in mesh.elements_of_face.items() if cells}
+    curved = {f for f in active if face_requires_curvilinear(geometry, f)}
+    if curved and active != curved:
+        curved.update(generation_curvilinear_faces(geometry, active))
+    return curved
+
+
+def region_requires_curvilinear(region, *, source_plane=False):
     from anygeometry.nurbs import NurbsSurface
     from anygeometry import Plane
     from anygeometry.support_curves import PlaneNurbsCurve
     support = getattr(region, 'support', None)
+    if type(support) is Plane and source_plane:
+        from anygeometry.arrangement_geometry import LinePath
+        if (len(region.faces) == 1 and not region.cancelled_seams and len(region.boundaries) == 1
+                and len(region.boundaries[0]) == 4
+                and all(type(path.curve) is LinePath for path in region.boundaries[0])):
+            return True
     return (isinstance(support, NurbsSurface) or
             isinstance(support, Plane) and any(isinstance(path.curve, PlaneNurbsCurve)
                 for loop in region.boundaries for path in loop))
@@ -485,7 +556,7 @@ class MaterialRegionBinding:
         if entry is not None and entry[0]() is self:
             self._require_construction()
             return
-        if not region_requires_curvilinear(self.region):
+        if not region_requires_curvilinear(self.region, source_plane=self.geometry_approximation_error is not None):
             return
         from anygeometry import chart_definition_fingerprint
         from weakref import ref
@@ -506,7 +577,7 @@ class MaterialRegionBinding:
             return
         entry = _CURVILINEAR_BINDING_IDENTITIES.get(id(self))
         if entry is None or entry[0]() is not self:
-            if region_requires_curvilinear(self.region):
+            if region_requires_curvilinear(self.region, source_plane=self.geometry_approximation_error is not None):
                 raise MeshError('NURBS material binding lacks construction authority')
             return
         if (self.geometry is not entry[1] or self.collection is not entry[2]
@@ -523,7 +594,7 @@ class MaterialRegionBinding:
         if snapshot is not None:
             return snapshot['curvilinear']
         self._require_construction()
-        return region_requires_curvilinear(self.region)
+        return region_requires_curvilinear(self.region, source_plane=self.geometry_approximation_error is not None)
 
     def _local_allocation(self):
         entry=_LOCAL_ALLOCATION_BINDINGS.get(id(self))
@@ -1722,8 +1793,9 @@ def prepare_material_regions(geometry, native_faces, source_to_final_faces, *,
         from anygeometry.nurbs import NurbsSurface
     except ImportError:
         return {}
+    curvilinear = set(generation_curvilinear_faces(geometry, native_faces))
     selected = tuple(face for face in native_faces
-                     if (face_requires_curvilinear(geometry, face)
+                     if (face in curvilinear
                          or (isinstance(geometry.faces[face].surface, ExtrudedSurface)
                              and geometry.faces[face].parameterization is None)))
     if not selected:
@@ -1732,9 +1804,11 @@ def prepare_material_regions(geometry, native_faces, source_to_final_faces, *,
     for authored, descendants in source_to_final_faces.items():
         for face in descendants:
             preimages.setdefault(int(face), set()).add(int(authored))
+    tensor_options = ({'source_tensors': True} if any(
+        polynomial_tensor_chart(geometry, face) is not None for face in curvilinear) else {})
     collection = query_material_surface_regions(
         geometry, selected, expected_revision=geometry.revision,
-        cancellation_check=cancellation_check)
+        cancellation_check=cancellation_check, **tensor_options)
     from .approximation_policy import _ACTIVE_LOCAL_FIELD
     active=_ACTIVE_LOCAL_FIELD.get()
     allocation=None
@@ -1744,7 +1818,7 @@ def prepare_material_regions(geometry, native_faces, source_to_final_faces, *,
     bindings = {}
     for region in collection.regions:
         faces = frozenset(int(handle.id) for handle in region.faces)
-        nurbs = region_requires_curvilinear(region)
+        nurbs = region_requires_curvilinear(region, source_plane=faces <= curvilinear)
         if not faces.issubset(selected):
             continue
         if nurbs:

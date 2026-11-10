@@ -169,6 +169,18 @@ def _attempt_options(
     return tuple(routes[:3])
 
 
+def _straight_sided_coons_faces(geometry, selected):
+    """Identify ordinary four-sided Coons panels eligible for the automatic retry."""
+    from anygeometry import CoonsSurface
+    from anygeometry.curves import Straight
+    faces = [geometry.faces[f] for f in (geometry.faces if selected is None else selected)]
+    return bool(faces) and all(
+        type(face.surface) is CoonsSurface and face.surface.has_boundaries
+        and face.parameterization is None and not face.holes and len(face.loop) == 4
+        and all(type(geometry.edges[u.edge].curve) is Straight for u in face.loop)
+        for face in faces)
+
+
 def _prefer_analytic_trim_recipe(geometry, first, recipes):
     """Select an existing native recipe for automatic analytic material cuts.
 
@@ -239,7 +251,7 @@ def select_curvilinear_recovery_policy(
         return automation, None
     import anygeometry as owner
     from ._material_region_binding import (checked_geometry_approximation_error,
-        face_requires_curvilinear, region_requires_curvilinear)
+        face_requires_curvilinear, polynomial_tensor_chart, region_requires_curvilinear)
     error = checked_geometry_approximation_error(geometry_approximation_error)
     selected = tuple(geometry.faces if face_ids is None else face_ids)
     candidates = tuple(face for face in selected
@@ -248,9 +260,11 @@ def select_curvilinear_recovery_policy(
         return automation, None
     # A raw NURBS/display type is merely a query hint. Exact-Coons provenance
     # and canonical material chart qualification remain with the owner.
+    tensor_options = ({'source_tensors': True} if any(
+        polynomial_tensor_chart(geometry, face) is not None for face in candidates) else {})
     regions = owner.query_material_surface_regions(
         geometry, candidates, expected_revision=geometry.revision,
-        cancellation_check=cancellation_check)
+        cancellation_check=cancellation_check, **tensor_options)
     owner.validate_material_surface_regions_binding(
         geometry, regions, cancellation_check=cancellation_check)
     admitted = {face.id for region in regions.regions
@@ -312,10 +326,12 @@ def generate_automatic_mesh_result(
     )
 
     original_callback = meshing_options.get("cancellation_check")
+    callback_error = None
     from anygeometry import is_cancellation_signal
     passive_signal = is_cancellation_signal(original_callback)
 
     def check_budget(phase: str, *, invoke_callback=True) -> None:
+        nonlocal callback_error
         if deadline is not None and monotonic() >= deadline:
             raise MeshRecoveryIncomplete(
                 f"automatic meshing time budget expired during {phase}"
@@ -324,7 +340,11 @@ def generate_automatic_mesh_result(
             if original_callback(phase):
                 raise MeshError(f"automatic meshing cancelled during {phase}")
         elif invoke_callback and original_callback is not None:
-            original_callback(phase)
+            try:
+                original_callback(phase)
+            except MeshError as error:
+                callback_error = error
+                raise
 
     check_budget("source geometry validation")
     problems = geometry.validate_topology()
@@ -333,11 +353,13 @@ def generate_automatic_mesh_result(
     first = dict(meshing_options)
     if first.get('face_ids') is not None:
         first['face_ids'] = tuple(first['face_ids'])
-    recipes = _attempt_options(first, fallback_structured_options)
+    original_recipes = _attempt_options(first, fallback_structured_options)
     if policy.strict_method:
-        recipes = recipes[:1]
+        recipes = original_recipes[:1]
     else:
-        recipes = _prefer_analytic_trim_recipe(geometry, first, recipes)
+        recipes = _prefer_analytic_trim_recipe(geometry, first, original_recipes)
+    native_hint = (not policy.strict_method and curvilinear_recovery_selection is None
+                   and recipes[0][0] == "native" and original_recipes[0][0] == "auto")
     if curvilinear_recovery_selection is not None:
         tensor_mode = 'allowed' if curvilinear_recovery_selection.get('nurbs_tensor_faces') else None
         recipes = tuple((method, dict(recipe, recombine=first.get('recombine', True),
@@ -350,7 +372,7 @@ def generate_automatic_mesh_result(
     inspectable_result: HybridMeshResult | None = None
     inspectable_method: str | None = None
     inspection_reason: str | None = None
-    for method, recipe in recipes:
+    for recipe_index, (method, recipe) in enumerate(recipes):
         check_budget(f"automatic meshing: {method}")
         # No deadline adds no executable callback to owner proofs. Only the
         # owner's exact live signal is passive; arbitrary callables retain the
@@ -364,6 +386,18 @@ def generate_automatic_mesh_result(
             # arbitrary caller code after the engine's final proof frontier.
             check_budget("automatic meshing candidate complete", invoke_callback=False)
         except MeshError as error:
+            from ._material_region_binding import _SourceCellResolutionRequired
+            if error is callback_error:
+                raise
+            if (native_hint and recipe_index == 0 and isinstance(error, _SourceCellResolutionRequired)
+                    and _straight_sided_coons_faces(geometry, first.get("face_ids"))):
+                # The guessed frontal recipe cannot certify its source cells;
+                # the independent automatic candidate is still attempted.
+                unsupported = NativeSurfaceUnsupported(
+                    "speculative native analytic recipe cannot resolve source "
+                    f"cells for this support: {error}")
+                unsupported.__cause__ = error
+                error = unsupported
             mapped_rejection = (
                 method == "mapped"
                 and str(error).startswith("explicit mapped strategy")
