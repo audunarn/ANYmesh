@@ -391,3 +391,25 @@ from .approximation_policy import (GeometryApproximationPolicy, GeometryApproxim
     resolve_geometry_approximation, validate_geometry_approximation_binding)
 __all__ += ["GeometryApproximationPolicy", "GeometryApproximationResolution",
     "resolve_geometry_approximation", "validate_geometry_approximation_binding"]
+
+_REGIONAL_UPDATE_EXPORTS = frozenset({
+    "RegionalAssembly", "RegionalQualityLimits",
+    "CrossRevisionAuthority", "OwnerBaselineReceipt", "STRUCTURED_QUALITY_COUNT_FIELDS",
+    "assemble_regional_replacement", "remap_mesh_ids",
+})
+__all__ += sorted(_REGIONAL_UPDATE_EXPORTS | {"remesh_mapped_region", "remesh_region"})
+
+
+def __getattr__(name: str):
+    # Lazy: importing the package does not load the regional-update module.
+    if name in _REGIONAL_UPDATE_EXPORTS:
+        from . import regional_update
+
+        return getattr(regional_update, name)
+    if name == "remesh_mapped_region":
+        from .regional_mapped import remesh_mapped_region
+        return remesh_mapped_region
+    if name == "remesh_region":
+        from .regional_patch import remesh_region
+        return remesh_region
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
