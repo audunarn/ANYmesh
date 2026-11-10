@@ -385,6 +385,158 @@ def _exact_contact(p, q, common):
             raise InvalidVolumeMesh('cell intersection exceeds its shared topological simplex (exact predicate)')
 
 
+_KUHN_MIN_GAP = 1.0e4 * _EPS          # minimum station spacing h (normalized)
+_MACHINE_EPS = float(np.finfo(float).eps)
+_STATION_JOIN = 64 * _MACHINE_EPS     # consecutive values closer than this chain
+_STATION_SPAN = _EPS                  # hard cap on the span of one chained station
+_BOUND_CUSHION = 64 * _MACHINE_EPS    # added to delta, subtracted from h
+_KUHN_MAX_LIPSCHITZ = 0.25            # required bound on L = 6*delta/h (< 1)
+
+
+def _axis_stations(values):
+    """Cluster one axis of normalized coordinates into logical grid stations.
+
+    Sorted values whose consecutive difference is <= _STATION_JOIN form one
+    chained cluster; a cluster wider than _STATION_SPAN makes the axis
+    ambiguous (None), so chaining can never drift without bound. The station
+    is the cluster midpoint, hence every member lies within span/2 of it.
+    Returns (stations, per-value station index, max |value - station|).
+    """
+    ordered = np.sort(values)
+    breaks = np.flatnonzero(np.diff(ordered) > _STATION_JOIN) + 1
+    low = ordered[np.concatenate(([0], breaks))]
+    high = ordered[np.concatenate((breaks, [len(ordered)])) - 1]
+    if np.any(high - low > _STATION_SPAN):
+        return None
+    stations = 0.5 * low + 0.5 * high
+    index = np.searchsorted(low, values, side='right') - 1
+    if np.any(values > high[index]) or np.any(np.diff(stations) <= 0):
+        return None
+    deviation = float(np.max(np.abs(values - stations[index])))
+    if not deviation <= _STATION_SPAN / 2:
+        return None
+    return stations, index, deviation
+
+
+def _certify_cartesian_kuhn(y, t, cancel=None):
+    """Prove that cells are a near-Cartesian, injective Kuhn tiling of a box.
+
+    Returns True only if, in the supplied (normalized float64) coordinates:
+      1. per axis, near-equal values chain into stations (see _axis_stations)
+         with strictly increasing spacing >= h > _KUHN_MIN_GAP, so the ideal
+         vertex of every actual vertex is its triple of stations; the ideal
+         vertices are the full product X x Y x Z (|vertices| = |X||Y||Z|,
+         all index triples distinct, which also refuses hidden duplicates);
+      2. every cell, whatever its vertex order, is a unit-step chain
+         v, v+e_a, v+e_a+e_b, v+e_1+e_2+e_3 (a, b, c a permutation of the
+         axes) in grid indices, i.e. one Kuhn tet of voxel v;
+      3. the (voxel, permutation) keys are pairwise distinct and number
+         exactly 6 per voxel, hence every voxel carries all six;
+      4. the perturbation bound below is well under 1.
+
+    Items 1-3 say the connectivity is exactly the Freudenthal complex K of the
+    ideal product grid; the six Kuhn tets of a voxel tile it with disjoint
+    interiors, and K is a conforming triangulation of the convex ideal box B.
+
+    Perturbation bound. Let I be the identity on B and F the continuous map
+    that is affine on every simplex of K and sends each ideal vertex to its
+    actual vertex. Then G = F - I is continuous and piecewise affine. On a
+    simplex, consecutive ideal vertices differ by h_a*e_a with h_a >= h, and
+    G takes values at vertices with every component in [-delta, delta], delta
+    being the largest |actual - station|. Each column of grad G is a
+    difference of two vertex values over h_a, so its components are at most
+    2*delta/h and the Frobenius norm is at most L = 6*delta/h. G is
+    continuous and piecewise affine on a convex set, so it is Lipschitz with
+    constant L (a segment crosses finitely many simplices). Hence for all
+    x, y in B: |F(x)-F(y)| >= |x-y| - |G(x)-G(y)| >= (1-L)|x-y| > 0 when
+    L < 1. F is injective: actual tets overlap in no positive volume and any
+    two meet only in the image of their shared topological face, which is what
+    the pairwise search establishes. The mesh geometry is never rounded or
+    snapped; the stations are only a proof device.
+
+    Floating assumptions. The proof is about the float64 values supplied,
+    exactly as stored (raw normalization noise is part of them, and is
+    admitted only if within the caps _STATION_JOIN/_STATION_SPAN, i.e. a few
+    tens of ulps; larger noise is refused). Roundoff in computing stations,
+    deviations, spacings and L is covered by adding _BOUND_CUSHION (64 eps) to
+    delta and subtracting it from h, and the demanded L <= _KUHN_MAX_LIPSCHITZ
+    is far below 1. Given the caps, delta <= 192 eps and h > 1e4*_EPS, so
+    L < 5e-4 whenever the caps pass. No metadata is used. Anything else,
+    including float32, oblique, ambiguous or corrupt meshes, returns False and
+    the unchanged generic search runs.
+    """
+    y, t = np.asarray(y), np.asarray(t)
+    if (y.dtype != np.float64 or y.ndim != 2 or y.shape[1] != 3 or t.ndim != 2
+            or t.shape[1] != 4 or t.dtype.kind not in 'iu' or not len(t)):
+        return False
+    if not np.isfinite(y).all() or t.min() < 0 or t.max() >= len(y):
+        return False
+    ijk = np.empty((len(y), 3), dtype=np.int64)
+    sizes = []
+    delta, spacing = 0., np.inf
+    for axis in range(3):
+        found = _axis_stations(y[:, axis])
+        if found is None:
+            return False
+        stations, index, deviation = found
+        n = len(stations)
+        gaps = np.diff(stations)
+        if n < 2 or n > len(y) or np.any(gaps <= _KUHN_MIN_GAP):
+            return False
+        ijk[:, axis] = index
+        sizes.append(n)
+        delta, spacing = max(delta, deviation), min(spacing, float(gaps.min()))
+    lipschitz = 6 * (delta + _BOUND_CUSHION) / (spacing - _BOUND_CUSHION)
+    if not lipschitz <= _KUHN_MAX_LIPSCHITZ:
+        return False
+    nx, ny, nz = sizes
+    voxels = (nx - 1) * (ny - 1) * (nz - 1)
+    if nx * ny * nz != len(y) or len(t) != 6 * voxels:
+        return False
+    _check_cancel(cancel)
+    if len(np.unique((ijk[:, 0] * ny + ijk[:, 1]) * nz + ijk[:, 2])) != len(y):
+        return False
+    local = ijk[t]                                   # (m, 4, 3)
+    ordering = np.argsort(local.sum(axis=2), axis=1, kind='stable')
+    local = np.take_along_axis(local, ordering[:, :, None], axis=1)
+    steps = np.diff(local, axis=1)                   # (m, 3, 3)
+    if np.any((steps < 0) | (steps > 1)) or np.any(steps.sum(axis=2) != 1):
+        return False
+    axes = steps.argmax(axis=2)                      # (m, 3)
+    if np.any(np.sort(axes, axis=1) != np.arange(3)):
+        return False
+    _check_cancel(cancel)
+    base = local[:, 0]
+    if np.any(base < 0) or np.any(base[:, 0] > nx - 2) or np.any(base[:, 1] > ny - 2) or np.any(base[:, 2] > nz - 2):
+        return False
+    keys = ((base[:, 0] * (ny - 1) + base[:, 1]) * (nz - 1) + base[:, 2]) * 9 + axes[:, 0] * 3 + axes[:, 1]
+    return len(np.unique(keys)) == len(t)
+
+
+def _generic_overlap_check(y, t, p, cancel):
+    planes = [_tet_planes(cell) for cell in p]
+    low, high = p.min(axis=1), p.max(axis=1)
+    # Sweep broad phase: inspect only overlapping AABBs, no all-pairs tensor.
+    order = np.argsort(low[:, 0], kind='stable')
+    active = []
+    for iteration, i in enumerate(order):
+        if iteration % 16 == 0:
+            _check_cancel(cancel)
+        active = [j for j in active if high[j, 0] >= low[i, 0] - _EPS]
+        for j in active:
+            if np.any(high[j, 1:] < low[i, 1:] - _EPS) or np.any(high[i, 1:] < low[j, 1:] - _EPS):
+                continue
+            common_ids = sorted(set(t[i]) & set(t[j]))
+            if len(common_ids) == 3:
+                # Positive cells with oppositely oriented shared facets lie in
+                # opposite closed halfspaces. Their only possible intersection
+                # is that common triangle; clipping is unnecessary and ill
+                # conditioned for a very thin shared face.
+                continue
+            _check_pair(p[i], p[j], y[common_ids], planes[i], planes[j])
+        active.append(i)
+
+
 def validate_cells(x, t, *, cancel=None):
     """Validate connected conforming positive tet4 cells; return outward facets."""
     y, t = _normalized_mesh(x, t)
@@ -426,27 +578,11 @@ def validate_cells(x, t, *, cancel=None):
             edge_uses[tuple(sorted((a, b)))].append((a, b))
     if any(len(v) != 2 or v[0] != v[1][::-1] for v in edge_uses.values()):
         raise InvalidVolumeMesh('exterior must be a closed oriented manifold')
-    planes = [_tet_planes(cell) for cell in p]
-    low, high = p.min(axis=1), p.max(axis=1)
-    # Sweep broad phase: inspect only overlapping AABBs, no all-pairs tensor.
-    order = np.argsort(low[:, 0], kind='stable')
-    active = []
-    for iteration, i in enumerate(order):
-        if iteration % 16 == 0:
-            _check_cancel(cancel)
-        active = [j for j in active if high[j, 0] >= low[i, 0] - _EPS]
-        for j in active:
-            if np.any(high[j, 1:] < low[i, 1:] - _EPS) or np.any(high[i, 1:] < low[j, 1:] - _EPS):
-                continue
-            common_ids = sorted(set(t[i]) & set(t[j]))
-            if len(common_ids) == 3:
-                # Positive cells with oppositely oriented shared facets lie in
-                # opposite closed halfspaces. Their only possible intersection
-                # is that common triangle; clipping is unnecessary and ill
-                # conditioned for a very thin shared face.
-                continue
-            _check_pair(p[i], p[j], y[common_ids], planes[i], planes[j])
-        active.append(i)
+    # All incidence, manifold, orientation and Jacobian checks above have
+    # passed. The certificate only replaces the pairwise overlap search; any
+    # doubt returns False and the protected generic search below runs unchanged.
+    if not _certify_cartesian_kuhn(y, t, cancel):
+        _generic_overlap_check(y, t, p, cancel)
     exterior.sort(key=lambda face: tuple(sorted(face)))
     return np.asarray(exterior, dtype=np.int64).reshape(-1, 3)
 
