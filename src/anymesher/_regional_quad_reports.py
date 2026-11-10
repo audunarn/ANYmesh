@@ -81,8 +81,7 @@ def _map_q5(report, ids):
 _FRONT = {**COUNT("attempts direct_accepts final_q4 final_t3 guided_accepts initial_t3 no_candidate queue_pushes "
                   "recovery_accepts recovery_attempts recovery_inserted_nodes stale_skips"),
           "exhausted_budget": _boolean, "field_diagnostics": [_string], "field_mode": _string,
-          "front_remaining": [_pair], "seed_triangulation_backend": _string,
-          "residual_flips": {**COUNT("flips passes"), **NUMBER("min_t3_angle_after min_t3_angle_before")}}
+          "front_remaining": [_pair], "seed_triangulation_backend": _string}
 _VALIDATION = {**COUNT("boundary_edge_count face interior_edge_count node_count quad_count tri_count t3_angle_warning_count"),
                **NUMBER("area_ratio cell_area_sum min_cell_area n_eq q4_area_fraction q4_count_fraction reference_area"),
                **_report_fields("min_q4_scaled_jacobian max_q4_angle min_t3_angle", _nullable(_finite)),
@@ -91,9 +90,15 @@ _VALIDATION = {**COUNT("boundary_edge_count face interior_edge_count node_count 
 
 
 def _front_face(value, path):
-    schema = _FRONT
+    value = _mapping(value, path)
+    # A front with no remaining triangles has no minimum triangle angle.
+    angle = _nullable(_finite) if value.get('final_t3') == 0 else _finite
+    schema = {**_FRONT, 'residual_flips': {**COUNT("flips passes"),
+              **_report_fields("min_t3_angle_after min_t3_angle_before", angle)}}
     if 'layout_seed' in value:
         schema = {**schema, 'layout_seed': COUNT("boundary_stations interior_points targeted_reseed_points")}
+    if 'edge_aligned_seed' in value:
+        schema = {**schema, 'edge_aligned_seed': COUNT("boundary_stations interior_points tensor_cells")}
     _validate_report(value, path, schema)
 
 
@@ -176,6 +181,9 @@ def quad_first_fields(record, ids, mesh):
     _validate_report(out['q4'], 'q4', _Q4_SUMMARY)
     _map_q5(out['q5'], ids)
     out['high_order_geometry'] = _high_order(out['high_order_geometry'], ids, mesh)
+    if 'quad_quality_repair' in record:
+        from ._regional_quad_repair import translate_quad_quality_repair
+        out['quad_quality_repair'] = translate_quad_quality_repair(record['quad_quality_repair'], ids)
     if 'quadratic_promotion' in out:
         row = out['quadratic_promotion']
         _validate_report(row, 'quadratic_promotion', {**COUNT('exact_boundary_midsides repair_count unique_midsides'),
