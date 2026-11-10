@@ -2266,21 +2266,29 @@ def _mesh_native_face_once(
     primary_output_origin = None
     primary_output_entry = None
     tensor_core = None
-    if _nurbs_tensor:
+    from .regional_source_faces import retained_core, stage_reused_source_face
+    retained = retained_core(
+        geometry, face_id, _material_region_binding, mesh, boundary_registry,
+        native_outer, protected_input_rows, chart_transform, holes=native_holes,
+        constraints=native_constraints, pinned=native_pinned, order=order,
+        declared=declared_junction_edges, mapped=_nurbs_tensor,
+        recombine=recombine, size_field=size_field, owner_zones=_owner_size_zone_count,
+        cancellation_check=cancellation_check, quality_options=quality_options)
+    if _nurbs_tensor and retained is None:
         tensor_core = _try_parametric_tensor(
             geometry, face_id, native_outer, native_holes, native_constraints, native_pinned,
             chart_inverse, protected_input_rows, analytic_chart, quality_options,
             _material_region_binding, _interior_resolution_scale, surface_diagnostics,
             declared_junction_edges, order, recombine, size_field, _owner_size_zone_count,
             _nurbs_tensor_refusal)
-        if tensor_core is None and _nurbs_tensor == 'required':
+        if tensor_core is None and _nurbs_tensor in ('required', 'mapped'):
             # Explicit quad-first never falls back to the native route.
             from .quad.public_integration import QuadPublicUnsupported
             raise QuadPublicUnsupported(
                 'NURBS quad-first tensor route refused face %d: %s'
                 % (face_id, surface_diagnostics.get('parametric_tensor_refusal')))
-    if tensor_core is not None:
-        core = tensor_core
+    if tensor_core is not None or retained is not None:
+        core = tensor_core if retained is None else retained
         if quality_options is not None:
             policy = quality_options.quality_policy
             surface_options = SurfaceMeshOptions(
@@ -2291,12 +2299,12 @@ def _mesh_native_face_once(
                 declared_junction=False, native_options=face_native_options)
         primary_output_origin = getattr(core, '_output_row_provenance', None)
         primary_output_entry = (primary_output_origin.source_by_row, primary_output_origin.source_to_row)
-        surface_diagnostics['parametric_tensor'] = {
-            'cells': int(core.quad_active.sum()), 'nodes': int(core.num_nodes),
-            'boundary_nodes': len(native_outer), 'interior_nodes': int(core.num_nodes) - len(native_outer),
-            # No insertion, cut, staging or repair runs: the 16/32/128/512 repair ceilings are never debited.
-            'insertion_accounting': {'cuts': 0, 'staged_nodes': 0, 'admitted_nodes': 0,
-                                     'touched_cells': 0, 'work': 0, 'retained_insertions': 0}}
+        if tensor_core is not None:
+            surface_diagnostics['parametric_tensor'] = {
+                'cells': int(core.quad_active.sum()), 'nodes': int(core.num_nodes),
+                'boundary_nodes': len(native_outer), 'interior_nodes': int(core.num_nodes) - len(native_outer),
+                'insertion_accounting': {'cuts': 0, 'staged_nodes': 0, 'admitted_nodes': 0,
+                                         'touched_cells': 0, 'work': 0, 'retained_insertions': 0}}
     elif quality_options is None:
         core = mesh_planar_surface(
             native_outer,
@@ -2576,6 +2584,14 @@ def _mesh_native_face_once(
     coordinates = np.asarray(core.node_coordinates, dtype=float)
     region_coordinates = (None if _material_region_binding is None else
                           analytic_chart.evaluate(coordinates[:, :2]))
+    if retained is not None:
+        # The chart row ledger and the source-cell proof use the original UV.
+        # A round-trip through a numerical metric transform may round a corner.
+        scale = float(np.linalg.norm(np.ptp(region_coordinates, axis=0)))
+        residual = geometry.tolerance.effective_surface_residual(scale)
+        if np.any(np.linalg.norm(region_coordinates - retained._retained_source_xyz, axis=1) > residual):
+            raise MeshError('retained source coordinates differ from current surface evaluation')
+        region_coordinates = retained._retained_source_xyz
     if _material_region_binding is None and (len(coordinates) < len(input_uv) or not np.allclose(
         coordinates[: len(input_uv), :2], input_uv, rtol=0.0, atol=2.0e-14
     )):
@@ -2734,9 +2750,16 @@ def _mesh_native_face_once(
         next_node += 1
 
     _publish_native_face_elements(mesh, face_id, core, core_to_global)
+    if _nurbs_tensor == 'mapped':
+        grid = core._parametric_tensor_grid
+        mesh.grid_of_face[face_id] = np.asarray(
+            [core_to_global[int(row)] for row in grid.flat], dtype=np.int64).reshape(grid.shape)
     if _material_region_binding is not None:
-        _material_region_binding.record_curvilinear_rows(coordinates[:, :2] @ chart_inverse, core_to_global)
+        uv = coordinates[:, :2] @ chart_inverse if retained is None else retained._retained_source_uv
+        _material_region_binding.record_curvilinear_rows(uv, core_to_global)
         _material_region_binding.certify_curvilinear_published(mesh, boundary_registry, cancellation_check)
+        if retained is not None:
+            stage_reused_source_face(_material_region_binding, face_id, core, core_to_global, mesh)
     if _material_region_binding is not None:
         _material_region_binding.validate(cancellation_check)
         region = _material_region_binding.region
@@ -5892,12 +5915,11 @@ def _finalize_hybrid_candidate(
     # The existing source-association remapper reconstructs registry parameters
     # by closest-point projection. Curvilinear authority requires declared,
     # owner-qualified source-parameter transport before that route can admit it.
-    from ._material_region_binding import (face_requires_curvilinear,
+    from ._material_region_binding import (face_requires_curvilinear, generation_curvilinear_faces,
                                           curvilinear_reference_candidates)
     curvilinear_generation = bool(curvilinear_reference_candidates(candidate.mesh)) or (
         bool(getattr(candidate.mesh, 'tris', {}) or getattr(candidate.mesh, 'quads', {}))
-        and any(face_requires_curvilinear(candidate.working_geometry, face)
-                                           for face in candidate.working_geometry.faces))
+        and bool(generation_curvilinear_faces(candidate.working_geometry, candidate.working_geometry.faces)))
     if curvilinear_generation:
         # Labels are not authority to select a proximity-based remapper.
         # Validate retained actual cells before any repair or publication.
@@ -6464,9 +6486,9 @@ def generate_hybrid_mesh_result(
     preflight_started = perf_counter()
     source_view = GeometryMeshingView(source_geometry)
     source_faces = _face_ids(source_geometry, requested_face_ids)
-    from ._material_region_binding import face_requires_curvilinear
+    from ._material_region_binding import face_requires_curvilinear, generation_curvilinear_faces
     _nurbs_tensor_refusal = None
-    nurbs_selected = any(face_requires_curvilinear(source_geometry, face) for face in source_faces)
+    nurbs_selected = bool(generation_curvilinear_faces(source_geometry, source_faces))
     if nurbs_selected:
         if geometry_approximation_error is None:
             raise MeshError('curvilinear approximation resolution did not supply an error limit')
@@ -6510,7 +6532,14 @@ def generate_hybrid_mesh_result(
             _nurbs_tensor = 'required'
             _nurbs_tensor_refusal = None
         if strategy is MeshingStrategy.MAPPED:
-            raise MeshError('NURBS material approximation does not admit the generic mapped route')
+            from ._material_region_binding import polynomial_tensor_chart
+            if not all(polynomial_tensor_chart(source_geometry, face) is not None
+                       for face in source_faces):
+                raise MeshError('NURBS material approximation does not admit the generic mapped route')
+            if contract_problem is not None:
+                raise MeshError('mapped source tensor cannot honour the request: ' + contract_problem)
+            strategy = MeshingStrategy.NATIVE
+            _nurbs_tensor = 'mapped'
         if strategy is MeshingStrategy.AUTO:
             strategy = MeshingStrategy.NATIVE
             if _nurbs_tensor is None:
@@ -7359,9 +7388,8 @@ def generate_hybrid_mesh_result(
         binding.prepare_curvilinear_chords(mesh, boundary_registry, cancellation_check)
     # Every canonical NURBS face requires the receipt route, including direct
     # native requests whose controls are outside its admitted linear scope.
-    missing_nurbs = [face for face in native_faces
-                     if face_requires_curvilinear(geometry, face)
-                     and face not in material_region_bindings]
+    missing_nurbs = [face for face in generation_curvilinear_faces(geometry, native_faces)
+                     if face not in material_region_bindings]
     if missing_nurbs:
         raise MeshError('NURBS approximation requires linear owner-bound frontal material regions')
     prepared_declared_junction_edges = set(
@@ -7641,6 +7669,9 @@ def generate_hybrid_mesh_result(
     retain_material_cells()
     candidate_runtime = new_candidate_runtime()
     candidate_runtime["operation_counts"] = operation_counts
+    if _nurbs_tensor == 'mapped':
+        source_strategies = {face: 'mapped' for face in source_faces}
+        mapped_faces = tuple(faces)
     candidate = _HybridCandidateContext(
         source_geometry=source_geometry,
         working_geometry=geometry,

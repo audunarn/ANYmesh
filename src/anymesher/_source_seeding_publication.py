@@ -9,7 +9,43 @@ from fractions import Fraction
 from math import isfinite
 from numbers import Integral
 
+import numpy as np
+
 from .errors import MeshError
+
+
+def _source_size_field(source, field):
+    from .refinement import Refinement, SizeField
+    expected = {'zones','overrides','_sources','face_sizes','edge_sizes','beam_sizes','target_size'}
+    if (type(field) is not SizeField or set(vars(field)) != expected
+            or any(getattr(field, k) for k in ('overrides','face_sizes','edge_sizes','beam_sizes'))):
+        raise MeshError('source seeding cannot remap prepared refinement references')
+    if type(field.target_size) is not float or not isfinite(field.target_size) or field.target_size <= 0:
+        raise MeshError('source seeding size field target is invalid')
+    if type(field.zones) is not tuple or len(field.zones) != len(field._sources):
+        raise MeshError('source seeding point field differs from its prepared coordinates')
+    points = []
+    for zone, cached in zip(field.zones, field._sources):
+        if (type(zone) is not Refinement or zone.mode != 'refine' or zone.ref is not None
+                or zone.center is None or type(zone.name) is not str):
+            raise MeshError('source seeding cannot remap prepared refinement references')
+        if type(cached) is not np.ndarray or not np.array_equal(cached, [zone.center]):
+            raise MeshError('source seeding point field differs from its prepared coordinates')
+        points.append(Refinement(center=zone.center, size=zone.size, radius=zone.radius,
+                                 growth=zone.growth, name=zone.name))
+    return SizeField(source, field.target_size, points)
+
+
+def source_size_field_metadata(source, field):
+    """Portable sizing request from a validated, source-projected literal field."""
+    if field is None:
+        return None
+    result = {'kind': 'uniform', 'target_size': field.target_size, 'source_model_id': str(source.model_id)}
+    if field.zones:
+        result.update(kind='point_refinements', zones=[
+            {'center': list(z.center), 'size': z.size, 'radius': z.radius, 'growth': z.growth,
+             'name': z.name, 'mode': z.mode} for z in field.zones])
+    return result
 
 
 def project_source_seeding(source, mesh, receipt, edge_maps, source_nodes):
@@ -82,13 +118,5 @@ def project_source_seeding(source, mesh, receipt, edge_maps, source_nodes):
     result = copy(original)
     result.divisions, result.classes = projected, projected_classes
     if original.size_field is not None:
-        from .refinement import SizeField
-        field = original.size_field
-        if (type(field) is not SizeField or any(getattr(field, name, None)
-                for name in ('zones', 'overrides', '_sources', 'face_sizes', 'edge_sizes', 'beam_sizes'))):
-            raise MeshError('source seeding cannot remap prepared refinement references')
-        target = field.target_size
-        if isinstance(target, bool) or not isinstance(target, (int,float)) or not isfinite(target) or target <= 0:
-            raise MeshError('source seeding size field target is invalid')
-        result.size_field = SizeField(source, target)
+        result.size_field = _source_size_field(source, original.size_field)
     return result
