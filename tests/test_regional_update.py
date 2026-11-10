@@ -533,6 +533,51 @@ def mapped_face_record():
             "actual_backend": "mapped", "fallback_reason": None, "phase_seconds": {}}
 
 
+def test_native_surface_candidate_indices_and_serial_fallback_keep_their_namespaces():
+    from anygeometry import GeometryModel
+    from anymesher import generate_hybrid_mesh
+
+    geometry = GeometryModel()
+    face = geometry.add_plate(geometry.add_points(((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0))))
+    geometry.add_sheet((face,))
+    mesh = generate_hybrid_mesh(geometry, target_size=.4, strategy="native", native_backend="python",
+                                recombine=False, qualified_s3=True)
+    nm = {node: node + 100 for node in mesh.nodes}
+    em = {element: element + 200 for element in mesh.tris}
+    backend = mesh.hybrid_diagnostics["triangulation_backend_by_face"][face]
+    quality = backend["quality_optimization"]["initial_quality"]
+    # A face candidate can have different topology from the selected global
+    # mesh. Even an identical integer does not acquire global element identity.
+    quality["repair_element_ids"] = [min(em)]
+    mesh.hybrid_diagnostics["parallel"] = {"used": False, "route": "serial", "reason": "one component"}
+    numbered = remap_mesh_ids(mesh, nm, em)
+    assert numbered.hybrid_diagnostics["triangulation_backend_by_face"][face] == backend
+    assert set(numbered.structural_preparation["qualified_s3"]["element_ids"]) == set(em.values())
+    assert numbered.hybrid_diagnostics["parallel"] == mesh.hybrid_diagnostics["parallel"]
+
+    quality["unknown_element_ids"] = [min(em)]
+    with pytest.raises(MeshError, match="unknown_element_ids"):
+        remap_mesh_ids(mesh, nm, em)
+    del quality["unknown_element_ids"]
+    mesh.hybrid_diagnostics["parallel"].update(used=True, route="parallel")
+    with pytest.raises(MeshError, match="mapped parallel plate joins only|cannot carry a certification"):
+        remap_mesh_ids(mesh, nm, em)
+
+
+def test_joined_plate_rejects_unknown_evidence_without_starting_a_pool():
+    mesh = rich_mesh()
+    mesh.hybrid_diagnostics = {
+        "certifiable": False, "certification_mode": "interactive", "strategy_by_face": {30: "mapped"},
+        "parallel": {"used": True, "route": "parallel", "components": 2, "separation": 0.5,
+                     "merge_reasons": 0, "runtime": {"new_source_certificate": "unproven"}},
+    }
+    with pytest.raises(MeshError, match="new_source_certificate"):
+        remap_mesh_ids(mesh, NM, EM)
+    mesh.hybrid_diagnostics["certifiable"] = True
+    with pytest.raises(MeshError, match="cannot carry a certification"):
+        remap_mesh_ids(mesh, NM, EM)
+
+
 def generator_diagnostics():
     return {
         "requested_target_size": 0.5,

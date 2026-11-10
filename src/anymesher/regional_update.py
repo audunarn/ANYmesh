@@ -345,10 +345,209 @@ _BACKEND_TOP_ONLY = frozenset({"structured_action", "working_face_ids", "working
 _BACKEND_OPTIONAL = frozenset({"phase_seconds"}) | _BACKEND_TOP_ONLY
 
 
+def _report_fields(names, validator):
+    return dict.fromkeys(names.split(), validator)
+
+
+# surface_mesh emits this diagnostic before hybrid._publish_native_face_elements
+# allocates any project node or element IDs. Its candidate indices, including
+# poor_element_ids, identify rows in each candidate's own MeshCore. Keep them
+# in that namespace. The enclosing whole-mesh structured_quality and S3
+# records are different: their cell IDs require global translation.
+_LOCAL_QUALITY = {
+    **_report_fields("elements_above_aspect_ratio_5 elements_above_maximum_angle "
+                     "elements_above_maximum_growth elements_below_minimum_angle "
+                     "elements_below_minimum_scaled_jacobian invalid_element_count "
+                     "quality_violation_count", _count),
+    **_report_fields("max_angle max_aspect_ratio max_element_growth min_angle min_scaled_jacobian", _finite),
+    "poor_element_ids": [_count], "repair_element_ids": [_count],
+}
+_LOCAL_WORK = _report_fields("full_triangulations optimization_noop_short_circuits quality_evaluations", _count)
+_LOCAL_LIMITS = _report_fields("maximum_angle maximum_aspect_ratio maximum_warpage "
+                               "minimum_angle minimum_scaled_jacobian", _finite)
+_LOCAL_OPTIMIZATION = {
+    **_report_fields("added_points attempted_added_points attempted_rounds candidate_count "
+                     "flips initial_generated_points moved_nodes point_budget rounds", _count),
+    **_report_fields("budget_exhausted target_met", _boolean),
+    "selected_strategy": _string, "effective_target_size": _finite,
+    "boundary_collar_skip_reason": lambda v, p: _string(v, p, optional=True),
+    "boundary_collars": [], "published_alignment": None,
+    "moved_node_rows": [_count], "work_totals": _LOCAL_WORK,
+    "initial_quality": _LOCAL_QUALITY, "final_quality": _LOCAL_QUALITY,
+    "candidates": [{"strategy": _string, "generated_points": _count, "target_met": _boolean,
+                    "score": [_finite], "final_quality": _LOCAL_QUALITY, "work_statistics": _LOCAL_WORK}],
+    "complex_geometry": {
+        **_report_fields("boundary_segment_count candidate_budget candidate_count hole_count "
+                         "hole_segment_count mandatory_segment_count", _count),
+        "alignment_evaluation": _string, "declared_junction": _boolean,
+    },
+    "edge_guides": {
+        **_report_fields("accepted_points distance_checks guide_count skipped_guides", _count),
+        "guide_ids": [], "soft_symmetry": _boolean,
+    },
+    "lattice_statistics": _report_fields("accepted_points candidate_points distance_checks "
+                                         "naive_distance_checks protected_segments", _count),
+}
+_NATIVE_FACE_REPORT = {
+    "quality_optimization": _LOCAL_OPTIMIZATION,
+    "quality_policy": {
+        "accepted": _boolean, "poor_element_ids": [_count], "thresholds": _LOCAL_LIMITS,
+        "worst": _LOCAL_LIMITS, "violation_counts": _report_fields(
+            "aspect_ratio maximum_angle minimum_angle scaled_jacobian warpage", _count),
+    },
+    "lattice_alignment": _string, "metric_tensor": None, "max_lattice_points": _count,
+    "recombination": {
+        **_report_fields("candidate_count exchange_count exchange_work pair_count rejected_candidate_count", _count),
+        "exchange_truncated": _boolean,
+    },
+    "native_diagnostics": {},
+}
+_LOCAL_ALIGNMENT = {
+    **_report_fields("edge_count quad_edge_count", _count),
+    **_report_fields("maximum_normal_error_degrees mean_normal_error_degrees quad_fraction", _finite),
+}
+_LOCAL_COLLAR = {
+    **_report_fields("accepted_points collar_points collar_segments removed_lattice_points requested_layers "
+                     "shortened_rows transition_points transition_regions", _count),
+    "preparation_cache_hit": _boolean, "holes": [],
+    "outer": {**_report_fields("accepted_layers released_corner_stations skipped_layers", _count),
+              "loop": _string, "stop_reason": lambda v, p: _string(v, p, optional=True)},
+}
+_LOCAL_RECOMBINED_CANDIDATE = {
+    **_LOCAL_OPTIMIZATION["candidates"][0],
+    **_report_fields("alignment_qualified mandatory_physical_quality physical_admissible quality_eligible", _boolean),
+    "max_element_growth": _finite, "physical_triangle_retention": None,
+    "hole_alignment": _LOCAL_ALIGNMENT, "outer_alignment": _LOCAL_ALIGNMENT,
+    "published_growth": {"elements_above_maximum": _count, "maximum": _finite},
+    "published_quality": _NATIVE_FACE_REPORT["quality_policy"],
+}
+_RECOMBINED_FACE_REPORT = {
+    **_NATIVE_FACE_REPORT,
+    "recombination": {**_NATIVE_FACE_REPORT["recombination"], "physical_triangle_retention": None},
+    "quality_optimization": {
+        **_LOCAL_OPTIMIZATION, "boundary_collars": [_LOCAL_COLLAR],
+        "candidates": [_LOCAL_RECOMBINED_CANDIDATE], "triangulation_quality": _LOCAL_QUALITY,
+        "final_quality": {**_LOCAL_QUALITY, "quality_scope": _string},
+        "published_alignment": {"holes": _LOCAL_ALIGNMENT, "outer": _LOCAL_ALIGNMENT},
+    },
+}
+
+
+def _validate_report(value, path, schema):
+    if isinstance(schema, dict):
+        record = _mapping(value, path)
+        if set(record) != set(schema):
+            raise MeshError(f"{path} has unknown or missing fields {sorted(set(record) ^ set(schema), key=str)}")
+        for key, item in record.items():
+            _validate_report(item, f"{path}.{key}", schema[key])
+    elif isinstance(schema, list):
+        items = _list(value, path)
+        if not schema and items:
+            raise MeshError(f"{path} has no documented nonempty schema")
+        for item in items:
+            _validate_report(item, f"{path} item", schema[0])
+    elif schema is None:
+        if value is not None:
+            raise MeshError(f"{path} has no documented non-null schema")
+    else:
+        schema(value, path)
+
+
+def _nullable(check):
+    def validate(value, path):
+        if value is not None:
+            check(value, path)
+    return validate
+
+
+def _v_threadpools(value, path):
+    # threadpoolctl introspection can be absent. Each supported library row
+    # describes a loaded binary and its thread count, independently of mesh IDs.
+    fields = _report_fields("user_api internal_api prefix filepath version threading_layer "
+                            "architecture threading_backend", _nullable(_string))
+    for row in _list(value, path):
+        row = _mapping(row, path)
+        if set(row) - (set(fields) | {"num_threads"}) or "num_threads" not in row:
+            raise MeshError(f"{path} contains an unknown library record")
+        _count(row["num_threads"], path)
+        for key in set(row) & set(fields):
+            fields[key](row[key], path)
+
+
+def _v_worker_controls(value, path):
+    schema = {
+        **_report_fields("containment priority_requested priority_class priority_mechanism "
+                         "priority_status priority_error", _nullable(_string)),
+        **_report_fields("nice_before nice_requested nice_effective", _nullable(_as_int)),
+        "priority_applied": _nullable(_boolean),
+        "thread_env": _report_fields("OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS", _nullable(_string)),
+        "threadpool": _nullable(_v_threadpools),
+    }
+    for key, worker in _mapping(value, path).items():
+        if not isinstance(key, (int, np.integer, str)) or not str(key).isascii() or not str(key).isdecimal():
+            raise MeshError(f"{path} has an invalid worker index")
+        _validate_report(worker, f"{path}[{key}]", schema)
+
+
+def _v_lifecycle(value, path):
+    entries = {"workers-spawned": (), "pool-ready": (), "job-begin": (), "job-end": (),
+               "cancel-signalled": (), "queued-cancelled": (_count,),
+               "shutdown-begin": (_string,), "shutdown-end": (_count,)}
+    for row in _list(value, path):
+        event = _list(row, path)
+        if not event or not isinstance(event[0], str) or event[0] not in entries:
+            raise MeshError(f"{path} contains an unknown pool event")
+        details = entries[event[0]]
+        if len(event) != 2 + len(details):
+            raise MeshError(f"{path} has an invalid {event[0]} event")
+        _finite(event[1], path)
+        for check, item in zip(details, event[2:]):
+            check(item, path)
+
+
+def _v_parallel(value):
+    where = "hybrid_diagnostics.parallel"
+    record = _mapping(value, where)
+    if record.get("used") is False and record.get("route") == "serial":
+        _validate_report(record, where, {"used": _boolean, "route": _string, "reason": _string})
+        return
+    if record.get("used") is not True or record.get("route") != "parallel":
+        raise MeshError(f"{where} is not a serial fallback or parallel join")
+    _validate_report(record, where, {
+        "used": _boolean, "route": _string, "components": _count, "separation": _finite,
+        "merge_reasons": _count,
+        "runtime": {
+            "pool": _string, "workers": _count, "worker_pids": [_count], "worker_controls": _v_worker_controls,
+            **_report_fields("plan_seconds prepare_seconds mesh_seconds join_seconds", _finite),
+            "component_seconds": [_finite], "component_estimated_elements": [_nullable(_count)],
+            "component_estimate_basis": [_string], "worker_working_set_bytes": [_nullable(_count)],
+            "lifecycle": _v_lifecycle,
+        },
+    })
+    runtime = record["runtime"]
+    workers = runtime["workers"]
+    if (workers < 1 or len(runtime["worker_pids"]) != workers or 0 in runtime["worker_pids"]
+            or len(set(runtime["worker_pids"])) != workers
+            or {str(k) for k in runtime["worker_controls"]} != {str(i) for i in range(workers)}
+            or len(runtime["worker_working_set_bytes"]) != workers):
+        raise MeshError(f"{where} has inconsistent worker evidence")
+    if record["components"] < 2 or any(len(runtime[key]) != record["components"] for key in (
+            "component_seconds", "component_estimated_elements", "component_estimate_basis")):
+        raise MeshError(f"{where} has inconsistent component evidence")
+
+
 def _backend_record(record: Any, what: str, nested: bool) -> None:
     record = _mapping(record, what)
     allowed = _BACKEND_REQUIRED | (_BACKEND_OPTIONAL - (_BACKEND_TOP_ONLY if nested else frozenset()))
     keys = set(record)
+    if keys.intersection(_NATIVE_FACE_REPORT):
+        if not set(_NATIVE_FACE_REPORT) <= keys:
+            raise MeshError(f"{what} has an incomplete native surface report")
+        recombination = _mapping(record["recombination"], f"{what}.recombination")
+        report = _RECOMBINED_FACE_REPORT if "physical_triangle_retention" in recombination else _NATIVE_FACE_REPORT
+        for name, schema in report.items():
+            _validate_report(record[name], f"{what}.{name}", schema)
+        allowed = allowed.union(_NATIVE_FACE_REPORT)
     if not _BACKEND_REQUIRED <= keys or keys - allowed:
         raise MeshError(
             f"{what} is not the documented mapped-face record "
@@ -429,18 +628,21 @@ def _x_structured_quality(value: Any, ids: _Ids) -> Any:
     return _quality_walk(value, ids, "hybrid_diagnostics.structured_quality")
 
 
-def _v_complex_geometry(value: Any) -> None:
+def _v_complex_geometry(value: Any, *, joined=False) -> None:
     where = "hybrid_diagnostics.complex_geometry"
     record = _mapping(value, where)
-    counts = ("component_candidate_budget", "source_face_count", "final_face_count", "declared_junction_edge_count")
-    expected = {"strategy_ladder", "source_strategy_by_face", *counts}
+    counts = {"source_face_count", "final_face_count", "declared_junction_edge_count"}
+    expected = {"strategy_ladder", *counts}
+    if not joined:
+        counts.add("component_candidate_budget")
+        expected.update(("source_strategy_by_face", "component_candidate_budget"))
     if set(record) != expected:
         raise MeshError(f"{where} has unknown or missing fields {sorted(set(record) ^ expected, key=str)}")
     for name in counts:
         _count(record[name], f"{where}.{name}")
     for item in _list(record["strategy_ladder"], f"{where}.strategy_ladder"):
         _string(item, f"{where}.strategy_ladder item")
-    for key, strategy in _mapping(record["source_strategy_by_face"], f"{where}.source_strategy_by_face").items():
+    for key, strategy in _mapping(record.get("source_strategy_by_face", {}), f"{where}.source_strategy_by_face").items():
         _geometry_face_key(key, where)
         _string(strategy, f"{where}.source_strategy_by_face[{key}]")
 
@@ -551,6 +753,7 @@ def _x_automation(value: Any, ids: _Ids) -> Any:
 
 
 _HYBRID_SCHEMA = {
+    "parallel": _v_parallel,
     "requested_target_size": lambda v: _finite(v, "requested_target_size", positive=True),
     "strategy_by_face": _v_strategy_by_face,
     "triangulation_backend_by_face": _v_backend_by_face,
@@ -926,6 +1129,17 @@ def _process_metadata(mesh: Mesh, label: str, ids: _Ids) -> Tuple[Dict[Any, Any]
     diagnostics = mesh.hybrid_diagnostics
     if diagnostics:
         record = _mapping(diagnostics, f"{label} hybrid_diagnostics")
+        parallel = record.get("parallel")
+        joined = isinstance(parallel, Mapping) and parallel.get("used") is True
+        if joined and (record.get("certifiable") is not False
+                       or record.get("certification_mode") not in ("none", "interactive")):
+            raise MeshError(f"{label} parallel join cannot carry a certification")
+        if joined:
+            strategies = _mapping(record.get("strategy_by_face"), "parallel join face strategies")
+            if ids.tris or not strategies or any(method != "mapped" for method in strategies.values()):
+                # A join assembles component data, but its producer does not
+                # publish a joined shell qualification for native triangles.
+                raise MeshError(f"{label} full renumber supports mapped parallel plate joins only")
         for key in record:
             if not isinstance(key, str) or (key not in _HYBRID_SCHEMA and key not in _HYBRID_ID_SCHEMA):
                 raise MeshError(
@@ -937,7 +1151,10 @@ def _process_metadata(mesh: Mesh, label: str, ids: _Ids) -> Tuple[Dict[Any, Any]
                 if key in _HYBRID_ID_SCHEMA:
                     hybrid_out[key] = _HYBRID_ID_SCHEMA[key](record[key], ids)
                 else:
-                    _HYBRID_SCHEMA[key](record[key])
+                    if key == "complex_geometry" and joined:
+                        _v_complex_geometry(record[key], joined=True)
+                    else:
+                        _HYBRID_SCHEMA[key](record[key])
                     hybrid_out[key] = copy.deepcopy(record[key])
             except MeshError as error:
                 raise MeshError(f"{label}: {error}") from None
@@ -965,6 +1182,7 @@ MESH_ID_BEARING_METADATA = (
     "hybrid_diagnostics.automation",
 )
 SPLICE_RECOMPUTE_METADATA = MESH_ID_BEARING_METADATA + (
+    "hybrid_diagnostics.parallel",
     "structural_preparation.structured_layout.metrics",
     "hybrid_diagnostics.qualified_s3_preparation",
     "hybrid_diagnostics.certifiable",
