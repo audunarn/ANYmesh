@@ -159,12 +159,22 @@ def _nonextruded_coons():
     return model
 
 
-def test_nonextruded_coons_hint_can_recover_to_existing_automatic_route():
+def test_nonextruded_coons_hint_can_recover_to_existing_automatic_route(monkeypatch):
+    import anymesher.recovery as recovery
+    generate = recovery.generate_hybrid_mesh_result
+    generated = []
+
+    def observe(geometry, **options):
+        generated.append(options["strategy"])
+        return generate(geometry, **options)
+
+    monkeypatch.setattr(recovery, "generate_hybrid_mesh_result", observe)
     model = _nonextruded_coons()
     result = generate_automatic_mesh_result(model,strategy='auto',target_size=.5,
         order='linear',native_backend='python',structural_preparation=False)
     assert result.status == 'ready' and result.selected_method == 'auto'
     assert result.attempts[0]['error_type'] == 'NativeSurfaceUnsupported'
+    assert generated == ["auto"]
 
 
 def test_coons_recovery_propagates_callback_resolution_error(monkeypatch):
@@ -175,15 +185,15 @@ def test_coons_recovery_propagates_callback_resolution_error(monkeypatch):
     attempts = []
 
     def callback(phase):
-        if phase == "inside native hint":
+        if phase == "inside automatic candidate":
             raise failure
 
-    def run_hint(geometry, **options):
+    def run_candidate(geometry, **options):
         attempts.append(options["strategy"])
-        options["cancellation_check"]("inside native hint")
+        options["cancellation_check"]("inside automatic candidate")
 
-    monkeypatch.setattr(recovery, "generate_hybrid_mesh_result", run_hint)
+    monkeypatch.setattr(recovery, "generate_hybrid_mesh_result", run_candidate)
     with pytest.raises(_SourceCellResolutionRequired) as raised:
         generate_automatic_mesh_result(_nonextruded_coons(), strategy="auto", target_size=.5,
                                        cancellation_check=callback)
-    assert raised.value is failure and attempts == ["native"]
+    assert raised.value is failure and attempts == ["auto"]

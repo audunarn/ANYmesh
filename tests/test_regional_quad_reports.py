@@ -49,3 +49,28 @@ def test_q5_transports_only_published_node_ids():
     assert report['moved_node_ids'] == local['moved_node_ids'] == [30]
     assert local['transition_quality']['global_moved_node_ids'] == [30]
     assert local['resident_moved_node_ids'] == local['transition_quality']['moved_node_ids'] == [3]
+
+
+def test_edge_aligned_seed_counts_survive_sparse_numbering():
+    from anygeometry import GeometryModel
+    from anymesher.hybrid import generate_hybrid_mesh_result
+    from anymesher.quad.options import QuadMeshingOptions
+    from anymesher.regional_update import remap_mesh_ids
+
+    geometry = GeometryModel()
+    face = geometry.add_plate(geometry.add_points([(0,0,0), (1,0,0), (1,1,0), (0,1,0)]))
+    mesh = generate_hybrid_mesh_result(geometry, target_size=.25, face_ids=(face,),
+                                       quad_options=QuadMeshingOptions(), layout_policy="adaptive").mesh
+    seed = mesh.hybrid_diagnostics["front"]["faces"][face]["edge_aligned_seed"]
+    nodes = {n: 101 + 2*n for n in mesh.nodes}
+    elements = {e: 501 + 3*e for e in mesh.shells}
+    numbered = remap_mesh_ids(mesh, nodes, elements)
+    assert numbered.hybrid_diagnostics["front"]["faces"][face]["edge_aligned_seed"] == seed
+    assert set(numbered.shells) == set(elements.values())
+    seed["unregistered_node_ids"] = [1]
+    with pytest.raises(MeshError, match="unknown or missing fields"):
+        remap_mesh_ids(mesh, nodes, elements)
+    del seed["unregistered_node_ids"]
+    seed["tensor_cells"] = -1
+    with pytest.raises(MeshError, match="non-negative"):
+        remap_mesh_ids(mesh, nodes, elements)

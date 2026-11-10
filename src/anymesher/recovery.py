@@ -170,12 +170,16 @@ def _attempt_options(
 
 
 def _straight_sided_coons_faces(geometry, selected):
-    """Identify ordinary four-sided Coons panels eligible for the automatic retry."""
+    """Whether the selection consists entirely of explicit bilinear, untrimmed panels."""
     from anygeometry import CoonsSurface
     from anygeometry.curves import Straight
+    if selected is not None and any(f not in geometry.faces for f in selected):
+        return False
     faces = [geometry.faces[f] for f in (geometry.faces if selected is None else selected)]
     return bool(faces) and all(
         type(face.surface) is CoonsSurface and face.surface.has_boundaries
+        and all(len(side) == 2 for side in (face.surface.bottom, face.surface.right,
+                                           face.surface.top, face.surface.left))
         and face.parameterization is None and not face.holes and len(face.loop) == 4
         and all(type(geometry.edges[u.edge].curve) is Straight for u in face.loop)
         for face in faces)
@@ -372,7 +376,16 @@ def generate_automatic_mesh_result(
     inspectable_result: HybridMeshResult | None = None
     inspectable_method: str | None = None
     inspection_reason: str | None = None
-    for recipe_index, (method, recipe) in enumerate(recipes):
+    if native_hint and _straight_sided_coons_faces(geometry, first.get("face_ids")):
+        # The speculative recipe targets analytic trims and topology-backed sweeps.
+        # A plain bilinear panel goes directly to its independently certified Auto recipe.
+        check_budget("automatic meshing: native")
+        first_recoverable = NativeSurfaceUnsupported(
+            "native analytic-trim preflight found only untrimmed straight-sided Coons panels")
+        attempts.append({"method": "native", "status": "rejected", "error_type": "NativeSurfaceUnsupported",
+                         "reason": str(first_recoverable), "problem_element_ids": []})
+        recipes = recipes[1:]
+    for method, recipe in recipes:
         check_budget(f"automatic meshing: {method}")
         # No deadline adds no executable callback to owner proofs. Only the
         # owner's exact live signal is passive; arbitrary callables retain the
@@ -386,18 +399,8 @@ def generate_automatic_mesh_result(
             # arbitrary caller code after the engine's final proof frontier.
             check_budget("automatic meshing candidate complete", invoke_callback=False)
         except MeshError as error:
-            from ._material_region_binding import _SourceCellResolutionRequired
             if error is callback_error:
                 raise
-            if (native_hint and recipe_index == 0 and isinstance(error, _SourceCellResolutionRequired)
-                    and _straight_sided_coons_faces(geometry, first.get("face_ids"))):
-                # The guessed frontal recipe cannot certify its source cells;
-                # the independent automatic candidate is still attempted.
-                unsupported = NativeSurfaceUnsupported(
-                    "speculative native analytic recipe cannot resolve source "
-                    f"cells for this support: {error}")
-                unsupported.__cause__ = error
-                error = unsupported
             mapped_rejection = (
                 method == "mapped"
                 and str(error).startswith("explicit mapped strategy")
