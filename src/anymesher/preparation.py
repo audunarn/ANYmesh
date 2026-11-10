@@ -893,11 +893,12 @@ def prepare_structural_closure(
     if reuse_working_copy and no_automatic and owned:
         working = geometry
     elif no_automatic and owned:
+        from anygeometry import clone_prepared_geometry, has_current_intersection_preparation
         from ._material_region_binding import face_requires_curvilinear
-        if any(face_requires_curvilinear(geometry, face) for face in source_faces):
-            # Only the geometry owner's genuine clone boundary can issue
-            # source correspondence; an ordinary clone grants none.
-            from anygeometry import clone_prepared_geometry
+        # A prepared partition already has an owner proof. Its trimmed
+        # descendants need not have the four sides of the authored tensor.
+        if (has_current_intersection_preparation(geometry, face_ids=source_faces)
+                or any(face_requires_curvilinear(geometry, face) for face in source_faces)):
             working = clone_prepared_geometry(geometry)
         else:
             working = geometry.clone(include_features=False, preserve_identity=reuse_working_copy)
