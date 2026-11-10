@@ -1129,6 +1129,10 @@ class OwnerBaselineReceipt:
     revision: int
     digest: str
     verified: bool
+    # "present": the owner exists in this revision (an ownership receipt).
+    # "absent": the issuing owner attests the component does not exist in this
+    # revision (the old side of a birth, the new side of a death).
+    state: str = "present"
 
 
 @dataclass(frozen=True)
@@ -1137,11 +1141,17 @@ class CrossRevisionAuthority:
 
     ``old_receipts``/``new_receipts``: per component owner, verified baselines in the
     previous and replacement revisions.  ``changed_owners`` are the components whose
-    elements are replaced; every other owner must have equal old/new digests.
-    ``unchanged_geometry_keys`` is the validated outside-association equivalence:
-    per kind (vertex/edge/face/sheet/member) the geometry keys retained outside
-    the region that denote the same entity in both revisions.  ``edge_owner`` maps
-    geometry edge -> owner, to find the edges whose seed may change.
+    elements are regenerated; every other owner must have equal old/new digests.
+    ``added_owners`` are born in the replacement revision (old receipt: verified
+    *absent* in the previous revision, new receipt: present); ``removed_owners`` die
+    (old receipt present, new receipt verified *absent*).  A removed owner's elements
+    are retired and it may own no replacement element.  ``replacement_element_owner``
+    maps every replacement (temporary) element id to its owner and must cover exactly
+    the changed and added owners.  ``unchanged_geometry_keys`` is the validated
+    outside-association equivalence: per kind (vertex/edge/face/sheet/member) the
+    geometry keys retained outside the region that denote the same entity in both
+    revisions.  ``edge_owner`` maps geometry edge -> owner, to find the edges whose
+    seed may change.
     """
 
     old_receipts: Mapping[Any, OwnerBaselineReceipt]
@@ -1149,21 +1159,48 @@ class CrossRevisionAuthority:
     changed_owners: FrozenSet[Any]
     unchanged_geometry_keys: Mapping[str, FrozenSet[int]] = field(default_factory=dict)
     edge_owner: Optional[Mapping[int, Any]] = None
+    added_owners: FrozenSet[Any] = frozenset()
+    removed_owners: FrozenSet[Any] = frozenset()
+    replacement_element_owner: Optional[Mapping[int, Any]] = None
 
     def __post_init__(self) -> None:
-        if not self.changed_owners:
-            raise MeshError("cross-revision authority names no changed owner")
+        changed = frozenset(self.changed_owners)
+        added, removed = frozenset(self.added_owners), frozenset(self.removed_owners)
+        if not (changed or added or removed):
+            raise MeshError("cross-revision authority names no changed, added or removed owner")
+        if changed & added or changed & removed or added & removed:
+            raise MeshError("an owner cannot be changed, added and removed at once (ambiguous lineage)")
         for kind in self.unchanged_geometry_keys:
             if kind not in _KINDS:
                 raise MeshError(f"unknown geometry key kind {kind!r}")
+        mapping = self.replacement_element_owner
+        if mapping is not None:
+            if not isinstance(mapping, Mapping):
+                raise MeshError("replacement_element_owner must be a mapping")
+            stray = set(mapping.values()) - (changed | added)
+            if stray:
+                raise MeshError(
+                    f"replacement elements are owned by owners that are neither changed nor added: "
+                    f"{sorted(map(repr, stray))[:6]}"
+                )
+            if set(mapping.values()) != (changed | added):
+                raise MeshError("replacement_element_owner must give every changed and added owner elements")
+        elif added or removed:
+            raise MeshError("an added or removed owner needs an explicit replacement_element_owner map")
 
 
 def _check_authority(
     authority: CrossRevisionAuthority, previous: Mesh, replacement: Mesh, owners: Set[Any]
 ) -> None:
-    if not authority.changed_owners <= owners:
-        raise MeshError("changed_owners name owners that own no previous element")
-    for owner in owners:
+    changed, added, removed = (
+        frozenset(authority.changed_owners), frozenset(authority.added_owners),
+        frozenset(authority.removed_owners),
+    )
+    if not (changed | removed) <= owners:
+        raise MeshError("changed_owners/removed_owners name owners that own no previous element")
+    if added & owners:
+        raise MeshError("added_owners already own previous elements; the lineage is ambiguous")
+    for owner in owners | added:
         for side, receipts, mesh in (
             ("old", authority.old_receipts, previous),
             ("new", authority.new_receipts, replacement),
@@ -1180,7 +1217,13 @@ def _check_authority(
                 raise MeshError(f"{side} baseline receipt of owner {owner!r} does not match the {side} mesh")
             if not isinstance(receipt.digest, str) or not receipt.digest:
                 raise MeshError(f"{side} baseline receipt of owner {owner!r} has no digest")
-        if owner not in authority.changed_owners and (
+            absent = (side == "old" and owner in added) or (side == "new" and owner in removed)
+            if receipt.state != ("absent" if absent else "present"):
+                raise MeshError(
+                    f"{side} baseline receipt of owner {owner!r} must state "
+                    f"{'absence' if absent else 'presence'}, not {receipt.state!r}"
+                )
+        if owner not in changed and owner not in added and owner not in removed and (
             authority.old_receipts[owner].digest != authority.new_receipts[owner].digest
         ):
             raise MeshError(f"retained owner {owner!r} changed between revisions; it must be in changed_owners")
@@ -1421,7 +1464,20 @@ def assemble_regional_replacement(
         if {_as_int(k, "owner key") for k in owner_of_element} != prev_elements:
             raise MeshError("owner_of_element must cover exactly every element of the previous mesh")
         _check_authority(cross_revision, previous, replacement, set(owner_of_element.values()))
-        owned = {int(k) for k, o in owner_of_element.items() if o in cross_revision.changed_owners}
+        creators = frozenset(cross_revision.changed_owners) | frozenset(cross_revision.added_owners)
+        reo = cross_revision.replacement_element_owner
+        if reo is None and len(creators) > 1:
+            raise MeshError("several changed/added owners need an explicit replacement_element_owner map")
+        if reo is not None and {_as_int(k, "replacement owner key") for k in reo} != rep_elements:
+            raise MeshError("replacement_element_owner must cover exactly every replacement element")
+        if not creators and rep_elements:
+            raise MeshError("a pure removal must have an empty replacement")
+        if creators and not rep_elements:
+            raise MeshError("the replacement has no elements for the changed/added owners")
+        owned = {
+            int(k) for k, o in owner_of_element.items()
+            if o in cross_revision.changed_owners or o in cross_revision.removed_owners
+        }
         if affected_element_ids is not None and {_as_int(e, "affected id") for e in affected_element_ids} != owned:
             raise MeshError("affected_element_ids disagree with the changed owners' elements")
         affected = owned
@@ -1440,7 +1496,8 @@ def assemble_regional_replacement(
         if source_owner is not None or affected_element_ids is None:
             raise MeshError("give affected_element_ids, or owner_of_element together with source_owner")
         affected = {_as_int(e, "affected id") for e in affected_element_ids}
-    if not affected:
+    pure_add = cross_revision is not None and bool(cross_revision.added_owners)
+    if not affected and not pure_add:
         raise MeshError("the affected selection is empty")
     if not affected <= prev_elements:
         raise MeshError(f"affected elements not in previous mesh: {sorted(affected - prev_elements)[:8]}")
@@ -1449,7 +1506,8 @@ def assemble_regional_replacement(
     changed_edges = {_as_int(e, "seed_changed_edges item") for e in (seed_changed_edges or ())}
     if cross_revision is not None and cross_revision.edge_owner is not None:
         changed_edges |= {
-            int(e) for e, o in cross_revision.edge_owner.items() if o in cross_revision.changed_owners
+            int(e) for e, o in cross_revision.edge_owner.items()
+            if o in cross_revision.changed_owners or o in cross_revision.added_owners
         }
 
     # -- topology outside the region
@@ -1523,12 +1581,39 @@ def assemble_regional_replacement(
     if clash:
         raise MeshError(f"new node ids reuse existing ids {sorted(clash)[:8]}")
     rep_conn = _element_nodes(rep)
-    if not rep_conn:
+    pure_removal = (
+        cross_revision is not None and bool(cross_revision.removed_owners)
+        and not cross_revision.changed_owners and not cross_revision.added_owners
+    )
+    if not rep_conn and not pure_removal:
         raise MeshError("the replacement has no elements")
     clash = [e for e in rep_conn if e in prev_elements]
     if clash:
         raise MeshError(f"new element ids reuse existing ids {sorted(clash)[:8]}")
     used = set().union(*rep_conn.values())
+    added_keys: Dict[str, Set[int]] = {kind: set() for kind in _KINDS}
+    if cross_revision is not None and cross_revision.added_owners:
+        reo = cross_revision.replacement_element_owner or {}
+        owner_of_new = {element_ids[int(t)]: o for t, o in reo.items()}
+        born = {e for e, o in owner_of_new.items() if o in cross_revision.added_owners}
+        born_nodes = set().union(*(rep_conn[e] for e in born)) if born else set()
+        other_nodes = set().union(*(rep_conn[e] for e in rep_conn if e not in born)) if len(born) < len(rep_conn) else set()
+        if born_nodes & set(iface.values()) or born_nodes & other_nodes or born_nodes & prev_nodes:
+            raise MeshError("an added owner shares nodes with retained or regenerated mesh; it must be disjoint")
+        keep = np.array([previous.nodes[n] for n in prev_nodes - retired_nodes], dtype=float).reshape(-1, 3)
+        for node in born_nodes:
+            if keep.size and bool(np.any(np.all(np.abs(keep - np.asarray(rep.nodes[node], dtype=float)) <= tol, axis=1))):
+                raise MeshError(f"added owner node {node} coincides with a retained node; it is not disjoint")
+        for name, kind in (("elements_of_face", "face"), ("elements_of_edge", "edge"), ("elements_of_sheet", "sheet")):
+            for key, seq in getattr(rep, name).items():
+                holders = {owner_of_new[int(e)] for e in seq if int(e) in owner_of_new}
+                if not holders & cross_revision.added_owners:
+                    continue
+                if holders - cross_revision.added_owners:
+                    raise MeshError(f"{name}[{key}] is shared by an added and another owner; lineage is ambiguous")
+                if key in getattr(previous, name):
+                    raise MeshError(f"added owner reuses {kind} key {key} that the previous mesh already holds")
+                added_keys[kind].add(int(key))
     if not interface_perm <= used:
         raise MeshError("the replacement leaves interface nodes unused; topology would be incomplete")
 
@@ -1682,6 +1767,12 @@ def assemble_regional_replacement(
         previous.seeding, replacement.seeding, changed_edges, set(drop["edge"])
     )
     if cross_revision is not None:
+        for kind in _KINDS:
+            contradiction = drop[kind] & set(cross_revision.unchanged_geometry_keys.get(kind, ()))
+            if contradiction:
+                raise MeshError(f"retired {kind} keys {sorted(contradiction)[:8]} are also attested as unchanged")
+            if drop[kind] & added_keys[kind]:
+                raise MeshError(f"retired {kind} keys are reused by an added owner; lineage is ambiguous")
         for kind, keys in retained.items():
             attested = set(cross_revision.unchanged_geometry_keys.get(kind, ()))
             missing = keys - attested
@@ -1727,6 +1818,18 @@ def assemble_regional_replacement(
                 f"replacement scaled Jacobian {q.min_scaled_jacobian:.4g} below {quality.min_scaled_jacobian}"
             )
 
+    if cross_revision is not None:
+        # Certify the whole assembled result, retained elements included.
+        _validate_structure(asm, "assembled mesh")
+        shells = Mesh(order=asm.order)
+        shells.nodes = asm.nodes
+        shells.quads = dict(asm.quads)
+        shells.tris = dict(asm.tris)
+        if shells.quads or shells.tris:
+            full = verify_mesh_quality(shells)
+            if (not np.isfinite((full.min_scaled_jacobian, full.max_aspect_ratio, full.max_warp)).all()
+                    or full.min_scaled_jacobian <= 0):
+                raise MeshError("the assembled mesh contains a degenerate, inverted or non-finite shell")
     return RegionalAssembly(
         mesh=asm,
         retained_node_ids=tuple(sorted(set(prev_nodes) - retired_nodes)),

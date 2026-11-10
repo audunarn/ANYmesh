@@ -1002,3 +1002,203 @@ def test_fully_retired_geometry_keys_of_removed_owner_are_dropped():
     with pytest.raises(MeshError):  # unknown key
         assemble_regional_replacement(
             two_part_mesh(), r, retired_geometry_keys={"vertex": [11, 99], "member": [40]}, **kw)
+
+
+# ------------------------------------------------- pure birth / pure death of an owner
+
+
+def state_receipts(revision, spec):
+    """spec: owner -> (digest, state)."""
+    return {o: OwnerBaselineReceipt(o, "model-a", revision, d, True, s) for o, (d, s) in spec.items()}
+
+
+def death_authority(**over):
+    base = dict(
+        old_receipts=state_receipts(1, {"A": ("a0", "present"), "B": ("b0", "present")}),
+        new_receipts=state_receipts(2, {"A": ("a0", "present"), "B": ("gone", "absent")}),
+        changed_owners=frozenset(), removed_owners=frozenset({"B"}),
+        replacement_element_owner={},
+        unchanged_geometry_keys={"vertex": frozenset({10}), "face": frozenset({30})},
+    )
+    base.update(over)
+    return CrossRevisionAuthority(**base)
+
+
+def empty_replacement(revision=2):
+    return Mesh(geometry_model_id="model-a", geometry_revision=revision)
+
+
+DEATH_KW = dict(quality=LIMITS, node_ids={}, element_ids={}, owner_of_element=OWNERS,
+                retired_geometry_keys={"vertex": [11], "member": [40]})
+
+
+def test_pure_deletion_retires_only_the_removed_owner_with_an_empty_replacement():
+    prev = two_part_mesh()
+    res = assemble_regional_replacement(
+        prev, empty_replacement(), cross_revision=death_authority(), **DEATH_KW)
+    m = res.mesh
+    assert res.retired_element_ids == (3, 4) and res.retired_node_ids == (11, 12, 13)
+    assert res.new_element_ids == () and res.new_node_ids == ()
+    assert m.quads == prev.quads and m.tris == prev.tris and not m.beams
+    assert set(m.nodes) == {1, 2, 3, 4, 5, 6, 7}
+    assert m.node_of_vertex == {10: 1} and m.elements_of_face == {30: [1, 2, 5]}
+    assert m.geometry_revision == 2
+    assert res.dropped_geometry_keys == {"vertex": (11,), "member": (40,)}
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["undeclared_loss", "unknown_retired_key", "retained_key_retired", "present_new_receipt",
+     "no_absence_receipt_revision", "retired_but_attested"],
+)
+def test_pure_deletion_refusals(case):
+    kw = dict(DEATH_KW)
+    authority_ = death_authority()
+    if case == "undeclared_loss":
+        kw["retired_geometry_keys"] = {"vertex": [11]}
+    elif case == "unknown_retired_key":
+        kw["retired_geometry_keys"] = {"vertex": [11, 99], "member": [40]}
+    elif case == "retained_key_retired":
+        kw["retired_geometry_keys"] = {"vertex": [10, 11], "member": [40]}
+    elif case == "present_new_receipt":
+        authority_ = death_authority(
+            new_receipts=state_receipts(2, {"A": ("a0", "present"), "B": ("b1", "present")}))
+    elif case == "no_absence_receipt_revision":
+        authority_ = death_authority(
+            new_receipts=state_receipts(3, {"A": ("a0", "present"), "B": ("gone", "absent")}))
+    elif case == "retired_but_attested":
+        authority_ = death_authority(unchanged_geometry_keys={
+            "vertex": frozenset({10, 11}), "face": frozenset({30})})
+    with pytest.raises(MeshError):
+        assemble_regional_replacement(
+            two_part_mesh(), empty_replacement(), cross_revision=authority_, **kw)
+
+
+def test_empty_replacement_is_refused_without_a_removed_owner():
+    with pytest.raises(MeshError, match="no elements"):
+        assemble_regional_replacement(
+            two_part_mesh(), empty_replacement(1), quality=LIMITS, node_ids={}, element_ids={},
+            affected_element_ids=[3, 4])
+    # changed (regenerated) owners must come back with elements
+    changed = CrossRevisionAuthority(
+        old_receipts=receipts(), new_receipts=receipts(revision=2, digests={"A": "a0", "B": "b1"}),
+        changed_owners=frozenset({"B"}),
+        unchanged_geometry_keys={"vertex": frozenset({10}), "face": frozenset({30})})
+    with pytest.raises(MeshError):
+        assemble_regional_replacement(
+            two_part_mesh(), empty_replacement(), quality=LIMITS, node_ids={}, element_ids={},
+            owner_of_element=OWNERS, cross_revision=changed, retired_geometry_keys={"vertex": [11]})
+
+
+def far_chain() -> Mesh:
+    r = Mesh(geometry_model_id="model-a", geometry_revision=2)
+    r.nodes = {1: xyz(0, 50, 0), 2: xyz(1, 50, 0), 3: xyz(2, 50, 0)}
+    r.beams = {1: (1, 2), 2: (2, 3)}
+    r.nodes_of_member = {41: [1, 2, 3]}
+    r.elements_of_member = {41: [1, 2]}
+    r.node_of_vertex = {12: 3}
+    return r
+
+
+def birth_authority(**over):
+    base = dict(
+        old_receipts=state_receipts(1, {"A": ("a0", "present"), "B": ("b0", "present"),
+                                        "C": ("none", "absent")}),
+        new_receipts=state_receipts(2, {"A": ("a0", "present"), "B": ("b0", "present"),
+                                        "C": ("c0", "present")}),
+        changed_owners=frozenset(), added_owners=frozenset({"C"}),
+        replacement_element_owner={1: "C", 2: "C"},
+        unchanged_geometry_keys={"vertex": frozenset({10, 11}), "face": frozenset({30}),
+                                 "member": frozenset({40})},
+    )
+    base.update(over)
+    return CrossRevisionAuthority(**base)
+
+
+BIRTH_KW = dict(quality=LIMITS, node_ids={1: 101, 2: 102, 3: 103}, element_ids={1: 201, 2: 202},
+                owner_of_element=OWNERS)
+
+
+def test_pure_addition_retires_nothing_and_uses_fresh_numbers():
+    prev = two_part_mesh()
+    res = assemble_regional_replacement(prev, far_chain(), cross_revision=birth_authority(), **BIRTH_KW)
+    m = res.mesh
+    assert res.retired_element_ids == () and res.retired_node_ids == ()
+    assert res.retained_element_ids == tuple(sorted(OWNERS)) and res.interface_node_ids == ()
+    assert set(prev.nodes) <= set(m.nodes) and set(prev.beams) <= set(m.beams)
+    assert m.beams[201] == (101, 102) and m.node_of_vertex == {10: 1, 11: 13, 12: 103}
+    assert m.nodes_of_member == {40: [11, 12, 13], 41: [101, 102, 103]}
+    assert res.dropped_geometry_keys == {}
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["owner_exists", "added_and_changed", "added_and_removed", "present_old_receipt",
+     "absent_new_receipt", "no_owner_map", "reused_key", "coincident_node", "uncovered_owner"],
+)
+def test_pure_addition_refusals(case):
+    kw = dict(BIRTH_KW)
+    replacement = far_chain()
+    if case == "owner_exists":      # an existing owner cannot be born again
+        kw["cross_revision"] = birth_authority(
+            added_owners=frozenset({"B"}), replacement_element_owner={1: "B", 2: "B"})
+    elif case == "added_and_changed":
+        with pytest.raises(MeshError):
+            birth_authority(changed_owners=frozenset({"C"}))
+        return
+    elif case == "added_and_removed":
+        with pytest.raises(MeshError):
+            birth_authority(removed_owners=frozenset({"C"}))
+        return
+    elif case == "present_old_receipt":
+        kw["cross_revision"] = birth_authority(old_receipts=state_receipts(
+            1, {"A": ("a0", "present"), "B": ("b0", "present"), "C": ("c0", "present")}))
+    elif case == "absent_new_receipt":
+        kw["cross_revision"] = birth_authority(new_receipts=state_receipts(
+            2, {"A": ("a0", "present"), "B": ("b0", "present"), "C": ("none", "absent")}))
+    elif case == "no_owner_map":
+        with pytest.raises(MeshError):
+            birth_authority(replacement_element_owner=None)
+        return
+    elif case == "uncovered_owner":
+        kw["cross_revision"] = birth_authority(replacement_element_owner={1: "C"})
+    elif case == "reused_key":   # the new owner claims a member the old mesh already holds
+        replacement.nodes_of_member = {40: [1, 2, 3]}
+        replacement.elements_of_member = {40: [1, 2]}
+    elif case == "coincident_node":  # sits exactly on retained node 11
+        replacement.nodes[1] = xyz(10, 0, 0)
+    kw.setdefault("cross_revision", birth_authority())
+    with pytest.raises(MeshError):
+        assemble_regional_replacement(two_part_mesh(), replacement, **kw)
+
+
+def test_simultaneous_death_and_birth_uses_disjoint_keys_and_refuses_overlap():
+    authority_ = CrossRevisionAuthority(
+        old_receipts=state_receipts(1, {"A": ("a0", "present"), "B": ("b0", "present"),
+                                        "C": ("none", "absent")}),
+        new_receipts=state_receipts(2, {"A": ("a0", "present"), "B": ("gone", "absent"),
+                                        "C": ("c0", "present")}),
+        changed_owners=frozenset(), removed_owners=frozenset({"B"}), added_owners=frozenset({"C"}),
+        replacement_element_owner={1: "C", 2: "C"},
+        unchanged_geometry_keys={"vertex": frozenset({10}), "face": frozenset({30})},
+    )
+    kw = dict(BIRTH_KW, retired_geometry_keys={"vertex": [11], "member": [40]})
+    res = assemble_regional_replacement(two_part_mesh(), far_chain(), cross_revision=authority_, **kw)
+    assert res.retired_element_ids == (3, 4) and res.new_element_ids == (201, 202)
+    assert set(res.mesh.nodes) == {1, 2, 3, 4, 5, 6, 7, 101, 102, 103}
+    # the new owner takes over a key that the removed owner retires: lineage is ambiguous
+    chain = far_chain()
+    chain.nodes_of_member, chain.elements_of_member = {40: [1, 2, 3]}, {40: [1, 2]}
+    with pytest.raises(MeshError):
+        assemble_regional_replacement(two_part_mesh(), chain, cross_revision=authority_, **kw)
+    # ...or lands exactly on the vacated nodes
+    chain = far_chain()
+    chain.nodes[1] = xyz(10, 0, 0)
+    with pytest.raises(MeshError):
+        assemble_regional_replacement(two_part_mesh(), chain, cross_revision=authority_,
+                                      **dict(kw, node_ids={1: 11, 2: 102, 3: 103}))
+
+
+def test_removed_owner_cannot_own_replacement_elements():
+    with pytest.raises(MeshError):
+        death_authority(replacement_element_owner={1: "B"})
