@@ -144,6 +144,48 @@ file-launched worker explicitly; ordinary import analysis cannot infer it.
 Real-provider feasibility, installed cross-repository consumption, independent
 review and release gates remain root-owned and are reported separately.
 
+## Structured rectangular-box lattice (provider-free)
+
+```python
+from anymesher import generate_structured_box_mesh
+
+mesh = generate_structured_box_mesh(
+    snapshot, target_edge_length=0.1, layers=4, boundary_tolerance=1e-6, cancel=None)
+```
+
+This is an explicit, deterministic route for one orthogonal rectangular-box solid
+region. It never calls `pytetwild`, does not touch the process/native capability
+gate and leaves the `generate_volume_mesh` signature and `backend='pytetwild'`
+default unchanged.
+
+- The two in-plane profile axes (`x1-x0`, `x3-x0`) are divided independently into
+  `ceil(length / target_edge_length)` intervals, so no axis edge exceeds the
+  target. `layers` is the exact positive integer number of cell layers along the
+  extrusion axis (`x4-x0`). Sizes and `layers` are never adjusted.
+- Nodes are the trilinear interpolation of the snapshot's eight corners, so
+  corners are bit-exact and offset, rotated, reversed-winding and negative
+  extrusion snapshots are handled from the snapshot geometry itself.
+- Every hexahedron is split into six Tet4s around its main diagonal (Kuhn
+  subdivision), which is conforming across all neighbours. Orientation follows the
+  frame handedness; the swap count recorded in provenance is zero.
+- Publication uses the same admitted-array path as the provider route: canonical
+  rows and IDs, `validate_cells`, geometric ownership/coverage of every
+  `start`/`end`/`side_i` source face, all overlapping source groups and the source
+  model/revision/region/signature provenance. `validate_volume_mesh` re-admits the
+  result. Provenance adds `structured_box` (divisions, edge lengths, box lengths).
+- Errors: `InvalidVolumeMesh` for non-positive/non-finite/boolean sizes, invalid
+  `layers`, bad tolerance, malformed snapshots and lattices exceeding the
+  resource guards (`MAX_STRUCTURED_BOX_CELLS` = 120000 Tet4s and
+  `MAX_STRUCTURED_BOX_AXIS_DIVISIONS` = 4096, checked before allocation);
+  `UnsupportedVolumeGeometry` for non-box topology (triangular/polygonal,
+  trapezoidal or oblique profiles, unexpected face layout);
+  `VolumeMeshingCancelled` for cancellation during generation, admission or just
+  before publication. Nothing escapes on refusal.
+
+The guard limits protect allocation and admission time; they are not scalability
+or qualification claims. `tests/test_structured_box.py` holds independent volume,
+coverage, outward-normal, rotation and persistence consumer checks.
+
 ## Headless controlled consumer example
 
 [`examples/solid_volume_controlled.py`](../examples/solid_volume_controlled.py)

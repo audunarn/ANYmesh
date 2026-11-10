@@ -5,6 +5,10 @@ on:
     paths:
       - '.github/workflows/solid-volume.yml'
       - 'src/anymesher/volume.py'
+      - 'src/anymesher/structured_box.py'
+      - 'src/anymesher/regional_mapped.py'
+      - 'tests/test_structured_box.py'
+      - 'tests/test_regional_mapped_arc.py'
       - 'src/anymesher/_volume*.py'
       - 'tests/test_volume*.py'
       - 'tests/test_installed_volume_example.py'
@@ -26,7 +30,7 @@ permissions:
 env:
   # One immutable owner identity feeds both validation and checkout. Dispatch
   # always validates its supplied input; PRs use the locally tested candidate.
-  CANDIDATE_GEOMETRY_REF: ${{ github.event_name == 'pull_request' && 'b98362f8738f93c59be642f88ffc5289921f68d4' || inputs.geometry_ref }}
+  CANDIDATE_GEOMETRY_REF: ${{ github.event_name == 'pull_request' && '33dfbaad89a76dd9e925fd6c628602213ce8c2b8' || inputs.geometry_ref }}
   OMP_NUM_THREADS: '1'
   OPENBLAS_NUM_THREADS: '1'
   MKL_NUM_THREADS: '1'
@@ -96,7 +100,7 @@ jobs:
           python -I -m pytest -q -o pythonpath= tests/test_workflow2_native_operations.py --junitxml=native-kernels.xml
           python -I -c "import xml.etree.ElementTree as E; t=E.parse('native-kernels.xml'); cases=t.findall('.//testcase'); assert len(cases)==2; assert all(c.find(k) is None for c in cases for k in ('failure','error','skipped')); assert all(int(s.get(k,'0'))==0 for s in t.findall('.//testsuite') for k in ('failures','errors','skipped'))"
       - name: Installed consumer and controlled process contracts
-        run: python -I -m pytest -q -o pythonpath= tests/test_volume_mesh.py tests/test_volume_process.py tests/test_volume_consumer.py tests/test_installed_volume_example.py --junitxml=volume-contracts.xml
+        run: python -I -m pytest -q -o pythonpath= tests/test_structured_box.py tests/test_regional_mapped_arc.py tests/test_volume_mesh.py tests/test_volume_process.py tests/test_volume_consumer.py tests/test_installed_volume_example.py --junitxml=volume-contracts.xml
       - run: python -m pip check
       - name: Retain candidate artifacts and diagnostics
         if: always()
