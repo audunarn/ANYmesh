@@ -637,8 +637,8 @@ def publish_model_closure_mesh_to_source(source, closure, mesh, *, cancellation_
         tables['elements_of_sheet'] = remap(mesh.elements_of_sheet, maps['sheet'])
         for name in ('elements_of_member', 'nodes_of_member'):
             tables[name] = remap(getattr(mesh, name), maps['member'])
+        from ._source_seeding_publication import project_source_seeding, source_size_field_metadata
         if mesh.seeding is not None:
-            from ._source_seeding_publication import project_source_seeding
             tables['seeding'] = project_source_seeding(
                 source, mesh, receipt, edge_maps, boundary_tables['nodes_of_edge'])
         # Stage metadata before changing any caller-owned association table.
@@ -655,9 +655,8 @@ def publish_model_closure_mesh_to_source(source, closure, mesh, *, cancellation_
             'prepared_model_id': str(prepared.model_id),
             'prepared_seeding': (None if mesh.seeding is None else {
                 'divisions': dict(mesh.seeding.divisions), 'classes': dict(mesh.seeding.classes)}),
-            'source_seeding_size_field': (None if mesh.seeding is None or mesh.seeding.size_field is None else {
-                'kind': 'uniform', 'target_size': mesh.seeding.size_field.target_size,
-                'source_model_id': str(source.model_id)}),
+            'source_seeding_size_field': source_size_field_metadata(
+                source, None if mesh.seeding is None else tables['seeding'].size_field),
             'edge_parameter_maps': [(current.id, original.id, str(lo), str(hi))
                                     for current, original, lo, hi in receipt.edge_parameter_maps]}
         preparation['closure_source_transfer'] = {

@@ -2272,7 +2272,8 @@ def _mesh_native_face_once(
         native_outer, protected_input_rows, chart_transform, holes=native_holes,
         constraints=native_constraints, pinned=native_pinned, order=order,
         declared=declared_junction_edges, mapped=_nurbs_tensor,
-        recombine=recombine)
+        recombine=recombine, size_field=size_field, owner_zones=_owner_size_zone_count,
+        cancellation_check=cancellation_check)
     if _nurbs_tensor and retained is None:
         tensor_core = _try_parametric_tensor(
             geometry, face_id, native_outer, native_holes, native_constraints, native_pinned,
@@ -2758,7 +2759,7 @@ def _mesh_native_face_once(
         _material_region_binding.record_curvilinear_rows(uv, core_to_global)
         _material_region_binding.certify_curvilinear_published(mesh, boundary_registry, cancellation_check)
         if retained is not None:
-            stage_reused_source_face(_material_region_binding, face_id)
+            stage_reused_source_face(_material_region_binding, face_id, core, core_to_global, mesh)
     if _material_region_binding is not None:
         _material_region_binding.validate(cancellation_check)
         region = _material_region_binding.region

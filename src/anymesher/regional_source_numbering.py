@@ -97,7 +97,56 @@ def _trace_provenance(record, nm, em):
 
 _MATERIAL_FACE_FIELDS = {'native_v2','material_region','analytic_physical_quality',
                          'material_region_final_physical_quality','detached_material_evaluations',
-                         'parametric_tensor', 'parametric_tensor_quality', 'parametric_tensor_refusal'}
+                         'parametric_tensor', 'parametric_tensor_quality', 'parametric_tensor_refusal',
+                         'initial_curvature_size_zones', 'source_cell_resolution'}
+
+
+def _approximation_report(record):
+    """The approximation policy reports geometry handles, never mesh labels."""
+    integer, string, boolean = regional._as_int, regional._string, regional._boolean
+    optional = regional._nullable
+    contact = {'version': integer, 'intent': string, 'face_ids': [integer],
+               'source_model_id': string, 'source_checksum': string, 'definition_checksum': string}
+    local = {'version': integer, 'definition_checksum': string, 'source_checksum': string,
+             'source_model_id': string, 'clearance_face_ids': [integer], 'contact_intent': boolean,
+             'conditional': boolean, 'contact_pairs': [[integer]], 'contacts': [contact],
+             'sweep_unions': [{'face_ids': [integer], 'seam_count': integer, 'definition_checksum': string}]}
+    schema = {
+        **dict.fromkeys(('effective_error', 'relative_accuracy', 'reference_scale', 'maximum_error',
+                         'policy_floor'), optional(regional._finite)),
+        **dict.fromkeys(('connect_intent', 'floor_limited', 'cap_limited'), boolean),
+        'mode': string, 'adaptation': string, 'face_ids': [integer], 'clearance_face_ids': [integer],
+        'scale_definition': optional(string),
+        'source': {'model_id': string, 'revision': integer, 'source_checksum': string},
+        'local_field': optional(lambda value, path: regional._validate_report(value, path, local)),
+    }
+    regional._validate_report(record, 'geometry_approximation', schema)
+    return deepcopy(record)
+
+
+def _recovery_report(record):
+    """Recovery names source faces, methods and option values, all independent of mesh labels."""
+    string, count, finite = regional._string, regional._count, regional._finite
+    structured = {
+        'preference': string, 'allow_detached_partition': regional._boolean,
+        **dict.fromkeys(('max_element_growth', 'minimum_size_ratio', 'maximum_size_ratio'), finite),
+        **dict.fromkeys(('maximum_radial_sides', 'maximum_candidates_per_component', 'maximum_face_records',
+                         'maximum_blocks', 'maximum_edge_records', 'maximum_estimated_elements',
+                         'maximum_divisions_per_edge'), count),
+        'quality_policy': dict.fromkeys(('minimum_scaled_jacobian', 'maximum_aspect_ratio', 'minimum_angle',
+                                         'maximum_angle', 'maximum_warpage'), finite),
+    }
+    native = {'schema': string, 'point_placement': string, 'metric_mode': string, 'metric_field': None,
+              'max_insertions': count, 'max_topology_operations': count, 'cancellation_interval': count}
+    def optional_options(schema):
+        return regional._nullable(lambda value, path: regional._validate_report(value, path, schema))
+    regional._validate_report(record, 'curvilinear_recovery', {
+        **dict.fromkeys(('requested_strategy', 'reason', 'selected_method', 'effective_strategy'), string),
+        'geometry_approximation_error': finite, 'source_faces': [count], 'nurbs_tensor_faces': [count],
+        'recombine': regional._boolean, 'native_options': optional_options(native),
+        'native_surface_options': optional_options(structured), 'structured_options': optional_options(structured),
+    })
+    return deepcopy(record)
 
 
 def _face_reports(reports, nm):
@@ -109,6 +158,13 @@ def _face_reports(reports, nm):
                                  set(regional._NATIVE_FACE_REPORT) | _MATERIAL_FACE_FIELDS)
         if unexpected:
             raise MeshError(f'unknown source face generation report: {sorted(unexpected)}')
+        if 'initial_curvature_size_zones' in row:
+            regional._count(row['initial_curvature_size_zones'], 'initial_curvature_size_zones')
+        if 'source_cell_resolution' in row:
+            regional._validate_report(row['source_cell_resolution'], 'source_cell_resolution', {
+                'refinement_retries': regional._count, 'localized_failure_zones': regional._count,
+                'interior_scale': regional._finite,
+            })
         translated = set()
         for native in (row.get('native_v2', {}), row.get('native_diagnostics', {}).get('native_v2', {})):
             for station in native.get('shared_nodes', ()):
@@ -140,6 +196,8 @@ def remap_source_mesh_ids(mesh, node_ids, element_ids, *, source_geometry):
     provenance = header.structural_preparation.pop('prepared_boundary_provenance', None)
     closure = header.structural_preparation.pop('closure_source_transfer', None)
     faces = header.hybrid_diagnostics.pop('triangulation_backend_by_face', None)
+    approximation = header.hybrid_diagnostics.pop('geometry_approximation', None)
+    recovery = header.hybrid_diagnostics.pop('curvilinear_recovery', None)
     error = header.hybrid_diagnostics.pop('geometry_approximation_error', None)
     prep, diagnostics, _ = regional._process_metadata(header, 'source mesh', ids)
     if provenance is not None:
@@ -148,6 +206,10 @@ def remap_source_mesh_ids(mesh, node_ids, element_ids, *, source_geometry):
         prep['closure_source_transfer'] = deepcopy(closure)
     if faces is not None:
         diagnostics['triangulation_backend_by_face'] = _face_reports(faces, nm)
+    if approximation is not None:
+        diagnostics['geometry_approximation'] = _approximation_report(approximation)
+    if recovery is not None:
+        diagnostics['curvilinear_recovery'] = _recovery_report(recovery)
     if error is not None:
         diagnostics['geometry_approximation_error'] = error
     result = regional._translate(mesh, nm, em, prep, diagnostics)

@@ -10,6 +10,51 @@ from anymesher.serialize import mesh_from_dict, mesh_to_dict
 from test_model_closure_source_publication import qualified_closure_publication_operands
 
 
+def test_curvature_zone_and_retry_diagnostics_are_counts_and_scales():
+    from anymesher.regional_source_numbering import _face_reports
+
+    report = {'initial_curvature_size_zones': 3, 'source_cell_resolution': {
+        'refinement_retries': 1, 'localized_failure_zones': 2, 'interior_scale': .5}}
+    assert _face_reports({7: report}, {1: 101, 2: 203, 3: 307}) == {7: report}
+    with pytest.raises(MeshError):
+        _face_reports({7: {'initial_curvature_size_zones': -1}}, {})
+    report['source_cell_resolution']['node_id'] = 4
+    with pytest.raises(MeshError):
+        _face_reports({7: report}, {})
+
+
+def test_automatic_approximation_report_keeps_only_its_geometry_namespace():
+    from anymesher.approximation_policy import resolve_geometry_approximation
+    from anymesher.regional_source_numbering import _approximation_report
+    from test_regional_source_generation import patch
+
+    source, face, _ = patch('nurbs')
+    issued = resolve_geometry_approximation(source, (face,)).to_dict()
+    copied = _approximation_report(issued)
+    assert copied == issued and copied['face_ids'] == [face]
+    issued['local_field']['unexpected_node_id'] = 3
+    with pytest.raises(MeshError, match='undocumented|unknown|schema|fields'):
+        _approximation_report(issued)
+
+
+def test_curved_recovery_transports_only_source_handles_and_documented_options():
+    from anymesher.recovery import _record_curvilinear_recovery
+    from anymesher.regional_source_numbering import _recovery_report
+    from anymesher.native_v2 import NativeMeshingOptions
+    from anymesher.structured import StructuredMeshingOptions
+
+    result = SimpleNamespace(mesh=SimpleNamespace(hybrid_diagnostics={}))
+    _record_curvilinear_recovery(result, dict(requested_strategy='auto', reason='curved source',
+        geometry_approximation_error=.02, source_faces=[3], nurbs_tensor_faces=[3]), 'native',
+        dict(strategy='native', recombine=True, native_options=NativeMeshingOptions(),
+             _native_surface_options=StructuredMeshingOptions()))
+    report = result.mesh.hybrid_diagnostics['curvilinear_recovery']
+    assert _recovery_report(report) == report
+    report['native_surface_options']['quality_policy']['element_id'] = 3
+    with pytest.raises(MeshError, match='unknown'):
+        _recovery_report(report)
+
+
 def test_structured_source_grid_requires_every_directed_cell_and_identity_chart():
     from anymesher.material_source_transfer import _source_face_grids
 
