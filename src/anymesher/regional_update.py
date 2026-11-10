@@ -285,8 +285,10 @@ class _Ids:
     """
 
     def __init__(self, nodes: Set[int], elements: Set[int], tris: Set[int],
-                 nm: Optional[Dict[int, int]] = None, em: Optional[Dict[int, int]] = None) -> None:
+                 nm: Optional[Dict[int, int]] = None, em: Optional[Dict[int, int]] = None,
+                 *, quads=()) -> None:
         self.nodes, self.elements, self.tris, self.nm, self.em = nodes, elements, tris, nm, em
+        self.shells = self.tris.union(quads)
 
     def node(self, value: Any, what: str) -> int:
         made = _as_int(value, what)
@@ -298,6 +300,12 @@ class _Ids:
         made = _as_int(value, what)
         if made not in (self.tris if triangle else self.elements):
             raise MeshError(f"{what} {made} is not a {'triangle' if triangle else 'element'} of the mesh; metadata is stale")
+        return made if self.em is None else self.em[made]
+
+    def shell(self, value, what):
+        made = _as_int(value, what)
+        if made not in self.shells:
+            raise MeshError(f"{what} {made} is not a shell of the mesh; metadata is stale")
         return made if self.em is None else self.em[made]
 
 
@@ -1027,7 +1035,7 @@ def _x_qualified_s3(value: Any, ids: _Ids, where: str) -> Any:
 
     normals = {}
     for key, vec in _mapping(record["element_owner_normals"], f"{where}.element_owner_normals").items():
-        normals[ids.element(_idkey(key), f"{where}.element_owner_normals key", True)] = _vec3(vec, f"{where}.element_owner_normals[{key}]")
+        normals[ids.shell(_idkey(key), f"{where}.element_owner_normals key")] = _vec3(vec, f"{where}.element_owner_normals[{key}]")
     sources = {}
     for key, src in _mapping(record["element_owner_sources"], f"{where}.element_owner_sources").items():
         src = _mapping(src, f"{where}.element_owner_sources[{key}]")
@@ -1037,7 +1045,7 @@ def _x_qualified_s3(value: Any, ids: _Ids, where: str) -> Any:
         for name in ("face_use_ids", "sheet_ids"):
             for item in _list(src[name], f"{where}.{name}"):
                 _as_int(item, f"{where}.{name} item")  # geometry ids
-        sources[ids.element(_idkey(key), f"{where}.element_owner_sources key", True)] = copy.deepcopy(dict(src))
+        sources[ids.shell(_idkey(key), f"{where}.element_owner_sources key")] = copy.deepcopy(dict(src))
     nodal = {}
     for key, vec in _mapping(record["nodal_normals"], f"{where}.nodal_normals").items():
         nodal[ids.node(_idkey(key), f"{where}.nodal_normals key")] = _vec3(vec, f"{where}.nodal_normals[{key}]")
@@ -1140,13 +1148,19 @@ def _process_metadata(mesh: Mesh, label: str, ids: _Ids) -> Tuple[Dict[Any, Any]
                 # A join assembles component data, but its producer does not
                 # publish a joined shell qualification for native triangles.
                 raise MeshError(f"{label} full renumber supports mapped parallel plate joins only")
+        from ._regional_quad_reports import quad_first_fields
+        quad_report = quad_first_fields(record, ids, mesh)
+        hybrid_out.update(quad_report)
         for key in record:
-            if not isinstance(key, str) or (key not in _HYBRID_SCHEMA and key not in _HYBRID_ID_SCHEMA):
+            if not isinstance(key, str) or (key not in _HYBRID_SCHEMA and key not in _HYBRID_ID_SCHEMA
+                                            and key not in quad_report):
                 raise MeshError(
                     f"{label} hybrid_diagnostics.{key!r} has no explicit schema; refusing to "
                     "translate or retain it (full rebuild required)"
                 )
         for key in record:
+            if key in quad_report:
+                continue
             try:
                 if key in _HYBRID_ID_SCHEMA:
                     hybrid_out[key] = _HYBRID_ID_SCHEMA[key](record[key], ids)
@@ -1165,7 +1179,7 @@ def _process_metadata(mesh: Mesh, label: str, ids: _Ids) -> Tuple[Dict[Any, Any]
 def _validate_metadata(mesh: Mesh, label: str, nodes: Set[int], elements: Set[int]) -> Tuple[str, ...]:
     """Refuse metadata outside the explicit schemas; return the evidence keys present."""
 
-    ids = _Ids(nodes, elements, {int(k) for k in mesh.tris})
+    ids = _Ids(nodes, elements, {int(k) for k in mesh.tris}, quads=mesh.quads)
     return _process_metadata(mesh, label, ids)[2]
 
 
@@ -1180,6 +1194,9 @@ MESH_ID_BEARING_METADATA = (
     "structural_preparation.structured_layout.quality",
     "hybrid_diagnostics.structured_quality",
     "hybrid_diagnostics.automation",
+    "hybrid_diagnostics.q5",
+    "hybrid_diagnostics.quadratic_promotion",
+    "hybrid_diagnostics.high_order_geometry",
 )
 SPLICE_RECOMPUTE_METADATA = MESH_ID_BEARING_METADATA + (
     "hybrid_diagnostics.parallel",
@@ -1188,6 +1205,10 @@ SPLICE_RECOMPUTE_METADATA = MESH_ID_BEARING_METADATA + (
     "hybrid_diagnostics.certifiable",
     "hybrid_diagnostics.structured_layout_status",
     "hybrid_diagnostics.triangulation_backend_by_face",
+    "hybrid_diagnostics.front",
+    "hybrid_diagnostics.q4",
+    "hybrid_diagnostics.validation",
+    "hybrid_diagnostics.t3_angle_rule",
     "hybrid_diagnostics.runtime",
     "structural_preparation.structured_layout.diagnostics",
     "hybrid_diagnostics.phase_seconds",
@@ -1323,7 +1344,7 @@ def remap_mesh_ids(mesh: Mesh, node_ids: Mapping[int, int], element_ids: Mapping
     nodes, elements = _validate_structure(mesh, "mesh", allow_zero=True)
     nm = _check_map("node_ids", node_ids, nodes)
     em = _check_map("element_ids", element_ids, elements)
-    ids = _Ids(nodes, elements, {int(k) for k in mesh.tris}, nm, em)
+    ids = _Ids(nodes, elements, {int(k) for k in mesh.tris}, nm, em, quads=mesh.quads)
     preparation, diagnostics, _ = _process_metadata(mesh, "mesh", ids)  # validates even for identity
     if all(k == v for k, v in nm.items()) and all(k == v for k, v in em.items()):
         return _detached_identity(mesh)

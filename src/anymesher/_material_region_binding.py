@@ -334,8 +334,27 @@ def _is_source_cell_resolution_request(error, cells, error_limit, *, geometry=No
                     and cell.face.model_id == geometry.model_id for cell in cells))
 
 
-def face_requires_curvilinear(geometry, face_id):
-    """Routing hint only; the geometry owner still proves the material chart."""
+def polynomial_tensor_chart(geometry, face_id):
+    """Return the geometry owner's exact tensor chart for an authored polynomial face."""
+    from anygeometry import CoonsSurface, ExtrudedSurface
+    from anygeometry.surfaces import RuledSurface
+    from anygeometry.curves import Straight
+    face = geometry.faces[face_id]
+    if type(face.surface) not in (ExtrudedSurface, RuledSurface, CoonsSurface):
+        return None
+    if (type(face.surface) is CoonsSurface and not face.surface.has_boundaries
+            and all(type(geometry.edges[use.edge].curve) is Straight for use in face.loop)):
+        return None
+    # Older geometry owners cannot supply this proof. Existing raw NURBS
+    # sweeps have their own admission below.
+    try:
+        from anygeometry import source_tensor_chart
+    except ImportError:
+        return None
+    return source_tensor_chart(geometry, face_id)
+
+
+def _existing_curvilinear_face(geometry, face_id):
     from anygeometry.nurbs import NurbsSurface, NurbsCurve
     from anygeometry import Plane, CoonsSurface
     from anygeometry.support_curves import PlaneNurbsCurve
@@ -351,6 +370,27 @@ def face_requires_curvilinear(geometry, face_id):
     return isinstance(face.surface, Plane) and any(
         isinstance(geometry.edges[use.edge].curve, PlaneNurbsCurve)
         for loop in (face.loop, *face.holes) for use in loop)
+
+
+def face_requires_curvilinear(geometry, face_id):
+    """Routing hint only; the geometry owner still proves the material chart."""
+    return (_existing_curvilinear_face(geometry, face_id)
+            or polynomial_tensor_chart(geometry, face_id) is not None)
+
+
+def generation_curvilinear_faces(geometry, selected):
+    """Keep mixed analytic structural preparations on their established route.
+
+    A tensor-only generation transports every selected source face. A mixed
+    selection may create material subregions and shared physical constraints
+    during preparation; its existing generation path owns that operation.
+    """
+    selected = tuple(selected)
+    existing = tuple(face for face in selected if _existing_curvilinear_face(geometry, face))
+    other = set(selected).difference(existing)
+    if other and all(polynomial_tensor_chart(geometry, face) is not None for face in other):
+        return selected
+    return existing
 
 
 def region_requires_curvilinear(region):
@@ -1722,8 +1762,9 @@ def prepare_material_regions(geometry, native_faces, source_to_final_faces, *,
         from anygeometry.nurbs import NurbsSurface
     except ImportError:
         return {}
+    curvilinear = set(generation_curvilinear_faces(geometry, native_faces))
     selected = tuple(face for face in native_faces
-                     if (face_requires_curvilinear(geometry, face)
+                     if (face in curvilinear
                          or (isinstance(geometry.faces[face].surface, ExtrudedSurface)
                              and geometry.faces[face].parameterization is None)))
     if not selected:
@@ -1732,9 +1773,11 @@ def prepare_material_regions(geometry, native_faces, source_to_final_faces, *,
     for authored, descendants in source_to_final_faces.items():
         for face in descendants:
             preimages.setdefault(int(face), set()).add(int(authored))
+    tensor_options = ({'source_tensors': True} if any(
+        polynomial_tensor_chart(geometry, face) is not None for face in curvilinear) else {})
     collection = query_material_surface_regions(
         geometry, selected, expected_revision=geometry.revision,
-        cancellation_check=cancellation_check)
+        cancellation_check=cancellation_check, **tensor_options)
     from .approximation_policy import _ACTIVE_LOCAL_FIELD
     active=_ACTIVE_LOCAL_FIELD.get()
     allocation=None

@@ -817,6 +817,23 @@ def _tri_mesh():
     return m
 
 
+@pytest.mark.parametrize("label", [1, 2, 3])
+def test_s3_owner_normals_cover_quads_and_refuse_beams_and_couplings(label):
+    mesh = _tri_mesh()
+    s3 = _s3_admitted(4, (1, 2, 7))
+    s3['element_owner_normals'][str(label)] = [0., 0., 1.]
+    s3['element_owner_sources'][str(label)] = dict(s3['element_owner_sources']['4'])
+    mesh.structural_preparation = _production_preparation(s3)
+    nm, em = {**NM, 7: 107}, {**EM, 4: 14}
+    if label != 1:
+        with pytest.raises(MeshError, match='not a shell'):
+            remap_mesh_ids(mesh, nm, em)
+    else:
+        out = remap_mesh_ids(mesh, nm, em).structural_preparation['qualified_s3']
+        assert set(out['element_owner_normals']) == set(out['element_owner_sources']) == {'11', '14'}
+        assert out['element_ids'] == [14]
+
+
 def test_admitted_s3_record_translates_every_mesh_id_and_keeps_geometry_ids():
     m = _tri_mesh()
     m.structural_preparation = _production_preparation(_s3_admitted(4, (1, 2, 7)))

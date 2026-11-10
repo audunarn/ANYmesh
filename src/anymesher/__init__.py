@@ -397,10 +397,13 @@ _REGIONAL_UPDATE_EXPORTS = frozenset({
     "CrossRevisionAuthority", "OwnerBaselineReceipt", "STRUCTURED_QUALITY_COUNT_FIELDS",
     "assemble_regional_replacement", "remap_mesh_ids",
 })
-__all__ += sorted(_REGIONAL_UPDATE_EXPORTS | {"remesh_mapped_region", "remesh_region"})
+__all__ += sorted(_REGIONAL_UPDATE_EXPORTS | {"remesh_mapped_region", "remesh_region", "remap_source_mesh_ids", "validate_numbered_source_mesh"})
 
 
 def __getattr__(name: str):
+    if name in {"remap_source_mesh_ids", "validate_numbered_source_mesh"}:
+        from . import regional_source_numbering
+        return getattr(regional_source_numbering, name)
     # Lazy: importing the package does not load the regional-update module.
     if name in _REGIONAL_UPDATE_EXPORTS:
         from . import regional_update

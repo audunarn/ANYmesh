@@ -9,6 +9,33 @@ from ._material_region_binding import face_requires_curvilinear, region_requires
 _IDENTITY_PUBLICATIONS = {}
 
 
+def _source_face_grids(mesh, receipt):
+    """Carry an unsplit tensor lattice only through an identical source chart."""
+    import numpy as np
+
+    if mesh.block_grids_of_face:
+        raise MeshError('split source publication does not qualify structured grid transport')
+    single = {children[0].id: parent.id for parent, children in receipt.source_to_prepared_faces
+              if len(children) == 1}
+    identity = ((1, 0, 0), (0, 1, 0))
+    same_chart = {child.id for parent, child, chart in receipt.chart_correspondence
+                  if chart == identity and single.get(child.id) == parent.id}
+    changed_chart = {child.id for _, child, chart in receipt.chart_correspondence if chart != identity}
+    grids = {}
+    for face, raw in mesh.grid_of_face.items():
+        grid = np.asarray(raw)
+        if (face not in same_chart or face in changed_chart or grid.ndim != 2
+                or min(grid.shape) < 2 or grid.dtype.kind not in 'iu'
+                or np.unique(grid).size != grid.size):
+            raise MeshError('split source publication does not qualify structured grid transport')
+        cells = np.stack((grid[:-1, :-1], grid[1:, :-1], grid[1:, 1:], grid[:-1, 1:]), axis=-1)
+        expected = [mesh.quads.get(e) for e in mesh.elements_of_face[face]]
+        if [tuple(row) for row in cells.reshape(-1, 4)] != expected:
+            raise MeshError('structured source grid differs from the proved oriented Q4 cells')
+        grids[single[face]] = grid.copy()
+    return grids
+
+
 
 class _ClosurePublicationQualification:
     """Invocation-local opaque identity; copying/serde issues no authority."""
@@ -272,6 +299,10 @@ def _validate_identity_source_publication(source, prepared, mesh, registry):
 
 def _validated_curvilinear_reference_uv(geometry, mesh):
     """Actual owner-proved cell reference points for physical normal evaluation."""
+    from .regional_source_numbering import numbered_reference_uv
+    numbered = numbered_reference_uv(geometry, mesh)
+    if numbered is not None:
+        return numbered
     from anygeometry import validate_prepared_material_curvilinear_cells_binding
     from ._material_region_binding import (curvilinear_reference_candidates,
         curvilinear_reference_registry, boundary_registry_pin,
@@ -576,9 +607,8 @@ def publish_model_closure_mesh_to_source(source, closure, mesh, *, cancellation_
         tables = {}
         for name in ('elements_of_face', 'thickness_of_face'):
             tables[name] = remap(getattr(mesh, name), face_map, aggregate=name == 'elements_of_face')
-        if mesh.grid_of_face or mesh.block_grids_of_face:
-            raise MeshError('split source publication does not qualify structured grid transport')
-        tables['grid_of_face'], tables['block_grids_of_face'] = {}, {}
+        tables['grid_of_face'] = _source_face_grids(mesh, receipt) if mesh.grid_of_face or mesh.block_grids_of_face else {}
+        tables['block_grids_of_face'] = {}
         station_transport = None
         from fractions import Fraction
         if any(parent is not None and Fraction(float(t)) != t
@@ -664,6 +694,10 @@ def publish_model_closure_mesh_to_source(source, closure, mesh, *, cancellation_
                     working_owner, prepared, working_receipt,
                     cell_receipts=tuple(item[3] for item in candidates))
         _validate_identity_source_publication(source, prepared, mesh, registry)
+        from .regional_source_numbering import remember_source_publication
+        remember_source_publication(mesh)
+        from .regional_source_faces import confirm_reused_source_faces
+        confirm_reused_source_faces(source, mesh)
         return mesh
     except BaseException:
         snapshot.restore()

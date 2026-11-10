@@ -99,7 +99,7 @@ def resolve_geometry_approximation(geometry, faces=None, *, geometry_approximati
     """
     if type(connect_intent) is not bool:raise MeshError('CONNECT intent must be an explicit boolean')
     import anygeometry as owner
-    from ._material_region_binding import face_requires_curvilinear, checked_geometry_approximation_error
+    from ._material_region_binding import generation_curvilinear_faces, checked_geometry_approximation_error
     if geometry_approximation_error is not None and policy is not None:
         raise MeshError('geometry_approximation_error and automatic policy are mutually exclusive')
     scalar = checked_geometry_approximation_error(geometry_approximation_error)
@@ -116,7 +116,7 @@ def resolve_geometry_approximation(geometry, faces=None, *, geometry_approximati
         result = GeometryApproximationResolution(scalar, 'explicit', selected,
             None, None, None, None, False, False, source)
     else:
-        curved = tuple(face for face in selected if face_requires_curvilinear(geometry, face))
+        curved = generation_curvilinear_faces(geometry, selected)
         if curved:
             scale = owner.query_trim_enclosure_scale(geometry, curved, cancellation_check=cancellation_check)
             if scale.source != source:
@@ -205,9 +205,9 @@ def _resolve_public_approximation(function):
             faces = tuple(faces)
             options['face_ids'] = faces
         from .hybrid import _face_ids
-        from ._material_region_binding import face_requires_curvilinear
+        from ._material_region_binding import generation_curvilinear_faces
         selected = _face_ids(geometry, faces)
-        if not any(face_requires_curvilinear(geometry, face) for face in selected):
+        if not generation_curvilinear_faces(geometry, selected):
             if policy is not None:
                 if type(policy) is dict:
                     GeometryApproximationPolicy.from_dict(policy)
