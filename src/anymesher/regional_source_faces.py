@@ -62,17 +62,19 @@ def independent_source_faces(model):
 
 
 def active_source_trim(source):
-    """True only during generation for the currently validated source trim request."""
+    """Use the source route while a validated new or retained hole is staged."""
     active = _ACTIVE.get()
-    return (active is not None and active[0] is source and bool(active[7])
-            and active[4][source][0] == source.revision and source._transaction_journal is None)
+    return (active is not None and active[0] is source and source in active[4]
+            and active[4][source][0] == source.revision and source._transaction_journal is None
+            and (bool(active[7]) or any(data.get('hole_edges') for data in active[1].values())))
 
 
 def _face_signature(model, face_id, native, *, outer_only=False):
     """Pin the complete retained rectangle, its occurrences and numerical policy."""
     from anygeometry.definition_binding import definition_checksum
     face = model.faces[face_id]
-    edges = tuple(model.edges[u.edge] for u in face.loop)
+    loops = (face.loop,) if outer_only else (face.loop, *face.holes)
+    edges = tuple(model.edges[u.edge] for loop in loops for u in loop)
     vertex_ids = {v for e in edges for v in (e.start, *getattr(e.curve,'control_vertices',()), e.end)}
     vertices = tuple(model.vertices[v] for v in sorted(vertex_ids))
     uses = tuple(model.face_uses[u] for u in sorted(model._face_structural_uses.get(face_id, ())))
@@ -101,8 +103,20 @@ def capture_reusable_source_faces(source, mesh):
     from . import material_source_transfer as transfer
     from .regional_source_numbering import _original
     from ._material_region_binding import straight_source_plane
+    from anygeometry.nurbs import CurveOnSurface, NurbsCurve, _IDENTITY
     vertex_faces = _vertex_faces(source)
-    faces = [f for f in source.faces if _ordinary_face(source, f, vertex_faces)]
+    faces = []
+    for f, definition in source.faces.items():
+        if not _ordinary_face(source, f, vertex_faces, trim=True):
+            continue
+        if definition.holes:
+            ring, = definition.holes
+            curves = [source.edges[u.edge].curve for u in ring]
+            if len(ring) != 4 or not all(type(c) is CurveOnSurface and c.support == definition.surface
+                                         and c.transform == _IDENTITY and type(c.pcurve) is NurbsCurve
+                                         and c.pcurve.degree == 1 and len(c.pcurve.controls) == 2 for c in curves):
+                continue
+        faces.append(f)
     if not faces or all(straight_source_plane(source, f) for f in faces):
         return {}
     original, _ = _original(mesh, source)
@@ -127,15 +141,19 @@ def capture_reusable_source_faces(source, mesh):
         ordered = sorted(nodes)
         local = {node: row for row, node in enumerate(ordered)}
         rim = []
-        for use in source.faces[face].loop:
-            entries = original.boundary_registry.entries(use.edge)
-            rim.append([use.edge, [[float(item.key.parameter), local[int(item.node_id)]] for item in entries]])
+        definition = source.faces[face]
+        for loop in (definition.loop, *definition.holes):
+            for use in loop:
+                entries = original.boundary_registry.entries(use.edge)
+                rim.append([use.edge, [[float(item.key.parameter), local[int(item.node_id)]] for item in entries]])
         grid = original.grid_of_face.get(face)
         data = {'source': str(source.model_id), 'revision': source.revision,
                 'face_checksum': _face_signature(source, face, native[face]), 'face': face, 'rim': rim,
                 'node_rows': [nodes[n] for n in ordered],
                 'cells': [[local[n] for n in cell] for cell in shell],
                 'grid': None if grid is None else [[local[int(n)] for n in column] for column in grid]}
+        if definition.holes:
+            data['hole_edges'] = [use.edge for use in definition.holes[0]]
         result[str(face)] = {'data': data, 'digest': _digest(data)}
     return result
 
@@ -189,10 +207,15 @@ def reuse_source_faces(source, candidates, *, point_patches=None, trim_patches=N
                 if (record['digest'] != _digest(data) or type(data['face']) is not int
                         or str(data['face']) != key or data['source'] != str(source.model_id)
                         or data['face'] not in source.faces or not _ordinary_face(source, data['face'], vertex_faces,
-                                                                                  trim=data['face'] in trims)
+                                                                                  trim=data['face'] in trims or bool(data.get('hole_edges')))
                         or data['face_checksum'] != _face_signature(source, data['face'], native[data['face']],
                                                                   outer_only=data['face'] in trims)):
                     raise MeshError('retained source-face proposal differs from its source')
+                if data.get('hole_edges'):
+                    holes = source.faces[data['face']].holes
+                    if (data['face'] in trims or len(holes) != 1
+                            or data['hole_edges'] != [u.edge for u in holes[0]]):
+                        raise MeshError('retained source-face proposal differs from its authored hole')
                 # Detach from caller-owned dictionaries across generation callbacks.
                 checked[data['face']] = json.loads(json.dumps(data, allow_nan=False))
             except MeshError:
@@ -231,9 +254,10 @@ def retained_core(geometry, face, binding, mesh, registry, outer, protected, tra
     source, proposals, _, _, incidence, lineages, patches, trims = active
     if geometry not in incidence or incidence[geometry][0] != geometry.revision:
         incidence[geometry] = (geometry.revision, _vertex_faces(geometry))
+    retained_hole = bool(proposals[face].get('hole_edges'))
     if (binding is None or not binding.requires_curvilinear or binding.face_ids != {face}
-            or not _ordinary_face(geometry, face, incidence[geometry][1], trim=face in trims) or protected is None
-            or (bool(holes) and not (face in trims and len(holes)==1))
+            or not _ordinary_face(geometry, face, incidence[geometry][1], trim=face in trims or retained_hole) or protected is None
+            or (bool(holes) and not ((face in trims or retained_hole) and len(holes)==1))
             or any(len(c) for c in constraints) or len(pinned) or order != 'linear' or mapped == 'required'):
         if face in patches or face in trims:
             raise MeshError('requested source patch lacks its original generation inputs')

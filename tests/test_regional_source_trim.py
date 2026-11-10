@@ -1,5 +1,6 @@
 """Fresh material publication of a curved chart with an aligned hole."""
 from copy import deepcopy
+from dataclasses import replace
 import json
 
 import numpy as np
@@ -99,6 +100,99 @@ def test_aligned_hole_admits_the_exact_exterior(monkeypatch, divisions):
     assert not cancelled['trimmed_faces']
 
 
+def test_tilted_hole_across_a_central_two_by_two_builds_one_conforming_annulus(monkeypatch):
+    model, face, sheet = patch('nurbs')
+    target = .17  # minimal fixture: the parent cells already meet the nominal target (1/6 is the expanded case below)
+    def generate(owner_model, **options):
+        closure = owner.extract_model_closure(owner_model,(owner_model.handle('sheet',sheet),))
+        token = qualify_model_closure_source_publication(owner_model, closure)
+        mesh = generate_hybrid_mesh_result(closure.working_model, target_size=target, strategy='auto',
+            geometry_approximation_error=.0125, structural_preparation=False, native_backend='python',
+            mutation_policy='working_copy', **options).mesh
+        publish_model_closure_mesh_to_source(owner_model, closure, mesh, qualification=token)
+        return mesh
+    parent = generate(model)
+    assert len(parent.quads) == 36 and not parent.tris
+    records = json.loads(json.dumps(capture_reusable_source_faces(model,parent)))
+    record = records[str(face)]
+    assert record['data']['grid'] is None  # the grid must be derived from oriented incidence and rim chains
+    model = owner.from_dict(owner.to_dict(model))
+    def cut_hole(source, coordinates, counts):
+        surface = source.faces[face].surface
+        vertices = source.add_points([tuple(map(float,surface.exact_point(*p))) for p in coordinates])
+        edges = []
+        for i,p in enumerate(coordinates):
+            curve = CurveOnSurface(surface,NurbsCurve(1,(0.,0.,1.,1.),(p,coordinates[(i+1)%4])))
+            edges.append(source.add_curve(vertices[i],vertices[(i+1)%4],curve))
+        trim_face(source,face,[tuple(OrientedEdge(e,True) for e in edges)])
+        return {e:n for e,n in zip(edges,counts)}
+    base = owner.to_dict(model)
+    # This more oblique loop produced a 161-degree Q4 and exceeded the
+    # default growth limit in the four-cell footprint.
+    steep = owner.from_dict(base)
+    counts = cut_hole(steep, [(.421875,.4375),(.578125,.40625),(.59375,.5625),(.453125,.59375)], (2,2,2,2))
+    assert plan_source_face_trim(steep,record,target_size=target,overrides=counts) is None
+    hole = [(112/256,113/256),(144/256,111/256),(146/256,143/256),(114/256,145/256)]
+    for counts in ((1,1,1,1),(2,1,2,1),(2,2,2,1),(2**62,2,2**62,2)):
+        other = owner.from_dict(base)
+        rejected = cut_hole(other,hole,counts)
+        assert plan_source_face_trim(other,record,target_size=target,overrides=rejected) is None
+    controls = cut_hole(model,hole,(2,2,2,2))
+    plan = plan_source_face_trim(model,record,target_size=target,overrides=controls)
+    assert plan is not None and plan['annulus']
+    assert len(plan['replaced_cell_rows']) == 4 and len(plan['new_cells']) == 8
+    assert len(plan['interface_rows']) == 8 and len(plan['new_rows']) == 8
+    assert all(len(stations) == 3 for _, stations in plan['hole_rim'])
+    assert plan_source_face_trim(model,record,target_size=target,overrides=controls,quality={'min_angle':89.}) is None
+    from anymesher.regional_source_faces import _digest
+    from anymesher.regional_source_trim import _derive_grid
+    assert _derive_grid(model.faces[face], record['data'], None) is not None
+    for mutate in (lambda d: d['cells'].__setitem__(5, d['cells'][5][::-1]),
+                   lambda d: d['rim'][0][1].reverse(),
+                   lambda d: d['cells'].__setitem__(6, [d['cells'][6][1], d['cells'][6][0], *d['cells'][6][2:]])):
+        bad = deepcopy(record)
+        mutate(bad['data'])
+        bad['digest'] = _digest(bad['data'])
+        assert _derive_grid(model.faces[face], bad['data'], None) is None
+        assert plan_source_face_trim(model,bad,target_size=target,overrides=controls) is None
+    def cancel_grid(phase):
+        if phase == 'source trim grid derivation':
+            raise RuntimeError('cancel grid')
+    with pytest.raises(RuntimeError,match='cancel grid'):
+        plan_source_face_trim(model,record,target_size=target,overrides=controls,cancellation_check=cancel_grid)
+    altered = deepcopy(plan)
+    altered['new_cells'].reverse()
+    with pytest.raises(MeshError,match='planned cut'):
+        with reuse_source_faces(model,records,trim_patches={str(face):altered}):
+            pytest.fail('altered multi-cell annulus was accepted')
+    from anymesher import hybrid
+    def refuse(*args,**kwargs):
+        pytest.fail('multi-cell trim invoked whole-face tessellation')
+    monkeypatch.setattr(hybrid, 'mesh_planar_surface', refuse)
+    monkeypatch.setattr(hybrid, '_try_parametric_tensor', refuse)
+    with reuse_source_faces(model,records,trim_patches={str(face):plan}) as stats:
+        child = generate(model,overrides=controls)
+    issued = stats['trimmed_faces'][face]
+    assert issued['annulus'] and len(issued['kept_cell_rows']) == 32
+    assert set(issued['new_cell_ids']).isdisjoint(issued['kept_cell_rows'].values())
+    assert len(child.shells) == len(parent.shells) - 4 + 8
+    assert set(_validated_curvilinear_reference_uv(model, child)) == set(child.shells)
+    # Same hole vertices and geometric locus, different authored station map.
+    # A retained face must bind each inner edge as well as the outer perimeter.
+    retained = capture_reusable_source_faces(model, child)
+    different = owner.from_dict(owner.to_dict(model))
+    edge = different.edges[min(controls)]
+    changed = replace(edge.curve.pcurve, weights=(1., 2.))
+    different._put_entity('edge', replace(edge, curve=replace(edge.curve, pcurve=changed)))
+    with pytest.raises(MeshError, match='proposal differs from its source'):
+        with reuse_source_faces(different, retained):
+            pytest.fail('an edited hole was accepted for unchanged-face reuse')
+    for old,e in issued['kept_cell_rows'].items():
+        assert child.quads[e] == tuple(issued['old_node_rows'][n] for n in record['data']['cells'][old])
+    for e,stations in plan['hole_rim']:
+        assert child.nodes_of_edge[e] == [issued['new_node_rows'][n] for t,n in stations]
+
+
 @pytest.mark.parametrize('single', [False, True], ids=['default-graded','explicit-growth-2'])
 def test_non_aligned_convex_trim_builds_a_source_annulus(monkeypatch, single):
     model, face, sheet = patch('nurbs')
@@ -164,6 +258,94 @@ def test_non_aligned_convex_trim_builds_a_source_annulus(monkeypatch, single):
     issued = stats['trimmed_faces'][face]
     assert issued['annulus'] and set(issued['new_cell_ids']).isdisjoint(issued['kept_cell_rows'].values())
     assert len(child.shells)==len(parent.shells)-removed+added
+    assert set(_validated_curvilinear_reference_uv(model, child)) == set(child.shells)
+    for old,e in issued['kept_cell_rows'].items():
+        assert child.quads[e] == tuple(issued['old_node_rows'][n] for n in record['data']['cells'][old])
+    for e,stations in plan['hole_rim']:
+        assert child.nodes_of_edge[e] == [issued['new_node_rows'][n] for t,n in stations]
+
+
+def test_tilted_hole_in_the_six_by_six_refuses_unachieved_nominal_size():
+    model, face, sheet = patch('nurbs')
+    target = 1/6
+    closure = owner.extract_model_closure(model,(model.handle('sheet',sheet),))
+    token = qualify_model_closure_source_publication(model, closure)
+    parent = generate_hybrid_mesh_result(closure.working_model, target_size=target, strategy='auto',
+        geometry_approximation_error=.0125, structural_preparation=False, native_backend='python',
+        mutation_policy='working_copy').mesh
+    publish_model_closure_mesh_to_source(model, closure, parent, qualification=token)
+    record = json.loads(json.dumps(capture_reusable_source_faces(model,parent)))[str(face)]
+    model = owner.from_dict(owner.to_dict(model))
+    coordinates = [(112/256,113/256),(144/256,111/256),(146/256,143/256),(114/256,145/256)]
+    surface = model.faces[face].surface
+    vertices = model.add_points([tuple(map(float,surface.exact_point(*p))) for p in coordinates])
+    edges = [model.add_curve(vertices[i],vertices[(i+1)%4],
+                             CurveOnSurface(surface,NurbsCurve(1,(0.,0.,1.,1.),(p,coordinates[(i+1)%4]))))
+             for i,p in enumerate(coordinates)]
+    trim_face(model,face,[tuple(OrientedEdge(e,True) for e in edges)])
+    plan = plan_source_face_trim(model,record,target_size=target,overrides={e:2 for e in edges})
+    assert plan is None
+
+
+@pytest.mark.parametrize('target, expanded', [(.2, True), (.205, False)], ids=['ring-refined-.2', 'minimal-.205'])
+def test_curved_five_by_five_hole_meets_the_nominal_target_minimally_or_by_ring_refinement(monkeypatch, target, expanded):
+    model, face, sheet = patch('nurbs')
+    def generate(owner_model, **options):
+        closure = owner.extract_model_closure(owner_model,(owner_model.handle('sheet',sheet),))
+        token = qualify_model_closure_source_publication(owner_model, closure)
+        mesh = generate_hybrid_mesh_result(closure.working_model, target_size=target, strategy='auto',
+            geometry_approximation_error=.0125, structural_preparation=False, native_backend='python',
+            mutation_policy='working_copy', **options).mesh
+        publish_model_closure_mesh_to_source(owner_model, closure, mesh, qualification=token)
+        return mesh
+    parent = generate(model)
+    assert len(parent.quads) == 25 and not parent.tris
+    records = json.loads(json.dumps(capture_reusable_source_faces(model,parent)))
+    record = records[str(face)]
+    model = owner.from_dict(owner.to_dict(model))
+    coordinates = [(78/256,82/256),(82/256,128/256),(129/256,124/256),(125/256,78/256)]
+    surface = model.faces[face].surface
+    vertices = model.add_points([tuple(map(float,surface.exact_point(*p))) for p in coordinates])
+    edges = [model.add_curve(vertices[i],vertices[(i+1)%4],
+                             CurveOnSurface(surface,NurbsCurve(1,(0.,0.,1.,1.),(p,coordinates[(i+1)%4]))))
+             for i,p in enumerate(coordinates)]
+    trim_face(model,face,[tuple(OrientedEdge(e,True) for e in edges)])
+    controls = {e:2 for e in edges}
+    plan = plan_source_face_trim(model,record,target_size=target,overrides=controls)
+    assert plan is not None and plan['annulus']
+    stars, odd = divmod(len(plan['replaced_cell_rows']) - 4, 2)
+    assert not odd
+    if expanded:
+        # Each midpoint star swaps its two ring cells and two old cells for twelve cells.
+        assert stars >= 1 and len(plan['new_cells']) == 8 + 10*stars
+        assert len(plan['new_rows']) > 8
+    else:
+        assert stars == 0 and len(plan['new_cells']) == 8 and len(plan['new_rows']) == 8
+    assert all(len(stations) == 3 for _, stations in plan['hole_rim'])
+    assert plan_source_face_trim(model,record,target_size=target,overrides=controls,quality={'min_angle':89.}) is None
+    def cancel(phase):
+        if phase == 'source trim ring refinement':
+            raise RuntimeError('cancel ring refinement')
+    if expanded:
+        with pytest.raises(RuntimeError,match='cancel ring refinement'):
+            plan_source_face_trim(model,record,target_size=target,overrides=controls,cancellation_check=cancel)
+    altered = deepcopy(plan)
+    altered['interface_rows'].reverse()
+    with pytest.raises(MeshError,match='planned cut'):
+        with reuse_source_faces(model,records,trim_patches={str(face):altered}):
+            pytest.fail('wrong expanded perimeter was accepted')
+    from anymesher import hybrid
+    def refuse(*args,**kwargs):
+        pytest.fail('trim annulus invoked whole-face tessellation')
+    monkeypatch.setattr(hybrid, 'mesh_planar_surface', refuse)
+    monkeypatch.setattr(hybrid, '_try_parametric_tensor', refuse)
+    with reuse_source_faces(model,records,trim_patches={str(face):plan}) as stats:
+        child = generate(model,overrides=controls)
+    issued = stats['trimmed_faces'][face]
+    assert issued['annulus'] and set(issued['new_cell_ids']).isdisjoint(issued['kept_cell_rows'].values())
+    assert len(issued['kept_cell_rows']) == 25 - len(plan['replaced_cell_rows'])
+    assert len(issued['new_cell_ids']) == len(plan['new_cells'])
+    assert len(child.shells) == len(parent.shells) - len(plan['replaced_cell_rows']) + len(plan['new_cells'])
     assert set(_validated_curvilinear_reference_uv(model, child)) == set(child.shells)
     for old,e in issued['kept_cell_rows'].items():
         assert child.quads[e] == tuple(issued['old_node_rows'][n] for n in record['data']['cells'][old])

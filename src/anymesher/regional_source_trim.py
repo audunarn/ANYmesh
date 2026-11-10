@@ -1,6 +1,7 @@
 """Remove complete parent cells bounded by one source-authored NURBS inner loop."""
 from collections import defaultdict
 from fractions import Fraction
+from itertools import combinations
 
 import numpy as np
 
@@ -132,6 +133,89 @@ def _exact_annulus_partition(original, new, points, boundary, hole):
     return (exposed==previous and sum(map(area,new))+area(hole)==sum(map(area,original)))
 
 
+_REFINE_EVALUATIONS = 96
+
+
+def _nominal(rows, cells, limit):
+    """The app's sizing gate: some cell's longest physical side is within target + geometry tolerance."""
+    return any(max(float(np.linalg.norm(np.subtract(rows[a][1], rows[b][1]))) for a,b in _sides(c)) <= limit
+               for c in cells)
+
+
+def _refine_ring(rows, exact_uv, cells, selected, proposed, support, hole, settings, limit, check):
+    """Refine the annulus itself by midpoint stars of the once-proposed material.
+
+    Every valence-four, interior, non-hole node of the proposed annular
+    cells whose star holds only those ring cells and old cells is a candidate. The
+    old cells of a chosen star join the replaced footprint (the expanded cut then
+    has a new fixed outer boundary) and the pivot is reissued as a fresh row on the
+    support. Disjoint stars are polled in a fixed order, smallest sets first, within
+    a bounded number of evaluations. Only cells derived from ring cells (never
+    purely exterior old-cell subdivisions) are accepted as sizing proof.
+    Returns (replaced_rows, new_cells, rows, interface) or None.
+    """
+    kept = [i for i in range(len(cells)) if i not in selected]
+    material = [cells[i] for i in kept] + proposed
+    first = len(kept)
+    ring = set(range(first, len(material)))
+    stars, edge_cells = defaultdict(list), defaultdict(list)
+    for i,c in enumerate(material):
+        for a,b in _sides(c):
+            edge_cells[_edge(a,b)].append(i)
+            stars[a].append(i)
+    candidates = []
+    for pivot in sorted({n for i in ring for n in material[i]} - set(hole)):
+        star = sorted(stars[pivot])
+        if len(star) != 4 or not ring.intersection(star) or any(len(material[i]) != 4 for i in star):
+            continue
+        around = {v for i in star for v in (material[i][material[i].index(pivot)-1],
+                  material[i][(material[i].index(pivot)+1)%4])}
+        if len(around) == 4 and all(len(edge_cells[_edge(v,pivot)]) == 2 for v in around):
+            candidates.append((pivot, star))
+    tried = 0
+    for size in range(1, len(candidates)+1):
+        for subset in combinations(candidates, size):
+            tried += 1
+            if tried > _REFINE_EVALUATIONS:
+                return None
+            check_stage(check, 'source trim ring refinement')
+            used = [i for _,star in subset for i in star]
+            if len(set(used)) != len(used):
+                continue
+            fresh = list(rows)
+            mapped = [list(c) for c in material]
+            blocks = []
+            for pivot, star in subset:
+                uv = fresh[pivot][0]
+                fresh.append([list(uv), np.asarray(support.evaluate(*uv)).tolist()])
+                for i in star:
+                    mapped[i] = [len(fresh)-1 if n == pivot else n for n in mapped[i]]
+                blocks.append((len(fresh)-1, star))
+            created = _grade_blocks(fresh, mapped, blocks, support)
+            annular, position = [], 0
+            for _, star in blocks:
+                for i in star:
+                    if i in ring:
+                        annular.extend(created[3*position:3*position+3])
+                    position += 1
+            replaced = set(used)
+            annular = [c for j,c in enumerate(proposed) if first+j not in replaced] + annular
+            # Hole stations retain the authored rational pcurve evaluation.
+            # Only the additional, freely chosen interior rows use stored UV.
+            exact = exact_uv + [tuple(map(Fraction, row[0])) for row in fresh[len(rows):]]
+            footprint = set(selected) | {kept[i] for i in replaced if i < first}
+            interface = _perimeter([cells[i] for i in sorted(footprint)])
+            if interface is None or any(not _convex([exact[n] for n in c]) for c in created):
+                continue
+            result = [proposed[j] for j in range(len(proposed)) if first+j not in replaced] + created
+            if (_nominal(fresh, annular, limit)
+                    and _exact_annulus_partition([cells[i] for i in sorted(footprint)], result, exact, interface, hole)
+                    and _compact_quality(fresh, [cells[i] for i in range(len(cells)) if i not in footprint] + result,
+                                         settings)):
+                return sorted(footprint), result, fresh, interface
+    return None
+
+
 def _plan_annulus(source, data, base, by_uv, field, overrides, recombine, quality, check):
     from anygeometry.nurbs import CurveOnSurface, NurbsCurve, _IDENTITY
     from .seeding import edge_demand
@@ -238,6 +322,267 @@ def _plan_annulus(source, data, base, by_uv, field, overrides, recombine, qualit
     return None
 
 
+def _interiors_meet(p, q):
+    """Exact test for overlap of two convex counter-clockwise polygon interiors."""
+    return not (any(all(_turn(a,b,x) <= 0 for x in q) for a,b in _sides(p))
+                or any(all(_turn(a,b,x) <= 0 for x in p) for a,b in _sides(q)))
+
+
+def _derive_grid(face, data, check):
+    """Derive node and cell rows from oriented Q4 incidence and the four ordered rim chains.
+
+    Starting from the first rim chain, each step crosses the single not yet used cell
+    on the far side of every edge of the current row. Nothing is inferred from
+    coordinates. Returns None unless one complete disk, a node bijection, the
+    consistently oriented interior and every outer edge are proved.
+    """
+    cells, count = data['cells'], len(data['node_rows'])
+    try:
+        stations = {edge: s for edge, s in data['rim']}
+        chains = []
+        for use in face.loop:
+            ts, nodes = [t for t,_ in stations[use.edge]], [n for _,n in stations[use.edge]]
+            if (len(ts) < 2 or ts[0] != 0 or ts[-1] != 1
+                    or not all(a < b for a,b in zip(ts, ts[1:]))):
+                return None
+            chains.append(nodes if use.forward else nodes[::-1])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (len(chains) != 4 or len(stations) != 4 or len(data['rim']) != 4
+            or any(a[-1] != b[0] for a,b in zip(chains, (*chains[1:], chains[0])))):
+        return None
+    c0, c1, c2, c3 = chains
+    A, B = len(c0)-1, len(c1)-1
+    if len(c2) != A+1 or len(c3) != B+1 or len(cells) != A*B or any(len(c) != 4 for c in cells):
+        return None
+    incidence = defaultdict(list)
+    for row, cell in enumerate(cells):
+        if row % 256 == 0:
+            check_stage(check, 'source trim grid derivation')
+        if len(set(cell)) != 4:
+            return None
+        for a,b in _sides(cell):
+            incidence[_edge(a,b)].append((row,a,b))
+    outer = {_edge(a,b) for c in chains for a,b in zip(c, c[1:])}
+    exposed = set()
+    for edge, adjacent in incidence.items():
+        if len(adjacent) == 1:
+            exposed.add(edge)
+        elif len(adjacent) != 2 or adjacent[0][1:] != adjacent[1][:0:-1]:
+            return None
+    if exposed != outer:
+        return None
+    def beyond(cell, node, other):
+        j = cell.index(node)
+        side = [cell[(j-1)%4], cell[(j+1)%4]]
+        if other not in side:
+            return None
+        return side[0] if side[1] == other else side[1]
+    levels, used, cell_at = [list(c0)], set(), {}
+    for b in range(B):
+        check_stage(check, 'source trim grid derivation')
+        below, above = levels[-1], [None]*(A+1)
+        for i in range(A):
+            u, v = below[i], below[i+1]
+            fresh = [r for r,_,_ in incidence.get(_edge(u,v), ()) if r not in used]
+            if len(fresh) != 1:
+                return None
+            used.add(fresh[0])
+            cell_at[i,b] = fresh[0]
+            cell = cells[fresh[0]]
+            pu, pv = beyond(cell, u, v), beyond(cell, v, u)
+            if pu is None or pv is None or above[i] not in (None, pu) or above[i+1] is not None:
+                return None
+            above[i], above[i+1] = pu, pv
+        if None in above:
+            return None
+        levels.append(above)
+        if b+1 < B and (above[0] != c3[B-b-1] or above[-1] != c1[b+1]):
+            return None
+    if (levels[-1] != c2[::-1] or any(l[0] != c3[B-b] or l[-1] != c1[b] for b,l in enumerate(levels))
+            or len(used) != len(cells)):
+        return None
+    flat = [n for level in levels for n in level]
+    if len(flat) != count or set(flat) != set(range(count)):
+        return None
+    return np.asarray(levels, dtype=int).T, cell_at
+
+
+def _hole_chains(source, face, support, field, overrides, by_uv, rows, exact_new, max_divisions):
+    """Append the authored hole's actual owner stations to rows; return CCW corner-to-corner chains.
+
+    exact_new is parallel to rows and receives the exact rational UV of every appended row;
+    rows only hold the binary64 projection of it, so non-dyadic stations never leak into the proofs.
+    """
+    from anygeometry.nurbs import CurveOnSurface, NurbsCurve, _IDENTITY
+    from .hybrid import _station_parameters
+    from .seeding import edge_demand
+    local, rim, chains, fresh = {}, [], [], set()
+    if len({use.edge for use in face.holes[0]}) != 4:
+        return None
+    for use in face.holes[0]:
+        edge = source.edges[use.edge]
+        curve = edge.curve
+        if (type(curve) is not CurveOnSurface or curve.support != support or curve.transform != _IDENTITY
+                or type(curve.pcurve) is not NurbsCurve or len(curve.pcurve.controls) != 2
+                or curve.pcurve.degree != 1 or curve.pcurve.weights and len(set(curve.pcurve.weights)) != 1):
+            return None
+        count = overrides.get(edge.id)
+        if count is None:
+            count = max(1, round(edge_demand(source, edge.id, field)))
+        if type(count) is not int or not 1 <= count <= max_divisions:
+            return None
+        parameters = [float(t) for t in _station_parameters(source, edge.id, count, field)]
+        if len(parameters) != count+1 or parameters[0] != 0. or parameters[-1] != 1. or parameters != sorted(set(parameters)):
+            return None
+        stations = []
+        for k, t in enumerate(parameters):
+            p = tuple(curve.pcurve.exact_point(t))
+            key = tuple(Fraction(x) for x in p)
+            vertex = edge.start if k == 0 else edge.end if k == count else None
+            # The owner's chord record binds the literal source vertex at an
+            # endpoint and the curve's binary evaluation at an interior station.
+            xyz = list(map(float, source.vertex_position(vertex) if vertex is not None else curve.evaluate(t)))
+            row = [[float(x) for x in p], xyz]
+            name = ('v', vertex) if vertex is not None else ('s', edge.id, k)
+            if name not in local:
+                if key in by_uv or key in fresh:
+                    return None
+                fresh.add(key)
+                local[name] = len(rows)
+                rows.append(row)
+                exact_new.append(key)
+            elif rows[local[name]] != row:
+                return None
+            stations.append([t, local[name]])
+        rim.append([edge.id, stations])
+        ordered = [n for _, n in stations]
+        chains.append(ordered if use.forward else ordered[::-1])
+    if (len({name for name in local if name[0] == 'v'}) != 4
+            or any(a[-1] != b[0] for a,b in zip(chains, (*chains[1:], chains[0])))
+            or len({n for c in chains for n in c[:-1]}) != sum(len(c)-1 for c in chains)):
+        return None
+    ring = [exact_new[n] for c in chains for n in c[:-1]]
+    if _area(ring) < 0:
+        chains = [c[::-1] for c in reversed(chains)]
+    return chains, rim
+
+
+def _compact_quality(rows, cells, settings):
+    used = sorted({n for c in cells for n in c})
+    index = {n:i for i,n in enumerate(used)}
+    return _annulus_quality([rows[n] for n in used], [[index[n] for n in c] for c in cells], settings)
+
+
+def _plan_multicell_annulus(source, data, base, by_uv, field, overrides, recombine, quality, check, limit):
+    """Mesh a convex authored hole crossing internal edges of a regular Q4 grid.
+
+    The owner station counts (m0, m1, m0, m1) define a W x H rectangle of whole
+    parent cells containing every cell the hole touches. Its four outer sides
+    and the four hole chains are matched corner to corner, one radial quad per
+    station interval. Larger-than-minimal placements are tried in a fixed order.
+    """
+    from .surface_mesh import SurfaceMeshOptions
+    face = source.faces[data['face']]
+    cells, old = data['cells'], data['node_rows']
+    if not recombine or len(face.holes[0]) != 4 or any(len(c) != 4 for c in cells):
+        return None
+    grid = _derive_grid(face, data, check)
+    if grid is None:
+        return None
+    if quality is not None and not set(quality) <= {'max_element_growth','min_angle','max_angle',
+                                                   'max_aspect_ratio','min_scaled_jacobian','max_warpage'}:
+        return None
+    g, cell_at = grid
+    A, B = g.shape[0]-1, g.shape[1]-1
+    rows = list(old)
+    exact = [tuple(map(Fraction, row[0])) for row in old]
+    got = _hole_chains(source, face, face.surface, field, overrides, by_uv, rows, exact, max(A, B))
+    if got is None:
+        return None
+    chains, rim = got
+    hull = [exact[c[0]] for c in chains]
+    m = [len(c)-1 for c in chains]
+    if not _convex(hull) or m[0] != m[2] or m[1] != m[3]:
+        return None
+    settings = SurfaceMeshOptions(**(quality or {}))
+    uv = np.asarray([r[0] for r in old])
+    corner_uv = np.asarray([rows[c[0]][0] for c in chains])
+    lower, upper = corner_uv.min(axis=0), corner_uv.max(axis=0)
+    touched = []
+    for k, ((a,b), i) in enumerate(cell_at.items()):
+        if k % 256 == 0:
+            check_stage(check, 'source trim multicell touched material')
+        box = uv[cells[i]]
+        if np.any(box.max(axis=0) < lower) or np.any(box.min(axis=0) > upper):
+            continue
+        poly = [exact[n] for n in cells[i]]
+        if not _convex(poly):
+            return None
+        if _interiors_meet(poly, hull):
+            touched.append((a,b))
+    if not touched:
+        return None
+    centre = tuple(sum(p[d] for p in hull)/4 for d in (0,1))
+    min_a, max_a = min(a for a,_ in touched), max(a for a,_ in touched)
+    min_b, max_b = min(b for _,b in touched), max(b for _,b in touched)
+    shapes = [(m[0],m[1])] + ([(m[1],m[0])] if m[0] != m[1] else [])
+    candidates = []
+    for s,(W,H) in enumerate(shapes):
+        if W > A or H > B:
+            continue
+        for a0 in range(max(0, max_a+1-W), min(min_a, A-W)+1):
+            for b0 in range(max(0, max_b+1-H), min(min_b, B-H)+1):
+                if len(candidates) % 256 == 0:
+                    check_stage(check, 'source trim candidate rectangles')
+                corners = [exact[int(g[a0+da*W, b0+db*H])] for da,db in ((0,0),(1,0),(1,1),(0,1))]
+                mid = tuple(sum(p[d] for p in corners)/4 for d in (0,1))
+                candidates.append((sum((x-y)**2 for x,y in zip(mid,centre)), s, a0, b0, W, H))
+    for _, _, a0, b0, W, H in sorted(candidates):
+        check_stage(check, 'source trim multicell footprint')
+        sides = [[int(g[a,b0]) for a in range(a0,a0+W+1)], [int(g[a0+W,b]) for b in range(b0,b0+H+1)],
+                 [int(g[a,b0+H]) for a in range(a0+W,a0-1,-1)], [int(g[a0,b]) for b in range(b0+H,b0-1,-1)]]
+        if _area([exact[s[0]] for s in sides]) < 0:
+            sides = [s[::-1] for s in reversed(sides)]
+        lengths = [len(s)-1 for s in sides]
+        options = []
+        for r in range(4):
+            if all(lengths[k] == m[(k+r)%4] for k in range(4)):
+                inner = [chains[(k+r)%4] for k in range(4)]
+                cost = sum(sum((x-y)**2 for x,y in zip(exact[s[0]], exact[c[0]])) for s,c in zip(sides, inner))
+                options.append((cost, r, inner))
+        selected = sorted(cell_at[a,b] for a in range(a0,a0+W) for b in range(b0,b0+H))
+        if not options or any(not _convex([exact[n] for n in cells[i]]) for i in selected):
+            continue
+        interface = _perimeter([cells[i] for i in selected])
+        if interface is None:
+            continue
+        removed = set(selected)
+        kept = [c for i,c in enumerate(cells) if i not in removed]
+        hole = [n for c in chains for n in c[:-1]]
+        for _, _, inner in sorted(options, key=lambda o: o[:2]):
+            proposed = [[o[i], o[i+1], n[i+1], n[i]] for o,n in zip(sides, inner) for i in range(len(o)-1)]
+            check_stage(check, 'source trim multicell physical quality')
+            if not (all(_convex([exact[n] for n in c]) for c in proposed)
+                    and _exact_annulus_partition([cells[i] for i in selected], proposed, exact, interface, hole)
+                    and _compact_quality(rows, kept+proposed, settings)):
+                continue
+            if _nominal(rows, proposed, limit):
+                return dict(base, annulus=True, hole_cell_row=selected[0], hole_cell_interface_rows=list(interface),
+                            new_rows=rows[len(old):], new_cells=proposed, parent_node_count=len(old),
+                            replaced_cell_rows=selected, interface_rows=interface, hole_rim=rim,
+                            quality=dict(quality or {}))
+            expanded = _refine_ring(rows, exact, cells, set(selected), proposed, face.surface, hole,
+                                    settings, limit, check)
+            if expanded is not None:
+                replaced, new_cells, new_rows, outer = expanded
+                return dict(base, annulus=True, hole_cell_row=replaced[0], hole_cell_interface_rows=list(outer),
+                            new_rows=new_rows[len(old):], new_cells=new_cells, parent_node_count=len(old),
+                            replaced_cell_rows=replaced, interface_rows=outer, hole_rim=rim,
+                            quality=dict(quality or {}))
+    return None
+
+
 def _plan_cut(cells, rim, hole, check):
     """Traverse actual oriented cell incidence, stopping at the new material rim."""
     incidence = defaultdict(list)
@@ -292,10 +637,11 @@ def plan_source_face_trim(source, record, *, target_size, overrides=(), strategy
                           recombine=True, quality=None, cancellation_check=None):
     """Return a codec-safe fixed-perimeter trim plan or None for full-face generation.
 
-    The aligned cut requires whole, source-registered old cell sides. A convex
-    four-sided UV polygon inside one old Q4 can instead issue an annulus and,
-    when needed, grade the immediately surrounding cells. The owner station
-    registry and complete new material are certified during ordinary generation.
+    An aligned cut follows source-registered sides of whole parent cells. A
+    convex four-sided hole inside one Q4 or crossing a rectangular grid of Q4s
+    can instead receive a ring of new cells along its prescribed stations.
+    Grading may include neighboring cells in the fixed-perimeter footprint.
+    Ordinary generation certifies the station registry and the new material.
     """
     from anygeometry.nurbs import NurbsSurface, CurveOnSurface, NurbsCurve
     from anygeometry.nurbs import _IDENTITY
@@ -344,7 +690,11 @@ def plan_source_face_trim(source, record, *, target_size, overrides=(), strategy
         return None
     base = {'face':face, 'proposal_digest':record['digest'], 'target_size':float(target_size),
             'strategy':strategy, 'overrides':[[e,n] for e,n in sorted(overrides.items())]}
+    limit = float(target_size) + source.tolerance.effective_length(target_size)
     annulus = _plan_annulus(source,data,base,by_uv,field,overrides,recombine,quality,cancellation_check)
+    if annulus is None:
+        annulus = _plan_multicell_annulus(source,data,base,by_uv,field,overrides,recombine,quality,
+                                          cancellation_check,limit)
     if annulus is not None:
         return annulus
     for use in definition.holes[0]:
