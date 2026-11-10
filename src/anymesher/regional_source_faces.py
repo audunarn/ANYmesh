@@ -33,16 +33,19 @@ def _native_definitions(model):
     return {row[0]: row for row in capture_native_supports(model)}
 
 
-def _ordinary_face(model, face_id, vertex_faces):
+def _ordinary_face(model, face_id, vertex_faces, *, trim=False):
     from anygeometry.nurbs import NurbsSurface
-    from ._material_region_binding import polynomial_tensor_chart
+    from ._material_region_binding import polynomial_tensor_chart, straight_source_plane
     face = model.faces[face_id]
-    if (face.holes or face.parameterization is not None
+    if ((bool(face.holes) and not (trim and len(face.holes)==1 and type(face.surface) is NurbsSurface))
+            or face.parameterization is not None
             or len(face.loop) != 4 or len({use.edge for use in face.loop}) != 4):
         return False
-    if type(face.surface) is not NurbsSurface and polynomial_tensor_chart(model, face_id) is None:
+    if (type(face.surface) is not NurbsSurface and not straight_source_plane(model, face_id)
+            and polynomial_tensor_chart(model, face_id) is None):
         return False
-    vertices = {model.edges[u.edge].start for u in face.loop} | {model.edges[u.edge].end for u in face.loop}
+    edges = [model.edges[u.edge] for loop in (face.loop, *face.holes) for u in loop]
+    vertices = {v for e in edges for v in (e.start, e.end)}
     return all(vertex_faces[v] == {face_id} for v in vertices)
 
 
@@ -53,10 +56,19 @@ def independent_source_faces(model):
     still requires a fresh, complete owner cell and rim proof.
     """
     incidence = _vertex_faces(model)
-    return bool(model.faces) and all(_ordinary_face(model, face, incidence) for face in model.faces)
+    from ._material_region_binding import straight_source_plane
+    return (any(not straight_source_plane(model, face) for face in model.faces)
+            and all(_ordinary_face(model, face, incidence) for face in model.faces))
 
 
-def _face_signature(model, face_id, native):
+def active_source_trim(source):
+    """True only during generation for the currently validated source trim request."""
+    active = _ACTIVE.get()
+    return (active is not None and active[0] is source and bool(active[7])
+            and active[4][source][0] == source.revision and source._transaction_journal is None)
+
+
+def _face_signature(model, face_id, native, *, outer_only=False):
     """Pin the complete retained rectangle, its occurrences and numerical policy."""
     from anygeometry.definition_binding import definition_checksum
     face = model.faces[face_id]
@@ -65,7 +77,12 @@ def _face_signature(model, face_id, native):
     vertices = tuple(model.vertices[v] for v in sorted(vertex_ids))
     uses = tuple(model.face_uses[u] for u in sorted(model._face_structural_uses.get(face_id, ())))
     sheets = tuple(model.sheets[s] for s in sorted({use.sheet_id for use in uses}))
-    return definition_checksum((model.model_id, model.tolerance, face, edges, vertices, uses, sheets, native))
+    if outer_only:
+        from dataclasses import replace
+        face = replace(face, holes=())
+        uses = tuple(replace(u, loops=u.loops[:1]) for u in uses)
+    coedges = tuple(model.coedges[key] for u in uses for loop in u.loops for key in loop)
+    return definition_checksum((model.model_id, model.tolerance, face, edges, vertices, uses, coedges, sheets, native))
 
 
 def reusable_face_for_request(record, strategy, recombine):
@@ -83,9 +100,10 @@ def capture_reusable_source_faces(source, mesh):
     """Export proposals from a live validated closure publication, in original source coordinates."""
     from . import material_source_transfer as transfer
     from .regional_source_numbering import _original
+    from ._material_region_binding import straight_source_plane
     vertex_faces = _vertex_faces(source)
     faces = [f for f in source.faces if _ordinary_face(source, f, vertex_faces)]
-    if not faces:
+    if not faces or all(straight_source_plane(source, f) for f in faces):
         return {}
     original, _ = _original(mesh, source)
     entry = transfer._IDENTITY_PUBLICATIONS[id(original)]
@@ -154,9 +172,11 @@ def capture_source_face_identity_tables(source, mesh, faces):
 
 
 @contextmanager
-def reuse_source_faces(source, candidates, *, point_patches=None):
+def reuse_source_faces(source, candidates, *, point_patches=None, trim_patches=None):
     """Propose only faces whose generation settings the caller has proved unchanged."""
-    stats = {'reused_faces': set(), 'patched_faces': {}}
+    stats = {'reused_faces': set(), 'patched_faces': {}, 'trimmed_faces': {}}
+    trims = {int(f): json.loads(json.dumps(plan, allow_nan=False))
+             for f,plan in (trim_patches or {}).items()}
     checked = {}
     incidence = {}
     if candidates:
@@ -168,8 +188,10 @@ def reuse_source_faces(source, candidates, *, point_patches=None):
                 data = record['data']
                 if (record['digest'] != _digest(data) or type(data['face']) is not int
                         or str(data['face']) != key or data['source'] != str(source.model_id)
-                        or data['face'] not in source.faces or not _ordinary_face(source, data['face'], vertex_faces)
-                        or data['face_checksum'] != _face_signature(source, data['face'], native[data['face']])):
+                        or data['face'] not in source.faces or not _ordinary_face(source, data['face'], vertex_faces,
+                                                                                  trim=data['face'] in trims)
+                        or data['face_checksum'] != _face_signature(source, data['face'], native[data['face']],
+                                                                  outer_only=data['face'] in trims)):
                     raise MeshError('retained source-face proposal differs from its source')
                 # Detach from caller-owned dictionaries across generation callbacks.
                 checked[data['face']] = json.loads(json.dumps(data, allow_nan=False))
@@ -180,10 +202,20 @@ def reuse_source_faces(source, candidates, *, point_patches=None):
     pending = {}
     patches = {int(f): json.loads(json.dumps(plan, allow_nan=False))
                for f, plan in (point_patches or {}).items()}
-    if (not set(patches) <= checked.keys() or
-            any(type(p) is not dict or type(p.get('face')) is not int or p['face'] != f for f,p in patches.items())):
+    operators = patches | trims
+    if (patches.keys() & trims.keys() or not set(operators) <= checked.keys() or
+            any(type(p) is not dict or type(p.get('face')) is not int or p['face'] != f for f,p in operators.items())):
         raise MeshError('a source patch requires its original face proposal')
-    token = _ACTIVE.set((source, checked, pending, stats, incidence, {}, patches))
+    if trims:
+        from .regional_source_trim import plan_source_face_trim
+        for face, plan in trims.items():
+            record = {'data': checked[face], 'digest': _digest(checked[face])}
+            current = plan_source_face_trim(source, record, target_size=plan.get('target_size'),
+                overrides=plan.get('overrides',()), strategy=plan.get('strategy'),
+                recombine=any(len(c)==4 for c in checked[face]['cells']), quality=plan.get('quality'))
+            if current is None or current != plan:
+                raise MeshError('source trim differs from the current source or planned cut')
+    token = _ACTIVE.set((source, checked, pending, stats, incidence, {}, patches, trims))
     try:
         yield stats
     finally:
@@ -192,22 +224,24 @@ def reuse_source_faces(source, candidates, *, point_patches=None):
 
 def retained_core(geometry, face, binding, mesh, registry, outer, protected, transform, *,
                   holes, constraints, pinned, order, declared, mapped, recombine,
-                  size_field=None, owner_zones=0, cancellation_check=None):
+                  size_field=None, owner_zones=0, cancellation_check=None, quality_options=None):
     active = _ACTIVE.get()
     if active is None or face not in active[1]:
         return None
-    source, proposals, _, _, incidence, lineages, patches = active
+    source, proposals, _, _, incidence, lineages, patches, trims = active
     if geometry not in incidence or incidence[geometry][0] != geometry.revision:
         incidence[geometry] = (geometry.revision, _vertex_faces(geometry))
     if (binding is None or not binding.requires_curvilinear or binding.face_ids != {face}
-            or not _ordinary_face(geometry, face, incidence[geometry][1]) or protected is None or holes
+            or not _ordinary_face(geometry, face, incidence[geometry][1], trim=face in trims) or protected is None
+            or (bool(holes) and not (face in trims and len(holes)==1))
             or any(len(c) for c in constraints) or len(pinned) or order != 'linear' or mapped == 'required'):
-        if face in patches:
+        if face in patches or face in trims:
             raise MeshError('requested source patch lacks its original generation inputs')
         return None
-    edges = {use.edge for use in geometry.faces[face].loop}
+    definition = geometry.faces[face]
+    edges = {use.edge for loop in (definition.loop, *definition.holes) for use in loop}
     if edges.intersection(declared):
-        if face in patches:
+        if face in patches or face in trims:
             raise MeshError('requested source patch acquired a declared junction')
         return None
     from anygeometry._local_adaptation_lineage import query_local_adaptation_lineage
@@ -228,6 +262,40 @@ def retained_core(geometry, face, binding, mesh, registry, outer, protected, tra
     data = proposals[face]
     old_data = data
     patch = patches.get(face)
+    trim = trims.get(face)
+    if trim is not None:
+        from .regional_source_trim import plan_source_face_trim
+        from .refinement import SizeField
+        if (type(size_field) is not SizeField or mapped in ('required', 'mapped')
+                or size_field.zones[:len(size_field.zones)-owner_zones]):
+            raise MeshError('source trim conflicts with the active meshing request')
+        quality = trim.get('quality')
+        if trim.get('annulus'):
+            from .surface_mesh import SurfaceMeshOptions
+            actual = SurfaceMeshOptions()
+            if quality_options is not None:
+                policy = quality_options.quality_policy
+                actual = SurfaceMeshOptions(min_scaled_jacobian=policy.minimum_scaled_jacobian,
+                    max_aspect_ratio=policy.maximum_aspect_ratio,min_angle=policy.minimum_angle,
+                    max_angle=policy.maximum_angle,max_warpage=policy.maximum_warpage,
+                    max_element_growth=quality_options.max_element_growth)
+            if any(getattr(actual,key) != value for key,value in quality.items()):
+                raise MeshError('source trim quality differs from the actual generation request')
+            quality = {key:getattr(actual,key) for key in ('min_scaled_jacobian','max_aspect_ratio',
+                       'min_angle','max_angle','max_warpage','max_element_growth')}
+        current = plan_source_face_trim(source, {'data':data, 'digest':_digest(data)},
+            target_size=size_field.target_size, overrides=trim.get('overrides', ()),
+            strategy=trim.get('strategy'), recombine=recombine, quality=quality,
+            cancellation_check=cancellation_check)
+        if current is not None and trim.get('annulus'):
+            current['quality'] = trim['quality']
+        if current is None or current != trim:
+            raise MeshError('source trim differs from the current source or planned cut')
+        removed = set(trim['replaced_cell_rows'])
+        kept = {k: c for k,c in enumerate(data['cells']) if k not in removed}
+        data = dict(data, cells=[*kept.values(), *trim.get('new_cells',())],
+                    node_rows=[*data['node_rows'], *trim.get('new_rows',())],
+                    rim=data['rim'] + trim['hole_rim'], grid=None)
     if patch is not None:
         from .regional_source_patch import _subdivide, _support, plan_source_face_point_patch
         from .refinement import SizeField
@@ -259,6 +327,8 @@ def retained_core(geometry, face, binding, mesh, registry, outer, protected, tra
         raise MeshError('retained source rim differs from current protected inputs')
     try:
         nodes = dict(enumerate(data['node_rows']))
+        if trim is not None:
+            nodes = {n: nodes[n] for cell in data['cells'] for n in cell}
         if not set(old_to_new) <= nodes.keys():
             raise MeshError('retained source face has missing rows')
         row_for_new = {new:row for row,new in protected.items()}
@@ -284,7 +354,8 @@ def retained_core(geometry, face, binding, mesh, registry, outer, protected, tra
             raise MeshError('retained source shell has unused node rows')
         points = np.zeros((len(nodes),3))
         points[:,:2] = uv @ transform
-        points[:len(outer), :2] = outer[:, :2]
+        boundary = np.vstack((outer, *holes))
+        points[:len(boundary), :2] = boundary[:, :2]
         core = MeshCore(points, triangles, quads)
         if mapped == 'mapped':
             grid = np.asarray([[old_to_row[n] for n in column] for column in data['grid']], dtype=int)
@@ -307,6 +378,8 @@ def retained_core(geometry, face, binding, mesh, registry, outer, protected, tra
     core._retained_source_xyz = xyz
     if patch is not None:
         core._source_patch_rows = (patch, {n: old_to_row[n] for n in range(len(old_data['node_rows']))}, kept)
+    if trim is not None:
+        core._source_patch_rows = (trim, old_to_row, kept)
     return core
 
 
@@ -315,6 +388,7 @@ def stage_reused_source_face(binding, face, core, core_to_global, mesh):
     if active is not None:
         rows = getattr(core, '_source_patch_rows', None)
         evidence = None
+        staged_cells = {}
         if rows is not None:
             patch, old_to_row, kept = rows
             published = {tuple(mesh.tris[e] if e in mesh.tris else mesh.quads[e]): e for e in mesh.elements_of_face[face]}
@@ -323,7 +397,16 @@ def stage_reused_source_face(binding, face, core, core_to_global, mesh):
             evidence = {'old_node_rows': nodes, 'kept_cell_rows': cells,
                         'interface_rows': list(patch['interface_rows']),
                         'replaced_cell_rows': list(patch['replaced_cell_rows'])}
-        active[2][id(binding.collection)] = (binding, face, evidence)
+            if patch.get('annulus'):
+                fixed = ({n for c in kept.values() for n in c} | set(patch['interface_rows'])
+                         | set(patch['hole_cell_interface_rows']))
+                for c in patch['new_cells']:
+                    conn = tuple(nodes[n] for n in c)
+                    staged_cells[published[conn]] = conn
+                evidence.update(annulus=True, old_node_rows={n:nodes[n] for n in fixed},
+                    new_node_rows={n:g for n,g in nodes.items() if n >= patch['parent_node_count']},
+                    new_cell_ids=list(staged_cells), hole_cell_interface_rows=list(patch['hole_cell_interface_rows']))
+        active[2][id(binding.collection)] = (binding, face, evidence, staged_cells)
 
 
 def confirm_reused_source_faces(source, mesh):
@@ -333,11 +416,11 @@ def confirm_reused_source_faces(source, mesh):
         entry = transfer._IDENTITY_PUBLICATIONS.get(id(mesh))
         if entry is None or entry[0]() is not mesh or entry[1] is not source:
             raise MeshError('retained face confirmation requires final source publication')
-        reused, patched = set(), {}
+        reused, patched, trimmed = set(), {}, {}
         for owner, collection, chords, cells in entry[4]:
             record = active[2].get(id(collection))
             if record is not None:
-                binding, face, evidence = record
+                binding, face, evidence, staged_cells = record
                 if (binding.collection is collection and binding.geometry is owner
                         and binding._curvilinear_state.get('chords') is chords
                         and binding._curvilinear_state.get('cells') is cells):
@@ -348,13 +431,22 @@ def confirm_reused_source_faces(source, mesh):
                         nodes = evidence['old_node_rows']
                         shell = mesh.shells
                         face_elements = set(mesh.elements_of_face[face])
+                        if face in active[7]:
+                            hole_rim = active[7][face]['hole_rim']
+                            if (face_elements != set(evidence['kept_cell_rows'].values()) | staged_cells.keys()
+                                    or any(shell[e] != c for e,c in staged_cells.items()) or any(
+                                    [(float(s.key.parameter), s.node_id) for s in mesh.boundary_registry.entries(e)] !=
+                                    [(t, (evidence['new_node_rows'] if staged_cells else nodes)[n])
+                                     for t,n in stations] for e,stations in hole_rim)):
+                                raise MeshError('source trim changed the qualified material or hole station table')
                         if (any(e not in face_elements or shell[e] != tuple(nodes[n] for n in proposal['cells'][k])
                                 for k,e in evidence['kept_cell_rows'].items()) or
                             any(not np.array_equal(mesh.nodes[node], proposal['node_rows'][k][1])
                                 for k,node in nodes.items())):
                             raise MeshError('fixed source patch exterior changed at final publication')
-                        patched[face] = evidence
-        if set(patched) != set(active[6]):
+                        (trimmed if face in active[7] else patched)[face] = evidence
+        if set(patched) != set(active[6]) or set(trimmed) != set(active[7]):
             raise MeshError('final source publication lacks the requested fixed-interface patch')
         active[3]['reused_faces'].update(reused)
         active[3]['patched_faces'].update(patched)
+        active[3]['trimmed_faces'].update(trimmed)

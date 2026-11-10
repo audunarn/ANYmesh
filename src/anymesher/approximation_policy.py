@@ -116,7 +116,9 @@ def resolve_geometry_approximation(geometry, faces=None, *, geometry_approximati
         result = GeometryApproximationResolution(scalar, 'explicit', selected,
             None, None, None, None, False, False, source)
     else:
-        curved = generation_curvilinear_faces(geometry, selected)
+        from ._material_region_binding import straight_source_plane
+        curved = tuple(face for face in generation_curvilinear_faces(geometry, selected)
+                       if not straight_source_plane(geometry, face))
         if curved:
             scale = owner.query_trim_enclosure_scale(geometry, curved, cancellation_check=cancellation_check)
             if scale.source != source:

@@ -2273,7 +2273,7 @@ def _mesh_native_face_once(
         constraints=native_constraints, pinned=native_pinned, order=order,
         declared=declared_junction_edges, mapped=_nurbs_tensor,
         recombine=recombine, size_field=size_field, owner_zones=_owner_size_zone_count,
-        cancellation_check=cancellation_check)
+        cancellation_check=cancellation_check, quality_options=quality_options)
     if _nurbs_tensor and retained is None:
         tensor_core = _try_parametric_tensor(
             geometry, face_id, native_outer, native_holes, native_constraints, native_pinned,

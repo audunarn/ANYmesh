@@ -306,9 +306,8 @@ def _validated_curvilinear_reference_uv(geometry, mesh):
     from anygeometry import validate_prepared_material_curvilinear_cells_binding
     from ._material_region_binding import (curvilinear_reference_candidates,
         curvilinear_reference_registry, boundary_registry_pin,
-        curvilinear_boundary_associations, face_requires_curvilinear)
-    faces = {face for face, elements in mesh.elements_of_face.items()
-             if elements and face_requires_curvilinear(geometry, face)}
+        curvilinear_boundary_associations, face_requires_curvilinear, published_material_faces)
+    faces = published_material_faces(geometry, mesh)
     publication = _IDENTITY_PUBLICATIONS.get(id(mesh))
     if publication is not None and publication[0]() is mesh:
         transferred = _validate_identity_source_publication(
@@ -454,8 +453,8 @@ The input mesh must still use the prepared model's association namespace.
             if key in expected:
                 raise MeshError('source transfer has duplicate owner cell membership')
             expected[key] = cell.xyz
-    relevant_faces = {face for face, elements in mesh.elements_of_face.items()
-                      if elements and face_requires_curvilinear(prepared, face)}
+    from ._material_region_binding import published_material_faces
+    relevant_faces = published_material_faces(prepared, mesh)
     actual, element_owners = {}, {}
     for face in relevant_faces:
         for element in mesh.elements_of_face[face]:

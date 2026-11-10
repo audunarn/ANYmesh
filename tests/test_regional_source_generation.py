@@ -138,3 +138,15 @@ def test_reissue_source_face_after_reopen(monkeypatch, family, strategy):
         third = generate(reopened)
     assert repeated['reused_faces'] == {face}
     assert third.shells == first.shells
+
+
+def test_automatic_bezier_selects_the_same_material_chart_as_generation():
+    from anymesher.approximation_policy import resolve_geometry_approximation
+    from anymesher.recovery import select_curvilinear_recovery_policy
+
+    model, face, _ = patch('extruded')
+    policy = resolve_geometry_approximation(model, (face,))
+    automation, choice = select_curvilinear_recovery_policy(model, requested_strategy='auto', order='linear',
+        certification_mode='interactive', geometry_approximation_error=policy.effective_error,
+        explicit_controls=False, face_ids=(face,))
+    assert automation is not None and choice['source_faces'] == choice['nurbs_tensor_faces'] == [face]

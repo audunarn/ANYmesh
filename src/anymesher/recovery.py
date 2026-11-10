@@ -239,7 +239,7 @@ def select_curvilinear_recovery_policy(
         return automation, None
     import anygeometry as owner
     from ._material_region_binding import (checked_geometry_approximation_error,
-        face_requires_curvilinear, region_requires_curvilinear)
+        face_requires_curvilinear, polynomial_tensor_chart, region_requires_curvilinear)
     error = checked_geometry_approximation_error(geometry_approximation_error)
     selected = tuple(geometry.faces if face_ids is None else face_ids)
     candidates = tuple(face for face in selected
@@ -248,9 +248,11 @@ def select_curvilinear_recovery_policy(
         return automation, None
     # A raw NURBS/display type is merely a query hint. Exact-Coons provenance
     # and canonical material chart qualification remain with the owner.
+    tensor_options = ({'source_tensors': True} if any(
+        polynomial_tensor_chart(geometry, face) is not None for face in candidates) else {})
     regions = owner.query_material_surface_regions(
         geometry, candidates, expected_revision=geometry.revision,
-        cancellation_check=cancellation_check)
+        cancellation_check=cancellation_check, **tensor_options)
     owner.validate_material_surface_regions_binding(
         geometry, regions, cancellation_check=cancellation_check)
     admitted = {face.id for region in regions.regions
