@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "status": "READY_RETAINED_MESH_QUALIFICATION",
+  "authority": "Workflow2 continuation user Proceed2026-10-28; no new native generation",
+  "backend": "pytetwild==0.4.2+anyworkflow2.exact1",
+  "limits": {
+    "maximum_coefficients": 150000,
+    "residual": 1E-09,
+    "work_symmetry": 1E-10,
+    "resultant": 1E-08,
+    "patch_tensors": 1E-10,
+    "solved_displacement": 1E-07
+  },
+  "conditioning": "Centered symmetric physical deformation used for energy/work; full shifted affine displacement and all six rigid modes checked separately. Raw shifted-energy diagnostic retained, not an acceptance substitution after observation.",
+  "execution": {
+    "native_calls": 0,
+    "per_case_wall_seconds": 74,
+    "total_case_process_wall_seconds": 149.989828694,
+    "orders": [
+      1,
+      2
+    ]
+  },
+  "cases": [
+    {
+      "id": "box",
+      "dimensions": [
+        1.0,
+        0.5,
+        0.25
+      ],
+      "target_edge_length": 0.125,
+      "boundary_tolerance": 2.5E-05,
+      "retained_mesh": "evidence/exact-box-20261028-mesh/mesh.npz",
+      "retained_sha256": "0c5c7bd2628a5973b484a15e49b5158b3bf58c026261e7070773c100d135bc55"
+    },
+    {
+      "id": "thin",
+      "dimensions": [
+        0.4,
+        0.1,
+        0.02
+      ],
+      "target_edge_length": 0.01,
+      "boundary_tolerance": 2E-06,
+      "retained_mesh": "evidence/exact-thin-20261028-mesh/mesh.npz",
+      "retained_sha256": "68dfd54e89a2e778a00cb2f45e3f4ec7cfb49270e244b49000aa35242b30f108"
+    }
+  ],
+  "supplement": "Physical rigid span and rank supplement only; prior load/tensor/solve evidence retained. No native calls. SVD rank/span floor1e-10; residual1e-9 unchanged."
+}

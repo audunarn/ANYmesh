@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "status": "PROSPECTIVE_RETAINED_PRISM_HOLD_FOR_ROOT",
+  "scope": "One retained real pentagonal prism; candidate-source owners plus installed ANYsolid; zero native meshing calls; single resolution; no promotion",
+  "execution": {"maximum_native_calls": 0, "maximum_physics_attempts": 1, "process_budget_seconds": 600, "maximum_process_seconds": 300, "verification_reserve_seconds": 45, "retries": 0},
+  "original_frozen": "evidence/volume-geometry-20261028-frozen/frozen.json",
+  "original_frozen_sha256": "e55b174d3738b6a9ce9242ab6a4804b50c854cbec76a2003d7073e0dbcc96989",
+  "case_id": "pentagon",
+  "raw_path": "evidence/volume-geometry-20261028-raw/pentagon/raw.npz",
+  "raw_sha256": "5e2b1437a16ec1f84058617dfb2de7ef25996a1990eaaffd936cc4d73e00ef67",
+  "native_receipt": "evidence/volume-geometry-20261028-raw/pentagon/native-attempt.json",
+  "native_receipt_sha256": "97af8b05d6f5b5fca63f897b9222b7b8be8245fe13a4a21bf5f04e83b3443e4f",
+  "expected_nodes": 463, "expected_cells": 1899,
+  "expected_source": {"model_id":"e7af2e3d-7c24-58b5-ba86-55b458719d3c", "region_id":"cdd8d2d1-b876-451a-8264-d3ecee3dcfd1", "revision":4, "source_signature":"e9e489e327e2e7845e99664dad831228390a7ffd6e70c69e90cad54514bbf9da"},
+  "boundary_tolerance": 0.000006,
+  "analytics": {"regular_polygon_sides":5, "radius":0.1, "height":0.06},
+  "limits": {"maximum_cells":100000, "maximum_coefficients":150000, "maximum_relative_volume_error":0.001, "maximum_relative_face_area_error":0.001, "maximum_face_normal_degrees":1, "maximum_regular_tet_condition":32, "residual":1e-9, "work_symmetry":1e-10, "resultant":1e-8, "patch_tensors":1e-10, "solved_displacement":1e-7},
+  "helper_sha256": {"qualify_retained_volume.py":"95472232886a7b59f325ae1d53d388f902ec249ad208874fabbf2705c6c0c06c", "qualify_volume_geometry.py":"ab90830b68902c9fc9e8b5a1cfe830cc403577d538af541fe26afa5b0d4f7748", "qualify_thin_volume.py":"2484fc7f44fd38f0d3abda06a25a0ec87cd23535d861bc9e75722c1c153b31a4", "workflow2_process_supervisor.py":"5963d541283c854c0da57ea5a206fd4484ef71c17137629db65861851da1efe9"},
+  "installed_anysolid_wheel": "evidence/installed-matrix-20261028-a1/wheels/anysolid-0.1.0-py3-none-any.whl",
+  "installed_anysolid_wheel_sha256": "601bd500625e6cd95f3a741f4f19b87bdcb4a72a7c7650278fea8be3efc56c3c",
+  "acceptance": "Every frozen input/runtime identity, analytic geometry/ownership/group/conditioning predicate, readmission and 11 unchanged physical checks at each P1/P2 order must pass. Nonfinite/failure/incomplete is terminal NO_GO. Thin-only axial span is inapplicable. No FE convergence or installed-owner/native-core/platform/release claim."
+}

@@ -50,6 +50,12 @@ def test_version_matches_pyproject() -> None:
     assert anymesher.__version__ == _pyproject()["project"]["version"]
 
 
+def test_optional_solid_provider_is_explicit_and_outside_base_requirements() -> None:
+    project = _pyproject()['project']
+    assert project['optional-dependencies']['solids-pytetwild'] == ['pytetwild==0.4.2']
+    assert not any('pytetwild' in requirement.lower() for requirement in project['dependencies'])
+
+
 def test_release_metadata_is_0_5_0_alpha_and_mpl_2_0() -> None:
     project = _pyproject()["project"]
     assert project["version"] == "0.5.1"
