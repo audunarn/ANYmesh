@@ -4,11 +4,14 @@ These pin existing behaviour; each runs on the 4-edge ``warp_0.1`` patch in abou
 """
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
 from anymesher.errors import MeshError
 from anymesher.hybrid import generate_hybrid_mesh_result
+from anymesher._route_receipt import TensorRefusal
 from anymesher.quad.options import QuadMeshingOptions
 from anymesher.quad.public_integration import QuadPublicUnsupported
 
@@ -55,3 +58,23 @@ def test_tensor_edge_length_to_target_band():  # T5
                       for q in mesh.quads.values() for i in range(4)])
     assert 0.9 <= edges.mean() / TARGET <= 1.35
     assert edges.max() / edges.min() <= 1.05
+
+
+def test_auto_fallback_is_signalled_at_result_level():  # T4
+    model, face = patch_model('warp_0.1')
+    result = generate_hybrid_mesh_result(model, strategy='auto', recombine=False, **request())
+    receipt = result.route_receipt
+    (entry,) = receipt.faces
+    assert (entry.face_id, entry.route_tried, entry.outcome) == (face, 'tensor', 'native_fallback')
+    assert entry.refusal is TensorRefusal.REQUEST_OUTSIDE_ALLOWLIST
+    assert 'recombine=False' in entry.detail
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        entry.outcome = 'tensor'
+
+
+def test_auto_tensor_success_receipt_reports_work():
+    model, face = patch_model('warp_0.1')
+    result = generate_hybrid_mesh_result(model, strategy='auto', **request())
+    (entry,) = result.route_receipt.faces
+    assert (entry.outcome, entry.refusal) == ('tensor', None)
+    assert dict(entry.work) == {'cells': len(result.mesh.quads), 'nodes': len(result.mesh.nodes)}

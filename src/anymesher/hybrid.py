@@ -159,6 +159,7 @@ class HybridMeshResult:
     certifiable: bool
     structured_layout: StructuredLayoutReport | None = None
     structural_preparation: StructuralPreparationReport | None = None
+    route_receipt: Any | None = None  # NurbsRouteReceipt for NURBS faces tried on the tensor route, else None
 
 
 @dataclass(frozen=True)
@@ -1786,40 +1787,48 @@ def _mesh_native_face(geometry, mesh, face_id, **options):
             raise
 
 
+from ._route_receipt import build_receipt as build_route_receipt
+
+
 def _try_parametric_tensor(geometry, face_id, outer, holes, constraints, pinned, chart_inverse,
                            protected_rows, analytic_chart, quality_options, binding,
                            interior_scale, diagnostics, declared_junction_edges=(), order='linear',
                            recombine=True, size_field=None, owner_zone_count=0, request_refusal=None):
     """Opt-in tensor core, or None (typed refusal recorded) so the native route runs unchanged."""
     from ._parametric_tensor import ParametricTensorUnsupported, parametric_tensor_core
-    def refuse(reason):
+    from ._route_receipt import TensorRefusal
+    def refuse(reason, kind):
         diagnostics['parametric_tensor_refusal'] = reason
+        diagnostics['parametric_tensor_refusal_kind'] = kind.value
         return None
     if request_refusal:
-        return refuse('request outside the tensor allowlist: ' + request_refusal)
+        return refuse('request outside the tensor allowlist: ' + request_refusal, TensorRefusal.REQUEST_OUTSIDE_ALLOWLIST)
     if binding is None or analytic_chart is None or protected_rows is None:
-        return refuse('tensor route requires an owner-bound NURBS material region')
+        return refuse('tensor route requires an owner-bound NURBS material region', TensorRefusal.NO_OWNER_BOUND_REGION)
     if not binding.requires_curvilinear or order != 'linear':
-        return refuse('tensor route requires a linear NURBS material region')
+        return refuse('tensor route requires a linear NURBS material region', TensorRefusal.NOT_LINEAR)
     declared = {int(edge) for edge in declared_junction_edges}
     region = binding.region
     edges = {int(path.source_edge) for paths in region.boundaries for path in paths}
     edges.update(int(path.source_edge) for path in region.interior_constraints)
     if edges & declared:
-        return refuse('tensor route does not evaluate declared-junction alignment')
+        return refuse('tensor route does not evaluate declared-junction alignment', TensorRefusal.DECLARED_JUNCTION)
     if interior_scale < 1.:
-        return refuse('owner proof requested finer resolution than a fixed tensor can supply')
+        return refuse('owner proof requested finer resolution than a fixed tensor can supply',
+                      TensorRefusal.FINER_RESOLUTION_REQUIRED)
     if not recombine:
-        return refuse('tensor route yields quadrilaterals only; recombine=False was requested')
+        return refuse('tensor route yields quadrilaterals only; recombine=False was requested',
+                      TensorRefusal.TRIANGLES_REQUESTED)
     # Owner-added curvature / source-cell zones are the last ``owner_zone_count`` zones; the tensor lets the
     # owner proof judge those. Anything the caller asked for (zones, entity sizes) cannot be honoured.
     if (size_field is None or type(size_field) is not SizeField or size_field.edge_sizes
             or len(size_field.zones) != owner_zone_count):
-        return refuse('tensor route cannot honour a non-uniform size field or feature controls')
+        return refuse('tensor route cannot honour a non-uniform size field or feature controls',
+                      TensorRefusal.NON_UNIFORM_SIZING)
     try:
         core, _ = parametric_tensor_core(outer, holes, constraints, pinned, chart_inverse, protected_rows)
     except ParametricTensorUnsupported as error:
-        return refuse(str(error))
+        return refuse(str(error), TensorRefusal.UNSUPPORTED_FACE)
     from .quality_v2 import evaluate_quality
     from .surface_mesh import SurfaceMeshOptions, _quality_threshold_report, _published_growth
     policy = StructuredMeshingOptions().quality_policy if quality_options is None else quality_options.quality_policy
@@ -1836,7 +1845,7 @@ def _try_parametric_tensor(geometry, face_id, outer, holes, constraints, pinned,
         from ._tensor_contract import non_default_gate_options
         named = non_default_gate_options(quality_options)
         return refuse('tensor candidate misses the final quality or growth gate'
-                      + (f' (non-default {named})' if named else ''))
+                      + (f' (non-default {named})' if named else ''), TensorRefusal.QUALITY_OR_GROWTH_GATE)
     diagnostics['parametric_tensor_quality'] = {'worst': report['worst'], 'maximum_growth': maximum_growth}
     return core
 
@@ -6127,6 +6136,7 @@ def _finalize_hybrid_candidate(
         certifiable=certifiable,
         structured_layout=structured_report,
         structural_preparation=candidate.preparation_report,
+        route_receipt=build_route_receipt(triangulation_backend_by_face),
     )
     runtime_phase_seconds: dict[str, float] = {}
     for source in (
