@@ -845,6 +845,14 @@ def prepare_structural_closure(
                                     "to select ownership before meshing: " + str(error)) from error
                 raise MeshError("structural overlap owner classification failed: " + str(error)) from error
             return
+        import anygeometry as owner
+        readiness = getattr(owner, 'has_current_prepared_partition_lineage', None)
+        # Missing/obsolete optional lineage supplies no overlap exemption.
+        # Explicit proof queries remain strict; their exceptions are never
+        # translated into a successful classification or a fallback signal.
+        partition_ready = readiness(geometry) if readiness is not None else True
+        if type(partition_ready) is not bool:
+            raise MeshError('owner partition readiness returned a malformed classification')
         for pair in _face_pairs(geometry, source_faces,
                             maximum_candidates=policy.maximum_candidate_pairs,
                             cancellation_check=cancellation_check):
@@ -852,7 +860,7 @@ def prepare_structural_closure(
                 validated_prepared_partition_disjoint_interiors,
                 validated_same_support_material_disjoint_interiors)
             _cancel(cancellation_check, "structural preparation overlap narrow phase")
-            if validated_prepared_partition_disjoint_interiors(geometry, *pair,
+            if partition_ready and validated_prepared_partition_disjoint_interiors(geometry, *pair,
                     cancellation_check=cancellation_check):
                 continue
             if validated_same_support_material_disjoint_interiors(geometry, *pair,
@@ -893,11 +901,12 @@ def prepare_structural_closure(
     if reuse_working_copy and no_automatic and owned:
         working = geometry
     elif no_automatic and owned:
+        from anygeometry import clone_prepared_geometry, has_current_intersection_preparation
         from ._material_region_binding import face_requires_curvilinear
-        if any(face_requires_curvilinear(geometry, face) for face in source_faces):
-            # Only the geometry owner's genuine clone boundary can issue
-            # source correspondence; an ordinary clone grants none.
-            from anygeometry import clone_prepared_geometry
+        # A prepared partition already has an owner proof. Its trimmed
+        # descendants need not have the four sides of the authored tensor.
+        if (has_current_intersection_preparation(geometry, face_ids=source_faces)
+                or any(face_requires_curvilinear(geometry, face) for face in source_faces)):
             working = clone_prepared_geometry(geometry)
         else:
             working = geometry.clone(include_features=False, preserve_identity=reuse_working_copy)

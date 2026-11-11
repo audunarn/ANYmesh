@@ -146,7 +146,7 @@ def test_automatic_region_hint_preserves_generator_face_selection(monkeypatch):
             face_ids=(face for face in expected))
 
 
-def test_nonextruded_coons_hint_can_recover_to_existing_automatic_route():
+def _nonextruded_coons():
     from anygeometry import CoonsSurface
     import numpy as np
     surface = CoonsSurface(bottom=np.asarray(((0,0,0),(2,0,0))),
@@ -156,7 +156,44 @@ def test_nonextruded_coons_hint_can_recover_to_existing_automatic_route():
     points = model.add_points([surface.evaluate(*uv) for uv in ((0,0),(1,0),(1,1),(0,1))])
     edges = [model.add_line(points[i],points[(i+1)%4]) for i in range(4)]
     model.add_face(edges,corners=(0,1,2,3),surface=surface)
+    return model
+
+
+def test_nonextruded_coons_hint_can_recover_to_existing_automatic_route(monkeypatch):
+    import anymesher.recovery as recovery
+    generate = recovery.generate_hybrid_mesh_result
+    generated = []
+
+    def observe(geometry, **options):
+        generated.append(options["strategy"])
+        return generate(geometry, **options)
+
+    monkeypatch.setattr(recovery, "generate_hybrid_mesh_result", observe)
+    model = _nonextruded_coons()
     result = generate_automatic_mesh_result(model,strategy='auto',target_size=.5,
         order='linear',native_backend='python',structural_preparation=False)
     assert result.status == 'ready' and result.selected_method == 'auto'
     assert result.attempts[0]['error_type'] == 'NativeSurfaceUnsupported'
+    assert generated == ["auto"]
+
+
+def test_coons_recovery_propagates_callback_resolution_error(monkeypatch):
+    import anymesher.recovery as recovery
+    from anymesher._material_region_binding import _SourceCellResolutionRequired
+
+    failure = _SourceCellResolutionRequired("caller stopped")
+    attempts = []
+
+    def callback(phase):
+        if phase == "inside automatic candidate":
+            raise failure
+
+    def run_candidate(geometry, **options):
+        attempts.append(options["strategy"])
+        options["cancellation_check"]("inside automatic candidate")
+
+    monkeypatch.setattr(recovery, "generate_hybrid_mesh_result", run_candidate)
+    with pytest.raises(_SourceCellResolutionRequired) as raised:
+        generate_automatic_mesh_result(_nonextruded_coons(), strategy="auto", target_size=.5,
+                                       cancellation_check=callback)
+    assert raised.value is failure and attempts == ["auto"]

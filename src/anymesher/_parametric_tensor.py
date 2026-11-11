@@ -84,7 +84,10 @@ def nurbs_tensor_admission(geometry, face_id) -> TensorAdmission:
     surface = face.surface if isinstance(face.surface, NurbsSurface) else face.parameterization
     if not isinstance(surface, NurbsSurface):
         from anygeometry.nurbs_sweep_chart import source_sweep_chart_model
-        view = source_sweep_chart_model(geometry, face_id)
+        from ._material_region_binding import polynomial_tensor_chart
+        view = polynomial_tensor_chart(geometry, face_id)
+        if view is None:
+            view = source_sweep_chart_model(geometry, face_id)
         if view is None:
             return no('not_nurbs_surface')
         geometry = view
@@ -222,4 +225,5 @@ def parametric_tensor_core(outer, holes, constraints, pinned, chart_inverse, pro
     record = OutputRowProvenance(tuple(by_row), pairs)
     record.validate(core)
     core._output_row_provenance = record
+    core._parametric_tensor_grid = grid
     return core, record

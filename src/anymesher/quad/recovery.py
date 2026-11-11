@@ -14,8 +14,8 @@ This module provides that recovery as a **bounded, deterministic** operation:
 * :func:`recover_then_front_step` — try a fixed, ordered ratio schedule; for
   each ratio dry-run the split through a :class:`~.journal.Transaction` view,
   and *only if* a child front edge is provably admissible for a
-  :func:`~anymesher.quad.front.front_step` quad, commit the split and then drive
-  the **real** :func:`~anymesher.quad.front.front_step` on that child edge.  No
+  :func:`~anymesher.quad.front.front_step` quad, stage the same production front advance and commit the entire edit once
+  using :func:`~anymesher.quad.front.front_step` on that child edge.  No
   hidden fallback: if no ratio enables a quad, the state is left untouched and
   :class:`RecoveryExhausted` is raised.
 
@@ -39,6 +39,7 @@ from .front import (
     EPS,
     FrontRejected,
     _is_residual_front,
+    _stage_front_step,
     area2,
     body_edges,
     candidate_partners,
@@ -315,16 +316,19 @@ def edge_split_recover(
 
 
 def _dry_run_enables(
-    view: Any, a: int, b: int, m_id: int
+    view: Any, a: int, b: int, m_id: int, *, additional_edges=()
 ) -> tuple[tuple[int, int] | None, str]:
     """On the *candidate* view, find a child front edge that classifies cleanly.
 
     Deterministic order: child edge ``(a, m)`` is tried before ``(m, b)``; its
     candidates are iterated in :func:`candidate_partners` order.  Returns the
-    enabling child edge (or ``None``) plus a diagnostic detail string.
+    enabling local front edge (or ``None``) plus a diagnostic detail string.
     """
     details: list[str] = []
-    for child in ((a, m_id), (m_id, b)):
+    children = [(a, m_id), (m_id, b)]
+    known = {edge_key(*child) for child in children}
+    children.extend(k for k in sorted(additional_edges) if k not in known)
+    for child in children:
         ck = edge_key(*child)
         if not view.is_front_edge(ck):
             details.append(f"child edge {tuple(ck)} is not on the front")
@@ -404,8 +408,10 @@ def recover_then_front_step(
                             tx, state, source, fe, third, pm, accepted_q4, int(variant)
                         )
                     view = tx.view
-                    enabled, detail = _dry_run_enables(view, a, b, m_id)
+                    extra = (k for k in touched if m_id in k) if accepted_q4 is not None else ()
+                    enabled, detail = _dry_run_enables(view, a, b, m_id, additional_edges=extra)
                     if enabled is not None:
+                        new_id, body = _stage_front_step(tx, enabled, options)
                         tx.commit()
             except (FrontRejected, RecoveryRejected) as exc:
                 ratio_details.append(f"variant={variant}: {exc}")
@@ -417,7 +423,6 @@ def recover_then_front_step(
                 )
                 continue
 
-            new_id, body = front_step(state, enabled, options)
             local = set(touched) | set(body_edges(body))
             local_front = tuple(sorted(k for k in local if state.is_front_edge(k)))
             success_detail = detail or "enabled"

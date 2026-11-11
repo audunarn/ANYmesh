@@ -100,6 +100,12 @@ from .recovery import (
     generate_automatic_mesh_result,
 )
 from .mesh import Coupling, Mesh
+from .volume import (
+    VolumeMesh, VolumeMeshError, VolumeBackendUnavailable,
+    UnsupportedVolumeGeometry, InvalidVolumeMesh, VolumeMeshingTimeout,
+    VolumeMeshingCancelled, generate_volume_mesh, validate_volume_mesh,
+)
+from .structured_box import generate_structured_box_mesh
 from .prepared_current_associations import (
     PREPARED_CURRENT_ASSOCIATIONS_CREATED_UV_SCHEMA,
     PREPARED_CURRENT_ASSOCIATIONS_SCHEMA,
@@ -375,6 +381,10 @@ __all__ = [
     "surface_point",
     "triangle_to_quads",
     "verify_mesh_quality",
+    "VolumeMesh", "VolumeMeshError", "VolumeBackendUnavailable",
+    "UnsupportedVolumeGeometry", "InvalidVolumeMesh", "VolumeMeshingTimeout",
+    "VolumeMeshingCancelled", "generate_volume_mesh", "validate_volume_mesh",
+    "generate_structured_box_mesh",
     "validate_prepared_current_component_associations",
     "validate_material_source_transfer_for_mesh",
     "publish_model_closure_mesh_to_source",
@@ -391,3 +401,28 @@ from .approximation_policy import (GeometryApproximationPolicy, GeometryApproxim
     resolve_geometry_approximation, validate_geometry_approximation_binding)
 __all__ += ["GeometryApproximationPolicy", "GeometryApproximationResolution",
     "resolve_geometry_approximation", "validate_geometry_approximation_binding"]
+
+_REGIONAL_UPDATE_EXPORTS = frozenset({
+    "RegionalAssembly", "RegionalQualityLimits",
+    "CrossRevisionAuthority", "OwnerBaselineReceipt", "STRUCTURED_QUALITY_COUNT_FIELDS",
+    "assemble_regional_replacement", "remap_mesh_ids",
+})
+__all__ += sorted(_REGIONAL_UPDATE_EXPORTS | {"remesh_mapped_region", "remesh_region", "remap_source_mesh_ids", "validate_numbered_source_mesh"})
+
+
+def __getattr__(name: str):
+    if name in {"remap_source_mesh_ids", "validate_numbered_source_mesh"}:
+        from . import regional_source_numbering
+        return getattr(regional_source_numbering, name)
+    # Lazy: importing the package does not load the regional-update module.
+    if name in _REGIONAL_UPDATE_EXPORTS:
+        from . import regional_update
+
+        return getattr(regional_update, name)
+    if name == "remesh_mapped_region":
+        from .regional_mapped import remesh_mapped_region
+        return remesh_mapped_region
+    if name == "remesh_region":
+        from .regional_patch import remesh_region
+        return remesh_region
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
