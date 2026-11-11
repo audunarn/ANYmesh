@@ -3522,8 +3522,25 @@ def _merge_quad_first_and_legacy(
         merged_mesh, geometry
     )
 
+    # The quad route's diagnostics name quad-route node IDs.  The merge keeps
+    # them (identity) except when quadratic beam promotion renumbers the quad
+    # midside nodes; then translate them here, at the producer boundary, so the
+    # published ``quad_first`` evidence is in the merged mesh's namespace.  The
+    # translator refuses any field without an explicit schema (fail closed).
+    quad_diagnostics: Any = quad_mesh.hybrid_diagnostics
+    if quad_diagnostics and any(old != new for old, new in quad_node_map.items()):
+        from .regional_update import translate_hybrid_diagnostics
+
+        quad_diagnostics = translate_hybrid_diagnostics(
+            quad_mesh,
+            quad_node_map,
+            {int(e): int(e) for e in (*quad_mesh.quads, *quad_mesh.tris, *quad_mesh.beams)}
+            | {int(e): int(e) for e in quad_mesh.couplings},
+        )
+
     if not legacy_faces:
-        merged_mesh.hybrid_diagnostics.update(dict(quad_mesh.hybrid_diagnostics))
+        # Flat and wrapped copies are independent records (never aliased).
+        merged_mesh.hybrid_diagnostics.update(deepcopy(dict(quad_diagnostics)))
 
     for legacy_report in (legacy_result,):
         for legacy_face_id, legacy_diagnostic in (
@@ -3536,7 +3553,7 @@ def _merge_quad_first_and_legacy(
         quad_faces
     )
     merged_mesh.hybrid_diagnostics["legacy_face_ids"] = sorted(legacy_faces)
-    merged_mesh.hybrid_diagnostics["quad_first"] = quad_mesh.hybrid_diagnostics
+    merged_mesh.hybrid_diagnostics["quad_first"] = quad_diagnostics
 
     legacy_strategies: dict[int, str] = {
         int(face_id): str(value)

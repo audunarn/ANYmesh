@@ -1158,43 +1158,161 @@ def _process_metadata(mesh: Mesh, label: str, ids: _Ids) -> Tuple[Dict[Any, Any]
     diagnostics = mesh.hybrid_diagnostics
     if diagnostics:
         record = _mapping(diagnostics, f"{label} hybrid_diagnostics")
-        parallel = record.get("parallel")
-        joined = isinstance(parallel, Mapping) and parallel.get("used") is True
-        if joined and (record.get("certifiable") is not False
-                       or record.get("certification_mode") not in ("none", "interactive")):
-            raise MeshError(f"{label} parallel join cannot carry a certification")
-        if joined:
-            strategies = _mapping(record.get("strategy_by_face"), "parallel join face strategies")
-            if ids.tris or not strategies or any(method != "mapped" for method in strategies.values()):
-                # A join assembles component data, but its producer does not
-                # publish a joined shell qualification for native triangles.
-                raise MeshError(f"{label} full renumber supports mapped parallel plate joins only")
-        from ._regional_quad_reports import quad_first_fields
-        quad_report = quad_first_fields(record, ids, mesh)
-        hybrid_out.update(quad_report)
-        for key in record:
-            if not isinstance(key, str) or (key not in _HYBRID_SCHEMA and key not in _HYBRID_ID_SCHEMA
-                                            and key not in quad_report):
-                raise MeshError(
-                    f"{label} hybrid_diagnostics.{key!r} has no explicit schema; refusing to "
-                    "translate or retain it (full rebuild required)"
-                )
-        for key in record:
-            if key in quad_report:
-                continue
-            try:
-                if key in _HYBRID_ID_SCHEMA:
-                    hybrid_out[key] = _HYBRID_ID_SCHEMA[key](record[key], ids)
-                else:
-                    if key == "complex_geometry" and joined:
-                        _v_complex_geometry(record[key], joined=True)
-                    else:
-                        _HYBRID_SCHEMA[key](record[key])
-                    hybrid_out[key] = copy.deepcopy(record[key])
-            except MeshError as error:
-                raise MeshError(f"{label}: {error}") from None
-        evidence.extend(f"hybrid_diagnostics.{k}" for k in sorted(record))
+        hybrid_out = _process_hybrid(mesh, label, ids, record)
+        evidence.extend(f"hybrid_diagnostics.{k}" for k in sorted(record, key=str))
     return prep_out, hybrid_out, tuple(evidence)
+
+
+# hybrid._merge_quad_first_and_legacy (the quad-first/legacy merge) writes, besides
+# the ordinary hybrid keys: ``quad_first_face_ids``/``legacy_face_ids`` (GEOMETRY
+# face ids, never translated), one top-level ``"<geometry face id>"`` backend
+# record per legacy face, and ``quad_first`` = the quad route's own
+# hybrid_diagnostics.  The producer normalizes ``quad_first`` into the merged mesh's
+# node/element namespace (it is the quad route's namespace, renumbered by the
+# merge only for quadratic beam promotion), so it is translated here like the
+# flat quad-first report, validated against the quad faces' share of the mesh.
+_MERGE_FACE_LISTS = ("quad_first_face_ids", "legacy_face_ids")
+
+
+def _is_face_text_key(key: Any) -> bool:
+    return isinstance(key, str) and key.isascii() and key.isdecimal()
+
+
+def _geometry_face_list(value: Any, what: str) -> List[int]:
+    items = [_as_int(x, f"{what} item") for x in _list(value, what)]
+    if len(set(items)) != len(items):
+        raise MeshError(f"{what} repeats a geometry face id")
+    return items
+
+
+def _quad_first_view(mesh: Any, quad_faces: Set[int]) -> Any:
+    """The share of ``mesh`` published by the quad-first route (for its certificates)."""
+
+    from types import SimpleNamespace
+
+    faces = {f: list(mesh.elements_of_face[f]) for f in sorted(quad_faces) if f in mesh.elements_of_face}
+    keep = {int(e) for seq in faces.values() for e in seq}
+    return SimpleNamespace(
+        is_quadratic=mesh.is_quadratic,
+        quads={e: b for e, b in mesh.quads.items() if int(e) in keep},
+        tris={e: b for e, b in mesh.tris.items() if int(e) in keep},
+        elements_of_face=faces,
+        nodes_of_edge=mesh.nodes_of_edge,
+    )
+
+
+def _merge_evidence(record: Mapping, mesh: Any, ids: _Ids, label: str) -> Dict[Any, Any]:
+    numeric = [k for k in record if _is_face_text_key(k)]
+    listed = [k for k in _MERGE_FACE_LISTS if k in record]
+    if not numeric and not listed and "quad_first" not in record:
+        return {}
+    if "quad_first" not in record or len(listed) != len(_MERGE_FACE_LISTS):
+        raise MeshError(
+            f"{label} hybrid_diagnostics is an incomplete quad-first/legacy merge record "
+            "(quad_first, quad_first_face_ids and legacy_face_ids are all required)"
+        )
+    quad_faces = _geometry_face_list(record["quad_first_face_ids"], f"{label} quad_first_face_ids")
+    legacy_faces = _geometry_face_list(record["legacy_face_ids"], f"{label} legacy_face_ids")
+    if set(quad_faces) & set(legacy_faces):
+        raise MeshError(f"{label} quad-first and legacy face ids overlap")
+    if not set(mesh.elements_of_face) <= set(quad_faces) | set(legacy_faces):
+        raise MeshError(f"{label} mesh has faces owned by neither the quad-first nor the legacy route")
+    if {int(k) for k in numeric} != set(legacy_faces):
+        raise MeshError(f"{label} legacy face diagnostics do not match legacy_face_ids")
+    out: Dict[Any, Any] = {k: copy.deepcopy(record[k]) for k in _MERGE_FACE_LISTS}
+    for key in numeric:
+        _backend_record(record[key], f"{label} hybrid_diagnostics[{key}]", False)
+        out[key] = copy.deepcopy(record[key])
+    nested = _mapping(record["quad_first"], f"{label} hybrid_diagnostics.quad_first")
+    view = _quad_first_view(mesh, set(quad_faces))
+    # The nested report describes the quad shell only: its node and cell IDs must
+    # belong to that submesh (seam nodes shared with beams or legacy shells are
+    # shell nodes too).  Translation still uses the whole-mesh bijection.
+    shell_ids = _Ids(
+        {int(n) for body in (*view.quads.values(), *view.tris.values()) for n in body},
+        {int(e) for e in (*view.quads, *view.tris)},
+        {int(e) for e in view.tris},
+        ids.nm, ids.em, quads={int(e) for e in view.quads},
+    )
+    out["quad_first"] = _process_hybrid(view, f"{label} quad_first", shell_ids, nested, nested=True)
+    return out
+
+
+def _process_hybrid(mesh: Any, label: str, ids: _Ids, record: Mapping, *, nested: bool = False) -> Dict[Any, Any]:
+    """Validate one hybrid-diagnostics record and return its translated fresh copy."""
+
+    hybrid_out: Dict[Any, Any] = {}
+    parallel = record.get("parallel")
+    joined = isinstance(parallel, Mapping) and parallel.get("used") is True
+    if joined and (record.get("certifiable") is not False
+                   or record.get("certification_mode") not in ("none", "interactive")):
+        raise MeshError(f"{label} parallel join cannot carry a certification")
+    if joined:
+        strategies = _mapping(record.get("strategy_by_face"), "parallel join face strategies")
+        if nested or ids.tris or not strategies or any(method != "mapped" for method in strategies.values()):
+            # A join assembles component data, but its producer does not
+            # publish a joined shell qualification for native triangles.
+            raise MeshError(f"{label} full renumber supports mapped parallel plate joins only")
+    from ._regional_quad_reports import quad_first_fields
+    quad_report = quad_first_fields(record, ids, mesh)
+    hybrid_out.update(quad_report)
+    merge_report = {} if nested else _merge_evidence(record, mesh, ids, label)
+    hybrid_out.update(merge_report)
+    if quad_report and "quad_first" in merge_report:
+        # The through-beam route publishes the quad report both flat and wrapped.
+        # Both copies are translated independently; they must remain one record.
+        wrapped = merge_report["quad_first"]
+        for key, flat in quad_report.items():
+            if key not in wrapped or wrapped[key] != flat:
+                raise MeshError(
+                    f"{label} flat and wrapped quad-first evidence disagree on {key!r}"
+                )
+    for key in record:
+        if not isinstance(key, str) or (key not in _HYBRID_SCHEMA and key not in _HYBRID_ID_SCHEMA
+                                        and key not in quad_report and key not in merge_report):
+            raise MeshError(
+                f"{label} hybrid_diagnostics.{key!r} has no explicit schema; refusing to "
+                "translate or retain it (full rebuild required)"
+            )
+    for key in record:
+        if key in quad_report or key in merge_report:
+            continue
+        try:
+            if key in _HYBRID_ID_SCHEMA:
+                hybrid_out[key] = _HYBRID_ID_SCHEMA[key](record[key], ids)
+            else:
+                if key == "complex_geometry" and joined:
+                    _v_complex_geometry(record[key], joined=True)
+                else:
+                    _HYBRID_SCHEMA[key](record[key])
+                hybrid_out[key] = copy.deepcopy(record[key])
+        except MeshError as error:
+            raise MeshError(f"{label}: {error}") from None
+    return hybrid_out
+
+
+def translate_hybrid_diagnostics(
+    mesh: Mesh, node_ids: Mapping[int, int], element_ids: Mapping[int, int]
+) -> Dict[Any, Any]:
+    """Producer-boundary helper: ``mesh.hybrid_diagnostics`` renumbered through explicit maps.
+
+    Always returns a fresh translated copy (no identity shortcut) and refuses any
+    field without an explicit schema.  The maps must cover every node/element of ``mesh``.
+    """
+
+    nodes, elements = _validate_structure(mesh, "mesh", allow_zero=True)
+    # Producer numbering may use 0 (not a permanent label), so the positivity of
+    # ``_check_map`` is not applied; coverage and injectivity still are.
+    nm = {_as_int(k, "node_ids key"): _as_int(v, "node_ids value") for k, v in node_ids.items()}
+    em = {_as_int(k, "element_ids key"): _as_int(v, "element_ids value") for k, v in element_ids.items()}
+    if set(nm) != nodes or set(em) != elements or len(set(nm.values())) != len(nm) \
+            or len(set(em.values())) != len(em):
+        raise MeshError("producer node/element maps must be injective and cover exactly the mesh ids")
+    ids = _Ids(nodes, elements, {int(k) for k in mesh.tris}, nm, em, quads=mesh.quads)
+    if not mesh.hybrid_diagnostics:
+        return {}
+    record = _mapping(mesh.hybrid_diagnostics, "mesh hybrid_diagnostics")
+    return _process_hybrid(mesh, "mesh", ids, record)
 
 
 def _validate_metadata(mesh: Mesh, label: str, nodes: Set[int], elements: Set[int]) -> Tuple[str, ...]:
@@ -1215,6 +1333,7 @@ MESH_ID_BEARING_METADATA = (
     "structural_preparation.structured_layout.quality",
     "hybrid_diagnostics.structured_quality",
     "hybrid_diagnostics.automation",
+    "hybrid_diagnostics.quad_first",
     "hybrid_diagnostics.q5",
     "hybrid_diagnostics.quadratic_promotion",
     "hybrid_diagnostics.high_order_geometry",

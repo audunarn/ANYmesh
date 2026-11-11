@@ -116,6 +116,38 @@ def _midside(row, ids):
                                     ids.node(row['midpoint_node'], path), row['residual'], row['curvature_class'])
 
 
+_STATION_GAP = 1.0e-9
+
+
+def _check_edge_stations(rows, mesh, node, path):
+    """Each certified boundary midside must be the chain node of exactly its own station.
+
+    ``nodes_of_edge[e]`` is the authoritative corner/midside sequence
+    ``[c0, m0, c1, m1, ...]`` in the edge's own parameter direction. Faces that
+    traverse the edge in opposite orientations report the same canonical
+    ``(edge, t0, t1)`` station, so identity is established by sorting the
+    station intervals, never by face loop order or by node-set membership.
+    ``node`` maps a chain node into the numbering of ``rows`` (identity before
+    renumbering, the permanent-ID map after it).
+    """
+    by_edge = {}
+    for row in rows:
+        by_edge.setdefault(row['source_edge'], []).append(row)
+    for edge, items in by_edge.items():
+        chain = mesh.nodes_of_edge.get(edge)
+        items = sorted(items, key=lambda row: tuple(row['station_interval']))
+        if chain is None or len(chain) != 2 * len(items) + 1:
+            raise MeshError(f'{path}: edge {edge} certifies {len(items)} stations but its published '
+                            f'chain has {None if chain is None else len(chain)} nodes')
+        for first, second in zip(items, items[1:]):
+            if abs(first['station_interval'][1] - second['station_interval'][0]) > _STATION_GAP:
+                raise MeshError(f'{path}: edge {edge} station intervals are not consecutive')
+        for index, row in enumerate(items):
+            if row['midpoint_node'] != node(chain[2 * index + 1]):
+                raise MeshError(f'{path}: edge {edge} station {index} midpoint node {row["midpoint_node"]} '
+                                f'is not the published chain midside {node(chain[2 * index + 1])}')
+
+
 def _high_order(value, ids, mesh):
     from .quad.high_order import HighOrderGeometryReport, HighOrderMeshCertificate
     if value == {'status': 'NOT_APPLICABLE', 'reports': []}:
@@ -159,6 +191,11 @@ def _high_order(value, ids, mesh):
         result = HighOrderMeshCertificate(reports=tuple(faces), **record).to_dict()
         if [_midside(item, ids).to_dict() for item in boundary] != result['boundary_midsides']:
             raise MeshError('quadratic boundary midsides differ from their face reports')
+        where = 'high_order_geometry.boundary_midsides'
+        # Before renumbering: the source certificate against the source chain.
+        _check_edge_stations([dict(item) for item in boundary], mesh, lambda n: n, where)
+        # After renumbering: the translated certificate against the translated chain.
+        _check_edge_stations(result['boundary_midsides'], mesh, lambda n: ids.node(n, where), where)
         return result
     except (KeyError, TypeError, ValueError) as error:
         raise MeshError(f'invalid high-order geometry report: {error}') from error
