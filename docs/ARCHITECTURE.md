@@ -15,7 +15,7 @@ generation, local refinement, mesh quality, geometry-to-mesh associations and
 the optional Gmsh backend. ANYfem and ANYstructure consume the same geometry
 objects directly; there is no copied or adapted geometry model.
 
-ANYmesher must not import ANYfem, ANYstructure, ANYsolver, ANYfileio or
+ANYmesher must not import ANYfem, ANYstructure, ANYfeSolver, ANYfileio or
 ANYmaterial. Any such reverse dependency would either close a cycle or make a
 neutral mesh depend on analysis data. `tests/test_layering.py` checks this by
 walking the source AST, and also checks that every unconditional third-party

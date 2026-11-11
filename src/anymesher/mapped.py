@@ -277,7 +277,7 @@ def _refuse_curved_beams(
 ) -> None:
     """A quadratic beam on a curve is refused, because the solver refuses it.
 
-    ANYsolver's 3-node beam is straight-sided: it requires the middle node at
+    ANYfeSolver's 3-node beam is straight-sided: it requires the middle node at
     the chord midpoint and rejects anything else, since a displaced mid node
     is not a curved-beam definition.  Mid-side nodes here are placed *on the
     curve*, which is right for a Q8 shell edge and wrong for a B3.  Catching it

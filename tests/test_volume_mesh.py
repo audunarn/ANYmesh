@@ -262,7 +262,7 @@ for module, names in (
     for name in names:
         assert name in anymesher.__all__, name
         assert getattr(anymesher, name) is getattr(module, name), name
-assert not {'pytetwild', 'pyvista', 'vtk', 'anysolid', 'anysolver', 'ngsolve'} & set(sys.modules)
+assert not {'pytetwild', 'pyvista', 'vtk', 'anysolid', 'anyfesolver','anysolver', 'ngsolve'} & set(sys.modules)
 """],
         capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr

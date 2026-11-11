@@ -170,7 +170,7 @@ def freeze(root):
 def origins(root):
     import anygeometry
     import anymesher
-    assert not {'pytetwild','pyvista','vtk','anysolid','anysolver','ngsolve'}.intersection(sys.modules)
+    assert not {'pytetwild','pyvista','vtk','anysolid','anyfesolver','anysolver','ngsolve'}.intersection(sys.modules)
     import anygeometry._core as core
     import anymesher._native as native
     import anysolid

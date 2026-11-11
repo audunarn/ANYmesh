@@ -8,8 +8,8 @@ records how they changed. Plan and evidence:
 `C:/Github/ANYfem/docs/handoff/submodelling-20261009/`.
 
 ANYmesher owns the discrete question "which source element, and where in it, corresponds to
-this submodel node". It does not evaluate displacements; ANYsolver does that from the hit
-(`ANYsolver/docs/SUBMODEL_TRANSFER_CONTRACT.md`).
+this submodel node". It does not evaluate displacements; ANYfeSolver does that from the hit
+(`ANYfeSolver/docs/SUBMODEL_TRANSFER_CONTRACT.md`).
 
 ## 1. `TransferHit`
 
@@ -19,7 +19,7 @@ this submodel node". It does not evaluate displacements; ANYsolver does that fro
 | `source_element_id`, `source_element_type` | Selected source element, `Q4` or `T3` |
 | `source_node_ids` | Its connectivity, in element order |
 | `natural`, `weights` | Natural coordinates and weights (Q4 bilinear in `(ξ, η)`, T3 `(1 − r − s, r, s)`) |
-| `x_p` | The element's own map `Σ N_i x_i` at `natural`, the point ANYsolver evaluates |
+| `x_p` | The element's own map `Σ N_i x_i` at `natural`, the point ANYfeSolver evaluates |
 | `distance` | `‖x_f − x_p‖` |
 | `inverse_residual` | Planar route: the in-plane residual of the inverse map. Cylindrical route: a physical position uncertainty of `x_p` (the parameter-plane residual times a domain-wide stretch bound) |
 | `incident_source_faces` | Every source face of every hit element |
@@ -50,7 +50,7 @@ keyed by target node in ascending order; deterministic.
   interpolating nodes (weights below `natural_tolerance` count as zero) **and** their
   node-indexed weights agree within `weight_tolerance`. Otherwise `NONCONFORMING`, which
   covers coincident or disconnected sheets and non-conforming edges. The other hits are
-  returned as `alternatives`, so ANYsolver bounds their value spread.
+  returned as `alternatives`, so ANYfeSolver bounds their value spread.
 - **Faces**: with `require_faces` (default) every hit element must belong to a source face
   (`FACE_MISSING`), so the junction rule never runs on incomplete data.
 - **Cylinders** (slice S3b, the optional `cylinder=CylinderFrame(origin, axis, radius,
@@ -64,7 +64,7 @@ keyed by target node in ascending order; deterministic.
   the actual target is checked against a bound computed per hit (radial deviations, residual and
   the interpolation error of the cylinder map) plus a floating-point allowance; both are reported
   with the a-priori `R dtheta^2/8`. `inverse_residual` is a physical position uncertainty of
-  `x_p`, as ANYsolver expects: the parameter-plane residual times
+  `x_p`, as ANYfeSolver expects: the parameter-plane residual times
   `max |J_phys| / min sigma_min(J_param)` over the slack-expanded natural domain (both Jacobians
   are affine in the natural coordinates, so the bound holds over the whole element, not only at
   the hit); a non-positive lower bound refuses as degenerate. The derivation is in
