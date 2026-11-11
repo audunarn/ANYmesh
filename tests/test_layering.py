@@ -1,6 +1,6 @@
 """The package must not import its own consumers.
 
-ANYsolver and ANYfileio consume meshes; ANYmesher does not consume solvers or
+ANYfeSolver and ANYfileio consume meshes; ANYmesher does not consume solvers or
 file readers.  If that arrow ever reverses the family's dependency graph becomes
 a cycle, and the packages can no longer be released independently.  The rule is
 cheap to state and easy to break by accident -- a debug import added while
@@ -34,6 +34,7 @@ ALLOWED_THIRD_PARTY = frozenset({"anygeometry", "numpy"})
 # mesh an opinion about something that is not its business.
 FORBIDDEN = frozenset(
     {
+        "anyfesolver",
         "anysolver",
         "anyfem",
         "anyfileio",

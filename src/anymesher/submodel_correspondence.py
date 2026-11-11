@@ -4,14 +4,14 @@ Implements ``docs/SUBMODEL_CORRESPONDENCE_CONTRACT.md`` for planar linear shells
 (slice S3a) and for linear shells on a cylinder (slice S3b, the ``cylinder``
 argument): for each submodel boundary point, find the source shell element and
 natural coordinates that correspond to it, restricted to the source elements the
-caller's lineage allows.  Displacements are not evaluated here; ANYsolver does
+caller's lineage allows.  Displacements are not evaluated here; ANYfeSolver does
 that from the returned :class:`TransferHit`.
 
 Tolerances are separate:
 
 * ``bounds_padding`` pads the AABB candidate query;
 * ``physical_tolerance`` bounds the distance from the point to the element's own map
-  (``x_p = sum N_i x_i``, the point ANYsolver evaluates);
+  (``x_p = sum N_i x_i``, the point ANYfeSolver evaluates);
 * ``natural_tolerance`` is the slack of the inside test in natural coordinates;
 * ``weight_tolerance`` bounds the disagreement of node-indexed weights between
   several hits (a shared edge or vertex).
@@ -25,7 +25,7 @@ The planar inverse map is explicit about its outcome: a warped Q4, a
 degenerate element or a non-converged inverse refuses rather than being skipped.
 Several hits are admitted only when they share the same interpolating nodes
 (topology; weights below ``natural_tolerance`` count as zero) and their
-node-indexed weights agree within ``weight_tolerance``; the other hits are returned as ``alternatives`` so ANYsolver
+node-indexed weights agree within ``weight_tolerance``; the other hits are returned as ``alternatives`` so ANYfeSolver
 can evaluate them and include their value spread in the interpolation allowance.  Coincident but disconnected sheets therefore refuse.
 """
 
@@ -157,7 +157,7 @@ def _planar_inverse(kind: str, coordinates: np.ndarray, point: np.ndarray, eleme
     local = (coordinates - origin) @ basis.T  # (n, 2)
     target = (point - origin) @ basis.T
     natural, weights, residual = _inverse_2d(kind, local, target, size, element_id)
-    mapped = weights @ coordinates  # the element's own map, as ANYsolver evaluates it
+    mapped = weights @ coordinates  # the element's own map, as ANYfeSolver evaluates it
     distance = float(np.linalg.norm(point - mapped))
     return natural, weights, mapped, distance, residual
 
@@ -208,7 +208,7 @@ _MAX_SPAN = 0.5 * np.pi
 
 
 def _element_map(weights: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
-    """``x_p = sum N_i x_i``: the element's own map, as ANYsolver evaluates it."""
+    """``x_p = sum N_i x_i``: the element's own map, as ANYfeSolver evaluates it."""
 
     return weights @ coordinates
 

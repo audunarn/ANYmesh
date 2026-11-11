@@ -15,7 +15,7 @@ The consuming solver turns that record into a constraint.
 native hybrid selector. ``backend='mapped'`` and
 ``anymesher.mapped.generate_mesh`` preserve the mapped-only compatibility path.
 
-The package deliberately does not import ANYsolver.  Meshes are produced here
+The package deliberately does not import ANYfeSolver.  Meshes are produced here
 and consumed there, never the other way round, so the dependency stays acyclic
 and a mesh can be generated and inspected without a solver present.
 

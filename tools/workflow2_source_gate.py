@@ -48,7 +48,7 @@ def export(a):
     archive=target/'source.tar'
     paths=[]
     if a.runtime_only:
-        for candidate in ('pyproject.toml','setup.py','MANIFEST.in','README.md','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','dependency-licenses.json','docs/LICENSE.md','src','anysolver','packages/results'):
+        for candidate in ('pyproject.toml','setup.py','MANIFEST.in','README.md','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','dependency-licenses.json','docs/LICENSE.md','src','anyfesolver','anysolver','packages/results'):
             if subprocess.run(['git','-C',a.repo,'cat-file','-e',a.ref+':'+candidate],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:paths.append(candidate)
     subprocess.run(['git','-C',a.repo,'archive','--format=tar','--output',str(archive),a.ref,*paths],check=True)
     source=target/'source';source.mkdir()

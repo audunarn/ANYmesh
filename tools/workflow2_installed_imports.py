@@ -29,7 +29,7 @@ def check_base(cell):
     import anygeometry
     import anymesher
     # Inspect before any explicit consumer/backend imports.
-    forbidden = ('anysolid','anysolver','skfem','pytetwild','pyvista','vtk','ngsolve')
+    forbidden = ('anysolid','anyfesolver','anysolver','skfem','pytetwild','pyvista','vtk','ngsolve')
     loaded = sorted(name for name in sys.modules
                     if any(name == item or name.startswith(item+'.') for item in forbidden))
     assert not loaded, loaded

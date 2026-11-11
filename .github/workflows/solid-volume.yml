@@ -90,7 +90,7 @@ jobs:
         env:
           EXPECTED_PROFILE: ${{ matrix.profile }}
         run: |
-          python -I -c "import os,sys,importlib,importlib.util,pathlib,anygeometry,anymesher; native=os.environ['EXPECTED_PROFILE']=='native'; names=('anygeometry._core','anymesher._native'); assert not {'pytetwild','pyvista','vtk','anysolid','anysolver','ngsolve'}.intersection(sys.modules); assert all('site-packages' in pathlib.Path(m.__file__).parts for m in (anygeometry,anymesher)); assert (anygeometry.backend_info()['backend']=='native')==native; assert all((importlib.util.find_spec(n) is not None)==native for n in names); extensions=[importlib.import_module(n) for n in names] if native else []; assert all(pathlib.Path(m.__file__).suffix in ('.pyd','.so') for m in extensions); print(sys.executable,anygeometry.backend_info())"
+          python -I -c "import os,sys,importlib,importlib.util,pathlib,anygeometry,anymesher; native=os.environ['EXPECTED_PROFILE']=='native'; names=('anygeometry._core','anymesher._native'); assert not {'pytetwild','pyvista','vtk','anysolid','anyfesolver','anysolver','ngsolve'}.intersection(sys.modules); assert all('site-packages' in pathlib.Path(m.__file__).parts for m in (anygeometry,anymesher)); assert (anygeometry.backend_info()['backend']=='native')==native; assert all((importlib.util.find_spec(n) is not None)==native for n in names); extensions=[importlib.import_module(n) for n in names] if native else []; assert all(pathlib.Path(m.__file__).suffix in ('.pyd','.so') for m in extensions); print(sys.executable,anygeometry.backend_info())"
       - name: Candidate owner geometry contracts
         working-directory: .ecosystem/ANYgeometry
         run: python -I -m pytest -q -o pythonpath= tests/test_solid_regions.py

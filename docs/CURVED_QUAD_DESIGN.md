@@ -324,7 +324,7 @@ CH5 does not re-run or weaken the CH1 mapping proof: the report consumes the imm
 
 CH6 re-opens the CH2 fail-closed mixed shell/beam boundary for **straight** beam/member content on the planar explicit quadratic quad-first route. It does not add a beam topology engine. The public mixed route continues to build the accepted quad-first Q8/T6 shell mesh and the existing mapped quadratic beam slice separately, then merges them through the established structural pipeline.
 
-The mapped beam implementation remains authoritative: a quadratic beam spans two linear stations and uses the intervening station as its third node, yielding B3 connectivity in frozen `start-mid-end` order. The middle node is the exact chord midpoint required by ANYsolver's straight-sided B3. Existing mapped rejection of curved quadratic beam edges remains in force; CH6 does not define a curved beam.
+The mapped beam implementation remains authoritative: a quadratic beam spans two linear stations and uses the intervening station as its third node, yielding B3 connectivity in frozen `start-mid-end` order. The middle node is the exact chord midpoint required by ANYfeSolver's straight-sided B3. Existing mapped rejection of curved quadratic beam edges remains in force; CH6 does not define a curved beam.
 
 The old blanket public guard that rejected every quadratic quad-first request containing beam/member content is removed. The private `_promote_quad_first_quadratic` guard for arbitrary pre-existing B2 content remains unchanged: CH6 only re-opens the coherent public mixed route where the beam slice is generated as B3 from the outset.
 

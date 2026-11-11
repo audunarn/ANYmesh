@@ -58,7 +58,7 @@ def origins(root):
     # -I makes repository files and PYTHONPATH irrelevant to these imports.
     import anygeometry
     import anymesher
-    forbidden = {'pytetwild', 'pyvista', 'vtk', 'anysolid', 'anysolver', 'ngsolve'}
+    forbidden = {'pytetwild', 'pyvista', 'vtk', 'anysolid', 'anyfesolver','anysolver', 'ngsolve'}
     assert not forbidden.intersection(sys.modules)
     import anysolid
     import numpy
