@@ -357,6 +357,27 @@ def _report_fields(names, validator):
     return dict.fromkeys(names.split(), validator)
 
 
+def _native_seconds(value, path):
+    try:
+        _finite(value, path)
+    except OverflowError as error:
+        raise MeshError(f"{path} exceeds the finite timing range") from error
+    if value < 0:
+        raise MeshError(f"{path} must be nonnegative")
+
+
+_COMPILED_TRIANGULATION_DIAGNOSTICS = {
+    **_report_fields("domain_filter_seconds insertion_seconds segment_recovery_seconds", _native_seconds),
+    "workspace_bytes": _count,
+}
+
+
+def _v_native_diagnostics(value, path):
+    # Reference triangulation and older artifacts carry an empty diagnostics mapping.
+    if _mapping(value, path):
+        _validate_report(value, path, _COMPILED_TRIANGULATION_DIAGNOSTICS)
+
+
 # surface_mesh emits this diagnostic before hybrid._publish_native_face_elements
 # allocates any project node or element IDs. Its candidate indices, including
 # poor_element_ids, identify rows in each candidate's own MeshCore. Keep them
@@ -408,7 +429,7 @@ _NATIVE_FACE_REPORT = {
         **_report_fields("candidate_count exchange_count exchange_work pair_count rejected_candidate_count", _count),
         "exchange_truncated": _boolean,
     },
-    "native_diagnostics": {},
+    "native_diagnostics": _v_native_diagnostics,
 }
 _LOCAL_ALIGNMENT = {
     **_report_fields("edge_count quad_edge_count", _count),

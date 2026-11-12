@@ -533,7 +533,8 @@ def mapped_face_record():
             "actual_backend": "mapped", "fallback_reason": None, "phase_seconds": {}}
 
 
-def test_native_surface_candidate_indices_and_serial_fallback_keep_their_namespaces():
+@pytest.fixture
+def native_plate():
     from anygeometry import GeometryModel
     from anymesher import generate_hybrid_mesh
 
@@ -542,6 +543,11 @@ def test_native_surface_candidate_indices_and_serial_fallback_keep_their_namespa
     geometry.add_sheet((face,))
     mesh = generate_hybrid_mesh(geometry, target_size=.4, strategy="native", native_backend="python",
                                 recombine=False, qualified_s3=True)
+    return mesh, face
+
+
+def test_native_surface_candidate_indices_and_serial_fallback_keep_their_namespaces(native_plate):
+    mesh, face = native_plate
     nm = {node: node + 100 for node in mesh.nodes}
     em = {element: element + 200 for element in mesh.tris}
     backend = mesh.hybrid_diagnostics["triangulation_backend_by_face"][face]
@@ -562,6 +568,43 @@ def test_native_surface_candidate_indices_and_serial_fallback_keep_their_namespa
     mesh.hybrid_diagnostics["parallel"].update(used=True, route="parallel")
     with pytest.raises(MeshError, match="mapped parallel plate joins only|cannot carry a certification"):
         remap_mesh_ids(mesh, nm, em)
+
+
+_COMPILED_DIAGNOSTICS = {
+    "domain_filter_seconds": 0.0,
+    "insertion_seconds": 0.125,
+    "segment_recovery_seconds": 0.25,
+    "workspace_bytes": 4096,
+}
+
+
+@pytest.mark.parametrize("diagnostics", [{}, _COMPILED_DIAGNOSTICS])
+def test_native_diagnostics_survive_numbering_and_serialization(native_plate, diagnostics):
+    from anymesher.serialize import mesh_from_dict, mesh_to_dict
+
+    mesh, face = native_plate
+    backend = mesh.hybrid_diagnostics["triangulation_backend_by_face"][face]
+    backend["native_diagnostics"] = dict(diagnostics)
+    numbered = remap_mesh_ids(mesh, {n: n + 100 for n in mesh.nodes}, {e: e + 200 for e in mesh.tris})
+    assert numbered.hybrid_diagnostics["triangulation_backend_by_face"][face]["native_diagnostics"] == diagnostics
+    reopened = mesh_from_dict(mesh_to_dict(numbered))
+    assert reopened.hybrid_diagnostics["triangulation_backend_by_face"][str(face)]["native_diagnostics"] == diagnostics
+
+
+@pytest.mark.parametrize("diagnostics", [
+    None, [], {"workspace_bytes": 1}, dict(_COMPILED_DIAGNOSTICS, unknown=0),
+    dict(_COMPILED_DIAGNOSTICS, insertion_seconds=-1), dict(_COMPILED_DIAGNOSTICS, insertion_seconds=True),
+    dict(_COMPILED_DIAGNOSTICS, insertion_seconds=-np.nextafter(np.longdouble(0), np.longdouble(1))),
+    dict(_COMPILED_DIAGNOSTICS, insertion_seconds=10**400), dict(_COMPILED_DIAGNOSTICS, segment_recovery_seconds=float("nan")),
+    dict(_COMPILED_DIAGNOSTICS, domain_filter_seconds=float("inf")), dict(_COMPILED_DIAGNOSTICS, domain_filter_seconds="0.1"),
+    dict(_COMPILED_DIAGNOSTICS, workspace_bytes=-1), dict(_COMPILED_DIAGNOSTICS, workspace_bytes=1.5),
+    dict(_COMPILED_DIAGNOSTICS, workspace_bytes=True),
+])
+def test_numbering_refuses_malformed_native_diagnostics(native_plate, diagnostics):
+    mesh, face = native_plate
+    mesh.hybrid_diagnostics["triangulation_backend_by_face"][face]["native_diagnostics"] = diagnostics
+    with pytest.raises(MeshError, match="native_diagnostics"):
+        remap_mesh_ids(mesh, {n: n + 100 for n in mesh.nodes}, {e: e + 200 for e in mesh.tris})
 
 
 def test_joined_plate_rejects_unknown_evidence_without_starting_a_pool():
