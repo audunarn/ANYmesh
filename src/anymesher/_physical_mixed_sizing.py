@@ -4,7 +4,7 @@ Only internal edges are cut. No centroid, source receipt or geometry truth is
 constructed here. The caller owns the canonical evaluator and final admission.
 """
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass,replace
 import numpy as np
 
 
@@ -388,7 +388,6 @@ def _assemble(mesh,covers,parents,children,xyz):
 
 def _score(mesh,settings):
     from .quality_v2 import evaluate_quality
-    _score_stats['full_calls']+=1;_score_stats['cells_evaluated']+=int(mesh.triangle_active.sum()+mesh.quad_active.sum())
     from .surface_mesh import _quality_threshold_report,_published_quality_report
     q=evaluate_quality(mesh,check_validity=False);threshold=_quality_threshold_report(q,settings)
     report=_published_quality_report(mesh,settings,q,threshold)
@@ -397,7 +396,14 @@ def _score(mesh,settings):
 
 
 # Counters for the local scorer (cells whose quality was computed, per call kind).
-_score_stats={'full_calls':0,'local_calls':0,'local_fallbacks':0,'cells_evaluated':0}
+@dataclass
+class _ScoreStats:
+    """Per-call counters of the local scorer, owned by the caller (no module state)."""
+    local_calls:int=0
+    local_fallbacks:int=0
+    cells_evaluated:int=0  # cells whose quality was computed (full re-scores included)
+
+
 _FIELDS=('area','aspect_ratio','minimum_angle','maximum_angle','scaled_jacobian','warpage')
 
 
@@ -429,7 +435,7 @@ def _spliced(base_group,base_active,candidate_conn,candidate_active,candidate_id
     return ElementQuality(candidate_ids[active],*(full[name][active] for name in _FIELDS))
 
 
-def _score_local(base,base_quality,candidate,settings):
+def _score_local(base,base_quality,candidate,settings,stats=None):
     """``_score(candidate)`` re-evaluating only cells not already known from ``base``.
 
     Bit-identical to the full score. Anything unusual (changed node prefix,
@@ -438,7 +444,8 @@ def _score_local(base,base_quality,candidate,settings):
     from .quality_v2 import MeshQualityV2,ValidityReport,_certified_linear_validity,triangle_quality,quad_quality
     from .surface_mesh import _quality_threshold_report,_published_quality_report
     def full():
-        _score_stats['local_fallbacks']+=1
+        if stats is not None:
+            stats.local_fallbacks+=1;stats.cells_evaluated+=int(candidate.triangle_active.sum()+candidate.quad_active.sum())
         return _score(candidate,settings)
     n0=base.num_nodes
     if (candidate.num_nodes<n0 or candidate.node_coordinates[:n0].tobytes()!=base.node_coordinates[:n0].tobytes()
@@ -452,7 +459,7 @@ def _score_local(base,base_quality,candidate,settings):
     quads=_spliced(base_quality.quadrilaterals,base.quad_active,candidate.quad_connectivity,candidate.quad_active,candidate.quad_ids,qrows,quad_quality,coords)
     validity=_certified_linear_validity(candidate,None,(),_triangle_metrics=triangles,_quad_metrics=quads)
     if validity is None:return full()
-    _score_stats['local_calls']+=1;_score_stats['cells_evaluated']+=len(trows)+len(qrows)
+    if stats is not None:stats.local_calls+=1;stats.cells_evaluated+=len(trows)+len(qrows)
     q=MeshQualityV2(triangles,quads,validity);threshold=_quality_threshold_report(q,settings)
     report=_published_quality_report(candidate,settings,q,threshold)
     report['violation_counts']=dict(threshold['violation_counts']);report['invalid_element_count']=len(q.validity.errors)
@@ -476,7 +483,7 @@ def _shape_clear(summary):
     return summary['invalid_element_count']==0 and not any(summary['violation_counts'].values())
 
 
-def _debt_closure(initial,points,mesh,covers,summary,quality,parents,report,protected,settings,evaluate,charge,check,*,node_remaining,first_work,initial_interfaces,cut_limit=16,node_limit=32,cell_limit=128,work_limit=512,max_fractions=5,new_row_placement=True,local_retriangulation=False):
+def _debt_closure(initial,points,mesh,covers,summary,quality,parents,report,protected,settings,evaluate,charge,check,*,node_remaining,first_work,initial_interfaces,cut_limit=16,node_limit=32,cell_limit=128,work_limit=512,max_fractions=5,new_row_placement=True,local_retriangulation=False,score_stats=None):
     """Private connected staging; only the original whole report can admit it.
 
     A failed transaction returns no geometry or admitted nodes; all work stays spent.
@@ -565,7 +572,7 @@ def _debt_closure(initial,points,mesh,covers,summary,quality,parents,report,prot
                         if assembled is None:reason='cover';continue
                         candidate,cover=assembled
                         if surface._physical_chart_invalid_count(proposed,candidate.triangle_connectivity) or not all(_positive(proposed,tuple(map(int,row))) for row in candidate.quad_connectivity[candidate.quad_active]):reason='source_uv';continue
-                        spend();check();result,q=_score_local(mesh,quality,candidate,settings);check()
+                        spend();check();result,q=_score_local(mesh,quality,candidate,settings,score_stats);check()
                         if not _shape_clear(result):reason='intermediate_shape';continue
                         stepped=True;break
                     if stepped:break
@@ -583,7 +590,7 @@ def _debt_closure(initial,points,mesh,covers,summary,quality,parents,report,prot
     return None,0,facts
 
 
-def repair_mixed_sizing(points,report,settings,evaluate,protected_edges,*,topology_remaining,insertion_remaining,max_fractions=5,new_row_placement=True,local_retriangulation=False):
+def repair_mixed_sizing(points,report,settings,evaluate,protected_edges,*,topology_remaining,insertion_remaining,max_fractions=5,new_row_placement=True,local_retriangulation=False,score_stats=None):
     """Return detached UV/report/work/new-node counts; all final gates remain hard."""
     from types import FunctionType
     from . import surface_mesh as surface
@@ -671,12 +678,12 @@ def repair_mixed_sizing(points,report,settings,evaluate,protected_edges,*,topolo
                             if staged is None:continue
                             candidate,cover=staged
                             if surface._physical_chart_invalid_count(proposed,candidate.triangle_connectivity):continue
-                            charge();check();summary,q=_score_local(mesh,bq,candidate,settings);check()
+                            charge();check();summary,q=_score_local(mesh,bq,candidate,settings,score_stats);check()
                             transaction_nodes=0
                             if not _alternative_progress(before,summary):
                                 if not (_shape_clear(before) and _shape_clear(summary)):continue
                                 check()
-                                outcome,transaction_nodes,detail=_debt_closure(before,proposed,candidate,cover,summary,q,parents,report,protected,settings,evaluate,charge,check,node_remaining=(len(selected),insertion_remaining-consumed,len(current)),first_work=used-proposal_start,initial_interfaces={edge for _,_,edge,_ in frontier},work_limit=min(512,used-proposal_start+topology_remaining-used),max_fractions=max_fractions,new_row_placement=new_row_placement,local_retriangulation=local_retriangulation)
+                                outcome,transaction_nodes,detail=_debt_closure(before,proposed,candidate,cover,summary,q,parents,report,protected,settings,evaluate,charge,check,node_remaining=(len(selected),insertion_remaining-consumed,len(current)),first_work=used-proposal_start,initial_interfaces={edge for _,_,edge,_ in frontier},work_limit=min(512,used-proposal_start+topology_remaining-used),max_fractions=max_fractions,new_row_placement=new_row_placement,local_retriangulation=local_retriangulation,score_stats=score_stats)
                                 consumed+=transaction_nodes
                                 facts['attempted_allocation_nodes']+=detail['allocated_nodes']-len(selected)
                                 facts['validated_private_staged_nodes']+=detail['staged_nodes']

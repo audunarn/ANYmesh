@@ -84,10 +84,9 @@ def test_local_score_equals_full_score_for_every_candidate_and_chained_commits(b
 def test_local_score_counts_only_affected_cells(base):
     mesh,report,protected,q=base;total=int(mesh.triangle_active.sum()+mesh.quad_active.sum())
     _,candidate,_=next(candidates(mesh,report,protected))
-    before=dict(sizing._score_stats);sizing._score_local(mesh,q,candidate,SETTINGS)
-    after=sizing._score_stats
-    assert after['local_calls']==before['local_calls']+1 and after['local_fallbacks']==before['local_fallbacks']
-    evaluated=after['cells_evaluated']-before['cells_evaluated']
+    stats=sizing._ScoreStats();sizing._score_local(mesh,q,candidate,SETTINGS,stats)
+    assert stats.local_calls==1 and stats.local_fallbacks==0
+    evaluated=stats.cells_evaluated
     assert 0<evaluated<=8 and evaluated*4<total
 
 
@@ -100,19 +99,18 @@ def test_wrong_affected_set_is_detected(base,monkeypatch,drop):
         t,qq=real(a,b)
         return (t[:0],qq[:0]) if drop=='all' else (t[:-1],qq[:-1])
     monkeypatch.setattr(sizing,'_recompute_rows',wrong)
-    fallbacks=sizing._score_stats['local_fallbacks']
-    try:equal(sizing._score_local(mesh,q,candidate,SETTINGS),sizing._score(candidate,SETTINGS));differs=False
+    stats=sizing._ScoreStats()
+    try:equal(sizing._score_local(mesh,q,candidate,SETTINGS,stats),sizing._score(candidate,SETTINGS));differs=False
     except AssertionError:differs=True
     # An incomplete set must never go unnoticed: it either changes the result
     # (this test fails) or is refused by the certifier and re-scored in full.
-    assert differs or sizing._score_stats['local_fallbacks']>fallbacks
-    assert 'cells_evaluated' in sizing._score_stats
+    assert differs or stats.local_fallbacks>0
 
 
 def test_correct_affected_set_never_needs_the_fallback(base):
-    mesh,report,protected,q=base;before=sizing._score_stats['local_fallbacks']
-    for _,candidate,_ in candidates(mesh,report,protected):sizing._score_local(mesh,q,candidate,SETTINGS)
-    assert sizing._score_stats['local_fallbacks']==before
+    mesh,report,protected,q=base;stats=sizing._ScoreStats()
+    for _,candidate,_ in candidates(mesh,report,protected):sizing._score_local(mesh,q,candidate,SETTINGS,stats)
+    assert stats.local_fallbacks==0 and stats.local_calls>=15
 
 
 def test_changed_node_prefix_or_invalid_candidate_falls_back_to_full_score(base):
@@ -120,11 +118,11 @@ def test_changed_node_prefix_or_invalid_candidate_falls_back_to_full_score(base)
     _,candidate,_=next(candidates(mesh,report,protected))
     moved=candidate.node_coordinates.copy();moved[0,0]+=.01
     changed=MeshCore(moved,candidate.triangle_connectivity,candidate.quad_connectivity,node_ids=candidate.node_ids,triangle_ids=candidate.triangle_ids,quad_ids=candidate.quad_ids,node_active=candidate.node_active,triangle_active=candidate.triangle_active,quad_active=candidate.quad_active,node_owner_handles=candidate.node_owner_handles,triangle_owner_handles=candidate.triangle_owner_handles,quad_owner_handles=candidate.quad_owner_handles)
-    before=sizing._score_stats['local_fallbacks']
-    equal(sizing._score_local(mesh,q,changed,SETTINGS),sizing._score(changed,SETTINGS))
-    assert sizing._score_stats['local_fallbacks']==before+1
+    stats=sizing._ScoreStats()
+    equal(sizing._score_local(mesh,q,changed,SETTINGS,stats),sizing._score(changed,SETTINGS))
+    assert stats.local_fallbacks==1
     inverted=candidate.node_coordinates.copy();inverted[-1]=inverted[0]   # new node on a base node -> degenerate
     bad=MeshCore(inverted,candidate.triangle_connectivity,candidate.quad_connectivity,node_ids=candidate.node_ids,triangle_ids=candidate.triangle_ids,quad_ids=candidate.quad_ids,node_active=candidate.node_active,triangle_active=candidate.triangle_active,quad_active=candidate.quad_active,node_owner_handles=candidate.node_owner_handles,triangle_owner_handles=candidate.triangle_owner_handles,quad_owner_handles=candidate.quad_owner_handles)
-    before=sizing._score_stats['local_fallbacks']
-    equal(sizing._score_local(mesh,q,bad,SETTINGS),sizing._score(bad,SETTINGS))
-    assert sizing._score_stats['local_fallbacks']==before+1
+    stats=sizing._ScoreStats()
+    equal(sizing._score_local(mesh,q,bad,SETTINGS,stats),sizing._score(bad,SETTINGS))
+    assert stats.local_fallbacks==1
