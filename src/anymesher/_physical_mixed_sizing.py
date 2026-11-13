@@ -388,9 +388,73 @@ def _assemble(mesh,covers,parents,children,xyz):
 
 def _score(mesh,settings):
     from .quality_v2 import evaluate_quality
+    _score_stats['full_calls']+=1;_score_stats['cells_evaluated']+=int(mesh.triangle_active.sum()+mesh.quad_active.sum())
     from .surface_mesh import _quality_threshold_report,_published_quality_report
     q=evaluate_quality(mesh,check_validity=False);threshold=_quality_threshold_report(q,settings)
     report=_published_quality_report(mesh,settings,q,threshold)
+    report['violation_counts']=dict(threshold['violation_counts']);report['invalid_element_count']=len(q.validity.errors)
+    return report,q
+
+
+# Counters for the local scorer (cells whose quality was computed, per call kind).
+_score_stats={'full_calls':0,'local_calls':0,'local_fallbacks':0,'cells_evaluated':0}
+_FIELDS=('area','aspect_ratio','minimum_angle','maximum_angle','scaled_jacobian','warpage')
+
+
+def _recompute_rows(base,candidate):
+    """Active candidate rows whose quality is not already known from ``base``.
+
+    Quality of a cell depends only on its corner coordinates; with an identical
+    node prefix, a row needs recomputation exactly when it is new, newly
+    active, or its connectivity differs from the base row.
+    """
+    result=[]
+    for conn,act,bconn,bact in ((candidate.triangle_connectivity,candidate.triangle_active,base.triangle_connectivity,base.triangle_active),
+            (candidate.quad_connectivity,candidate.quad_active,base.quad_connectivity,base.quad_active)):
+        n0=len(bconn);known=np.zeros(len(conn),dtype=bool)
+        known[:n0]=bact&(conn[:n0]==bconn).all(axis=1)
+        result.append(np.flatnonzero(act&~known))
+    return result
+
+
+def _spliced(base_group,base_active,candidate_conn,candidate_active,candidate_ids,rows,function,coords):
+    from .quality_v2 import ElementQuality
+    full={name:np.zeros(len(candidate_conn)) for name in _FIELDS}
+    base_rows=np.flatnonzero(base_active)
+    for name in _FIELDS:full[name][base_rows]=getattr(base_group,name)
+    if len(rows):
+        fresh=function(coords,candidate_conn[rows],candidate_ids[rows])
+        for name in _FIELDS:full[name][rows]=getattr(fresh,name)
+    active=np.flatnonzero(candidate_active)
+    return ElementQuality(candidate_ids[active],*(full[name][active] for name in _FIELDS))
+
+
+def _score_local(base,base_quality,candidate,settings):
+    """``_score(candidate)`` re-evaluating only cells not already known from ``base``.
+
+    Bit-identical to the full score. Anything unusual (changed node prefix,
+    shape change, uncertified validity) returns the full score.
+    """
+    from .quality_v2 import MeshQualityV2,ValidityReport,_certified_linear_validity,triangle_quality,quad_quality
+    from .surface_mesh import _quality_threshold_report,_published_quality_report
+    def full():
+        _score_stats['local_fallbacks']+=1
+        return _score(candidate,settings)
+    n0=base.num_nodes
+    if (candidate.num_nodes<n0 or candidate.node_coordinates[:n0].tobytes()!=base.node_coordinates[:n0].tobytes()
+            or len(candidate.triangle_connectivity)<len(base.triangle_connectivity) or len(candidate.quad_connectivity)<len(base.quad_connectivity)
+            or candidate.triangle_connectivity.shape[1:]!=base.triangle_connectivity.shape[1:] or candidate.quad_connectivity.shape[1:]!=base.quad_connectivity.shape[1:]
+            or len(base_quality.triangles)!=int(base.triangle_active.sum()) or len(base_quality.quadrilaterals)!=int(base.quad_active.sum())):
+        return full()
+    trows,qrows=_recompute_rows(base,candidate)
+    coords=candidate.node_coordinates
+    triangles=_spliced(base_quality.triangles,base.triangle_active,candidate.triangle_connectivity,candidate.triangle_active,candidate.triangle_ids,trows,triangle_quality,coords)
+    quads=_spliced(base_quality.quadrilaterals,base.quad_active,candidate.quad_connectivity,candidate.quad_active,candidate.quad_ids,qrows,quad_quality,coords)
+    validity=_certified_linear_validity(candidate,None,(),_triangle_metrics=triangles,_quad_metrics=quads)
+    if validity is None:return full()
+    _score_stats['local_calls']+=1;_score_stats['cells_evaluated']+=len(trows)+len(qrows)
+    q=MeshQualityV2(triangles,quads,validity);threshold=_quality_threshold_report(q,settings)
+    report=_published_quality_report(candidate,settings,q,threshold)
     report['violation_counts']=dict(threshold['violation_counts']);report['invalid_element_count']=len(q.validity.errors)
     return report,q
 
@@ -501,7 +565,7 @@ def _debt_closure(initial,points,mesh,covers,summary,quality,parents,report,prot
                         if assembled is None:reason='cover';continue
                         candidate,cover=assembled
                         if surface._physical_chart_invalid_count(proposed,candidate.triangle_connectivity) or not all(_positive(proposed,tuple(map(int,row))) for row in candidate.quad_connectivity[candidate.quad_active]):reason='source_uv';continue
-                        spend();check();result,q=_score(candidate,settings);check()
+                        spend();check();result,q=_score_local(mesh,quality,candidate,settings);check()
                         if not _shape_clear(result):reason='intermediate_shape';continue
                         stepped=True;break
                     if stepped:break
@@ -543,7 +607,7 @@ def repair_mixed_sizing(points,report,settings,evaluate,protected_edges,*,topolo
     original=np.asarray(points,dtype=float);current=original.copy();mesh=report.mesh;protected={tuple(sorted(map(int,e))) for e in protected_edges}
     xyz=np.asarray(evaluate(current),dtype=float)
     if xyz.tobytes()!=mesh.node_coordinates.tobytes():raise MeshError('mixed sizing initial owner coordinates differ')
-    covers=_cover(report,protected);before,_=_score(mesh,settings);facts.update(enabled=True,stop_reason=None,initial_quality=before)
+    covers=_cover(report,protected);before,bq=_score(mesh,settings);facts.update(enabled=True,stop_reason=None,initial_quality=before)
     if before['invalid_element_count'] or surface._physical_chart_invalid_count(current,mesh.triangle_connectivity):raise MeshError('mixed sizing requires a valid complete source UV cover')
     used=added=consumed=0;budget_error=MeshError('mixed sizing topology work exhausted')
     def charge():
@@ -607,7 +671,7 @@ def repair_mixed_sizing(points,report,settings,evaluate,protected_edges,*,topolo
                             if staged is None:continue
                             candidate,cover=staged
                             if surface._physical_chart_invalid_count(proposed,candidate.triangle_connectivity):continue
-                            charge();check();summary,q=_score(candidate,settings);check()
+                            charge();check();summary,q=_score_local(mesh,bq,candidate,settings);check()
                             transaction_nodes=0
                             if not _alternative_progress(before,summary):
                                 if not (_shape_clear(before) and _shape_clear(summary)):continue
@@ -621,7 +685,7 @@ def repair_mixed_sizing(points,report,settings,evaluate,protected_edges,*,topolo
                                 proposed,candidate,cover,summary,q=outcome
                             retained=len(proposed)-len(current)
                             report=_covered_report(report,candidate,cover,q,protected)
-                            current,mesh,covers,before=proposed,candidate,cover,summary
+                            current,mesh,covers,before,bq=proposed,candidate,cover,summary,q
                             added+=retained
                             if not transaction_nodes:consumed+=retained
                             facts['commits']+=1;committed=True;break

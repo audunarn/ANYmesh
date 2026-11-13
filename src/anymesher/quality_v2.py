@@ -250,6 +250,7 @@ def _certified_linear_validity(
     declared: tuple[Sequence[int], ...],
     *,
     _triangle_metrics: ElementQuality | None = None,
+    _quad_metrics: ElementQuality | None = None,
 ) -> ValidityReport | None:
     """Vectorized certification of a fully valid linear mesh.
 
@@ -325,11 +326,19 @@ def _certified_linear_validity(
                 return None
         if len(quads):
             rows = np.flatnonzero(mesh.quad_active)
-            metrics = quad_quality(
-                mesh.node_coordinates,
-                mesh.quad_connectivity[rows],
-                mesh.quad_ids[rows],
-            )
+            metrics = _quad_metrics
+            if metrics is None:
+                metrics = quad_quality(
+                    mesh.node_coordinates,
+                    mesh.quad_connectivity[rows],
+                    mesh.quad_ids[rows],
+                )
+            elif (type(metrics) is not ElementQuality
+                  or not np.array_equal(metrics.element_ids, mesh.quad_ids[rows])
+                  or any(getattr(metrics, name).shape != (len(rows),) for name in
+                         ("area", "aspect_ratio", "minimum_angle", "maximum_angle",
+                          "scaled_jacobian", "warpage"))):
+                return None
             if not (
                 np.all(np.isfinite(metrics.area))
                 and np.all(metrics.area > area_tolerance)
