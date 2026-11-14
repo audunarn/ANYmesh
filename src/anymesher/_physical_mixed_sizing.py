@@ -404,7 +404,6 @@ class _ScoreStats:
     cells_evaluated:int=0  # cells whose quality was computed (full re-scores included)
 
 
-_FIELDS=('area','aspect_ratio','minimum_angle','maximum_angle','scaled_jacobian','warpage')
 
 
 def _recompute_rows(base,candidate):
@@ -425,14 +424,15 @@ def _recompute_rows(base,candidate):
 
 def _spliced(base_group,base_active,candidate_conn,candidate_active,candidate_ids,rows,function,coords):
     from .quality_v2 import ElementQuality
-    full={name:np.zeros(len(candidate_conn)) for name in _FIELDS}
+    fields=('area','aspect_ratio','minimum_angle','maximum_angle','scaled_jacobian','warpage')
+    full={name:np.zeros(len(candidate_conn)) for name in fields}
     base_rows=np.flatnonzero(base_active)
-    for name in _FIELDS:full[name][base_rows]=getattr(base_group,name)
+    for name in fields:full[name][base_rows]=getattr(base_group,name)
     if len(rows):
         fresh=function(coords,candidate_conn[rows],candidate_ids[rows])
-        for name in _FIELDS:full[name][rows]=getattr(fresh,name)
+        for name in fields:full[name][rows]=getattr(fresh,name)
     active=np.flatnonzero(candidate_active)
-    return ElementQuality(candidate_ids[active],*(full[name][active] for name in _FIELDS))
+    return ElementQuality(candidate_ids[active],*(full[name][active] for name in fields))
 
 
 def _score_local(base,base_quality,candidate,settings,stats=None):
@@ -441,7 +441,7 @@ def _score_local(base,base_quality,candidate,settings,stats=None):
     Bit-identical to the full score. Anything unusual (changed node prefix,
     shape change, uncertified validity) returns the full score.
     """
-    from .quality_v2 import MeshQualityV2,ValidityReport,_certified_linear_validity,triangle_quality,quad_quality
+    from .quality_v2 import MeshQualityV2,_certified_linear_validity,triangle_quality,quad_quality
     from .surface_mesh import _quality_threshold_report,_published_quality_report
     def full():
         if stats is not None:

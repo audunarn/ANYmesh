@@ -1672,7 +1672,7 @@ def _physical_pairing_services():
         vars(topology).get('__init__'), vars(topology).get('flip_edge'),
         vars(native_v2).get('orient2d'), vars(pairing).get('replace'),
         _quality_threshold_report, _published_quality_report, _physical_chart_invalid_count,
-        quality_v2.triangle_quality, quality_v2.quad_candidate_quality, quality_v2._certified_linear_validity,
+        quality_v2.triangle_quality, quality_v2.quad_candidate_quality, quality_v2._certified_linear_validity, quality_v2.quad_quality, quality_v2._quad_values, quality_v2._corner_data, quality_v2._normal, quality_v2.native_element_quality,
         vars(AnalyticMetricChart).get('evaluate'),
         *(vars(shape).get(name) for name in ('_check_context','_capture_context','_patch','_world_core','_admissible','repair_shape_patches','_eligible_chart','_score','_positive','_closed_mixed_link','_alternative_progress','replace','_STAR_CALL')),
         *(vars(guard_kind).get(name) for name in ('__init__','__call__','__setattr__')),
@@ -1705,7 +1705,7 @@ def _physical_pairing_services():
         if any(v is None for v in positional) or any(k is None or v is None for k,v in named):return None
         return identity+(id(function),id(function.__code__),positional,named)
     pins = tuple(owned_pin(function) for function in functions)
-    return None if any(pin is None for pin in pins) else (id(topology),id(vars(pairing).get('np')),id(vars(pairing).get('Counter')),id(vars(sizing).get('np')),id(vars(sizing).get('Counter')),id(vars(sizing).get('replace')),id(vars(shape).get('np')),id(vars(mixed).get('np')),id(vars(mixed).get('Fraction')),id(np.float64),id(np.int64),id(np.ndarray),tuple(id(vars(guard_kind).get(name)) for name in ('_data','__getattribute__','__getattr__','__slots__')),tuple(id(vars(SurfaceMeshOptions).get(name)) for name in ('__getattribute__','__getattr__','min_angle','max_angle','min_scaled_jacobian','max_aspect_ratio','max_warpage','max_element_growth')),pins)
+    return None if any(pin is None for pin in pins) else (id(topology),id(vars(pairing).get('np')),id(vars(pairing).get('Counter')),id(vars(sizing).get('np')),id(vars(sizing).get('Counter')),id(vars(sizing).get('replace')),id(vars(quality_v2).get('np')),id(vars(quality_v2).get('ElementQuality')),id(vars(quality_v2).get('ValidityReport')),id(vars(quality_v2).get('MeshQualityV2')),id(vars(quality_v2).get('MeshCore')),id(vars(quality_v2).get('corner_edges')),id(quality_v2._frozen),id(quality_v2._frozen.__code__),id(quality_v2._frozen.__defaults__),id(vars(quality_v2).get('MeshError')),id(vars(quality_v2).get('acos')),id(vars(quality_v2).get('atan2')),id(vars(quality_v2).get('degrees')),id(vars(quality_v2).get('pi')),id(vars(shape).get('np')),id(vars(mixed).get('np')),id(vars(mixed).get('Fraction')),id(np.float64),id(np.int64),id(np.ndarray),tuple(id(vars(guard_kind).get(name)) for name in ('_data','__getattribute__','__getattr__','__slots__')),tuple(id(vars(SurfaceMeshOptions).get(name)) for name in ('__getattribute__','__getattr__','min_angle','max_angle','min_scaled_jacobian','max_aspect_ratio','max_warpage','max_element_growth')),pins)
 
 
 _REFERENCE_PHYSICAL_PAIRING_SERVICES = None  # frozen after all owned functions are defined

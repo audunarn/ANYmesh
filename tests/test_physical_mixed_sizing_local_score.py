@@ -153,3 +153,55 @@ def test_replaced_local_score_helper_refuses_before_it_is_entered(owner_chart,mo
     # A changed calculation helper makes the whole repair ineligible: nothing is entered or changed.
     assert not entered and facts['enabled'] is False and facts['stop_reason']=='ineligible'
     assert made is points and updated is report and (work,nodes)==(0,0)
+
+
+_QUALITY_NAMES=['np','ElementQuality','ValidityReport','MeshQualityV2','MeshCore','corner_edges','MeshError','acos','atan2','degrees','pi',
+    'quad_quality','_quad_values','_corner_data','_normal','_frozen','native_element_quality','triangle_quality']
+
+
+@pytest.mark.parametrize('name',_QUALITY_NAMES)
+def test_every_quality_name_read_by_the_local_score_path_is_in_the_code_pin(monkeypatch,name):
+    from anymesher import quality_v2
+    assert surface._physical_pairing_services()==surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+    monkeypatch.setattr(quality_v2,name,object() if name in ('np','ElementQuality','ValidityReport','MeshQualityV2','MeshCore','MeshError','pi') else (lambda *a,**k:None))
+    assert surface._physical_pairing_services()!=surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+
+
+def test_frozen_defaults_and_code_are_in_the_code_pin(monkeypatch):
+    from anymesher import quality_v2
+    original=quality_v2._frozen.__defaults__
+    monkeypatch.setattr(quality_v2._frozen,'__defaults__',(np.float32,))
+    assert surface._physical_pairing_services()!=surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+    monkeypatch.setattr(quality_v2._frozen,'__defaults__',original)
+    assert surface._physical_pairing_services()==surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+
+
+def _globals_read(function):
+    import dis
+    found=set()
+    def walk(code):
+        found.update(i.argval for i in dis.get_instructions(code) if i.opname=='LOAD_GLOBAL')
+        for constant in code.co_consts:
+            if hasattr(constant,'co_code'):walk(constant)
+    walk(function.__code__);return found
+
+
+def test_local_score_helpers_read_no_unpinned_module_state():
+    """No module-level constant/tuple is read: only pinned helpers, numpy (id-pinned) and builtins."""
+    import builtins
+    allowed={'_recompute_rows','_spliced','_score','np'}
+    for name in ('_score_local','_recompute_rows','_spliced'):
+        extra={g for g in _globals_read(getattr(sizing,name)) if g not in allowed and not hasattr(builtins,g)}
+        assert not extra,(name,extra)
+    assert not hasattr(sizing,'_FIELDS')
+
+
+def test_replaced_quad_quality_makes_the_repair_ineligible_before_it_is_entered(owner_chart,monkeypatch):
+    from anymesher import quality_v2
+    from test_physical_mixed_sizing import patch,scope
+    model,chart=owner_chart;points,report,edges=patch(chart,'QQ');settings=surface.SurfaceMeshOptions(min_angle=15.);entered=[]
+    def stub(*a,**k):entered.append(1);raise AssertionError('replaced quality helper entered')
+    monkeypatch.setattr(quality_v2,'quad_quality',stub)
+    with scope(model,chart,settings):
+        made,updated,work,nodes,facts=sizing.repair_mixed_sizing(points,report,settings,chart.evaluate,edges,topology_remaining=128,insertion_remaining=8)
+    assert not entered and facts['enabled'] is False and updated is report
