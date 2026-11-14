@@ -187,7 +187,10 @@ def _globals_read(function):
 
 
 def test_local_score_helpers_read_no_unpinned_module_state():
-    """No module-level constant/tuple is read: only pinned helpers, numpy (id-pinned) and builtins."""
+    """No module-level constant/tuple is read: only pinned helpers, numpy (id-pinned) and builtins.
+
+    Builtins and their shadowing are outside the admission contract (see _physical_pairing_services).
+    """
     import builtins
     allowed={'_recompute_rows','_spliced','_score','np'}
     for name in ('_score_local','_recompute_rows','_spliced'):

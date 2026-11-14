@@ -1655,7 +1655,19 @@ _REFERENCE_PHYSICAL_FULL_SERVICES = _physical_full_quality_services()
 _PAIRING_NO_VALUE=np._NoValue
 
 def _physical_pairing_services():
-    """Finite callback-free calculation slice added by physical pairing."""
+    """Finite callback-free calculation slice added by physical pairing.
+
+    Admission contract. The returned inventory pins (a) the code, defaults and
+    identity of each listed entry-point function and (b) the identity of the
+    declared module-level objects (numpy module, selected classes and modules).
+    A replaced entry point or declared module object changes the inventory and
+    makes the mixed repair ineligible. It is NOT a defence against monkeypatching
+    of anything else. Explicitly outside the contract: builtins and shadowing of
+    builtins by module globals, numpy functions (np.cross, np.dot, ...), class
+    internals (methods, __init__ defaults, __post_init__), and native flags such
+    as native_cpp.COMPILED_QUALITY_PIPELINE_AVAILABLE. The same limits already
+    applied to triangle_quality and the other pinned helpers.
+    """
     from . import _physical_pairing_topology as pairing, _physical_corner_cavity as cavity
     from . import native_v2, _physical_t3_refinement, _physical_mixed_sizing as sizing, quality_v2
     from . import _physical_shape_patches as shape, _physical_mixed_repair as mixed
