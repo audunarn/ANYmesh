@@ -1,6 +1,7 @@
 """Local (incremental) mixed-sizing score equals the full score, cell for cell."""
 import numpy as np
 import pytest
+from test_physical_mixed_sizing import owner_chart  # noqa: F401  (fixture)
 from anymesher import _physical_mixed_sizing as sizing
 from anymesher import surface_mesh as surface
 from anymesher.core import MeshCore
@@ -126,3 +127,29 @@ def test_changed_node_prefix_or_invalid_candidate_falls_back_to_full_score(base)
     stats=sizing._ScoreStats()
     equal(sizing._score_local(mesh,q,bad,SETTINGS,stats),sizing._score(bad,SETTINGS))
     assert stats.local_fallbacks==1
+
+
+@pytest.mark.parametrize('name',['_score_local','_recompute_rows','_spliced'])
+def test_local_score_helpers_are_in_the_code_pin(monkeypatch,name):
+    assert surface._physical_pairing_services()==surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+    monkeypatch.setattr(sizing,name,lambda *a,**k:None)
+    assert surface._physical_pairing_services()!=surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+
+
+def test_certified_validity_helper_is_in_the_code_pin(monkeypatch):
+    from anymesher import quality_v2
+    monkeypatch.setattr(quality_v2,'_certified_linear_validity',lambda *a,**k:None)
+    assert surface._physical_pairing_services()!=surface._REFERENCE_PHYSICAL_PAIRING_SERVICES
+
+
+@pytest.mark.parametrize('name',['_score_local','_recompute_rows','_spliced'])
+def test_replaced_local_score_helper_refuses_before_it_is_entered(owner_chart,monkeypatch,name):
+    from test_physical_mixed_sizing import patch,scope
+    model,chart=owner_chart;points,report,edges=patch(chart,'QQ');settings=surface.SurfaceMeshOptions(min_angle=15.);entered=[]
+    def stub(*a,**k):entered.append(name);raise AssertionError('replaced helper entered')
+    monkeypatch.setattr(sizing,name,stub)
+    with scope(model,chart,settings):
+        made,updated,work,nodes,facts=sizing.repair_mixed_sizing(points,report,settings,chart.evaluate,edges,topology_remaining=128,insertion_remaining=8)
+    # A changed calculation helper makes the whole repair ineligible: nothing is entered or changed.
+    assert not entered and facts['enabled'] is False and facts['stop_reason']=='ineligible'
+    assert made is points and updated is report and (work,nodes)==(0,0)

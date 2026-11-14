@@ -1672,13 +1672,13 @@ def _physical_pairing_services():
         vars(topology).get('__init__'), vars(topology).get('flip_edge'),
         vars(native_v2).get('orient2d'), vars(pairing).get('replace'),
         _quality_threshold_report, _published_quality_report, _physical_chart_invalid_count,
-        quality_v2.triangle_quality, quality_v2.quad_candidate_quality,
+        quality_v2.triangle_quality, quality_v2.quad_candidate_quality, quality_v2._certified_linear_validity,
         vars(AnalyticMetricChart).get('evaluate'),
         *(vars(shape).get(name) for name in ('_check_context','_capture_context','_patch','_world_core','_admissible','repair_shape_patches','_eligible_chart','_score','_positive','_closed_mixed_link','_alternative_progress','replace','_STAR_CALL')),
         *(vars(guard_kind).get(name) for name in ('__init__','__call__','__setattr__')),
         *(vars(mixed).get(name) for name in ('_batch_chart','_growth_descent','_project_growth_halfspaces','_constraint_operation_pin','_constraint_numpy_current','_constraint_topology','_prepare_constraint_layout','_constraint_growth_vector','_physical_constraint_values','repair_mixed_core_coordinates','repair_mixed_coordinates')),
         np.abs,np.all,np.any,np.argmax,np.array,np.column_stack,np.frombuffer,np.hypot,np.max,np.min,np.minimum,np.sqrt,np.sum,np.where,np.zeros,np.zeros_like,
-        *(vars(sizing).get(name) for name in ('_edges','_boundary','_positive','_eligible_chart','_cover','_frontier','_key','_children','_assemble','_score','_covered_report','_shape_clear','_debt_closure','repair_mixed_sizing','_star_objective','_place_new_rows','_retriangulate_cavity','_neighbour_sizes','_search_order')),
+        *(vars(sizing).get(name) for name in ('_edges','_boundary','_positive','_eligible_chart','_cover','_frontier','_key','_children','_assemble','_score','_covered_report','_shape_clear','_debt_closure','repair_mixed_sizing','_star_objective','_place_new_rows','_retriangulate_cavity','_neighbour_sizes','_search_order','_score_local','_recompute_rows','_spliced')),
         np.asarray,np.array_equal,np.flatnonzero,np.roll,np.unique,np.linalg.norm,
         np.vstack,np.concatenate,np.arange,np.full,np.ones,np.log,np.maximum,np.isfinite,np.empty)
     def owned_pin(function):
