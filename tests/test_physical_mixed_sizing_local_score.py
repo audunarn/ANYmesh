@@ -208,3 +208,15 @@ def test_replaced_quad_quality_makes_the_repair_ineligible_before_it_is_entered(
     with scope(model,chart,settings):
         made,updated,work,nodes,facts=sizing.repair_mixed_sizing(points,report,settings,chart.evaluate,edges,topology_remaining=128,insertion_remaining=8)
     assert not entered and facts['enabled'] is False and updated is report
+
+
+def test_non_function_frozen_replacement_refuses_admission_instead_of_crashing(owner_chart,monkeypatch):
+    from functools import partial
+    from anymesher import quality_v2
+    from test_physical_mixed_sizing import patch,scope
+    monkeypatch.setattr(quality_v2,'_frozen',partial(quality_v2._frozen))
+    assert surface._physical_pairing_services() is None
+    model,chart=owner_chart;points,report,edges=patch(chart,'QQ');settings=surface.SurfaceMeshOptions(min_angle=15.)
+    with scope(model,chart,settings):
+        made,updated,work,nodes,facts=sizing.repair_mixed_sizing(points,report,settings,chart.evaluate,edges,topology_remaining=128,insertion_remaining=8)
+    assert facts['enabled'] is False and facts['stop_reason']=='ineligible' and updated is report
