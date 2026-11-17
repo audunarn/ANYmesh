@@ -201,6 +201,111 @@ def _high_order(value, ids, mesh):
         raise MeshError(f'invalid high-order geometry report: {error}') from error
 
 
+
+def _fixed_sequence(*validators):
+    def check(value, path):
+        values = _list(value, path)
+        if len(values) != len(validators):
+            raise MeshError(f"{path} requires {len(validators)} values")
+        for item, validator in zip(values, validators):
+            validator(item, path)
+    return check
+
+
+def _optional_fields(required, optional):
+    def check(value, path):
+        row = _mapping(value, path)
+        _validate_report(row, path, {**required, **{k: v for k, v in optional.items() if k in row}})
+    return check
+
+
+# SmartMapped's prototype indices are local rows before global node/element
+# allocation (including improvement.moved_node_ids and the cavity cell lists).
+_CHART_XY = _fixed_sequence(_finite, _finite)
+_CAVITY_SCORE = _fixed_sequence(_finite, _count, _finite)
+_SEED_QUALITY = {**COUNT("quads triangles triangles_below_minimum"),
+                 "minimum_triangle_angle": _nullable(_finite)}
+_SEED_IMPROVEMENT = {
+    **COUNT("budget evaluations accepted_pairs accepted_moves eligible_move_nodes"),
+    **_report_fields("enabled_pairing enabled_smoothing budget_exhausted", _boolean),
+    "moved_node_ids": [_count], "before": _SEED_QUALITY, "after_pairing": _SEED_QUALITY,
+    "after": _SEED_QUALITY,
+}
+_REFUSAL = _optional_fields(
+    {"point": _CHART_XY, "triangle": _fixed_sequence(_CHART_XY, _CHART_XY, _CHART_XY),
+     "separation": _finite, "reason": _string},
+    {"station": _CHART_XY, "edge": _fixed_sequence(_CHART_XY, _CHART_XY)},
+)
+_CAVITY = _optional_fields(
+    {"cells": _count, "attempts": [{"new_points": _count, "score": _CAVITY_SCORE}], "reason": _string},
+    {"before_score": _CAVITY_SCORE, "proposal_refusals": [_REFUSAL]},
+)
+_SEED_REFINEMENT = {
+    **COUNT("budget cdt_calls added_nodes accepted_cavities declined_cavities"),
+    "enabled": _boolean, "budget_exhausted": _boolean, "cavities": [_CAVITY],
+    "expanded_cell_indices": [_count], "released_quad_indices": [_count], "restored_quad_indices": [_count],
+    "before": _SEED_QUALITY, "after": _SEED_QUALITY,
+}
+_PROTOTYPE = {
+    **COUNT("background_cells retained_quads triangles source_constraints derived_constraint_segments geometric_work"),
+    **_report_fields("prototype exact_coverage prescribed_boundaries_exact", _boolean),
+    **_report_fields("repair_scope quality_status actual_backend", _string), "grid_shape": _pair,
+    "improvement": _SEED_IMPROVEMENT, "refinement": _SEED_REFINEMENT,
+}
+_SMART_FACE = {
+    **COUNT("face faces_seeded seed_quads seed_triangles seed_nodes boundary_stations initial_front_edges regular_footprints"),
+    "initial_front": _string, "layout_policy_requested": _string, "prototype_diagnostics": _PROTOTYPE,
+    "prototype_options": _optional_fields({}, {
+        **COUNT("max_grid_cells max_work improvement_budget refinement_budget"),
+        **_report_fields("enable_pairing enable_smoothing enable_refinement", _boolean),
+    }),
+}
+_FOOTPRINT_COUNTS = COUNT("regular_footprints preserved lost moved")
+_ARC_FIDELITY = {**COUNT("divisions required_divisions target_sized_divisions"),
+                 **NUMBER("radius sweep analytic_radial_error")}
+_SMART_REPORT = {
+    **_report_fields("adapter strategy dispatch prototype_module prototype_function", _string),
+    **_report_fields("global_patch downstream_stages_unchanged downstream_may_modify_seed pure_prototype_claim", _boolean),
+    **COUNT("seed_quads seed_triangles"), "faces": [_count], "per_face": [_SMART_FACE],
+    "regular_footprints": {
+        "seeded": _count, "per_face": _face_map(_count), "guard": _string,
+        "stages": _optional_fields(
+            {stage: _FOOTPRINT_COUNTS for stage in ("front_q5", "after_repair", "final")},
+            {"before_repair": _FOOTPRINT_COUNTS}),
+        "final_preserved": _count, "final_lost": _count,
+    },
+    "optimization_pins": {"scope": _string, "per_face": _face_map(COUNT("held released"))},
+    "boundary_fidelity": {
+        **_report_fields("profile kind", _string), "arc_radial_tolerance_m": _finite,
+        **_report_fields("geometry_tolerance_changed qualification_claim same_station_rule_for_linear_and_quadratic", _boolean),
+        # Keys in both maps are geometry edge IDs in the same int/decimal-key format as faces.
+        "arc_divisions": _face_map(_count), "arcs": _face_map(_ARC_FIDELITY),
+    },
+}
+
+
+def _smart_mapped_fields(record):
+    if "meshing_strategy" not in record and "smart_mapped" not in record:
+        return {}
+    report = _mapping(record.get("smart_mapped"), "smart_mapped")
+    if (record.get("meshing_strategy") != "smart_mapped" or report.get("strategy") != "smart_mapped"
+            or report.get("adapter") != "smart_mapped_seed/1"):
+        raise MeshError("unrecognized or incomplete SmartMapped diagnostic")
+    _validate_report(report, "smart_mapped", _SMART_REPORT)
+    faces = report["faces"]
+    if (list(faces) != sorted(set(faces))
+            or [row["face"] for row in report["per_face"]] != list(faces)
+            or set(faces) != {int(key) for key in report["regular_footprints"]["per_face"]}
+            or set(faces) != {int(key) for key in report["optimization_pins"]["per_face"]}
+            or set(faces) != {int(key) for key in record["geometry_family_by_face"]}):
+        raise MeshError("SmartMapped report face IDs disagree with the quad-first face records")
+    for row in report["per_face"]:
+        moved = row["prototype_diagnostics"]["improvement"]["moved_node_ids"]
+        if any(index >= row["seed_nodes"] for index in moved):
+            raise MeshError("SmartMapped moved_node_ids contains an absent face-local prototype node")
+    return {"meshing_strategy": "smart_mapped", "smart_mapped": deepcopy(report)}
+
+
 def quad_first_fields(record, ids, mesh):
     if 'quad_first_api' not in record:
         return {}
@@ -211,6 +316,7 @@ def quad_first_fields(record, ids, mesh):
     for key in ('layout_policy','line_search','orientation','quad_first_api','quality_model','route','seed_mode'):
         _string(out[key], key)
     _validate_report(out['geometry_family_by_face'], 'geometry_family_by_face', _face_map(_string))
+    out.update(_smart_mapped_fields(record))
     _validate_report(out['front'], 'front', {'faces': _face_map(_front_face)})
     _validate_report(out['validation'], 'validation', {'faces': _face_map(_VALIDATION)})
     _validate_report(out['t3_angle_rule'], 't3_angle_rule', {'minimum_angle': _finite, 'action': _string,

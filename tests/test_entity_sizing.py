@@ -306,6 +306,40 @@ def test_fine_beam_gets_own_nodes_tied_by_interpolation_couplings():
     assert set(mesh.nodes) <= _referenced(mesh)
 
 
+@pytest.mark.parametrize(("order", "offset"), [("linear", 0.), ("quadratic", .1)])
+def test_published_member_tracks_rebuilt_beam_and_unmodified_edge(order, offset):
+    geometry, face = _plate()
+    bottom, right, top, _ = geometry.faces[face].loop
+    member = geometry.add_member((OrientedEdge(right.edge, not right.forward),
+                                  OrientedEdge(bottom.edge, not bottom.forward)))
+    unaffected = geometry.add_member((top,))
+    edges = (bottom.edge, right.edge, top.edge)
+    mesh = generate_hybrid_mesh(
+        geometry, target_size=.5, strategy="smart_mapped", order=order, beam_edges=edges,
+        beam_offsets={edge: (0., 0., offset) for edge in edges},
+        refinements=[size_override(EntityRef("edge", bottom.edge), .8)],
+    )
+    assert mesh.hybrid_diagnostics["independent_beam_edges"] == [bottom.edge]
+    assert set(mesh.nodes_of_member[member]) <= mesh.nodes.keys()
+    assert set(mesh.elements_of_member[member]) <= mesh.beams.keys()
+    assert mesh.elements_of_member[member] == [
+        *reversed(mesh.elements_of_edge[right.edge]), *reversed(mesh.elements_of_edge[bottom.edge])]
+    # Preserve every actual DOF, including distinct eccentric joint nodes if
+    # the two final beam bodies have distinct IDs at a coincident station.
+    final_nodes = {n for element in mesh.elements_of_member[member] for n in mesh.beams[element]}
+    member_nodes = mesh.nodes_of_member[member]
+    assert set(member_nodes) == final_nodes and len(member_nodes) == len(final_nodes)
+    positions = [mesh.nodes[n] for n in member_nodes]
+    factor = 2 if order == "quadratic" else 1
+    right_stations = [(4., y, offset) for y in np.linspace(2., 0., 4 * factor + 1)]
+    bottom_stations = [(x, 0., offset) for x in np.linspace(4., 0., 5 * factor + 1)]
+    np.testing.assert_allclose(positions[:len(right_stations)], right_stations, atol=1.e-12)
+    np.testing.assert_allclose(positions[-len(bottom_stations):], bottom_stations, atol=1.e-12)
+    assert mesh.elements_of_member[unaffected] == mesh.elements_of_edge[top.edge]
+    assert mesh.nodes_of_member[unaffected] == (mesh.offset_nodes_of_edge.get(top.edge)
+                                                or mesh.nodes_of_edge[top.edge])
+
+
 @pytest.mark.parametrize(("beam_size", "expected_couplings"), [(1.0, 9), (4.0 / 3.0, 7)])
 def test_quadratic_eccentric_coarse_beam_has_only_real_stations(beam_size, expected_couplings):
     geometry, face_id = _plate()

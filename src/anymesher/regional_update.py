@@ -781,7 +781,15 @@ def _x_automation(value: Any, ids: _Ids) -> Any:
     return out
 
 
+def _v_independent_beam_edges(value):
+    # These are source geometry edge IDs, unchanged by mesh renumbering.
+    edges = [_count(edge, "independent_beam_edges item") for edge in _list(value, "independent_beam_edges")]
+    if edges != sorted(set(edges)):
+        raise MeshError("independent_beam_edges requires sorted unique geometry edge IDs")
+
+
 _HYBRID_SCHEMA = {
+    "independent_beam_edges": _v_independent_beam_edges,
     "parallel": _v_parallel,
     "requested_target_size": lambda v: _finite(v, "requested_target_size", positive=True),
     "strategy_by_face": _v_strategy_by_face,

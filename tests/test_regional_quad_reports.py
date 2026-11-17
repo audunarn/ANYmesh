@@ -261,3 +261,60 @@ def test_edge_aligned_seed_counts_survive_sparse_numbering():
     seed["tensor_cells"] = -1
     with pytest.raises(MeshError, match="non-negative"):
         remap_mesh_ids(mesh, nodes, elements)
+
+
+def test_smart_mapped_sparse_publication_keeps_prototype_indices_and_geometry_ids():
+    from anygeometry import GeometryModel
+    from anymesher.hybrid import generate_hybrid_mesh
+    from anymesher.regional_update import remap_mesh_ids
+
+    model = GeometryModel()
+    face = model.add_plate(model.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0))))
+    mesh = generate_hybrid_mesh(model, strategy="smart_mapped", target_size=.5)
+    nodes = {n: 101 + 3*n for n in mesh.nodes}
+    elements = {e: 501 + 5*e for e in mesh.shells}
+    report = mesh.hybrid_diagnostics["smart_mapped"]
+    numbered = remap_mesh_ids(mesh, nodes, elements)
+    assert set(numbered.shells) == set(elements.values())
+    assert set(numbered.nodes) == set(nodes.values())
+    assert numbered.hybrid_diagnostics["smart_mapped"] == report
+    assert numbered.hybrid_diagnostics["meshing_strategy"] == "smart_mapped"
+    assert report["faces"] == [face]
+    # A prototype seed row is not a published mesh node. Zero is valid here.
+    row = report["per_face"][0]
+    moved = row["prototype_diagnostics"]["improvement"]["moved_node_ids"]
+    moved.append(0)
+    assert remap_mesh_ids(mesh, nodes, elements).hybrid_diagnostics["smart_mapped"] == report
+    moved.append(row["seed_nodes"])
+    with pytest.raises(MeshError, match="absent face-local prototype node"):
+        remap_mesh_ids(mesh, nodes, elements)
+    moved.pop()
+    row["prototype_diagnostics"]["improvement"]["unknown_node_ids"] = [1]
+    with pytest.raises(MeshError, match="unknown or missing fields"):
+        remap_mesh_ids(mesh, nodes, elements)
+    del row["prototype_diagnostics"]["improvement"]["unknown_node_ids"]
+    report["regular_footprints"]["stages"]["final"]["preserved"] = -1
+    with pytest.raises(MeshError, match="non-negative"):
+        remap_mesh_ids(mesh, nodes, elements)
+
+
+def test_independent_beam_edge_ids_are_source_geometry_labels():
+    from anygeometry import GeometryModel
+    from anymesher import EntityRef
+    from anymesher.mapped import generate_mesh
+    from anymesher.refinement import size_override
+    from anymesher.regional_update import remap_mesh_ids
+
+    model = GeometryModel()
+    face = model.add_plate(model.add_points(((0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0))))
+    edge = model.faces[face].loop[0].edge
+    mesh = generate_mesh(model, target_size=.5, beam_edges=[edge], beam_offsets={edge: .1},
+                         refinements=[size_override(EntityRef("edge", edge), 1.)])
+    nodes = {n: 101 + 3*n for n in mesh.nodes}
+    elements = {e: 501 + 5*e for e in (*mesh.shells, *mesh.beams, *mesh.couplings)}
+    numbered = remap_mesh_ids(mesh, nodes, elements)
+    assert numbered.hybrid_diagnostics["independent_beam_edges"] == [edge]
+    assert numbered.elements_of_edge[edge] == [elements[e] for e in mesh.elements_of_edge[edge]]
+    mesh.hybrid_diagnostics["independent_beam_edges"] = [edge, edge]
+    with pytest.raises(MeshError, match="unique geometry edge IDs"):
+        remap_mesh_ids(mesh, nodes, elements)

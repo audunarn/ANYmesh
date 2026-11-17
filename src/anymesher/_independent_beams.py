@@ -130,9 +130,34 @@ def apply_independent_beams(
             geometry, mesh, edge_id, flagged[edge_id], size_field, offsets, index,
             cancellation_check,
         )
+    _refresh_member_associations(geometry, mesh, flagged)
     known = {int(edge) for edge in mesh.hybrid_diagnostics.get(INDEPENDENT_BEAM_EDGES, ())}
     mesh.hybrid_diagnostics[INDEPENDENT_BEAM_EDGES] = sorted(known | set(flagged))
     return tuple(sorted(flagged))
+
+
+def _refresh_member_associations(geometry, mesh: Mesh, rebuilt_edges: Mapping[int, int]) -> None:
+    """Republish affected member chains after all their edge stations are final."""
+    for member_id in mesh.elements_of_member.keys() | mesh.nodes_of_member.keys():
+        member = geometry.members.get(member_id)
+        if member is None:
+            continue
+        uses = [geometry.member_edge_uses[use_id] for use_id in member.edge_use_ids]
+        if not any(use.edge_id in rebuilt_edges for use in uses):
+            continue
+        elements: list[int] = []
+        nodes: list[int] = []
+        for use in uses:
+            edge_elements = mesh.elements_of_edge.get(use.edge_id, ())
+            forward = int(use.orientation) > 0
+            ordered_elements = edge_elements if forward else reversed(edge_elements)
+            for element in ordered_elements:
+                elements.append(element)
+                # Both B2 and B3 bodies are stored in station order.
+                body = mesh.beams[element]
+                nodes.extend(body if forward else reversed(body))
+        mesh.elements_of_member[member_id] = list(dict.fromkeys(elements))
+        mesh.nodes_of_member[member_id] = list(dict.fromkeys(nodes))
 
 
 class _LocalShells:
