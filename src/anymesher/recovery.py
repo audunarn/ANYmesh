@@ -160,10 +160,11 @@ def _attempt_options(
         )
         if all(route != "native" or options.get("quad_options") is not None for route, options in routes):
             routes.append(("native", native))
-    if preferred == "smart_mapped":
-        for _method, options in routes[1:]:
-            # These controls belong to the preferred quad pipeline. Legacy
-            # recovery keeps its own unchanged quality policy and admission.
+    for _method, options in routes[1:]:
+        if options.get("quad_options") is None:
+            # These controls belong to the preferred quad pipeline (quad-first
+            # or SmartMapped). Legacy recovery keeps its own unchanged quality
+            # policy and admission, and the engine refuses the controls there.
             options.pop("quad_t3_minimum_angle", None)
             options.pop("quad_t3_angle_action", None)
     return tuple(routes[:3])
