@@ -494,21 +494,28 @@ def _remap_entity_overrides(
 
     result: list[Refinement] = []
     # A descendant shared by two exactly coincident source edges must receive
-    # one size.  One source named twice keeps its finer-wins resolution.
-    edge_size: dict[int, tuple[int, float]] = {}
+    # one size.  Each source first resolves its own requests (the finer wins);
+    # the resolved sizes are then compared across the sources that share a
+    # descendant, so the outcome cannot depend on request order.
+    resolved: dict[int, float] = {}
+    for item in refinements:
+        assert item.ref is not None
+        if item.ref.kind == "edge":
+            key = int(item.ref.id)
+            resolved[key] = min(float(item.size), resolved.get(key, float(item.size)))
+    edge_size: dict[int, float] = {}
+    for source_id, size in sorted(resolved.items()):
+        for final_id in source_to_final_edges.get(source_id, (source_id,)):
+            previous = edge_size.setdefault(int(final_id), size)
+            if previous != size:
+                raise MeshError(
+                    f"working edge {final_id} receives conflicting exact "
+                    "size overrides"
+                )
     for item in refinements:
         assert item.ref is not None
         table = source_to_final_faces if item.ref.kind == "face" else source_to_final_edges
         for final_id in table.get(int(item.ref.id), (int(item.ref.id),)):
-            if item.ref.kind == "edge":
-                owner, size = edge_size.setdefault(
-                    int(final_id), (int(item.ref.id), float(item.size))
-                )
-                if owner != int(item.ref.id) and size != float(item.size):
-                    raise MeshError(
-                        f"working edge {final_id} receives conflicting exact "
-                        "size overrides"
-                    )
             result.append(
                 replace(item, ref=EntityRef(item.ref.kind, int(final_id)))
             )

@@ -326,6 +326,46 @@ def remap_prepared_mesh_associations(
         for vertex_id in source.vertices
         if vertex_id in mesh.node_of_vertex
     }
+    # Source edges that share a working descendant keep one exact chain each;
+    # bind their endpoint vertices from that source-ordered chain so a vertex
+    # reference to any sharing source resolves.  Only vertices at an endpoint
+    # of a shared edge are touched, and only when the node is at the vertex.
+    claimants: dict[int, int] = {}
+    for source_edge_id, working_edges in edges.items():
+        for working_edge_id in working_edges:
+            claimants[working_edge_id] = claimants.get(working_edge_id, 0) + 1
+    shared_sources = sorted(
+        source_edge_id
+        for source_edge_id, working_edges in edges.items()
+        if any(claimants[item] > 1 for item in working_edges)
+    )
+    for source_edge_id in shared_sources:
+        chain = remapped_nodes_of_edge.get(source_edge_id)
+        if not chain:
+            continue
+        edge = source.edges[source_edge_id]
+        length = source.edge_length(source_edge_id)
+        tolerance = max(
+            source.tolerance.effective_length(length),
+            128.0 * np.finfo(float).eps * max(length, 1.0),
+        )
+        for vertex_id, node_id in ((edge.start, chain[0]), (edge.end, chain[-1])):
+            vertex_id, node_id = int(vertex_id), int(node_id)
+            gap = float(
+                np.linalg.norm(
+                    np.asarray(mesh.nodes[node_id], dtype=float)
+                    - np.asarray(source.vertices[vertex_id].position, dtype=float)
+                )
+            )
+            if gap > tolerance:
+                continue
+            previous = node_of_vertex.setdefault(vertex_id, node_id)
+            if previous != node_id:
+                raise MeshError(
+                    f"source vertex {vertex_id} is bound to nodes {previous} and "
+                    f"{node_id} by exactly coincident source edges"
+                )
+
     elements_of_sheet: dict[int, list[int]] = {}
     for sheet_id in source.sheets:
         elements = set(map(int, mesh.elements_of_sheet.get(sheet_id, ())))
