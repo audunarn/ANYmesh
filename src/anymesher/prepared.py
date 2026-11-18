@@ -10,11 +10,12 @@ never to choose an owner.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TypeVar
 
 import numpy as np
 
+from anygeometry.curves import Straight
 from anygeometry.model import GeometryModel
 
 from .errors import MeshError
@@ -31,6 +32,8 @@ def _declared_descendants(
     source_ids: Sequence[int],
     working_ids: Mapping[int, _Value],
     kind: str,
+    *,
+    may_share: Callable[[int, int], bool] | None = None,
 ) -> dict[int, tuple[int, ...]]:
     source_set = set(int(item) for item in source_ids)
     unknown_sources = sorted(set(int(item) for item in mapping).difference(source_set))
@@ -57,7 +60,9 @@ def _declared_descendants(
             )
         for descendant in descendants:
             previous = claimed.setdefault(descendant, source_id)
-            if previous != source_id:
+            if previous != source_id and not (
+                may_share is not None and may_share(previous, source_id)
+            ):
                 raise MeshError(
                     f"working {kind} {descendant} is claimed by source {kind}s "
                     f"{previous} and {source_id}"
@@ -202,6 +207,41 @@ def _remapped_seeding(
     )
 
 
+def _exactly_coincident_edges(source: GeometryModel) -> Callable[[int, int], bool]:
+    """Return a predicate for source edges that are one exact curve.
+
+    Two edges coincide only when their end positions and curve records are
+    exactly equal, in the same direction.  Reversed edges are accepted only for
+    straight segments.  Anything undecidable is not coincident.
+    """
+
+    def endpoints(edge_id: int) -> tuple[np.ndarray, np.ndarray]:
+        edge = source.edges[edge_id]
+        return (
+            np.asarray(source.vertices[edge.start].position),
+            np.asarray(source.vertices[edge.end].position),
+        )
+
+    def predicate(first: int, second: int) -> bool:
+        try:
+            a, b = source.edges[first], source.edges[second]
+            (a0, a1), (b0, b1) = endpoints(first), endpoints(second)
+            if np.array_equal(a0, b0) and np.array_equal(a1, b1):
+                return bool(a.curve == b.curve)
+            if (
+                isinstance(a.curve, Straight)
+                and isinstance(b.curve, Straight)
+                and np.array_equal(a0, b1)
+                and np.array_equal(a1, b0)
+            ):
+                return bool(a.curve == b.curve)
+        except Exception:
+            return False
+        return False
+
+    return predicate
+
+
 def remap_prepared_mesh_associations(
     mesh: Mesh,
     source: GeometryModel,
@@ -228,6 +268,7 @@ def remap_prepared_mesh_associations(
         tuple(source.edges),
         working.edges,
         "edge",
+        may_share=_exactly_coincident_edges(source),
     )
 
     remapped_elements_of_face: dict[int, list[int]] = {}
