@@ -329,7 +329,7 @@ def remap_prepared_mesh_associations(
     # Source edges that share a working descendant keep one exact chain each;
     # bind their endpoint vertices from that source-ordered chain so a vertex
     # reference to any sharing source resolves.  Only vertices at an endpoint
-    # of a shared edge are touched, and only when the node is at the vertex.
+    # of a shared edge are touched, and and a shared edge whose endpoint has no node is refused.
     claimants: dict[int, int] = {}
     for source_edge_id, working_edges in edges.items():
         for working_edge_id in working_edges:
@@ -358,7 +358,11 @@ def remap_prepared_mesh_associations(
                 )
             )
             if gap > tolerance:
-                continue
+                raise MeshError(
+                    f"source vertex {vertex_id} at an endpoint of source edge "
+                    f"{source_edge_id} cannot be bound: the shared working chain "
+                    f"has no node at it (nearest end node {node_id}, {gap:.6g} m away)"
+                )
             previous = node_of_vertex.setdefault(vertex_id, node_id)
             if previous != node_id:
                 raise MeshError(

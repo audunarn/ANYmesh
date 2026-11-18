@@ -301,17 +301,21 @@ def test_shared_edge_vertex_binding_contradiction_is_refused() -> None:
     source, working, mesh, first, second, v = _shared_vertex_case(
         reverse=False, bindings={"a": 1, "b": 2, "c": 2}
     )
-    before = dict(mesh.node_of_vertex)
+    import json
+
+    from anymesher.serialize import mesh_to_dict
+
+    before = json.dumps(mesh_to_dict(mesh), sort_keys=True, default=str)
     with pytest.raises(MeshError, match="vertex"):
         remap_prepared_mesh_associations(
             mesh, source, working,
             source_to_working_faces={},
             source_to_working_edges={first: (first,), second: (first,)},
         )
-    assert mesh.node_of_vertex == before
+    assert json.dumps(mesh_to_dict(mesh), sort_keys=True, default=str) == before
 
 
-def test_unshared_edges_and_unrelated_vertices_gain_no_vertex_binding() -> None:
+def test_unrelated_vertices_gain_no_vertex_binding() -> None:
     source, working, mesh, first, second, v = _shared_vertex_case(
         reverse=False, bindings={"a": 1, "b": 2}
     )
@@ -324,3 +328,87 @@ def test_unshared_edges_and_unrelated_vertices_gain_no_vertex_binding() -> None:
         source_to_working_edges={first: (first,), second: (first,)},
     )
     assert extra not in result.node_of_vertex
+
+
+def test_shared_edge_endpoint_without_a_node_is_refused() -> None:
+    import json
+
+    from anymesher.serialize import mesh_to_dict
+
+    source, working, mesh, first, second, v = _shared_vertex_case(
+        reverse=False, bindings={}
+    )
+    # The descendant chain has nodes only at 0.25 and 0.75: no endpoint node.
+    mesh.nodes = {1: np.asarray((0.25, 0.0, 0.0)), 2: np.asarray((0.75, 0.0, 0.0))}
+    before = json.dumps(mesh_to_dict(mesh), sort_keys=True, default=str)
+    with pytest.raises(MeshError, match=f"source vertex {v['a']}"):
+        remap_prepared_mesh_associations(
+            mesh, source, working,
+            source_to_working_faces={},
+            source_to_working_edges={first: (first,), second: (first,)},
+        )
+    assert json.dumps(mesh_to_dict(mesh), sort_keys=True, default=str) == before
+
+
+def _mixed_case(*, with_shared_pair: bool):
+    """Two unshared edges (with vertex bindings) beside an optional shared pair."""
+
+    source = GeometryModel()
+    pts = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)]
+    pts += [(0.0, 2.0, 0.0), (1.0, 2.0, 0.0), (0.0, 2.0, 0.0), (1.0, 2.0, 0.0)]
+    ids = source.add_points(tuple(pts))
+    e1 = source.add_line(ids[0], ids[1])
+    e2 = source.add_line(ids[2], ids[3])
+    nodes = {
+        1: np.asarray(pts[0]), 2: np.asarray(pts[1]),
+        3: np.asarray(pts[2]), 4: np.asarray(pts[3]),
+        5: np.asarray(pts[4]), 6: np.asarray(pts[5]),
+    }
+    nodes_of_edge = {e1: [1, 2], e2: [3, 4]}
+    node_of_vertex = {ids[0]: 1, ids[1]: 2, ids[2]: 3, ids[3]: 4}
+    table = {e1: (e1,), e2: (e2,)}
+    e3 = e4 = None
+    if with_shared_pair:
+        e3 = source.add_line(ids[4], ids[5])
+        e4 = source.add_line(ids[6], ids[7])
+        nodes_of_edge[e3] = [5, 6]
+        node_of_vertex[ids[4]] = 5
+        node_of_vertex[ids[5]] = 6
+        table[e3] = (e3,)
+        table[e4] = (e3,)
+    working = source.clone()
+    if with_shared_pair:
+        working.remove_edge(e4)
+    mesh = Mesh(
+        geometry_model_id=working.model_id,
+        geometry_revision=working.revision,
+        nodes=nodes,
+        nodes_of_edge=nodes_of_edge,
+        node_of_vertex=node_of_vertex,
+    )
+    return source, working, mesh, table, (e1, e2), ids
+
+
+def test_unshared_edges_are_untouched_beside_a_shared_pair() -> None:
+    e_ref = _mixed_case(with_shared_pair=False)
+    e_mix = _mixed_case(with_shared_pair=True)
+    results = []
+    for source, working, mesh, table, _unshared, _ids in (e_ref, e_mix):
+        results.append(
+            remap_prepared_mesh_associations(
+                mesh, source, working,
+                source_to_working_faces={}, source_to_working_edges=table,
+            )
+        )
+    ref, mix = results
+    (e1, e2), ids = e_mix[4], e_mix[5]
+    for edge in (e1, e2):
+        assert mix.nodes_of_edge[edge] == ref.nodes_of_edge[edge]
+        assert mix.elements_of_edge.get(edge) == ref.elements_of_edge.get(edge)
+        assert mix.offset_nodes_of_edge.get(edge) == ref.offset_nodes_of_edge.get(edge)
+    for vertex in ids[:4]:
+        assert mix.node_of_vertex[vertex] == ref.node_of_vertex[vertex]
+    # only the shared pair's endpoint vertices are added, nothing else
+    assert set(mix.node_of_vertex) == set(ids[:6]) | {ids[6], ids[7]}
+    assert mix.node_of_vertex[ids[6]] == 5 and mix.node_of_vertex[ids[7]] == 6
+    assert ref.node_of_vertex == {k: ref.node_of_vertex[k] for k in ids[:4]}
