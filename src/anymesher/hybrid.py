@@ -493,10 +493,22 @@ def _remap_entity_overrides(
     """Re-bind entity size overrides to every descendant of their source entity."""
 
     result: list[Refinement] = []
+    # A descendant shared by two exactly coincident source edges must receive
+    # one size.  One source named twice keeps its finer-wins resolution.
+    edge_size: dict[int, tuple[int, float]] = {}
     for item in refinements:
         assert item.ref is not None
         table = source_to_final_faces if item.ref.kind == "face" else source_to_final_edges
         for final_id in table.get(int(item.ref.id), (int(item.ref.id),)):
+            if item.ref.kind == "edge":
+                owner, size = edge_size.setdefault(
+                    int(final_id), (int(item.ref.id), float(item.size))
+                )
+                if owner != int(item.ref.id) and size != float(item.size):
+                    raise MeshError(
+                        f"working edge {final_id} receives conflicting exact "
+                        "size overrides"
+                    )
             result.append(
                 replace(item, ref=EntityRef(item.ref.kind, int(final_id)))
             )
@@ -1364,7 +1376,11 @@ def _remap_edge_divisions(
             for item in source_to_working_edges.get(source_edge, (source_edge,))
         )
         if len(descendants) == 1:
-            remapped[descendants[0]] = requested
+            previous = remapped.setdefault(descendants[0], requested)
+            if previous != requested:
+                raise MeshError(
+                    f"working edge {descendants[0]} receives conflicting exact overrides"
+                )
             continue
         if requested < len(descendants):
             raise MeshError(

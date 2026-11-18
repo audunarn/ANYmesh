@@ -147,3 +147,51 @@ def test_remap_still_refuses_shared_descendant_for_non_coincident_edges() -> Non
             source_to_working_edges={first: (first,), second: (first,)},
         )
     assert mesh.nodes_of_edge == {first: [1, 2]}
+
+
+def _shared_edge_ids():
+    source, working, _mesh, first, second = _two_lines(1.0)
+    return source, working, first, second, {first: (first,), second: (first,)}
+
+
+@pytest.mark.parametrize("pair, ok", [((2, 4), False), ((3, 3), True)])
+def test_shared_descendant_division_requests_must_agree(pair, ok) -> None:
+    from anymesher.hybrid import _remap_edge_divisions
+
+    source, working, first, second, table = _shared_edge_ids()
+    overrides = {first: pair[0], second: pair[1]}
+    if ok:
+        assert _remap_edge_divisions(source, working, table, overrides) == {first: 3}
+    else:
+        with pytest.raises(MeshError, match="conflicting"):
+            _remap_edge_divisions(source, working, table, overrides)
+
+
+@pytest.mark.parametrize("sizes, ok", [((0.5, 0.25), False), ((0.5, 0.5), True)])
+def test_shared_descendant_size_overrides_must_agree(sizes, ok) -> None:
+    from anymesher.hybrid import _remap_entity_overrides
+    from anymesher.refinement import size_override
+
+    _source, _working, first, second, table = _shared_edge_ids()
+    items = (
+        size_override(EntityRef("edge", first), sizes[0], name="a"),
+        size_override(EntityRef("edge", second), sizes[1], name="b"),
+    )
+    if ok:
+        result = _remap_entity_overrides(items, {}, table)
+        assert {item.size for item in result} == {0.5}
+    else:
+        with pytest.raises(MeshError, match="conflicting"):
+            _remap_entity_overrides(items, {}, table)
+
+
+def test_same_source_edge_named_twice_keeps_finer_request() -> None:
+    from anymesher.hybrid import _remap_entity_overrides
+    from anymesher.refinement import size_override
+
+    _source, _working, first, _second, table = _shared_edge_ids()
+    items = (
+        size_override(EntityRef("edge", first), 0.5, name="a"),
+        size_override(EntityRef("edge", first), 0.25, name="b"),
+    )
+    assert [item.size for item in _remap_entity_overrides(items, {}, table)] == [0.5, 0.25]
