@@ -10,7 +10,7 @@ not vendor a third-party meshing library.
 | --- | --- | --- | --- | --- |
 | NumPy | `numpy>=1.26` | https://numpy.org/ | BSD-3-Clause | Separate runtime dependency; not bundled |
 | ANYgeometry | `ANYgeometry[planar]>=0.4.5,<0.5` | https://github.com/audunarn/ANYgeometry | Must be MPL-2.0 before the ANYmesher 0.4.0 release gate | Separate runtime dependency; not bundled |
-| ANYtk3D | `ANYtk3D>=0.2.1,<0.3` (`gui3d` extra) | https://github.com/audunarn/ANYtk3D | Verify the installed release metadata | Optional separate dependency; not bundled |
+| ANYtk3D | `ANYtk3D>=0.5.5,<0.6` (`gui3d` extra) | https://github.com/audunarn/ANYtk3D | Verify the installed release metadata | Optional separate dependency; not bundled |
 | Gmsh | `gmsh>=4.11` (`gmsh` extra) | https://gmsh.info/ | GPL-2.0-or-later | Optional compatibility backend; separately installed and never selected automatically |
 | pytetwild | `pytetwild==0.4.2` (`solids-pytetwild` extra) | https://github.com/pyvista/pytetwild | Upstream wrapper MPL-2.0; local `0.4.2+anyworkflow2.exact1` also statically links LGPL-3.0-or-later i_pred and other separately licensed native components; Windows bundles LGPL3 MPIR and Microsoft runtime DLLs | Optional separate volume provider; not bundled; explicit selection only. Earlier import-only patch history remains separate. Exact1 notice/source/relink handoff: `docs/pytetwild_exact_notice_handoff.md`; local finite qualification and notice packaging do not establish distribution readiness or public-provider promotion. |
 | build | `build>=1.2` (`dev` extra) | https://pypa-build.readthedocs.io/ | MIT | Development/release tool; not bundled |
