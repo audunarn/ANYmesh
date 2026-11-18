@@ -412,3 +412,24 @@ def test_unshared_edges_are_untouched_beside_a_shared_pair() -> None:
     assert set(mix.node_of_vertex) == set(ids[:6]) | {ids[6], ids[7]}
     assert mix.node_of_vertex[ids[6]] == 5 and mix.node_of_vertex[ids[7]] == 6
     assert ref.node_of_vertex == {k: ref.node_of_vertex[k] for k in ids[:4]}
+
+
+@pytest.mark.parametrize("entry", ["missing", "empty"])
+@pytest.mark.parametrize("bindings", [{}, {"a": 2, "b": 1}])
+def test_shared_edge_without_a_node_chain_is_refused(entry, bindings) -> None:
+    import json
+
+    from anymesher.serialize import mesh_to_dict
+
+    source, working, mesh, first, second, v = _shared_vertex_case(
+        reverse=False, bindings=bindings
+    )
+    mesh.nodes_of_edge = {} if entry == "missing" else {first: []}
+    before = json.dumps(mesh_to_dict(mesh), sort_keys=True, default=str)
+    with pytest.raises(MeshError, match=rf"source edge {first}.*vertex|vertex.*source edge {first}"):
+        remap_prepared_mesh_associations(
+            mesh, source, working,
+            source_to_working_faces={},
+            source_to_working_edges={first: (first,), second: (first,)},
+        )
+    assert json.dumps(mesh_to_dict(mesh), sort_keys=True, default=str) == before

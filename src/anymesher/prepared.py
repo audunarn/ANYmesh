@@ -342,7 +342,12 @@ def remap_prepared_mesh_associations(
     for source_edge_id in shared_sources:
         chain = remapped_nodes_of_edge.get(source_edge_id)
         if not chain:
-            continue
+            edge = source.edges[source_edge_id]
+            raise MeshError(
+                f"source edge {source_edge_id} shares a working descendant but has "
+                f"no node chain; its endpoint source vertex {int(edge.start)} and source vertex "
+                f"{int(edge.end)} cannot be bound"
+            )
         edge = source.edges[source_edge_id]
         length = source.edge_length(source_edge_id)
         tolerance = max(
