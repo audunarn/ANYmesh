@@ -133,3 +133,71 @@ def test_a_node_without_any_normal_term_stays_a_typed_refusal() -> None:
 
     with pytest.raises(S3OwnerAuthorityError, match="ambiguous"):
         _qualified_nodal_normals(mesh, owners)
+
+
+def _pair_mesh(points, quad, tri, quad_id, tri_id, dtype=float):
+    geometry = GeometryModel()
+    ids = geometry.add_points(points)
+    mesh = Mesh(
+        geometry_model_id=geometry.model_id,
+        geometry_revision=geometry.revision,
+        nodes={i: np.asarray(geometry.vertex_position(i), dtype=dtype) for i in ids},
+        quads={} if quad is None else {quad_id: tuple(ids[i] for i in quad)},
+        tris={tri_id: tuple(ids[i] for i in tri)},
+        elements_of_face={},
+    )
+    return mesh, ids
+
+
+def test_cancellation_takes_the_lowest_element_even_when_it_is_visited_last() -> None:
+    from anymesher.s3_production import _qualified_nodal_normals
+
+    # Quads are visited before triangles; the triangle has the lower id.
+    mesh, ids = _pair_mesh(_COPLANAR, (0, 1, 2, 3), (2, 4, 5), quad_id=20, tri_id=2)
+    normals = _qualified_nodal_normals(mesh, {20: (0.0, 0.0, 1.0), 2: (0.0, 0.0, -1.0)})
+    np.testing.assert_array_equal(normals[ids[2]], (0.0, 0.0, -1.0))
+
+
+def test_float32_cancellation_records_a_float64_unit_normal() -> None:
+    from anymesher.s3_production import _qualified_nodal_normals
+
+    tilted = tuple((x, y, x) for x, y, _z in _COPLANAR)  # the plane z = x
+    mesh, ids = _pair_mesh(tilted, (0, 1, 2, 3), (2, 4, 5), quad_id=10, tri_id=20,
+                           dtype=np.float32)
+    normals = _qualified_nodal_normals(mesh, {10: (-1.0, 0.0, 1.0), 20: (1.0, 0.0, -1.0)})
+    shared = normals[ids[2]]
+    assert shared.dtype == np.float64
+    assert abs(float(np.linalg.norm(shared)) - 1.0) <= 1.0e-12
+    assert float(np.dot(shared, (-1.0, 0.0, 1.0))) > 0.0
+
+
+@pytest.mark.parametrize("delta, cancelled", [(1.5e-9, True), (2.5e-9, False)])
+def test_cancellation_bound_is_relative_to_the_term_count(delta, cancelled) -> None:
+    # Two triangles at node 0: +z and the reversed owner side of a normal
+    # tilted by delta, so the signed sum has length ~delta against the
+    # bound 1e-9 x 2 terms.
+    from anymesher.mapped import nodal_normals
+    from anymesher.s3_production import _qualified_nodal_normals
+
+    geometry = GeometryModel()
+    ids = geometry.add_points(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                               (-1.0, 0.0, 0.0), (0.0, -1.0, delta)))
+    mesh = Mesh(
+        geometry_model_id=geometry.model_id,
+        geometry_revision=geometry.revision,
+        nodes={i: np.asarray(geometry.vertex_position(i), dtype=float) for i in ids},
+        quads={},
+        tris={1: (ids[0], ids[1], ids[2]), 2: (ids[0], ids[3], ids[4])},
+        elements_of_face={},
+    )
+    owners = {1: (0.0, 0.0, 1.0), 2: (0.0, 0.0, -1.0)}
+    normals = _qualified_nodal_normals(mesh, owners)
+    if cancelled:
+        np.testing.assert_array_equal(normals[ids[0]], (0.0, 0.0, 1.0))
+    else:
+        legacy = nodal_normals(mesh, element_owner_normals=owners, include_triangles=True)
+        np.testing.assert_array_equal(normals[ids[0]], legacy[ids[0]])
+        assert abs(float(normals[ids[0]][1]) + 1.0) <= 1.0e-6
+    for node in ids[1:]:
+        legacy = nodal_normals(mesh, element_owner_normals=owners, include_triangles=True)
+        np.testing.assert_array_equal(normals[node], legacy[node])

@@ -326,6 +326,11 @@ def _qualified_nodal_normals(
             continue
         length = float(np.linalg.norm(total))
         count = len(terms[node])
+        if not np.isfinite(length):
+            # Non-finite element terms (overflowing coordinates) have no
+            # direction; the old construction refused them too.
+            ambiguous.append(node)
+            continue
         if length > _NODAL_CANCELLATION_RELATIVE * count:
             normals[node] = total / length
             continue
@@ -333,7 +338,14 @@ def _qualified_nodal_normals(
         # shared plane that is the plane normal; at a junction whose normals
         # share no plane (three webs at 120 degrees) no director exists and
         # the value is a recorded convention (owner decision D1, 2026-11-21).
-        normals[node] = min(terms[node], key=lambda item: item[0])[1].copy()
+        reference = np.asarray(
+            min(terms[node], key=lambda item: item[0])[1], dtype=np.float64
+        )
+        reference_length = float(np.linalg.norm(reference))
+        if not np.isfinite(reference_length) or reference_length <= 0.0:
+            ambiguous.append(node)
+            continue
+        normals[node] = reference / reference_length
     if ambiguous:
         raise S3OwnerAuthorityError(
             "qualified mixed-shell nodal normals are ambiguous for nodes "

@@ -335,7 +335,8 @@ def oriented_shell_normal_contributions(
         if length <= 0.0:
             continue
         normal = normal / length
-        owner = owners.get(int(element_id))
+        key = int(element_id)
+        owner = owners.get(key)
         if owner is not None:
             made_owner = np.asarray(owner, dtype=float)
             owner_length = float(np.linalg.norm(made_owner))
@@ -350,7 +351,7 @@ def oriented_shell_normal_contributions(
                 )
             if alignment < 0.0:
                 normal = -normal
-        yield int(element_id), nodes, normal
+        yield key, nodes, normal
 
 
 def nodal_normals(
