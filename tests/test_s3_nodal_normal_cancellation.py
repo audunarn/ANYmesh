@@ -75,13 +75,12 @@ def test_tilted_opposite_coplanar_owners_get_the_plane_director() -> None:
     assert float(np.dot(shared, plane)) >= 1.0 - 1.0e-9
 
 
-def test_non_parallel_cancelling_owners_stay_a_typed_refusal() -> None:
+def _y_junction():
     # Three plates meeting on one line at 120 degrees, owner normals
-    # symmetric about it: they cancel without sharing a plane.  No director
-    # is defined, so the refusal must remain.
+    # symmetric about it: they cancel without sharing a plane (the tripod hub
+    # axis, where the three arm-plane webs meet).
     geometry = GeometryModel()
-    axis_lo, axis_hi = (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)
-    pts = [axis_lo, axis_hi]
+    pts = [(0.0, 0.0, 0.0), (0.0, 0.0, 1.0)]
     for k in range(3):
         a = 2.0 * np.pi * k / 3.0
         d = (float(np.cos(a)), float(np.sin(a)), 0.0)
@@ -102,10 +101,35 @@ def test_non_parallel_cancelling_owners_stay_a_typed_refusal() -> None:
         tris={},
         elements_of_face={f: [10 + k] for k, f in enumerate(faces)},
     )
-    from anymesher.s3_production import _qualified_nodal_normals
-
     owners = {10 + k: tuple(np.cross(np.subtract(pts[3 + 2 * k], pts[0]),
                                      np.subtract(pts[1], pts[0])))
               for k in range(3)}
+    return mesh, ids, owners
+
+
+def test_non_parallel_cancelling_owners_take_the_lowest_element_normal() -> None:
+    # Owner decision D1 (2026-11-21): no director exists at such a junction;
+    # the record takes the owner-side normal of the lowest-numbered element.
+    from anymesher.mapped import oriented_shell_normal_contributions
+    from anymesher.s3_production import _qualified_nodal_normals
+
+    mesh, ids, owners = _y_junction()
+    normals = _qualified_nodal_normals(mesh, owners)
+
+    lowest = {e: n for e, _nodes, n in oriented_shell_normal_contributions(
+        mesh, element_owner_normals=owners, include_triangles=True)}[10]
+    for node in (ids[0], ids[1]):
+        np.testing.assert_array_equal(normals[node], lowest)
+    assert set(normals) == set(ids)
+
+
+def test_a_node_without_any_normal_term_stays_a_typed_refusal() -> None:
+    mesh, ids, owners = _y_junction()
+    # Collapse element 12 so it has no normal; its two outer nodes then have
+    # no term at all.
+    mesh.nodes[ids[6]] = mesh.nodes[ids[0]].copy()
+    mesh.nodes[ids[7]] = mesh.nodes[ids[1]].copy()
+    from anymesher.s3_production import _qualified_nodal_normals
+
     with pytest.raises(S3OwnerAuthorityError, match="ambiguous"):
         _qualified_nodal_normals(mesh, owners)

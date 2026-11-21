@@ -276,8 +276,6 @@ def _shell_owner_authority(
 # A node whose owner-side element normals sum to less than this fraction of
 # their count has no signed-average direction: the sum is cancellation noise.
 _NODAL_CANCELLATION_RELATIVE = 1.0e-9
-# Contributions count as one plane when the sine between them is below this.
-_NODAL_PARALLEL_SINE = 1.0e-9
 
 
 def _qualified_nodal_normals(
@@ -292,8 +290,10 @@ def _qualified_nodal_normals(
     mirror-image webs meeting at a node no other plate uses -- the signed
     average has no direction although the plane normal is well defined: the
     node then takes that plane normal, on the side of its lowest-numbered
-    element.  Cancelling normals that do not share one plane define no
-    director and remain a typed refusal.
+    element.  Cancelling normals that share no plane (a symmetric junction of
+    three or more plates) define no director; the node takes the
+    lowest-numbered element's owner-side normal as a recorded convention.  A
+    node without any non-degenerate element term remains a typed refusal.
     """
 
     totals: dict[int, np.ndarray] = {}
@@ -329,14 +329,11 @@ def _qualified_nodal_normals(
         if length > _NODAL_CANCELLATION_RELATIVE * count:
             normals[node] = total / length
             continue
-        reference = min(terms[node], key=lambda item: item[0])[1]
-        if all(
-            float(np.linalg.norm(np.cross(reference, normal))) <= _NODAL_PARALLEL_SINE
-            for _element, normal in terms[node]
-        ):
-            normals[node] = reference.copy()
-        else:
-            ambiguous.append(node)
+        # Cancelled: the lowest-numbered element's owner-side normal.  On a
+        # shared plane that is the plane normal; at a junction whose normals
+        # share no plane (three webs at 120 degrees) no director exists and
+        # the value is a recorded convention (owner decision D1, 2026-11-21).
+        normals[node] = min(terms[node], key=lambda item: item[0])[1].copy()
     if ambiguous:
         raise S3OwnerAuthorityError(
             "qualified mixed-shell nodal normals are ambiguous for nodes "
