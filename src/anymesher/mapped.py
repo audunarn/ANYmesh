@@ -301,21 +301,20 @@ def _refuse_curved_beams(
         )
 
 
-def nodal_normals(
+def oriented_shell_normal_contributions(
     mesh: Mesh,
     *,
     element_owner_normals: Mapping[int, Sequence[float]] | None = None,
     include_triangles: bool | None = None,
-) -> Dict[int, np.ndarray]:
-    """A unit normal at every shell node, averaged over its incident plates.
+):
+    """Yield ``(element_id, nodes, unit_normal)`` for every shell element.
 
-    Triangle contributions are opt-in during the additive S3 release. Passing
-    authoritative owner normals enables them by default; callers may also set
-    ``include_triangles=True`` explicitly. The legacy no-argument call keeps
-    its historical quadrilateral-only behavior.
+    This is the per-element term that :func:`nodal_normals` sums, in the same
+    order: the corner-diagonal (Q4) or edge (T3) normal, flipped onto its
+    owner side when an owner normal is given.  Degenerate elements and, unless
+    enabled, triangles are skipped exactly as there.
     """
 
-    accumulated: Dict[int, np.ndarray] = {}
     owners = {} if element_owner_normals is None else element_owner_normals
     use_triangles = bool(owners) if include_triangles is None else bool(include_triangles)
     for element_id, nodes in mesh.shells.items():
@@ -351,6 +350,29 @@ def nodal_normals(
                 )
             if alignment < 0.0:
                 normal = -normal
+        yield int(element_id), nodes, normal
+
+
+def nodal_normals(
+    mesh: Mesh,
+    *,
+    element_owner_normals: Mapping[int, Sequence[float]] | None = None,
+    include_triangles: bool | None = None,
+) -> Dict[int, np.ndarray]:
+    """A unit normal at every shell node, averaged over its incident plates.
+
+    Triangle contributions are opt-in during the additive S3 release. Passing
+    authoritative owner normals enables them by default; callers may also set
+    ``include_triangles=True`` explicitly. The legacy no-argument call keeps
+    its historical quadrilateral-only behavior.
+    """
+
+    accumulated: Dict[int, np.ndarray] = {}
+    for _element_id, nodes, normal in oriented_shell_normal_contributions(
+        mesh,
+        element_owner_normals=element_owner_normals,
+        include_triangles=include_triangles,
+    ):
         for node in nodes:
             accumulated[node] = accumulated.get(node, np.zeros(3)) + normal
 
