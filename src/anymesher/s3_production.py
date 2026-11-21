@@ -328,7 +328,9 @@ def _qualified_nodal_normals(
         count = len(terms[node])
         if not np.isfinite(length):
             # Non-finite element terms (overflowing coordinates) have no
-            # direction; the old construction refused them too.
+            # direction.  The old construction dropped a NaN sum (refusal)
+            # but recorded a zero or non-finite vector for an infinite one;
+            # both are refused here.
             ambiguous.append(node)
             continue
         if length > _NODAL_CANCELLATION_RELATIVE * count:

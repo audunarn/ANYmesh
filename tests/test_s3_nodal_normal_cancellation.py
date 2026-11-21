@@ -201,3 +201,15 @@ def test_cancellation_bound_is_relative_to_the_term_count(delta, cancelled) -> N
     for node in ids[1:]:
         legacy = nodal_normals(mesh, element_owner_normals=owners, include_triangles=True)
         np.testing.assert_array_equal(normals[node], legacy[node])
+
+
+def test_an_overflowing_element_normal_is_a_typed_refusal() -> None:
+    from anymesher.s3_production import _qualified_nodal_normals
+
+    side = 1.0e20
+    square = ((0.0, 0.0, 0.0), (side, 0.0, 0.0), (side, side, 0.0), (0.0, side, 0.0),
+              (2.0 * side, side, 0.0), (2.0 * side, 2.0 * side, 0.0))
+    mesh, _ids = _pair_mesh(square, (0, 1, 2, 3), (2, 4, 5), quad_id=10, tri_id=20,
+                            dtype=np.float32)
+    with pytest.raises(S3OwnerAuthorityError, match="ambiguous"):
+        _qualified_nodal_normals(mesh, {10: (0.0, 0.0, 1.0), 20: (0.0, 0.0, 1.0)})
