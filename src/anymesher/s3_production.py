@@ -22,7 +22,7 @@ from anygeometry.errors import GeometryError
 from anygeometry.model import GeometryModel
 
 from .errors import MeshError
-from .mapped import nodal_normals
+from .mapped import oriented_shell_normal_contributions
 from .mesh import Mesh
 from .s3_quality import (
     DEFAULT_S3_QUALITY_POLICY,
@@ -273,6 +273,89 @@ def _shell_owner_authority(
     return normals, sources
 
 
+# A node whose owner-side element normals sum to less than this fraction of
+# their count has no signed-average direction: the sum is cancellation noise.
+_NODAL_CANCELLATION_RELATIVE = 1.0e-9
+
+
+def _qualified_nodal_normals(
+    mesh: Mesh,
+    owners: Mapping[int, Sequence[float]],
+) -> dict[int, np.ndarray]:
+    """The qualified mixed-shell nodal normal at every shell node.
+
+    Each node takes the normalized sum of its owner-side element normals
+    (bit-identical to :func:`anymesher.mapped.nodal_normals`).  Where that sum
+    cancels -- coplanar plates whose sheets are oriented oppositely, such as
+    mirror-image webs meeting at a node no other plate uses -- the signed
+    average has no direction although the plane normal is well defined: the
+    node then takes that plane normal, on the side of its lowest-numbered
+    element.  Cancelling normals that share no plane (a symmetric junction of
+    three or more plates) define no director; the node takes the
+    lowest-numbered element's owner-side normal as a recorded convention.  A
+    node without any non-degenerate element term remains a typed refusal.
+    """
+
+    totals: dict[int, np.ndarray] = {}
+    terms: dict[int, list[tuple[int, np.ndarray]]] = {}
+    try:
+        for element_id, nodes, normal in oriented_shell_normal_contributions(
+            mesh,
+            element_owner_normals=owners,
+            include_triangles=True,
+        ):
+            for node in nodes:
+                node = int(node)
+                totals[node] = totals.get(node, np.zeros(3)) + normal
+                terms.setdefault(node, []).append((int(element_id), normal))
+    except MeshError as error:
+        raise S3OwnerAuthorityError(
+            "qualified mixed-shell nodal normal construction failed"
+        ) from error
+    shell_nodes = {
+        int(node_id)
+        for connectivity in mesh.shells.values()
+        for node_id in connectivity
+    }
+    normals: dict[int, np.ndarray] = {}
+    ambiguous: list[int] = []
+    for node in sorted(shell_nodes):
+        total = totals.get(node)
+        if total is None:
+            ambiguous.append(node)
+            continue
+        length = float(np.linalg.norm(total))
+        count = len(terms[node])
+        if not np.isfinite(length):
+            # Non-finite element terms (overflowing coordinates) have no
+            # direction.  The old construction dropped a NaN sum (refusal)
+            # but recorded a zero or non-finite vector for an infinite one;
+            # both are refused here.
+            ambiguous.append(node)
+            continue
+        if length > _NODAL_CANCELLATION_RELATIVE * count:
+            normals[node] = total / length
+            continue
+        # Cancelled: the lowest-numbered element's owner-side normal.  On a
+        # shared plane that is the plane normal; at a junction whose normals
+        # share no plane (three webs at 120 degrees) no director exists and
+        # the value is a recorded convention (owner decision D1, 2026-11-21).
+        reference = np.asarray(
+            min(terms[node], key=lambda item: item[0])[1], dtype=np.float64
+        )
+        reference_length = float(np.linalg.norm(reference))
+        if not np.isfinite(reference_length) or reference_length <= 0.0:
+            ambiguous.append(node)
+            continue
+        normals[node] = reference / reference_length
+    if ambiguous:
+        raise S3OwnerAuthorityError(
+            "qualified mixed-shell nodal normals are ambiguous for nodes "
+            f"{tuple(ambiguous)}"
+        )
+    return normals
+
+
 def _quality_record(item: Any) -> dict[str, Any]:
     return {
         "edge_ratio": float(item.edge_ratio),
@@ -401,26 +484,7 @@ def prepare_qualified_s3_mesh(
             if not item.admitted
         ]
     )
-    try:
-        mixed_normals = nodal_normals(
-            made,
-            element_owner_normals=shell_owners,
-            include_triangles=True,
-        )
-    except MeshError as error:
-        raise S3OwnerAuthorityError(
-            "qualified mixed-shell nodal normal construction failed"
-        ) from error
-    shell_nodes = {
-        int(node_id)
-        for connectivity in made.shells.values()
-        for node_id in connectivity
-    }
-    missing = tuple(sorted(shell_nodes.difference(mixed_normals)))
-    if missing:
-        raise S3OwnerAuthorityError(
-            f"qualified mixed-shell nodal normals are ambiguous for nodes {missing}"
-        )
+    mixed_normals = _qualified_nodal_normals(made, shell_owners)
     record = {
         "admission": {
             "elements": [_quality_record(item) for item in final_admission.elements],
