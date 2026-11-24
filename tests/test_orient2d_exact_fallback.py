@@ -73,3 +73,40 @@ def test_tripod_heave_plate_ring_piece_meshes_quad_first(size):
     result = generate_hybrid_mesh_result(_ring_piece(), target_size=size, strategy="native", layout_policy="adaptive",
                                          quad_options=QuadMeshingOptions(quality_model="shape_jacobian"))
     assert len(result.mesh.quads) > 5 * len(result.mesh.tris) > 0
+
+
+def test_underflow_regime_takes_the_exact_path():
+    a = (2.0 ** -500, (1 + 2.0 ** -52) * 2.0 ** -575)
+    b = ((1 - 2.0 ** -53) * 2.0 ** -500, 2.0 ** -575)
+    c = (-float.fromhex("0x1.0000000000001p-553"), float.fromhex("0x1.7ffffffffffffp-628"))
+    exact = _exact(a, b, c)
+    assert exact < 0 and orient2d(a, b, c) < 0.0
+
+
+def test_a_nonzero_determinant_below_the_subnormal_range_keeps_its_sign():
+    tiny = 2.0 ** -600
+    assert _exact((0.0, 0.0), (tiny, 0.0), (0.0, tiny)) > 0
+    assert orient2d((0.0, 0.0), (tiny, 0.0), (0.0, tiny)) > 0.0
+    assert orient2d((0.0, 0.0), (0.0, tiny), (tiny, 0.0)) < 0.0
+
+
+def test_exact_zero_keeps_the_earlier_signed_zero():
+    value = orient2d((-0.0, -0.0), (-0.0, 0.0), (0.0, 0.0))
+    assert value == 0.0 and str(value) == "-0.0"
+    assert str(orient2d(*COLLINEAR)) in ("0.0", "-0.0")
+
+
+def test_vectorised_screen_matches_the_scalar_oracle_in_the_underflow_regime():
+    from anymesher.native_cpp import _orientation_rows
+
+    rng = np.random.default_rng(7)
+    points = np.vstack([rng.normal(size=(12, 2)) * scale for scale in (1.0, 2.0 ** -500, 2.0 ** -540)]
+                       + [np.array(COLLINEAR)])
+    rows = np.array([(i, j, k) for i in range(len(points)) for j in range(len(points)) for k in range(len(points))
+                     if len({i, j, k}) == 3][::7], dtype=np.int64)
+    values = _orientation_rows(points, rows, orient2d)
+    for (i, j, k), value in zip(rows, values):
+        expected = orient2d(points[i], points[j], points[k])
+        assert value == expected or (np.isnan(value) and np.isnan(expected))
+        exact = _exact(points[i], points[j], points[k])
+        assert np.sign(value) == (exact > 0) - (exact < 0)

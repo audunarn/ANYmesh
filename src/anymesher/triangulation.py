@@ -33,6 +33,11 @@ __all__ = [
 
 
 _FLOAT_EPSILON = np.finfo(np.float64).eps
+# Below this product magnitude the relative error bounds of the float filters no
+# longer hold (gradual underflow loses relative precision); such inputs take the
+# exact path.  Ordinary coordinates (|x| > 1e-140) are far above it.
+_FILTER_UNDERFLOW_FLOOR = 2.0 ** -960
+_SMALLEST_SUBNORMAL = 5e-324
 
 
 def _decimal(value: float) -> Decimal:
@@ -47,8 +52,9 @@ def orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[fl
     bx = float(second[0]) - float(third[0])
     by = float(second[1]) - float(third[1])
     determinant = ax * by - ay * bx
-    error = 8.0 * _FLOAT_EPSILON * (abs(ax * by) + abs(ay * bx))
-    if abs(determinant) > error:
+    magnitude = abs(ax * by) + abs(ay * bx)
+    error = 8.0 * _FLOAT_EPSILON * magnitude
+    if abs(determinant) > error and magnitude >= _FILTER_UNDERFLOW_FLOOR:
         return determinant
     return _exact_orient2d(first, second, third)
 
@@ -61,18 +67,15 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
     determinant is formed in exact integer arithmetic.  (A fixed 80-digit
     decimal context is not exact: a coordinate near 1e-16 next to one near 1
     needs about 90 significant digits, and the rounded differences gave
-    exactly collinear stations a nonzero, sign-wrong orientation.)
+    exactly collinear stations a nonzero, sign-wrong orientation.)  The sign is
+    always exact: a nonzero determinant below the subnormal range returns the
+    smallest subnormal of its sign, and an exact zero keeps the earlier path's
+    signed zero.
     """
     values = tuple(float(value) for value in (first[0], first[1], second[0], second[1], third[0], third[1]))
     if not all(isfinite(value) for value in values):
         # Non-finite operands keep the earlier decimal behaviour unchanged.
-        with localcontext() as context:
-            context.prec = 80
-            exact_ax = _decimal(values[0]) - _decimal(values[4])
-            exact_ay = _decimal(values[1]) - _decimal(values[5])
-            exact_bx = _decimal(values[2]) - _decimal(values[4])
-            exact_by = _decimal(values[3]) - _decimal(values[5])
-            return float((exact_ax * exact_by) - (exact_ay * exact_bx))
+        return _legacy_decimal_orient2d(values)
     ratios = tuple(value.as_integer_ratio() for value in values)
     shift = max(denominator.bit_length() for _numerator, denominator in ratios) - 1
     fx, fy, sx, sy, tx, ty = (
@@ -80,11 +83,29 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
     )
     exact = (fx - tx) * (sy - ty) - (fy - ty) * (sx - tx)
     if exact == 0:
-        return 0.0
+        # The earlier path was exact for an exact zero only in magnitude; keep
+        # its signed zero so callers see bit-identical values.
+        legacy = _legacy_decimal_orient2d(values)
+        return legacy if legacy == 0.0 else 0.0
     try:
-        return float(Fraction(exact, 1 << (2 * shift)))
+        value = float(Fraction(exact, 1 << (2 * shift)))
     except OverflowError:
         return float("inf") if exact > 0 else -float("inf")
+    if value == 0.0:
+        # A nonzero determinant below the subnormal range keeps its sign.
+        return _SMALLEST_SUBNORMAL if exact > 0 else -_SMALLEST_SUBNORMAL
+    return value
+
+
+def _legacy_decimal_orient2d(values: Sequence[float]) -> float:
+    """The earlier 80-digit decimal evaluation (exact-zero sign and non-finite operands only)."""
+    with localcontext() as context:
+        context.prec = 80
+        exact_ax = _decimal(values[0]) - _decimal(values[4])
+        exact_ay = _decimal(values[1]) - _decimal(values[5])
+        exact_bx = _decimal(values[2]) - _decimal(values[4])
+        exact_by = _decimal(values[3]) - _decimal(values[5])
+        return float((exact_ax * exact_by) - (exact_ay * exact_bx))
 
 
 def incircle(
@@ -115,7 +136,7 @@ def incircle(
         + blift * (abs(ax * cy) + abs(ay * cx))
         + clift * (abs(ax * by) + abs(ay * bx))
     )
-    if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale:
+    if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale or scale < _FILTER_UNDERFLOW_FLOOR:
         # Fixed decimal precision can leave a signed rounding residue even
         # for an exactly cocircular binary-coordinate rectangle. Such a
         # residue permits both diagonal flips and prevents convergence.

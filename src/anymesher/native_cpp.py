@@ -689,8 +689,10 @@ def _orientation_rows(
         bx = b[:, 0] - c[:, 0]
         by = b[:, 1] - c[:, 1]
         determinant = ax * by - ay * bx
-        error = 8.0 * np.finfo(np.float64).eps * (np.abs(ax * by) + np.abs(ay * bx))
-        uncertain = ~(np.abs(determinant) > error)
+        magnitude = np.abs(ax * by) + np.abs(ay * bx)
+        error = 8.0 * np.finfo(np.float64).eps * magnitude
+        # Same underflow floor as the scalar oracle's fast path.
+        uncertain = ~((np.abs(determinant) > error) & (magnitude >= 2.0 ** -960))
     for index in np.flatnonzero(uncertain):
         determinant[index] = oracle(a[index], b[index], c[index])
     return determinant

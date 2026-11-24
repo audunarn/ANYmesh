@@ -5168,47 +5168,95 @@ def _repair_quad_first_quality(
 
 
 class _QuadFaceRefusalContext:
-    """The face whose per-face quad-first stage is running, for refusal diagnostics only."""
+    """The face whose per-face quad-first stage is running, for refusal diagnostics only.
 
-    __slots__ = ("domain",)
+    ``raised`` holds (by identity) every exception the caller's cancellation callback
+    raised during the call, so caller-owned exceptions are never annotated.
+    """
+
+    __slots__ = ("domain", "raised")
 
     def __init__(self) -> None:
         self.domain: Any = None
+        self.raised: list[BaseException] = []
+
+    def owns(self, error: BaseException) -> bool:
+        """Whether ``error`` (or an exception it was raised from) came from the caller's callback."""
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if any(current is item for item in self.raised):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    def track(self, callback: "Callable[[str], Any] | None") -> "Callable[[str], Any] | None":
+        """The callback unchanged in effect (same return value and exception), recording what it raises."""
+        if callback is None:
+            return None
+        raised = self.raised
+
+        def tracked(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return callback(*args, **kwargs)
+            except BaseException as error:
+                raised.append(error)
+                raise
+
+        return tracked
+
+
+def _quad_face_refusal_location(error: BaseException, domain: Any) -> "tuple[float, float, float] | None":
+    """Lifted centroid of the refusal's chart points (failing cell or lost segments), or ``None``."""
+    try:
+        chart = getattr(error, "cell_uv", None)
+        if chart is None:
+            chart = getattr(error, "segment_uv", None)
+        if chart is None:
+            return None
+        chart = np.asarray(chart, dtype=float)
+        if chart.ndim != 2 or chart.shape[1] != 2 or len(chart) == 0:
+            return None
+        lifted = np.asarray([domain.lift(point) for point in chart], dtype=float)
+        centroid = lifted.mean(axis=0)
+        if centroid.shape != (3,) or not np.all(np.isfinite(centroid)):
+            return None
+        return tuple(float(value) for value in centroid)
+    except Exception:  # diagnostics never replace the refusal
+        return None
 
 
 def _annotate_quad_face_refusal(error: MeshError, context: _QuadFaceRefusalContext) -> None:
-    """Name the working face (and the failing cell's or lost segments' 3D centroid) on a per-face refusal.
+    """Record the working face (and the failing cell's or lost segments' 3D centroid) on a per-face refusal.
 
-    Diagnostics only: the exception keeps its type and cause; its message gains a
-    ``[quad-first face F ...]`` suffix and the attributes ``quad_first_face`` and
-    ``quad_first_location`` (``None`` when the cell is unknown).  Cancellations,
-    refusals outside the per-face loop and already-annotated errors are untouched.
+    Diagnostics only and message-neutral: the exception keeps its type, cause and
+    message (recovery records ``str(error)``, so a changed message would change a
+    successful fallback result); it gains the attributes ``quad_first_face`` and
+    ``quad_first_location`` (``None`` when unknown), set afresh on every raise.
+    Callers (ANYfem) render them.  Exceptions from the caller's cancellation
+    callback and refusals outside the per-face loop are untouched.
     """
     domain = context.domain
-    if (domain is None or _is_stage_cancellation(error)
-            or getattr(error, "quad_first_face", None) is not None):
+    if domain is None or _is_stage_cancellation(error) or context.owns(error):
         return
-    face_id = int(domain.face_id)
-    location = None
-    cell_uv = getattr(error, "cell_uv", None) or getattr(error, "segment_uv", None)
-    if cell_uv:
-        try:
-            lifted = np.asarray([domain.lift(point) for point in cell_uv], dtype=float)
-            centroid = lifted.mean(axis=0)
-            if centroid.shape == (3,) and np.all(np.isfinite(centroid)):
-                location = tuple(float(value) for value in centroid)
-        except Exception:  # diagnostics never replace the refusal
-            location = None
-    error.quad_first_face = face_id
-    error.quad_first_location = location
-    where = "" if location is None else " near (%.4g, %.4g, %.4g)" % location
-    if error.args and isinstance(error.args[0], str):
-        error.args = (f"{error.args[0]} [quad-first face {face_id}{where}]", *error.args[1:])
+    try:
+        face_id = int(domain.face_id)
+    except Exception:
+        return
+    location = _quad_face_refusal_location(error, domain)
+    try:
+        error.quad_first_face = face_id
+        error.quad_first_location = location
+    except Exception:  # an exception type without an instance dict keeps its refusal
+        return
 
 
 def _quad_first_execute(geometry: GeometryModel, /, **options: Any) -> "HybridMeshResult":
-    """Run :func:`_quad_first_execute_faces`; a refusal inside one face's stage names that face."""
+    """Run :func:`_quad_first_execute_faces`; a refusal inside one face's stage records that face."""
     context = _QuadFaceRefusalContext()
+    if options.get("cancellation_check") is not None:
+        options["cancellation_check"] = context.track(options["cancellation_check"])
     try:
         return _quad_first_execute_faces(geometry, _refusal_context=context, **options)
     except MeshError as error:
