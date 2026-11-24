@@ -5181,20 +5181,34 @@ class _QuadFaceRefusalContext:
         self.raised: list[BaseException] = []
 
     def owns(self, error: BaseException) -> bool:
-        """Whether ``error`` (or an exception it was raised from) came from the caller's callback."""
-        seen: set[int] = set()
+        """Whether ``error`` (or an exception it was raised from) came from the caller's callback.
+
+        Identity checks only: no exception in the chain is tested for truth or equality.
+        """
+        if not self.raised:
+            return False
+        seen: list[BaseException] = []
         current: BaseException | None = error
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
+        while current is not None and not any(current is item for item in seen):
+            seen.append(current)
             if any(current is item for item in self.raised):
                 return True
-            current = current.__cause__ or current.__context__
+            following = current.__cause__
+            current = current.__context__ if following is None else following
         return False
 
     def track(self, callback: "Callable[[str], Any] | None") -> "Callable[[str], Any] | None":
-        """The callback unchanged in effect (same return value and exception), recording what it raises."""
+        """The callback unchanged in effect (same return value and exception), recording what it raises.
+
+        A typed cancellation signal is passed through untouched: owners type-check it
+        (``is_cancellation_signal``) and it reports by return value, never by raising.
+        """
         if callback is None:
             return None
+        from anygeometry import is_cancellation_signal
+
+        if is_cancellation_signal(callback):
+            return callback
         raised = self.raised
 
         def tracked(*args: Any, **kwargs: Any) -> Any:

@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from anymesher.triangulation import orient2d
+from anymesher.triangulation import incircle, orient2d
 
 COLLINEAR = ((0.0, 0.0), (0.6921856373743935, 5.075305255429295e-16), (1.384371274748787, 1.015061051085859e-15))
 
@@ -110,3 +110,40 @@ def test_vectorised_screen_matches_the_scalar_oracle_in_the_underflow_regime():
         assert value == expected or (np.isnan(value) and np.isnan(expected))
         exact = _exact(points[i], points[j], points[k])
         assert np.sign(value) == (exact > 0) - (exact < 0)
+
+
+def _exact_incircle(a, b, c, p):
+    (ax, ay), (bx, by), (cx, cy), (px, py) = [(Fraction(float(q[0])), Fraction(float(q[1]))) for q in (a, b, c, p)]
+    ax, ay, bx, by, cx, cy = ax - px, ay - py, bx - px, by - py, cx - px, cy - py
+    value = (ax * ax + ay * ay) * (bx * cy - by * cx) - (bx * bx + by * by) * (ax * cy - ay * cx) \
+        + (cx * cx + cy * cy) * (ax * by - ay * bx)
+    orientation = _exact(a, b, c)
+    return -value if orientation < 0 else value
+
+
+def _sign(value):
+    return (value > 0) - (value < 0)
+
+
+def test_incircle_sign_is_exact_for_tiny_and_mixed_scale_inputs():
+    s = 2.0 ** -300
+    cases = [((0.0, 0.0), (s, 0.0), (s, s), (0.0, s / 2)),
+             ((2.0 ** -500, (1 + 2.0 ** -52) * 2.0 ** -575), ((1 - 2.0 ** -53) * 2.0 ** -500, 2.0 ** -575),
+              (2.0 ** 500, 0.0), (-float.fromhex("0x1.0000000000001p-553"), float.fromhex("0x1.7ffffffffffffp-628")))]
+    rng = np.random.default_rng(11)
+    for scale in (2.0 ** -520, 2.0 ** -300, 2.0 ** 300):
+        for _ in range(200):
+            cases.append(tuple(tuple(map(float, row)) for row in rng.normal(size=(4, 2)) * scale))
+    for a, b, c, p in cases:
+        assert _sign(incircle(a, b, c, p)) == _sign(_exact_incircle(a, b, c, p)), (a, b, c, p)
+
+
+def test_filters_do_not_raise_under_strict_numpy_error_settings():
+    from anymesher.native_cpp import _orientation_rows
+
+    s = 2.0 ** -530
+    points = np.array([(0.0, 0.0), (s, 0.0), (0.0, s)])
+    with np.errstate(all="raise"):
+        values = _orientation_rows(points, np.array([(0, 1, 2)], dtype=np.int64), orient2d)
+        assert values[0] > 0.0 and orient2d(*points) > 0.0
+        assert incircle((0.0, 0.0), (s, 0.0), (s, s), (0.0, s / 2)) > 0.0

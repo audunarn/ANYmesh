@@ -124,3 +124,40 @@ def test_lost_segment_refusal_is_located_at_the_segments():
     error.segment_uv = ((0.0, 0.0), (2.0, 0.0))
     _annotate_quad_face_refusal(error, _context())
     assert error.quad_first_location == (1.0, 0.0, 1.0)
+
+
+def test_a_typed_cancellation_signal_reaches_the_route_unwrapped(monkeypatch):
+    import anymesher.hybrid as hybrid
+    from anygeometry.cancellation import CancellationSignal
+
+    seen = []
+    real = hybrid._quad_first_execute_faces
+
+    def spy(geometry, **options):
+        seen.append(options.get("cancellation_check"))
+        return real(geometry, **options)
+
+    monkeypatch.setattr(hybrid, "_quad_first_execute_faces", spy)
+    signal = CancellationSignal()
+    geometry = GeometryModel()
+    geometry.add_plate(geometry.add_points(((0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0), (0.0, 1.0, 0.0))))
+    _mesh(geometry, cancellation_check=signal)
+    assert seen and all(item is signal for item in seen)
+
+
+def test_cause_chain_is_walked_by_identity_only():
+    class Hostile(Exception):
+        def __bool__(self):
+            raise RuntimeError("tested for truth")
+
+        def __eq__(self, other):
+            raise RuntimeError("compared")
+
+        __hash__ = object.__hash__
+
+    context = _context()
+    context.raised.append(MeshError("someone else's"))
+    error = MeshError("refused")
+    error.__cause__ = Hostile("cause")
+    _annotate_quad_face_refusal(error, context)
+    assert error.quad_first_face == 7

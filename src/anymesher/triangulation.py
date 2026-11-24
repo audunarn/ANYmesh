@@ -32,12 +32,27 @@ __all__ = [
 ]
 
 
-_FLOAT_EPSILON = np.finfo(np.float64).eps
-# Below this product magnitude the relative error bounds of the float filters no
-# longer hold (gradual underflow loses relative precision); such inputs take the
-# exact path.  Ordinary coordinates (|x| > 1e-140) are far above it.
-_FILTER_UNDERFLOW_FLOOR = 2.0 ** -960
+# A Python float, so the filters never raise under strict NumPy error settings.
+_FLOAT_EPSILON = float(np.finfo(np.float64).eps)
+# Trust rules for the float filters.  Their relative error bounds assume normal
+# arithmetic; gradual underflow adds at most 2**-1074 of absolute error per operation
+# and large operands can overflow.  orient2d trusts its filter only when every
+# coordinate difference is at most 2**400 and the product magnitude is at least
+# 2**-800 (underflow error <= 2**-1073 << 8 eps 2**-800); incircle only when every
+# difference is at most 2**200 and its scale is at least 2**-500 (underflow error,
+# even after multiplication by factors up to 2**401, stays below 2**-669 << 32 eps
+# 2**-500).  Otherwise the exact path decides.  Ordinary coordinates never reach
+# either bound, so their decisions are unchanged.
+_ORIENT_DIFFERENCE_CAP, _ORIENT_MAGNITUDE_FLOOR = 2.0 ** 400, 2.0 ** -800
+_INCIRCLE_DIFFERENCE_CAP, _INCIRCLE_SCALE_FLOOR = 2.0 ** 200, 2.0 ** -500
 _SMALLEST_SUBNORMAL = 5e-324
+
+
+def _nonzero_sign_kept(value: float, exact: Any) -> float:
+    """``value`` (the rounded exact result), or the smallest subnormal of the exact sign if it rounded to zero."""
+    if value == 0.0 and exact != 0:
+        return _SMALLEST_SUBNORMAL if exact > 0 else -_SMALLEST_SUBNORMAL
+    return value
 
 
 def _decimal(value: float) -> Decimal:
@@ -51,10 +66,12 @@ def orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[fl
     ay = float(first[1]) - float(third[1])
     bx = float(second[0]) - float(third[0])
     by = float(second[1]) - float(third[1])
-    determinant = ax * by - ay * bx
-    magnitude = abs(ax * by) + abs(ay * bx)
+    left, right = ax * by, ay * bx
+    determinant = left - right
+    magnitude = abs(left) + abs(right)
     error = 8.0 * _FLOAT_EPSILON * magnitude
-    if abs(determinant) > error and magnitude >= _FILTER_UNDERFLOW_FLOOR:
+    if (abs(determinant) > error and magnitude >= _ORIENT_MAGNITUDE_FLOOR
+            and max(abs(ax), abs(ay), abs(bx), abs(by)) <= _ORIENT_DIFFERENCE_CAP):
         return determinant
     return _exact_orient2d(first, second, third)
 
@@ -88,10 +105,8 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
         value = float(Fraction(exact, 1 << (2 * shift)))
     except OverflowError:
         return float("inf") if exact > 0 else -float("inf")
-    if value == 0.0:
-        # A nonzero determinant below the subnormal range keeps its sign.
-        return _SMALLEST_SUBNORMAL if exact > 0 else -_SMALLEST_SUBNORMAL
-    return value
+    # A nonzero determinant below the subnormal range keeps its sign.
+    return _nonzero_sign_kept(value, exact)
 
 
 def _signed_zero_orient2d(values: Sequence[float]) -> float:
@@ -128,7 +143,68 @@ def incircle(
     third: Sequence[float],
     point: Sequence[float],
 ) -> float:
-    """Adaptive in-circle predicate, positive for an interior point."""
+    """Adaptive in-circle predicate, positive for an interior point; the sign is exact."""
+
+    ax, ay = float(first[0]) - float(point[0]), float(first[1]) - float(point[1])
+    bx, by = float(second[0]) - float(point[0]), float(second[1]) - float(point[1])
+    cx, cy = float(third[0]) - float(point[0]), float(third[1]) - float(point[1])
+    if max(abs(ax), abs(ay), abs(bx), abs(by), abs(cx), abs(cy)) <= _INCIRCLE_DIFFERENCE_CAP:
+        alift = ax * ax + ay * ay
+        blift = bx * bx + by * by
+        clift = cx * cx + cy * cy
+        determinant = fsum((
+            alift * (bx * cy - by * cx),
+            -blift * (ax * cy - ay * cx),
+            clift * (ax * by - ay * bx),
+        ))
+        # Bound the products before subtracting them: almost collinear stations
+        # can cancel within each cross product. Using the already-cancelled terms
+        # understates roundoff and can certify opposite diagonal flips as illegal
+        # simultaneously. Ambiguous signs use exact binary-input arithmetic.
+        scale = (
+            alift * (abs(bx * cy) + abs(by * cx))
+            + blift * (abs(ax * cy) + abs(ay * cx))
+            + clift * (abs(ax * by) + abs(ay * bx))
+        )
+        if scale >= _INCIRCLE_SCALE_FLOOR and abs(determinant) > 32.0 * _FLOAT_EPSILON * scale:
+            return -determinant if orient2d(first, second, third) < 0.0 else determinant
+    coordinates = tuple(float(value) for item in (first, second, third, point) for value in item[:2])
+    if not all(isfinite(value) for value in coordinates):
+        return _legacy_incircle(first, second, third, point)
+    # Fixed decimal precision can leave a signed rounding residue even
+    # for an exactly cocircular binary-coordinate rectangle. Such a
+    # residue permits both diagonal flips and prevents convergence.
+    (fax, fay), (fbx, fby), (fcx, fcy), (px, py) = (
+        (Fraction(coordinates[2 * index]), Fraction(coordinates[2 * index + 1])) for index in range(4)
+    )
+    dax, day = fax - px, fay - py
+    dbx, dby = fbx - px, fby - py
+    dcx, dcy = fcx - px, fcy - py
+    da = dax * dax + day * day
+    db = dbx * dbx + dby * dby
+    dc = dcx * dcx + dcy * dcy
+    exact = (
+        da * (dbx * dcy - dby * dcx)
+        - db * (dax * dcy - day * dcx)
+        + dc * (dax * dby - day * dbx)
+    )
+    try:
+        determinant = _nonzero_sign_kept(float(exact), exact)
+    except OverflowError:
+        # Match Decimal-to-float conversion for extreme finite inputs.
+        determinant = float("inf") if exact > 0 else -float("inf")
+    if orient2d(first, second, third) < 0.0:
+        determinant = -determinant
+    return determinant
+
+
+def _legacy_incircle(
+    first: Sequence[float],
+    second: Sequence[float],
+    third: Sequence[float],
+    point: Sequence[float],
+) -> float:
+    """The earlier incircle, verbatim: used only for non-finite operands (unchanged behaviour)."""
 
     ax, ay = float(first[0]) - float(point[0]), float(first[1]) - float(point[1])
     bx, by = float(second[0]) - float(point[0]), float(second[1]) - float(point[1])
@@ -150,7 +226,7 @@ def incircle(
         + blift * (abs(ax * cy) + abs(ay * cx))
         + clift * (abs(ax * by) + abs(ay * bx))
     )
-    if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale or scale < _FILTER_UNDERFLOW_FLOOR:
+    if abs(determinant) <= 32.0 * _FLOAT_EPSILON * scale:
         # Fixed decimal precision can leave a signed rounding residue even
         # for an exactly cocircular binary-coordinate rectangle. Such a
         # residue permits both diagonal flips and prevents convergence.
