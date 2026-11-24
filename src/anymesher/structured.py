@@ -23,7 +23,7 @@ from anygeometry.model import GeometryModel
 from anygeometry.surfaces import Cylinder, Plane
 
 from .decomposition import check_mappable
-from .errors import MeshError
+from .errors import MeshError, StructuredElementLimitExceeded
 from .seeding import SeedingConflict, solve_seeding
 
 __all__ = [
@@ -1176,10 +1176,7 @@ def _actual_evidence(
                 * sum(seeding.divisions[item.edge] for item in sides[1])
             )
     if estimated > plan.options.maximum_estimated_elements:
-        raise MeshError(
-            f"global seed solution estimates {estimated} structured elements, exceeding "
-            f"maximum_estimated_elements={plan.options.maximum_estimated_elements}"
-        )
+        raise StructuredElementLimitExceeded(estimated, plan.options.maximum_estimated_elements)
 
     source_for_working_edge: dict[int, int] = {}
     for source_edge, descendants in sorted(edge_mapping.items()):
