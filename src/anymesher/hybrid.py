@@ -35,6 +35,7 @@ except ImportError:  # Older supported ANYgeometry builds predate schema 6.
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
 from ._stage_cancellation import (check_stage as _stage_check,
+    is_stage_cancellation as _is_stage_cancellation,
     preserve_stage_cancellation as _preserve_stage_cancellation, stage_scope as _stage_scope)
 from .errors import MeshError, StructuredQualityRejected
 from ._hybrid_candidate import _HybridCandidateContext, new_candidate_runtime
@@ -5166,7 +5167,56 @@ def _repair_quad_first_quality(
         )
 
 
-def _quad_first_execute(
+class _QuadFaceRefusalContext:
+    """The face whose per-face quad-first stage is running, for refusal diagnostics only."""
+
+    __slots__ = ("domain",)
+
+    def __init__(self) -> None:
+        self.domain: Any = None
+
+
+def _annotate_quad_face_refusal(error: MeshError, context: _QuadFaceRefusalContext) -> None:
+    """Name the working face (and the failing cell's or lost segments' 3D centroid) on a per-face refusal.
+
+    Diagnostics only: the exception keeps its type and cause; its message gains a
+    ``[quad-first face F ...]`` suffix and the attributes ``quad_first_face`` and
+    ``quad_first_location`` (``None`` when the cell is unknown).  Cancellations,
+    refusals outside the per-face loop and already-annotated errors are untouched.
+    """
+    domain = context.domain
+    if (domain is None or _is_stage_cancellation(error)
+            or getattr(error, "quad_first_face", None) is not None):
+        return
+    face_id = int(domain.face_id)
+    location = None
+    cell_uv = getattr(error, "cell_uv", None) or getattr(error, "segment_uv", None)
+    if cell_uv:
+        try:
+            lifted = np.asarray([domain.lift(point) for point in cell_uv], dtype=float)
+            centroid = lifted.mean(axis=0)
+            if centroid.shape == (3,) and np.all(np.isfinite(centroid)):
+                location = tuple(float(value) for value in centroid)
+        except Exception:  # diagnostics never replace the refusal
+            location = None
+    error.quad_first_face = face_id
+    error.quad_first_location = location
+    where = "" if location is None else " near (%.4g, %.4g, %.4g)" % location
+    if error.args and isinstance(error.args[0], str):
+        error.args = (f"{error.args[0]} [quad-first face {face_id}{where}]", *error.args[1:])
+
+
+def _quad_first_execute(geometry: GeometryModel, /, **options: Any) -> "HybridMeshResult":
+    """Run :func:`_quad_first_execute_faces`; a refusal inside one face's stage names that face."""
+    context = _QuadFaceRefusalContext()
+    try:
+        return _quad_first_execute_faces(geometry, _refusal_context=context, **options)
+    except MeshError as error:
+        _annotate_quad_face_refusal(error, context)
+        raise
+
+
+def _quad_first_execute_faces(
     geometry: GeometryModel,
     *,
     face_ids: tuple[int, ...],
@@ -5185,6 +5235,7 @@ def _quad_first_execute(
     cancellation_check: "Callable[[str], None] | None" = None,
     smart_mapped: "Any | None" = None,
     context_faces: "Sequence[int] | None" = None,
+    _refusal_context: _QuadFaceRefusalContext | None = None,
 ) -> "HybridMeshResult":
     """Execute the genuine PQ-M1 target-size planar quad route.
 
@@ -5394,7 +5445,9 @@ def _quad_first_execute(
     next_node_id = first_node_id + len(global_nodes)
     next_element_id = 0
 
+    refusal = _QuadFaceRefusalContext() if _refusal_context is None else _refusal_context
     for domain in domains:
+        refusal.domain = domain
         _check_cancellation(cancellation_check, "quad-first:face-seed")
         # The ordinary adaptive route (no SmartMapped seed builder) also admits
         # split-edge rectangles as a station-conforming tensor and freezes any
@@ -5582,6 +5635,7 @@ def _quad_first_execute(
                 local_to_global, global_nodes,
             )
         domain.assert_current(geometry)
+    refusal.domain = None
 
     nodes_of_edge: dict[int, list[int]] = {}
     for edge_id in sorted(registry.chains):
