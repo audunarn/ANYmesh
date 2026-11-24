@@ -147,3 +147,20 @@ def test_filters_do_not_raise_under_strict_numpy_error_settings():
         values = _orientation_rows(points, np.array([(0, 1, 2)], dtype=np.int64), orient2d)
         assert values[0] > 0.0 and orient2d(*points) > 0.0
         assert incircle((0.0, 0.0), (s, 0.0), (s, s), (0.0, s / 2)) > 0.0
+
+
+def test_collinear_inputs_near_overflow_give_a_signed_zero_not_nan():
+    from anymesher.native_cpp import _orientation_rows
+
+    m = 2.0 ** 1023
+    points = np.array([(m, 0.0), (0.0, 0.0), (-m, 0.0)])
+    value = orient2d(*points)
+    assert value == 0.0 and not np.isnan(value)
+    assert _orientation_rows(points, np.array([(0, 1, 2)], dtype=np.int64), orient2d)[0] == 0.0
+
+
+def test_ordinary_ambiguous_value_is_bit_identical_to_the_earlier_path():
+    x = 0.25 - 2.0 ** -54
+    a, b, c = (x, x), (0.5 + 2.0 ** -51, 0.5), (1.0, 1.0)
+    assert _exact(a, b, c) > 0
+    assert orient2d(a, b, c) == float.fromhex("0x1.8000000000001p-52")

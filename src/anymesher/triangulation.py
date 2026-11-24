@@ -5,9 +5,9 @@ from __future__ import annotations
 import heapq
 
 from dataclasses import dataclass, field
-from decimal import Decimal, localcontext
+from decimal import Context, Decimal, localcontext
 from fractions import Fraction
-from math import floor, fsum, hypot, isfinite, sqrt
+from math import copysign, floor, fsum, hypot, isfinite, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -101,11 +101,21 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
     exact = (fx - tx) * (sy - ty) - (fy - ty) * (sx - tx)
     if exact == 0:
         return _signed_zero_orient2d(values)
+    # The earlier 80-digit evaluation is kept wherever its sign is right, so values
+    # stay bit-identical where it rounded only in magnitude; otherwise the
+    # correctly rounded exact value (a nonzero below the subnormal range keeps its
+    # sign).  A fresh context: caller traps never replace a finite result.
+    try:
+        with localcontext(Context(prec=80)):
+            earlier = _decimal_orient2d(values)
+    except (ArithmeticError, ValueError):
+        earlier = 0.0
+    if earlier != 0.0 and (earlier > 0.0) == (exact > 0):
+        return earlier
     try:
         value = float(Fraction(exact, 1 << (2 * shift)))
     except OverflowError:
         return float("inf") if exact > 0 else -float("inf")
-    # A nonzero determinant below the subnormal range keeps its sign.
     return _nonzero_sign_kept(value, exact)
 
 
@@ -114,27 +124,34 @@ def _signed_zero_orient2d(values: Sequence[float]) -> float:
 
     Decimal and IEEE binary arithmetic share the signed-zero rules: an exactly zero
     difference is +0 except (-0) - (+0) = -0, and a zero product carries the xor of
-    the signs.  A float difference is zero exactly when the exact one is (gradual
-    underflow), so when both float products are zero their float difference is the
-    decimal path's signed zero; otherwise two equal nonzero products cancel to +0.
+    the operand signs.  A float difference is zero exactly when the exact one is
+    (gradual underflow), and a nonzero one keeps its sign even if it overflows, so
+    each zero product is built from the operand signs (never inf * 0); equal
+    nonzero products cancel to +0.
     """
     ax, ay = values[0] - values[4], values[1] - values[5]
     bx, by = values[2] - values[4], values[3] - values[5]
-    first, second = ax * by, ay * bx
     if (ax == 0.0 or by == 0.0) and (ay == 0.0 or bx == 0.0):
+        first = copysign(0.0, copysign(1.0, ax) * copysign(1.0, by))
+        second = copysign(0.0, copysign(1.0, ay) * copysign(1.0, bx))
         return first - second
     return 0.0
 
 
+def _decimal_orient2d(values: Sequence[float]) -> float:
+    """The earlier decimal determinant in the current decimal context."""
+    exact_ax = _decimal(values[0]) - _decimal(values[4])
+    exact_ay = _decimal(values[1]) - _decimal(values[5])
+    exact_bx = _decimal(values[2]) - _decimal(values[4])
+    exact_by = _decimal(values[3]) - _decimal(values[5])
+    return float((exact_ax * exact_by) - (exact_ay * exact_bx))
+
+
 def _legacy_decimal_orient2d(values: Sequence[float]) -> float:
-    """The earlier 80-digit decimal evaluation (non-finite operands only)."""
+    """The earlier 80-digit decimal evaluation, verbatim (non-finite operands only)."""
     with localcontext() as context:
         context.prec = 80
-        exact_ax = _decimal(values[0]) - _decimal(values[4])
-        exact_ay = _decimal(values[1]) - _decimal(values[5])
-        exact_bx = _decimal(values[2]) - _decimal(values[4])
-        exact_by = _decimal(values[3]) - _decimal(values[5])
-        return float((exact_ax * exact_by) - (exact_ay * exact_bx))
+        return _decimal_orient2d(values)
 
 
 def incircle(
@@ -168,14 +185,17 @@ def incircle(
         )
         if scale >= _INCIRCLE_SCALE_FLOOR and abs(determinant) > 32.0 * _FLOAT_EPSILON * scale:
             return -determinant if orient2d(first, second, third) < 0.0 else determinant
-    coordinates = tuple(float(value) for item in (first, second, third, point) for value in item[:2])
-    if not all(isfinite(value) for value in coordinates):
-        return _legacy_incircle(first, second, third, point)
+    if not isfinite(ax + ay + bx + by + cx + cy):  # inf/NaN anywhere (or a huge sum): check precisely
+        # A non-finite difference: either an operand is non-finite (the earlier code,
+        # verbatim) or finite operands overflowed (the exact path below).
+        if not all(isfinite(float(value)) for item in (first, second, third, point) for value in (item[0], item[1])):
+            return _legacy_incircle(first, second, third, point)
     # Fixed decimal precision can leave a signed rounding residue even
     # for an exactly cocircular binary-coordinate rectangle. Such a
     # residue permits both diagonal flips and prevents convergence.
     (fax, fay), (fbx, fby), (fcx, fcy), (px, py) = (
-        (Fraction(coordinates[2 * index]), Fraction(coordinates[2 * index + 1])) for index in range(4)
+        (Fraction(float(coordinates[0])), Fraction(float(coordinates[1])))
+        for coordinates in (first, second, third, point)
     )
     dax, day = fax - px, fay - py
     dbx, dby = fbx - px, fby - py
