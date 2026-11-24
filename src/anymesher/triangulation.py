@@ -83,10 +83,7 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
     )
     exact = (fx - tx) * (sy - ty) - (fy - ty) * (sx - tx)
     if exact == 0:
-        # The earlier path was exact for an exact zero only in magnitude; keep
-        # its signed zero so callers see bit-identical values.
-        legacy = _legacy_decimal_orient2d(values)
-        return legacy if legacy == 0.0 else 0.0
+        return _signed_zero_orient2d(values)
     try:
         value = float(Fraction(exact, 1 << (2 * shift)))
     except OverflowError:
@@ -97,8 +94,25 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
     return value
 
 
+def _signed_zero_orient2d(values: Sequence[float]) -> float:
+    """The signed zero the earlier decimal path returned for an exactly zero determinant.
+
+    Decimal and IEEE binary arithmetic share the signed-zero rules: an exactly zero
+    difference is +0 except (-0) - (+0) = -0, and a zero product carries the xor of
+    the signs.  A float difference is zero exactly when the exact one is (gradual
+    underflow), so when both float products are zero their float difference is the
+    decimal path's signed zero; otherwise two equal nonzero products cancel to +0.
+    """
+    ax, ay = values[0] - values[4], values[1] - values[5]
+    bx, by = values[2] - values[4], values[3] - values[5]
+    first, second = ax * by, ay * bx
+    if (ax == 0.0 or by == 0.0) and (ay == 0.0 or bx == 0.0):
+        return first - second
+    return 0.0
+
+
 def _legacy_decimal_orient2d(values: Sequence[float]) -> float:
-    """The earlier 80-digit decimal evaluation (exact-zero sign and non-finite operands only)."""
+    """The earlier 80-digit decimal evaluation (non-finite operands only)."""
     with localcontext() as context:
         context.prec = 80
         exact_ax = _decimal(values[0]) - _decimal(values[4])
