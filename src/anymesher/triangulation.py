@@ -50,14 +50,41 @@ def orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[fl
     error = 8.0 * _FLOAT_EPSILON * (abs(ax * by) + abs(ay * bx))
     if abs(determinant) > error:
         return determinant
-    with localcontext() as context:
-        context.prec = 80
-        exact_ax = _decimal(first[0]) - _decimal(third[0])
-        exact_ay = _decimal(first[1]) - _decimal(third[1])
-        exact_bx = _decimal(second[0]) - _decimal(third[0])
-        exact_by = _decimal(second[1]) - _decimal(third[1])
-        exact = (exact_ax * exact_by) - (exact_ay * exact_bx)
-    return float(exact)
+    return _exact_orient2d(first, second, third)
+
+
+def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[float]) -> float:
+    """The correctly rounded exact determinant of binary-float inputs.
+
+    Every finite double is an integer times a power of two, so the inputs are
+    scaled to integers sharing one power-of-two denominator and the
+    determinant is formed in exact integer arithmetic.  (A fixed 80-digit
+    decimal context is not exact: a coordinate near 1e-16 next to one near 1
+    needs about 90 significant digits, and the rounded differences gave
+    exactly collinear stations a nonzero, sign-wrong orientation.)
+    """
+    values = tuple(float(value) for value in (first[0], first[1], second[0], second[1], third[0], third[1]))
+    if not all(isfinite(value) for value in values):
+        # Non-finite operands keep the earlier decimal behaviour unchanged.
+        with localcontext() as context:
+            context.prec = 80
+            exact_ax = _decimal(values[0]) - _decimal(values[4])
+            exact_ay = _decimal(values[1]) - _decimal(values[5])
+            exact_bx = _decimal(values[2]) - _decimal(values[4])
+            exact_by = _decimal(values[3]) - _decimal(values[5])
+            return float((exact_ax * exact_by) - (exact_ay * exact_bx))
+    ratios = tuple(value.as_integer_ratio() for value in values)
+    shift = max(denominator.bit_length() for _numerator, denominator in ratios) - 1
+    fx, fy, sx, sy, tx, ty = (
+        numerator << (shift - denominator.bit_length() + 1) for numerator, denominator in ratios
+    )
+    exact = (fx - tx) * (sy - ty) - (fy - ty) * (sx - tx)
+    if exact == 0:
+        return 0.0
+    try:
+        return float(Fraction(exact, 1 << (2 * shift)))
+    except OverflowError:
+        return float("inf") if exact > 0 else -float("inf")
 
 
 def incircle(
@@ -1385,7 +1412,10 @@ def _finish_triangles(
                 cancellation_check("python triangulation domain boundary")
             edge = _normal_edge(int(first), int(second))
             if edge not in incidence:
-                raise MeshError("triangulation lost a domain boundary")
+                error = MeshError("triangulation lost a domain boundary")
+                error.segment_uv = tuple(tuple(float(value) for value in points[node])
+                                         for node in (first, second))
+                raise error
             for row in incidence[edge]:
                 opposite = next(node for node in cells[row] if node not in edge)
                 if orient2d(points[first], points[second], points[opposite]) < 0.0:
@@ -1406,7 +1436,11 @@ def _finish_triangles(
     edges = set(_edge_incidence([tuple(map(int, row)) for row in result]).keys())
     missing = [tuple(map(int, edge)) for edge in prepared.segments if tuple(map(int, edge)) not in edges]
     if missing:
-        raise MeshError(f"triangulation lost mandatory segments: {missing[:3]}")
+        error = MeshError(f"triangulation lost mandatory segments: {missing[:3]}")
+        # Caller diagnostics: the lost segments' end points in the input chart.
+        error.segment_uv = tuple(tuple(float(value) for value in points[node])
+                                 for edge in missing[:3] for node in edge)
+        raise error
     return result
 
 
