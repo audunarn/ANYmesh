@@ -36,18 +36,19 @@
 namespace anymesher_native {
 
 inline PyObject* py_exact_arithmetic_probe(PyObject*, PyObject* args) {
-    double a = 0.0, b = 0.0;
-    double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0, cx = 0.0, cy = 0.0;
-    if (!PyArg_ParseTuple(args, "dd|dddddd:exact_arithmetic_probe", &a, &b,
-                          &ax, &ay, &bx, &by, &cx, &cy)) return nullptr;
     // Orientation of (ax, ay), (bx, by), (cx, cy) when given, otherwise of a
-    // fixed construction from a and b.
+    // fixed construction from a and b.  The count is checked before any
+    // conversion, so every wrong count is a TypeError.
     const Py_ssize_t given = PyTuple_GET_SIZE(args);
     if (given != 2 && given != 8) {
         PyErr_SetString(PyExc_TypeError, "exact_arithmetic_probe takes 2 or 8 arguments");
         return nullptr;
     }
     const bool explicit_points = given == 8;
+    double a = 0.0, b = 0.0;
+    double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0, cx = 0.0, cy = 0.0;
+    if (!PyArg_ParseTuple(args, "dd|dddddd:exact_arithmetic_probe", &a, &b,
+                          &ax, &ay, &bx, &by, &cx, &cy)) return nullptr;
     double product = 0.0, product_tail = 0.0, sum = 0.0, sum_tail = 0.0;
     double high = 0.0, low = 0.0;
     two_product(a, b, product, product_tail);

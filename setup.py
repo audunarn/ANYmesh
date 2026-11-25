@@ -59,7 +59,10 @@ compile_args = ["/std:c++17", "/O2", "/fp:precise"] if sys.platform == "win32" e
     "-fno-associative-math", "-fno-reciprocal-math", "-fno-finite-math-only",
     "-ffp-contract=off",
 ]
-link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else []
+# Repeated on the link line: a link-time optimization step must not pick up an
+# inherited contraction or fast-math setting (GCC 13 keeps the compile-time
+# options under -flto; this is a backstop for other toolchains).
+link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else compile_args[2:]
 
 extensions = []
 require_native = os.environ.get("ANYMESHER_REQUIRE_NATIVE", "0") in {
