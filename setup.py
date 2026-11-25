@@ -44,7 +44,10 @@ def _ensure_msvc_tools_on_path() -> None:
 _ensure_msvc_tools_on_path()
 
 
-compile_args = ["/std:c++17", "/O2"] if sys.platform == "win32" else ["-std=c++17", "-O3"]
+# The exact predicates use error-free transforms (Dekker split, two_sum,
+# two_product) that need separately rounded operations; a fused multiply-add
+# contraction across statements (GCC default on FMA targets) breaks split.
+compile_args = ["/std:c++17", "/O2"] if sys.platform == "win32" else ["-std=c++17", "-O3", "-ffp-contract=off"]
 link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else []
 
 extensions = []
@@ -60,6 +63,7 @@ if os.environ.get("ANYMESHER_DISABLE_NATIVE", "0") not in {"1", "true", "TRUE"}:
             ["src/anymesher/_native.cpp"],
             depends=[
                 "src/anymesher/_triangulation_native.hpp",
+                "src/anymesher/_exact_probe_native.hpp",
                 "src/anymesher/_quality_pipeline_native.hpp",
                 "src/anymesher/_native_v2.hpp",
                 "src/anymesher/_native_t3_storage.hpp",

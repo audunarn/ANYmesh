@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Build the native extension with `-ffp-contract=off` on non-Windows platforms. The exact
+  orientation and in-circle expansions rely on separately rounded operations (Dekker split,
+  two_sum, two_product). GCC's default cross-statement contraction on an FMA target (for example
+  `-march=haswell` or aarch64 Linux) made `split` wrong for every tested input. Linux x86-64 at the
+  default target compiles to byte-identical machine code, and Windows is unchanged. A new probe
+  (`_native.exact_arithmetic_probe`) and `tests/test_exact_arithmetic_contraction.py` check the
+  compiled transforms against exact rational arithmetic.
+
 - **Behaviour change.** A scalar beam eccentricity now stands a stiffener off on the side of its
   plate's surface normal (`GeometryModel.face_normal`) on every meshing route. The nodal normal
   averaged raw element normals, so the mapped route took the face loop's side, while nodes

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "_triangulation_native.hpp"
+#include "_exact_probe_native.hpp"
 #include "_quality_pipeline_native.hpp"
 #include "_native_v2.hpp"
 
@@ -314,6 +315,8 @@ PyMethodDef methods[] = {
      "Deterministic constrained triangulation over canonical prepared PSLG buffers."},
     {"reference_delaunay", anymesher_native::py_reference_delaunay, METH_VARARGS,
      "Reference-compatible insertion with adaptive Python predicate oracles."},
+    {"exact_arithmetic_probe", anymesher_native::py_exact_arithmetic_probe, METH_VARARGS,
+     "Error-free transform self-check (two_product, two_sum, split, exact orientation)."},
     {"pslg_segment_memberships", anymesher_quality_native::py_pslg_segment_memberships, METH_VARARGS,
      "Batch deterministic point-on-segment memberships."},
     {"pslg_domain_classification", anymesher_quality_native::py_pslg_domain_classification, METH_VARARGS,
