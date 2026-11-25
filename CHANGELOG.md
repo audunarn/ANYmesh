@@ -13,11 +13,11 @@
   and on a change the routine continues on the live array through the original Python
   predicate expressions. Floating tripod, 615 captured calls: identical results, 10.2 s native
   replay on the development PC (312.9 s Python capture on the bench PC). Same identity contract as
-  the entry below. Proposed addition to "not defended", owner decision pending: the Python frames
-  between the routine and its callback (the engine calls the callback from C), and so
-  `RecursionError` near the recursion limit, caller-frame inspection, warnings attributed by
-  `stacklevel` (and module-based warning filtering of them), traceback contents, and
-  tracing/profiling hooks. Tests: `tests/test_native_finite_hull_seed.py`,
+  the entry below. Added to "not defended" (owner, 2026-11-25): Python-frame depth
+  between the routine and its callback (the engine calls the callback from C): `RecursionError`
+  near the recursion limit and caller-frame inspection. Same root cause, owner confirmation
+  pending: warnings attributed by `stacklevel` (and module-based filtering of them), traceback
+  contents, tracing/profiling hooks. Tests: `tests/test_native_finite_hull_seed.py`,
   `tests/test_tripod_speed_identity.py` (both routes); scale harness `tools/fhs_native_harness.py`.
 
 - **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
