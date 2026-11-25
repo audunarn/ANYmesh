@@ -21,7 +21,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 
-from anymesher import triangulation
+from anymesher import MeshError, triangulation
 from anymesher.native import _finite_hull_seed_kernel
 
 KERNEL = _finite_hull_seed_kernel()
@@ -458,6 +458,71 @@ def test_direct_native_calls_refuse_foreign_helper_results():
         with pytest.raises(SystemError):
             module.finite_hull_seed(points, [0, 1, 2], go_live, location, triangulation._live_flip_test,
                                     canonical, triangulation._FHS_STAGES)
+
+
+def test_direct_native_calls_refuse_inexact_helper_results_and_stages():
+    # Codex r3 (high): results are read only as exact types, so no conversion runs user code.
+    module = _native_module()
+
+    class Index:
+        def __init__(self, value, owner=None):
+            self.value, self.owner = value, owner
+
+        def __index__(self):
+            if self.owner is not None:
+                self.owner.clear()
+            return self.value
+
+    def shrinking_location(array, triangle, node):
+        zeros = []
+        zeros.extend([Index(0, zeros), 1, 2])
+        return True, zeros
+
+    class Truthy:
+        def __bool__(self):
+            raise AssertionError("must not be called")
+
+    cases = (
+        (shrinking_location, triangulation._live_flip_test, triangulation._canonical_triangle),
+        (lambda a, t, n: (Truthy(), []), triangulation._live_flip_test, triangulation._canonical_triangle),
+        (lambda a, t, n: [True, []], triangulation._live_flip_test, triangulation._canonical_triangle),
+        (triangulation._live_location, triangulation._live_flip_test, lambda t, a: list(t)),
+    )
+    for location, flip, canonical in cases:
+        points = np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
+
+        def go_live(stage, points=points):
+            points[3] = (1.0, 1.5)
+
+        with pytest.raises(SystemError):
+            module.finite_hull_seed(points, [0, 1, 2], go_live, location, flip, canonical, triangulation._FHS_STAGES)
+    good = np.array([(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)])
+    helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)
+    for stages in (list(triangulation._FHS_STAGES), ("a", "b"), ("a", "b", 3)):
+        with pytest.raises(TypeError):
+            module.finite_hull_seed(good, [0, 1, 2], None, *helpers, stages)
+
+
+def test_native_survives_a_callback_that_corrupts_its_private_edge_sets():
+    # Codex r3 (high): the vertex-edge sets are reachable through gc; malformed entries are refused,
+    # never dereferenced. (Mutating library internals is outside the identity contract.)
+    import gc
+
+    points = FAMILIES[1].copy()
+    done = []
+
+    def corrupt(stage):
+        if stage.endswith("edge") and not done:
+            for item in gc.get_objects():
+                if type(item) is set and item and all(type(e) is tuple and len(e) == 2 for e in item):
+                    item.add(("x",))
+                    item.add((10 ** 6, 2))
+                    done.append(item)
+
+    try:
+        triangulation._finite_hull_seed(points, corrupt)
+    except (SystemError, RuntimeError, MeshError):
+        pass
 
 
 def test_direct_native_calls_validate_their_inputs():

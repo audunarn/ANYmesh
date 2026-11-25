@@ -523,7 +523,14 @@ struct Engine {
                                      static_cast<long long>(t[2])));
     }
 
+    static void bad_result(const char* what) {
+        PyErr_Format(PyExc_SystemError, "finite hull seed: unexpected %s", what);
+        throw PyError();
+    }
+
+    // An exact int only: converting it runs no Python code.
     static int64_t as_index(PyObject* o) {
+        if (!PyLong_CheckExact(o)) bad_result("non-int index");
         const long long v = PyLong_AsLongLong(o);
         if (v == -1 && PyErr_Occurred()) throw PyError();
         return static_cast<int64_t>(v);
@@ -533,7 +540,7 @@ struct Engine {
         if (live) {
             Ref t(tri_tuple(raw));
             Ref result(checked(PyObject_CallFunctionObjArgs(canonical, t.p, points, nullptr)));
-            if (!PyTuple_Check(result.p) || PyTuple_GET_SIZE(result.p) != 3) {
+            if (!PyTuple_CheckExact(result.p) || PyTuple_GET_SIZE(result.p) != 3) {
                 PyErr_SetString(PyExc_SystemError, "finite hull seed: unexpected canonical triangle");
                 throw PyError();
             }
@@ -564,17 +571,14 @@ struct Engine {
             Ref tt(tri_tuple(t));
             Ref nn(checked(PyLong_FromLongLong(node)));
             Ref result(checked(PyObject_CallFunctionObjArgs(location, points, tt.p, nn.p, nullptr)));
-            const int contains = PyObject_IsTrue(checked(PyTuple_GetItem(result.p, 0)));
-            if (contains < 0) throw PyError();
-            PyObject* zeros = checked(PyTuple_GetItem(result.p, 1));
+            if (!PyTuple_CheckExact(result.p) || PyTuple_GET_SIZE(result.p) != 2) bad_result("location result");
+            PyObject* flag = PyTuple_GET_ITEM(result.p, 0);
+            PyObject* zeros = PyTuple_GET_ITEM(result.p, 1);
+            if (!PyBool_Check(flag) || !PyList_CheckExact(zeros)) bad_result("location result");
+            const bool contains = flag == Py_True;
             zero[0] = zero[1] = zero[2] = false;
-            if (!PyList_Check(zeros)) {
-                PyErr_SetString(PyExc_SystemError, "finite hull seed: location helper returned no list");
-                throw PyError();
-            }
-            const Py_ssize_t m = PyList_Size(zeros);
-            if (m < 0) throw PyError();
-            for (Py_ssize_t k = 0; k < m; ++k) {
+            // The result tuple owns the list; its items are exact ints, so nothing can resize it here.
+            for (Py_ssize_t k = 0; k < PyList_GET_SIZE(zeros); ++k) {
                 const int64_t position = as_index(PyList_GET_ITEM(zeros, k));
                 if (position < 0 || position > 2) {
                     PyErr_SetString(PyExc_SystemError, "finite hull seed: location helper returned a bad edge position");
@@ -582,7 +586,7 @@ struct Engine {
                 }
                 zero[position] = true;
             }
-            return contains != 0;
+            return contains;
         }
         int s[3];
         for (int i = 0; i < 3; ++i) {
@@ -623,9 +627,8 @@ struct Engine {
             Ref result(checked(PyObject_CallFunction(flip_test, "OLLLLO", points, static_cast<long long>(e0),
                                                      static_cast<long long>(e1), static_cast<long long>(a),
                                                      static_cast<long long>(b), ft.p)));
-            const int truth = PyObject_IsTrue(result.p);
-            if (truth < 0) throw PyError();
-            return truth != 0;
+            if (!PyBool_Check(result.p)) bad_result("flip test result");
+            return result.p == Py_True;
         }
         const int first_turn = orient_sign(xs[e0], ys[e0], xs[e1], ys[e1], xs[a], ys[a]);
         const int second_turn = orient_sign(xs[e0], ys[e0], xs[e1], ys[e1], xs[b], ys[b]);
@@ -869,8 +872,11 @@ struct Engine {
                     if (PyErr_Occurred()) throw PyError();
                     break;
                 }
+                // The sets are private but reachable (gc.get_objects): check every entry.
+                if (!PyTuple_CheckExact(near_edge.p) || PyTuple_GET_SIZE(near_edge.p) != 2) bad_result("edge entry");
                 const int64_t n0 = as_index(PyTuple_GET_ITEM(near_edge.p, 0));
                 const int64_t n1 = as_index(PyTuple_GET_ITEM(near_edge.p, 1));
+                if (n0 < 0 || n0 >= count || n1 < 0 || n1 >= count || n0 == n1) bad_result("edge entry");
                 const Rows near_rows = rows_of(edge_key(n0, n1));
                 for (int k = 0; k < near_rows.n; ++k) {
                     const int64_t row = near_rows.r[k];
@@ -894,12 +900,29 @@ struct Engine {
 // finite_hull_seed(points, hull, cancellation_check, location, flip_test, canonical, stages)
 // stages = (insertion, edge, legality): the very str objects the Python route passes.
 inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
-    PyObject *points, *hull_object, *callback, *location, *flip_test, *canonical;
-    PyObject *stage_insertion, *stage_edge, *stage_legality;
-    if (!PyArg_ParseTuple(args, "OOOOOO(UUU)", &points, &hull_object, &callback, &location, &flip_test, &canonical,
-                          &stage_insertion, &stage_edge, &stage_legality)) {
+    PyObject *points, *hull_object, *callback, *location, *flip_test, *canonical, *stages;
+    if (!PyArg_ParseTuple(args, "OOOOOOO", &points, &hull_object, &callback, &location, &flip_test, &canonical,
+                          &stages)) {
         return nullptr;
     }
+    if (!PyTuple_CheckExact(stages) || PyTuple_GET_SIZE(stages) != 3) {
+        PyErr_SetString(PyExc_TypeError, "finite hull seed: stages must be a tuple of three str");
+        return nullptr;
+    }
+    for (Py_ssize_t i = 0; i < 3; ++i) {
+        if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(stages, i))) {
+            PyErr_SetString(PyExc_TypeError, "finite hull seed: stages must be a tuple of three str");
+            return nullptr;
+        }
+    }
+    // Strong references for the whole run (the tuple itself is immutable and held by the caller,
+    // but the engine never relies on that).
+    Ref stage_insertion(Py_NewRef(PyTuple_GET_ITEM(stages, 0)));
+    Ref stage_edge(Py_NewRef(PyTuple_GET_ITEM(stages, 1)));
+    Ref stage_legality(Py_NewRef(PyTuple_GET_ITEM(stages, 2)));
+    Ref held_points(Py_NewRef(points));
+    Ref held_helpers[3] = {Ref(Py_NewRef(location)), Ref(Py_NewRef(flip_test)), Ref(Py_NewRef(canonical))};
+    Ref held_callback(Py_NewRef(callback));
     try {
         std::vector<int64_t> hull;
         {
@@ -930,9 +953,9 @@ inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
         engine.location = location;
         engine.flip_test = flip_test;
         engine.canonical = canonical;
-        engine.stage_insertion = stage_insertion;
-        engine.stage_edge = stage_edge;
-        engine.stage_legality = stage_legality;
+        engine.stage_insertion = stage_insertion.p;
+        engine.stage_edge = stage_edge.p;
+        engine.stage_legality = stage_legality.p;
         return engine.run(hull);
     } catch (const PyError&) {
         return nullptr;
