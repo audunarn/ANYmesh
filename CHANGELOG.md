@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Build the native extension with value-safe floating point: `-fno-fast-math
-  -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -ffp-contract=off`
+  -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -fno-finite-math-only
+  -ffp-contract=off`
   after any inherited `CFLAGS` on non-Windows platforms, and pin MSVC's
   default `/fp:precise`. The exact orientation and in-circle expansions rely on separately rounded
   operations (Dekker split, two_sum, two_product). GCC's default cross-statement contraction on an
