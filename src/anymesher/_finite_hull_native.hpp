@@ -414,6 +414,7 @@ struct Engine {
     std::unordered_set<uint64_t> believed;
     std::priority_queue<uint64_t, std::vector<uint64_t>, std::greater<uint64_t>> pending;
     std::vector<PyObject*> vertex_edges;  // owned Python sets (or nullptr)
+    Ref dtype_name{nullptr};
 
     ~Engine() {
         Py_XDECREF(snap.dtype);
@@ -468,7 +469,8 @@ struct Engine {
                 throw PyError();
             }
         }
-        snap.dtype = checked(PyObject_GetAttrString(points, "dtype"));
+        dtype_name.p = checked(PyUnicode_FromString("dtype"));
+        snap.dtype = checked(PyObject_GetAttr(points, dtype_name.p));
     }
 
     // The option-1 checkpoint: call back, then drop to the live array on any change of
@@ -489,9 +491,7 @@ struct Engine {
             live = true;
             return;
         }
-        static PyObject* dtype_name = PyUnicode_InternFromString("dtype");
-        if (dtype_name == nullptr) throw PyError();
-        Ref dtype(checked(PyObject_GetAttr(points, dtype_name)));
+        Ref dtype(checked(PyObject_GetAttr(points, dtype_name.p)));
         if (dtype.p != snap.dtype) {
             const int equal = PyObject_RichCompareBool(dtype.p, snap.dtype, Py_EQ);
             if (equal < 0) throw PyError();
@@ -537,8 +537,18 @@ struct Engine {
                 PyErr_SetString(PyExc_SystemError, "finite hull seed: unexpected canonical triangle");
                 throw PyError();
             }
-            return Tri{as_index(PyTuple_GET_ITEM(result.p, 0)), as_index(PyTuple_GET_ITEM(result.p, 1)),
-                       as_index(PyTuple_GET_ITEM(result.p, 2))};
+            const Tri out{as_index(PyTuple_GET_ITEM(result.p, 0)), as_index(PyTuple_GET_ITEM(result.p, 1)),
+                          as_index(PyTuple_GET_ITEM(result.p, 2))};
+            // Only a permutation of the input triangle is used (a foreign helper on a direct call
+            // could return anything; the library's _canonical_triangle always permutes).
+            Tri a = raw, b = out;
+            std::sort(a.begin(), a.end());
+            std::sort(b.begin(), b.end());
+            if (a != b) {
+                PyErr_SetString(PyExc_SystemError, "finite hull seed: canonical helper did not permute the triangle");
+                throw PyError();
+            }
+            return out;
         }
         Tri v = raw;
         if (orient_sign(xs[v[0]], ys[v[0]], xs[v[1]], ys[v[1]], xs[v[2]], ys[v[2]]) < 0) std::swap(v[1], v[2]);
@@ -558,9 +568,20 @@ struct Engine {
             if (contains < 0) throw PyError();
             PyObject* zeros = checked(PyTuple_GetItem(result.p, 1));
             zero[0] = zero[1] = zero[2] = false;
+            if (!PyList_Check(zeros)) {
+                PyErr_SetString(PyExc_SystemError, "finite hull seed: location helper returned no list");
+                throw PyError();
+            }
             const Py_ssize_t m = PyList_Size(zeros);
             if (m < 0) throw PyError();
-            for (Py_ssize_t k = 0; k < m; ++k) zero[as_index(PyList_GET_ITEM(zeros, k))] = true;
+            for (Py_ssize_t k = 0; k < m; ++k) {
+                const int64_t position = as_index(PyList_GET_ITEM(zeros, k));
+                if (position < 0 || position > 2) {
+                    PyErr_SetString(PyExc_SystemError, "finite hull seed: location helper returned a bad edge position");
+                    throw PyError();
+                }
+                zero[position] = true;
+            }
             return contains != 0;
         }
         int s[3];
@@ -870,20 +891,14 @@ struct Engine {
     }
 };
 
-// finite_hull_seed(points, hull, cancellation_check, location, flip_test, canonical)
+// finite_hull_seed(points, hull, cancellation_check, location, flip_test, canonical, stages)
+// stages = (insertion, edge, legality): the very str objects the Python route passes.
 inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
     PyObject *points, *hull_object, *callback, *location, *flip_test, *canonical;
-    if (!PyArg_ParseTuple(args, "OOOOOO", &points, &hull_object, &callback, &location, &flip_test, &canonical)) {
+    PyObject *stage_insertion, *stage_edge, *stage_legality;
+    if (!PyArg_ParseTuple(args, "OOOOOO(UUU)", &points, &hull_object, &callback, &location, &flip_test, &canonical,
+                          &stage_insertion, &stage_edge, &stage_legality)) {
         return nullptr;
-    }
-    static PyObject* stage_insertion = nullptr;
-    static PyObject* stage_edge = nullptr;
-    static PyObject* stage_legality = nullptr;
-    if (stage_insertion == nullptr) {
-        stage_insertion = PyUnicode_InternFromString("python triangulation finite hull insertion");
-        stage_edge = PyUnicode_InternFromString("python triangulation finite hull edge");
-        stage_legality = PyUnicode_InternFromString("python triangulation finite hull legality");
-        if (stage_insertion == nullptr || stage_edge == nullptr || stage_legality == nullptr) return nullptr;
     }
     try {
         std::vector<int64_t> hull;

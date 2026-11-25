@@ -421,6 +421,45 @@ def test_native_raises_where_python_does_for_a_callback_that_stops_being_callabl
     assert native[0] == ("error", "TypeError", "'StopAfterHull' object is not callable")
 
 
+def test_native_passes_the_same_stage_objects_as_python():
+    # Codex r2: identity, not only equality, of the stage strings.
+    def run(points):
+        seen = []
+        try:
+            triangulation._finite_hull_seed(points, lambda stage: seen.append(stage))
+        except Exception:
+            pass
+        return seen
+
+    points = FAMILIES[1]
+    native, python = run(points.copy()), _python(run, points.copy())
+    assert [s for s in native if s.startswith("python triangulation finite hull ")]
+    for a, b in zip(native, python):
+        assert a is b
+
+
+def test_direct_native_calls_refuse_foreign_helper_results():
+    # Codex r2 (high): a foreign helper on a direct call can never index native storage.
+    module = _native_module()
+
+    def bad_location(array, triangle, node):
+        return True, [7]
+
+    def bad_canonical(triangle, array):
+        return (0, 1, 99)
+
+    for location, canonical in ((bad_location, triangulation._canonical_triangle),
+                                (triangulation._live_location, bad_canonical)):
+        points = np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
+
+        def go_live(stage, points=points):
+            points[3] = (1.0, 1.5)  # any change: live helpers from here on
+
+        with pytest.raises(SystemError):
+            module.finite_hull_seed(points, [0, 1, 2], go_live, location, triangulation._live_flip_test,
+                                    canonical, triangulation._FHS_STAGES)
+
+
 def test_direct_native_calls_validate_their_inputs():
     module = _native_module()
     helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)
@@ -436,10 +475,12 @@ def test_direct_native_calls_validate_their_inputs():
         (good, [0, 1, 2.0], TypeError),
     ):
         with pytest.raises(error):
-            module.finite_hull_seed(points, hull, None, *helpers)
+            module.finite_hull_seed(points, hull, None, *helpers, triangulation._FHS_STAGES)
     with pytest.raises(TypeError):
-        module.finite_hull_seed(good, [0, 1, 2], None, None, None, None)
-    assert module.finite_hull_seed(good, [0, 1, 2], None, *helpers) == [(0, 1, 2)]
+        module.finite_hull_seed(good, [0, 1, 2], None, None, None, None, triangulation._FHS_STAGES)
+    with pytest.raises(TypeError):
+        module.finite_hull_seed(good, [0, 1, 2], None, *helpers, (1, 2, 3))
+    assert module.finite_hull_seed(good, [0, 1, 2], None, *helpers, triangulation._FHS_STAGES) == [(0, 1, 2)]
     # The batch probe reads unaligned buffers and refuses partial rows and non-finite values.
     raw = bytearray(1) + np.arange(8, dtype=np.float64).tobytes()
     assert len(module.fhs_predicate_signs(memoryview(raw)[1:])) == 2

@@ -1208,6 +1208,11 @@ def _complete_hull_seed(points: np.ndarray, triangles: Sequence[tuple[int, int, 
 
 # Private switch: False keeps the Python finite-hull seed even when the native one is built.
 _NATIVE_FINITE_HULL = True
+# Callback stages of _finite_hull_seed; both routes pass these very objects.
+_FHS_STAGE_INSERTION = "python triangulation finite hull insertion"
+_FHS_STAGE_EDGE = "python triangulation finite hull edge"
+_FHS_STAGE_LEGALITY = "python triangulation finite hull legality"
+_FHS_STAGES = (_FHS_STAGE_INSERTION, _FHS_STAGE_EDGE, _FHS_STAGE_LEGALITY)
 
 
 def _live_location(points: Any, triangle: tuple[int, int, int], node: int) -> tuple[bool, list[int]]:
@@ -1257,7 +1262,7 @@ def _finite_hull_seed(points: np.ndarray,
             # the snapshot, makes the same callbacks and continues on the live array through the
             # _live_* helpers if a callback changes the input.
             outcome = kernel(points, hull, cancellation_check, _live_location, _live_flip_test,
-                             _canonical_triangle)
+                             _canonical_triangle, _FHS_STAGES)
             if type(outcome) is int:
                 if outcome == 1:
                     raise MeshError("finite hull insertion could not locate a point")
@@ -1310,7 +1315,7 @@ def _finite_hull_seed(points: np.ndarray,
     installed = set(hull)
     for node in sorted(set(range(len(points))) - installed, key=lambda index: (*points[index], index)):
         if cancellation_check is not None:
-            checkpoint("python triangulation finite hull insertion")
+            checkpoint(_FHS_STAGE_INSERTION)
         containing = []
         edge = None
         if fast:
@@ -1382,7 +1387,7 @@ def _finite_hull_seed(points: np.ndarray,
 
     def examine(edge: tuple[int, int]) -> None:
         if cancellation_check is not None:
-            checkpoint("python triangulation finite hull edge")
+            checkpoint(_FHS_STAGE_EDGE)
         if edge in believed:
             return
         if flippable(edge, incidence[edge]):
@@ -1393,14 +1398,14 @@ def _finite_hull_seed(points: np.ndarray,
         examine(edge)
     for _ in range(limit):
         if cancellation_check is not None:
-            checkpoint("python triangulation finite hull legality")
+            checkpoint(_FHS_STAGE_LEGALITY)
         edge = None
         while pending:
             candidate = heapq.heappop(pending)
             if candidate not in believed:
                 continue
             if cancellation_check is not None:
-                checkpoint("python triangulation finite hull edge")
+                checkpoint(_FHS_STAGE_EDGE)
             if not flippable(candidate, incidence[candidate]):
                 believed.discard(candidate)
                 continue

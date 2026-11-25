@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Speed, results unchanged.** The finite-hull triangulation fallback runs natively: when the
+  compiled extension provides `finite_hull_seed`, `_finite_hull_seed` hands the fan seed, exact
+  point insertion and Lawson flips to C++ (`_finite_hull_native.hpp`) for exact float64 (n, 2)
+  finite ndarrays with distinct hull rows and n < 2**28; the hull, the completeness check and the
+  refusals stay in Python, and without the extension the Python routine runs unchanged. The C++
+  predicates use the Python predicates' float filters (same IEEE operations, no FP contraction)
+  and exact integer arithmetic otherwise, so every orientation/in-circle sign is the Python one.
+  Callbacks: the same stage objects at the same points, the same snapshot check after each call,
+  and on a change the routine continues on the live array through the original Python
+  predicate expressions. Floating tripod, 615 captured calls: identical results, 10.2 s native
+  replay on the development PC (312.9 s Python capture on the bench PC). Same identity contract as
+  the entry below. Proposed addition to "not defended", owner decision pending: Python-frame depth
+  (the engine calls the callback from C, so `RecursionError` near the recursion limit and
+  caller-frame inspection can differ). Tests: `tests/test_native_finite_hull_seed.py`,
+  `tests/test_tripod_speed_identity.py` (both routes); scale harness `tools/fhs_native_harness.py`.
+
 - **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
   (48 webs, 0.5 m): the Python finite-hull triangulation fallback (615 of 1005 planar seeds) skips
   cells whose closed bounding box excludes the point being located and feeds its predicates Python
