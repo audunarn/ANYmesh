@@ -37,6 +37,11 @@ MAX_BYTES = 4_000_000
 PATH_ENV = 'ANYMESHER_S0_BASELINE'
 SHA_ENV = 'ANYMESHER_S0_BASELINE_SHA256'
 REQUIRE_ENV = 'ANYMESHER_REQUIRE_S0_BASELINE'
+# Set by the CI report step when tools/ci_s0_baseline.py could not produce a
+# baseline in that leg (its value is the step outcome).  Byte comparisons that
+# need the baseline are then skipped with that reason instead of stopping the
+# leg; the S0 step's own result stays reported in the job summary.
+UNAVAILABLE_ENV = 'ANYMESHER_S0_BASELINE_UNAVAILABLE'
 THREADS = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
            'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')
 # Test-input identities, not production/native trust pins. These retain the
@@ -230,6 +235,11 @@ def baseline_environment():
     path, seal = os.environ.get(PATH_ENV), os.environ.get(SHA_ENV)
     if not path and not seal:
         assert os.environ.get(REQUIRE_ENV) != '1', 'required S0 cold baseline is missing'
+        unavailable = os.environ.get(UNAVAILABLE_ENV)
+        if unavailable:
+            import pytest
+            pytest.skip(f'S0 frozen-source baseline unavailable in this CI leg ({unavailable}); '
+                        'reported by the S0 step')
         return None
     assert path and seal, 'partial S0 baseline environment'
     return path, seal

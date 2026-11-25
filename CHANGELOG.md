@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- CI: the S0 frozen-source baseline step is reported but no longer stops the test legs. A failed S0
+  (currently the compiler proof, frozen mesher ref `aa19c0f` predates `native_cpp.py` up to `210e56a`)
+  used to end every full-matrix pytest leg before any test ran. Tests that need the baseline are now
+  skipped with the reported reason, and the baseline is required exactly when S0 succeeded. How a
+  reviewed build-file change moves the frozen reference: `docs/ci-s0-baseline.md`.
+
 - **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
   (48 webs, 0.5 m): the Python finite-hull triangulation fallback (615 of 1005 planar seeds) skips
   cells whose closed bounding box excludes the point being located and feeds its predicates Python

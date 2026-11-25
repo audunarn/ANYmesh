@@ -2,6 +2,8 @@
 
 No build, installation, numerical override, cache reset or golden update occurs.
 The reviewed manual Mac diagnostic remains a separate diagnostic-only entrypoint.
+In CI a failed run is reported but does not stop the test legs, and a reviewed
+build-file change moves the frozen reference: see docs/ci-s0-baseline.md.
 """
 from __future__ import annotations
 

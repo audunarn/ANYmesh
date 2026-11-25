@@ -152,15 +152,25 @@ def test_loader_patch_is_explicit_and_no_other_python_drift_allowed(tmp_path):
         module.loader_payload(actual, tmp_path / 'source')
 
 
-def test_ci_requires_cold_baseline_in_both_full_profiles():
+def test_ci_runs_and_reports_the_cold_baseline_in_both_full_profiles():
+    # Owner decision 2026-11-25: S0 runs in both full profiles and its result
+    # is reported, but a failed S0 no longer stops the test legs.  The
+    # baseline is required (ANYMESHER_REQUIRE_S0_BASELINE=1) exactly when the
+    # S0 step succeeded; otherwise the leg records it as unavailable.
     source = (Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml').read_text()
     for name, following in (('pytest:', 'native-absent:'), ('wheel-full-linux:', 'qualified-caller-planning:')):
         job = source.split('\n  ' + name, 1)[1].split('\n  ' + following, 1)[0]
-        assert 'ANYMESHER_REQUIRE_S0_BASELINE: "1"' in job
-        assert 'tools/ci_s0_baseline.py' in job
+        assert 'ANYMESHER_REQUIRE_S0_BASELINE: "1"' not in job  # never unconditional
+        step = job.split('- name: Produce one cold frozen-source six-face S0 baseline', 1)[1].split('\n      - ', 1)[0]
+        assert 'id: s0' in step and 'continue-on-error: true' in step
+        assert 'tools/ci_s0_baseline.py' in step and '--github-env' in step
+        report = job.split('- name: Report the S0 result', 1)[1].split('\n      - ', 1)[0]
+        assert 'if: always()' in report and '${{ steps.s0.outcome }}' in report
+        assert 'GITHUB_STEP_SUMMARY' in report and '::warning' in report
+        assert 'ANYMESHER_REQUIRE_S0_BASELINE=1' in report
+        assert contract.UNAVAILABLE_ENV + '=' in report
+        assert job.index('Report the S0 result') < job.index('-m pytest')
         assert contract.REFS['geometry'] in job and contract.REFS['mesher'] in job
-        assert '--github-env' in job
-        assert 'if: always()' in job
     assert 'python -I -B tools/ci_s0_baseline.py' in source
 
 
@@ -208,3 +218,16 @@ def test_assert_output_consumes_exact_packet_and_rejects_changed_warm_bytes(tmp_
     monkeypatch.delenv(contract.SHA_ENV)
     with pytest.raises(AssertionError, match='required S0 cold baseline'):
         contract.assert_output('planar', mesh, contract.HISTORICAL, digest=digest)
+
+
+def test_unavailable_baseline_skips_with_the_reported_reason(monkeypatch):
+    monkeypatch.delenv(contract.PATH_ENV, raising=False)
+    monkeypatch.delenv(contract.SHA_ENV, raising=False)
+    monkeypatch.delenv(contract.REQUIRE_ENV, raising=False)
+    monkeypatch.setenv(contract.UNAVAILABLE_ENV, 'failure')
+    with pytest.raises(pytest.skip.Exception, match='unavailable.*failure'):
+        contract.baseline_environment()
+    # Never both: a required baseline that is unavailable still fails.
+    monkeypatch.setenv(contract.REQUIRE_ENV, '1')
+    with pytest.raises(AssertionError, match='required'):
+        contract.baseline_environment()
