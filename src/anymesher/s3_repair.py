@@ -284,7 +284,10 @@ def _plain_shells(mesh: Mesh) -> bool:
         if (id(type(node_id)) not in _PLAIN_INTEGER_IDS or type(position) is not np.ndarray
                 or position.dtype != np.float64):
             return False
-    for cells in (mesh.quads, mesh.tris):
+    for element_id in mesh.couplings:
+        if id(type(element_id)) not in _PLAIN_INTEGER_IDS:
+            return False
+    for cells in (mesh.quads, mesh.tris, mesh.beams):
         for element_id, connectivity in cells.items():
             if id(type(element_id)) not in _PLAIN_INTEGER_IDS:
                 return False

@@ -360,22 +360,17 @@ def test_owner_normal_memo_needs_default_numpy_error_handling(monkeypatch):
     assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
 
 
-def test_owner_normal_memo_needs_a_library_surface():
+def test_owner_normal_memo_needs_library_values_by_identity():
     from anygeometry.surfaces import Plane
 
     class OwnPlane(Plane):
         pass
 
-    class Face:
-        def __init__(self, surface):
-            self.surface = surface
-
-    class Model:
-        faces = {1: Face(object.__new__(Plane)), 2: Face(object.__new__(OwnPlane))}
-
-    assert s3_production._library_surface(Model, 1)
-    assert not s3_production._library_surface(Model, 2)
-
+    origin, u, v = np.zeros(3), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    assert s3_production._library_value(Plane(origin, u, v))
+    assert not s3_production._library_value(OwnPlane(origin, u, v))
+    assert not s3_production._library_value(1.0e155) and not s3_production._library_value(1.0e-30)
+    assert s3_production._library_value(0.0) and s3_production._library_value((1.0, -2.0, 3))
 
 def test_plain_shells_never_calls_user_code_and_needs_plain_nodes():
     class Hostile(type):
@@ -412,8 +407,6 @@ def test_owner_normal_memo_declines_magnitudes_that_could_warn(monkeypatch):
         second = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
     assert first == second
     assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
-    assert not s3_production._moderate(1.0e155, divisor=False)
-    assert not s3_production._moderate(1.0e-30, divisor=True) and s3_production._moderate(0.0, divisor=True)
 
 
 def test_plain_shells_needs_plain_beams_couplings_and_float64_nodes():
@@ -426,3 +419,70 @@ def test_plain_shells_needs_plain_beams_couplings_and_float64_nodes():
     mesh = _sliver_patch(10.0)
     mesh.nodes[1] = mesh.nodes[1].astype(np.float32)
     assert not s3_repair._plain_shells(mesh)
+
+
+def test_plain_shells_needs_exact_integer_keys_in_beams_and_couplings():
+    # Codex r4: an int subclass key can run user code (e.g. in max()) after the map was captured.
+    class Key(int):
+        pass
+
+    mesh = _sliver_patch(10.0)
+    mesh.beams = {Key(99): (1, 2)}
+    assert not s3_repair._plain_shells(mesh)
+    mesh = _sliver_patch(10.0)
+    mesh.beams = {99: (1, Key(2))}
+    assert not s3_repair._plain_shells(mesh)
+
+
+def test_owner_normal_memo_never_hashes_the_model_id(monkeypatch):
+    # Codex r4: the key hashed a UUID subclass model id; the call-local memo no longer reads it.
+    import uuid
+
+    class Id(uuid.UUID):
+        def __hash__(self):
+            raise RuntimeError("hashed")
+
+    geometry, mesh = _square_mesh()
+    object.__setattr__(geometry, "_model_id", Id(str(geometry.model_id)))
+    assert type(geometry.model_id) is Id
+    expected = s3_production._shell_owner_authority(geometry, mesh)
+    memo = {"geometry": geometry, "normals": {}}
+    assert s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo) == expected
+    assert s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo) == expected
+
+
+def test_owner_normal_memo_declines_a_nurbs_surface_without_raising():
+    # Codex r4: the guard read vars() of the slotted NurbsSurface and raised TypeError.
+    from anygeometry.nurbs import NurbsSurface
+
+    surface = NurbsSurface(1, 1, (0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 1.0),
+                           (((0.0, 0.0, 0.0), (0.0, 1.0, 0.0)), ((1.0, 0.0, 0.0), (1.0, 1.0, 0.0))))
+    assert s3_production._library_value(surface) is False
+    geometry, mesh = _square_mesh()
+    face_id = next(iter(geometry.faces))
+    geometry.set_face_parameterization(face_id, surface)
+    uses = tuple(int(u) for u in s3_production._face_use_ids(geometry).get(face_id, ()))
+    assert s3_production._owner_face_admitted(geometry, face_id, uses) is False
+
+
+def test_owner_normal_memo_checks_the_effective_parameterization(monkeypatch):
+    # Codex r4: a parameterization installed with set_face_parameterization is what face_point evaluates.
+    from anygeometry.surfaces import Plane
+
+    class OwnPlane(Plane):
+        pass
+
+    geometry, mesh = _square_mesh()
+    face_id = next(iter(geometry.faces))
+    uses = tuple(int(u) for u in s3_production._face_use_ids(geometry).get(face_id, ()))
+    assert s3_production._owner_face_admitted(geometry, face_id, uses)
+    origin, u, v = np.zeros(3), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    geometry.set_face_parameterization(face_id, OwnPlane(origin, u, v))
+    assert not s3_production._owner_face_admitted(geometry, face_id, uses)
+    calls = _counting(monkeypatch)
+    memo = {"geometry": geometry, "normals": {}}
+    s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
+    s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
+    assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
+    geometry.set_face_parameterization(face_id, Plane(origin, u, v))
+    assert s3_production._owner_face_admitted(geometry, face_id, uses)

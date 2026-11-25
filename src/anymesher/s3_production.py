@@ -225,89 +225,155 @@ def _shell_owner_projection_uv(geometry, mesh, face_by_element):
 
 
 _DEFAULT_NUMPY_ERRORS = {"divide": "warn", "over": "warn", "under": "ignore", "invalid": "warn"}
-
-
-def _owner_normal_memo_admitted(geometry, mesh) -> bool:
-    """Whether owner normals may be reused (an allow-list; anything else is evaluated as before).
-
-    Exact library types with their own methods, plain node storage, the library's
-    tolerance policy and NumPy's default error handling with no handler, so that
-    an evaluation has no observable effect beyond its result.
-    """
-    from anygeometry.tolerance import TolerancePolicy
-    from .s3_repair import _plain_shells
-    return (type(geometry) is GeometryModel and type(mesh) is Mesh and _plain_shells(mesh)
-            and type(geometry.tolerance) is TolerancePolicy
-            and np.geterr() == _DEFAULT_NUMPY_ERRORS and np.geterrcall() is None
-            and all(getattr(getattr(geometry, name), "__func__", None) is getattr(GeometryModel, name)
-                    for name in ("project_to_face", "face_normal", "face_point")))
-
-
-_LIBRARY_SURFACE_IDS: frozenset[int] | None = None
 _MAGNITUDE_CAP, _MAGNITUDE_FLOOR = 2.0 ** 64, 2.0 ** -64
+_MODEL_METHODS = ("project_to_face", "face_normal", "face_point", "face_local_uv", "closest_edge_point",
+                  "face_trim_loops_uv")
+_LIBRARY_VALUE_TYPES: dict[int, type] | None = None
 
 
-def _library_surface_ids() -> frozenset[int]:
-    global _LIBRARY_SURFACE_IDS
-    if _LIBRARY_SURFACE_IDS is None:
-        from anygeometry.nurbs import NurbsSurface
-        from anygeometry.surfaces import Cone, CoonsSurface, Cylinder, ExtrudedSurface, Plane, RuledSurface
-        _LIBRARY_SURFACE_IDS = frozenset(
-            id(kind) for kind in (Plane, Cylinder, Cone, ExtrudedSurface, RuledSurface, CoonsSurface, NurbsSurface))
-    return _LIBRARY_SURFACE_IDS
+def _library_value_types() -> dict[int, type]:
+    """Library classes the owner-normal evaluation may meet, by identity (no subclasses).
 
-
-def _moderate(value, *, divisor: bool, depth: int = 0) -> bool:
-    """Plain numbers whose evaluation cannot overflow (an allow-list: other types decline).
-
-    Every float is finite and at most 2^64 in magnitude; a ``divisor`` value is also
-    0 or at least 2^-64.  Products and quotients of such values stay far from the
-    float64 range, so the projections and normals evaluated from them emit no
-    NumPy warning and a reused result has no skipped side effect.
+    Surfaces and parameterizations, edge curves, topology records and the tolerance
+    policy.  NURBS surfaces and NURBS-based curves (lazily prepared state) are not
+    listed: faces using them are evaluated by the original route.
     """
+    global _LIBRARY_VALUE_TYPES
+    if _LIBRARY_VALUE_TYPES is None:
+        from anygeometry import curves, entities, exact_curves, line_ranges, surfaces, tolerance
+        kinds = [surfaces.Plane, surfaces.Cylinder, surfaces.Cone, surfaces.ExtrudedSurface,
+                 surfaces.RuledSurface, surfaces.CoonsSurface,
+                 curves.Straight, curves.Arc, curves.Spline,
+                 exact_curves.EllipticArc, exact_curves._CylinderSupport, exact_curves.CylinderIntersectionCurve,
+                 line_ranges.LineRange,
+                 entities.Vertex, entities.Edge, entities.OrientedEdge,
+                 tolerance.TolerancePolicy]
+        _LIBRARY_VALUE_TYPES = {id(kind): kind for kind in kinds}
+    return _LIBRARY_VALUE_TYPES
+
+
+def _library_value(value, depth: int = 0) -> bool:
+    """An allow-list over values the evaluation reads: plain, moderate numbers and listed library records.
+
+    Never calls user code: every object is identified by ``type(...)`` identity
+    before any attribute is read, and listed classes are read through their
+    dataclass fields with ``object.__getattribute__``.  Floats are finite, at most
+    2^64 in magnitude and either 0 or at least 2^-64, so the projections and
+    normals computed from them cannot overflow or warn.
+    """
+    if depth > 8:
+        return False
     kind = type(value)
-    if kind is bool or kind is int:
-        return abs(value) <= _MAGNITUDE_CAP
+    if value is None or kind is bool or kind is str:
+        return True
+    if kind is int:
+        return -_MAGNITUDE_CAP <= value <= _MAGNITUDE_CAP
     if kind is float or kind is np.float64:
         magnitude = abs(float(value))
-        return (magnitude <= _MAGNITUDE_CAP
-                and (not divisor or magnitude == 0.0 or magnitude >= _MAGNITUDE_FLOOR))
+        return magnitude == 0.0 or _MAGNITUDE_FLOOR <= magnitude <= _MAGNITUDE_CAP
     if kind is np.ndarray:
+        if value.dtype.kind in "iu":
+            return True
         if value.dtype != np.float64 or not bool(np.all(np.isfinite(value))):
             return False
         magnitude = np.abs(value)
-        return bool(np.all(magnitude <= _MAGNITUDE_CAP)
-                    and (not divisor or np.all((magnitude == 0.0) | (magnitude >= _MAGNITUDE_FLOOR))))
-    if (kind is tuple or kind is list) and depth < 4:
-        return all(_moderate(item, divisor=divisor, depth=depth + 1) for item in value)
-    return False
-
-
-def _library_surface(geometry, face_id) -> bool:
-    """The face's surface is an exact anygeometry surface with moderate parameters."""
+        return bool(np.all((magnitude == 0.0) | ((magnitude >= _MAGNITUDE_FLOOR) & (magnitude <= _MAGNITUDE_CAP))))
+    if kind is tuple or kind is list:
+        return all(_library_value(item, depth + 1) for item in value)
+    from fractions import Fraction
+    from anygeometry.structural import Orientation
+    if kind is Fraction or kind is Orientation:
+        return True
+    if id(kind) not in _library_value_types():
+        return False
+    import dataclasses
+    if not dataclasses.is_dataclass(kind):
+        return False
+    for field in dataclasses.fields(kind):
+        if not _library_value(object.__getattribute__(value, field.name), depth + 1):
+            return False
     try:
-        surface = geometry.faces[face_id].surface
-    except (KeyError, AttributeError):
+        extra = object.__getattribute__(value, "__dict__")
+    except AttributeError:
+        extra = {}
+    if type(extra) is not dict:
         return False
-    if id(type(surface)) not in _library_surface_ids():
+    return all(type(name) is str and _library_value(item, depth + 1) for name, item in extra.items())
+
+
+def _owner_normal_memo_admitted(geometry, mesh) -> bool:
+    """Whether owner normals may be reused at all (anything else is evaluated as before).
+
+    Exact library model with its own evaluation methods and no open transaction,
+    plain shell storage, the library tolerance policy, and NumPy's default error
+    handling with no handler.
+    """
+    from .s3_repair import _plain_shells
+    if not (type(geometry) is GeometryModel and type(mesh) is Mesh and _plain_shells(mesh)
+            and np.geterr() == _DEFAULT_NUMPY_ERRORS and np.geterrcall() is None):
         return False
-    fields = vars(surface)
-    return all(type(name) is str and _moderate(value, divisor=True) for name, value in fields.items())
+    if any(name in object.__getattribute__(geometry, "__dict__") for name in _MODEL_METHODS):
+        return False
+    if object.__getattribute__(geometry, "_transaction_journal") is not None:
+        return False
+    if type(geometry.revision) is not int:
+        return False
+    return _library_value(geometry.tolerance)
+
+
+def _owner_face_admitted(geometry, face_id, uses) -> bool:
+    """Everything the evaluation of a normal on ``face_id`` reads is an allow-listed value.
+
+    The face record (surface and parameterization, outer loop and holes), every
+    loop edge and its curve, the vertices those curves use, and the FaceUses with
+    their orientations (mapped from ANYgeometry's face_point, face_normal and
+    project_to_face).
+    """
+    from anygeometry import curves, entities
+    from anygeometry.structural import FaceUse, Orientation
+    try:
+        face = geometry.faces[face_id]
+        # The fields the evaluation reads (``metadata`` is not read).
+        if type(face) is not entities.Face or not all(
+                _library_value(object.__getattribute__(face, name))
+                for name in ("id", "loop", "corners", "holes", "surface", "parameterization")):
+            return False
+        vertex_ids = []
+        for loop in (face.loop, *face.holes):
+            for oriented in loop:
+                edge = geometry.edges[oriented.edge]
+                if type(edge) is not entities.Edge or not _library_value(edge):
+                    return False
+                vertex_ids.extend((edge.start, edge.end))
+                curve = edge.curve
+                if type(curve) is curves.Arc:
+                    vertex_ids.append(curve.via_vertex)
+                elif type(curve) is curves.Spline:
+                    vertex_ids.extend(curve.control_vertices)
+        for vertex_id in vertex_ids:
+            vertex = geometry.vertices[vertex_id]
+            if type(vertex) is not entities.Vertex or not _library_value(vertex):
+                return False
+        for use in uses:
+            record = geometry.face_uses[use]
+            if type(record) is not FaceUse or type(record.orientation) is not Orientation:
+                return False
+    except (KeyError, IndexError, AttributeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
     """Exact inputs of one ``_physical_owner_normal`` evaluation, or None.
 
-    For an exact ``GeometryModel`` (its own projection and normal methods) the
-    normal is a deterministic function of the model revision, the face, its
-    FaceUses and their orientations, the angular tolerance, the NumPy error
-    state, the element's corner coordinates and the supplied uv (or, without
-    one, the projection of the corner centroid).  Only plain float64 corners and
-    uv made of float64 values are keyed, so equal keys mean equal inputs.  Every
-    other case (no FaceUse, unreadable corners, other value types) returns None
-    and is evaluated by the original route, which raises its original error.
+    Called only after ``_owner_normal_memo_admitted`` and ``_owner_face_admitted``:
+    the normal is then a deterministic function of the model revision, the face,
+    its FaceUses and their orientations, the angular tolerance, the element's
+    corner coordinates and the supplied uv (or, without one, the projection of the
+    corner centroid).  Only moderate float64 corners and uv are keyed; every other
+    case returns None and is evaluated by the original route.
     """
-    if not uses or not _library_surface(geometry, face_id):
+    if not uses:
         return None
     try:
         corners = [mesh.nodes[node_id] for node_id in mesh.corners_of(element_id)]
@@ -317,24 +383,22 @@ def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
         return None
     made = []
     for corner in corners:
-        if (type(corner) is not np.ndarray or corner.dtype != np.float64 or corner.shape != (3,)
-                or not _moderate(corner, divisor=False)):
+        if type(corner) is not np.ndarray or corner.shape != (3,) or not _library_value(corner):
             return None
         made.append(corner.tobytes())
     if uv is None:
         made_uv = None
     elif type(uv) is np.ndarray:
-        if uv.dtype != np.float64 or uv.shape != (2,) or not _moderate(uv, divisor=False):
+        if uv.dtype != np.float64 or uv.shape != (2,) or not _library_value(uv):
             return None
         made_uv = uv.tobytes()
     elif (type(uv) is tuple and len(uv) == 2
           and all(type(value) is float or type(value) is np.float64 for value in uv)
-          and _moderate(uv, divisor=False)):
+          and _library_value(uv)):
         made_uv = np.asarray(uv, dtype=np.float64).tobytes() + b"t"
     else:
         return None
-    return (geometry.model_id, geometry.revision, int(face_id), uses, orientations, angular,
-            tuple(sorted(np.geterr().items())), tuple(made), made_uv)
+    return (geometry.revision, int(face_id), uses, orientations, angular, tuple(made), made_uv)
 
 
 def _shell_owner_authority(
@@ -372,7 +436,12 @@ def _shell_owner_authority(
         key = None
         if memo is not None:
             uses = tuple(int(value) for value in face_use_ids.get(face_id, ()))
-            key = _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv)
+            admitted = memo.setdefault("faces", {})
+            face_key = (geometry.revision, face_id, uses)
+            if face_key not in admitted:
+                admitted[face_key] = _owner_face_admitted(geometry, face_id, uses)
+            if admitted[face_key]:
+                key = _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv)
             if key is not None and key in memo["normals"]:
                 normals[element_id] = memo["normals"][key]
                 continue
