@@ -59,6 +59,18 @@ def _cases():
 CASES = _cases()
 
 
+@pytest.fixture(autouse=True, params=["python", "native"])
+def finite_hull_route(request, monkeypatch):
+    """Each test runs on the option-1 Python route and on the native engine (when it is built)."""
+    if request.param == "native":
+        from anymesher.native import _finite_hull_seed_kernel
+
+        if _finite_hull_seed_kernel() is None:
+            pytest.skip("native extension not built")
+    monkeypatch.setattr(triangulation, "_NATIVE_FINITE_HULL", request.param == "native")
+    return request.param
+
+
 def _outcome(points, mutate=None):
     stages = []
 
@@ -101,6 +113,8 @@ def test_finite_hull_seed_non_float64_input_keeps_the_plain_scan():
 
 def test_finite_hull_seed_prefilter_skips_cells_that_cannot_contain_the_point(monkeypatch):
     # Fails on the old code, whose location scan tests every cell for every inserted point.
+    # Python predicate counts: the native engine calls none (counts are not part of the contract).
+    monkeypatch.setattr(triangulation, "_NATIVE_FINITE_HULL", False)
     points = CASES[2]
     calls = [0]
     original = triangulation.orient2d
@@ -129,6 +143,7 @@ def test_finite_hull_seed_follows_a_callback_that_reshapes_the_input():
 
 def test_finite_hull_seed_calls_no_extra_predicates_before_the_first_insertion(monkeypatch):
     # Codex r2: the zero-area flags come from a vectorised float filter, not from extra orient2d calls.
+    monkeypatch.setattr(triangulation, "_NATIVE_FINITE_HULL", False)
     counts = {}
     original = triangulation.orient2d
     calls = [0]

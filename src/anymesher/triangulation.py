@@ -19,6 +19,7 @@ from .native import (
     NativeBoundarySelection,
     run_native_triangulation,
     snapshot_native_boundary,
+    _finite_hull_seed_kernel,
     _run_reference_native_seed,
 )
 
@@ -1205,6 +1206,22 @@ def _complete_hull_seed(points: np.ndarray, triangles: Sequence[tuple[int, int, 
     return len(reached) == len(triangles)
 
 
+# Private switch: False keeps the Python finite-hull seed even when the native one is built.
+_NATIVE_FINITE_HULL = True
+
+
+def _live_location(points: Any, triangle: tuple[int, int, int], node: int) -> tuple[bool, list[int]]:
+    """The location test of ``_finite_hull_seed`` on the live array (native engine, changed input)."""
+    turns = [orient2d(points[triangle[i]], points[triangle[(i + 1) % 3]], points[node]) for i in range(3)]
+    return min(turns) >= 0.0, [i for i, turn in enumerate(turns) if turn == 0.0]
+
+
+def _live_flip_test(points: Any, e0: int, e1: int, a: int, b: int, first: tuple[int, int, int]) -> bool:
+    """The geometric part of ``flippable`` in ``_finite_hull_seed`` on the live array."""
+    return bool(_proper_intersection(points[e0], points[e1], points[a], points[b])
+                and incircle(*(points[node] for node in first), points[b]) > 0.0)
+
+
 def _finite_hull_seed(points: np.ndarray,
                       cancellation_check: Callable[[str], None] | None = None) -> list[tuple[int, int, int]]:
     """Seed a complete finite disk when removal of the super triangle loses cells.
@@ -1230,6 +1247,22 @@ def _finite_hull_seed(points: np.ndarray,
             and array.shape[1] == 2 and bool(np.all(np.isfinite(array)))
             # a callback during the hull may have shrunk the array under the hull's rows
             and all(type(index) is int and 0 <= index < array.shape[0] for index in hull))
+    if fast and _NATIVE_FINITE_HULL and array.shape[0] < 2 ** 31:
+        kernel = _finite_hull_seed_kernel()
+        if kernel is not None:
+            # The same routine in C++ (decision-identical, see _finite_hull_native.hpp): it takes
+            # the snapshot, makes the same callbacks and continues on the live array through the
+            # _live_* helpers if a callback changes the input.
+            outcome = kernel(points, hull, cancellation_check, _live_location, _live_flip_test,
+                             _canonical_triangle)
+            if type(outcome) is int:
+                if outcome == 1:
+                    raise MeshError("finite hull insertion could not locate a point")
+                raise MeshError("finite hull triangulation legality did not converge")
+            if not _complete_hull_seed(points, outcome, cancellation_check):
+                raise MeshError("finite hull triangulation is incomplete")
+            return outcome
+
     def layout():
         return (array.shape, array.strides, array.dtype, array.__array_interface__["data"][0])
 

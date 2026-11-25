@@ -13,6 +13,7 @@
 #include "_triangulation_native.hpp"
 #include "_quality_pipeline_native.hpp"
 #include "_native_v2.hpp"
+#include "_finite_hull_native.hpp"
 
 namespace {
 
@@ -342,6 +343,12 @@ PyMethodDef methods[] = {
      "Perform deterministic metric local-edge flips with the GIL released."},
     {"native_v2_constrained_smoothing", anymesher_native_v2::py_constrained_smoothing, METH_VARARGS,
      "Perform deterministic constrained smoothing with the GIL released."},
+    {"finite_hull_seed", anymesher_fhs::py_finite_hull_seed, METH_VARARGS,
+     "Decision-identical native finite-hull seed (fan, exact insertion, Lawson flips)."},
+    {"fhs_orient_sign", anymesher_fhs::py_fhs_orient_sign, METH_VARARGS, "Sign of the exact orient2d (probe)."},
+    {"fhs_incircle_sign", anymesher_fhs::py_fhs_incircle_sign, METH_VARARGS, "Sign of the exact incircle (probe)."},
+    {"fhs_predicate_signs", anymesher_fhs::py_fhs_predicate_signs, METH_VARARGS,
+     "Batch orient/incircle signs over rows of eight float64 values (probe)."},
     {nullptr, nullptr, 0, nullptr},
 };
 
