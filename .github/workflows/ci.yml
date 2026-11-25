@@ -130,6 +130,9 @@ jobs:
         # Reported by the next step; a failed S0 must not stop the test legs.
         continue-on-error: true
         shell: bash
+        env:
+          # Inherited by every S0 descendant; the report step kills what carries it.
+          ANYMESHER_S0_OWNER: s0-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
         run: |
           python -m pip install 'psutil>=5.9'
           python -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env s0-binding.env
@@ -139,7 +142,7 @@ jobs:
         shell: bash
         env:
           S0_OUTCOME: ${{ steps.s0.outcome }}
-        run: python -B tools/ci_s0_report.py --outcome "$S0_OUTCOME" --binding s0-binding.env --output ci-s0-baseline --github-env "$GITHUB_ENV"
+        run: python -B tools/ci_s0_report.py --outcome "$S0_OUTCOME" --binding s0-binding.env --output ci-s0-baseline --github-env "$GITHUB_ENV" --owner "s0-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}"
       - name: Retain cold S0 identity and partial process evidence
         if: always()
         continue-on-error: true
@@ -338,6 +341,9 @@ jobs:
         # Reported by the next step; a failed S0 must not stop the test legs.
         continue-on-error: true
         shell: bash
+        env:
+          # Inherited by every S0 descendant; the report step kills what carries it.
+          ANYMESHER_S0_OWNER: s0-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
         run: |
           python -m pip install 'psutil>=5.9'
           python -I -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env s0-binding.env
@@ -347,7 +353,7 @@ jobs:
         shell: bash
         env:
           S0_OUTCOME: ${{ steps.s0.outcome }}
-        run: python -B tools/ci_s0_report.py --outcome "$S0_OUTCOME" --binding s0-binding.env --output ci-s0-baseline --github-env "$GITHUB_ENV"
+        run: python -B tools/ci_s0_report.py --outcome "$S0_OUTCOME" --binding s0-binding.env --output ci-s0-baseline --github-env "$GITHUB_ENV" --owner "s0-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}"
       - name: Retain cold S0 identity and partial process evidence
         if: always()
         continue-on-error: true

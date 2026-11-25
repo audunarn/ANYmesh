@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 from types import SimpleNamespace
@@ -174,6 +175,8 @@ def test_ci_runs_and_reports_the_cold_baseline_in_both_full_profiles():
         assert 'if: always()' in report and 'continue-on-error' not in report
         assert '${{ steps.s0.outcome }}' in report
         assert 'tools/ci_s0_report.py' in report and '--binding s0-binding.env' in report
+        token = step.split('ANYMESHER_S0_OWNER: ', 1)[1].split('\n', 1)[0]
+        assert 'github.run_id' in token and '--owner "' + token + '"' in report
         assert '--github-env "$GITHUB_ENV"' in report
         upload = job.split('- name: Retain cold S0 identity and partial process evidence', 1)[1].split('\n      - ', 1)[0]
         assert 'continue-on-error: true' in upload
@@ -182,7 +185,7 @@ def test_ci_runs_and_reports_the_cold_baseline_in_both_full_profiles():
     assert 'python -I -B tools/ci_s0_baseline.py' in source
 
 
-def _report(tmp_path, outcome, binding_lines):
+def _report(tmp_path, outcome, binding_lines, owner=None):
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
@@ -192,30 +195,75 @@ def _report(tmp_path, outcome, binding_lines):
     if binding_lines is not None:
         binding.write_text(''.join(line + '\n' for line in binding_lines), encoding='utf8')
     env, summary = tmp_path / 'github.env', tmp_path / 'summary.md'
-    code = module.report(outcome, binding, tmp_path / 'ci-s0-baseline', env, summary)
+    output = tmp_path / 'ci-s0-baseline'
+    output.mkdir(exist_ok=True)
+    code = module.report(outcome, binding, output, env, summary, owner)
     exported = dict(line.split('=', 1) for line in env.read_text(encoding='utf8').splitlines())
     return code, exported, summary.read_text(encoding='utf8')
 
 
-PAIR = [contract.PATH_ENV + '=/runner/ci-s0-baseline/manifest.json', contract.SHA_ENV + '=' + 'a' * 64]
+def _pair(tmp_path, body=b'{"schema": 1}'):
+    output = tmp_path / 'ci-s0-baseline'
+    output.mkdir(exist_ok=True)
+    manifest = output / 'manifest.json'
+    manifest.write_bytes(body)
+    return [contract.PATH_ENV + '=' + str(manifest), contract.SHA_ENV + '=' + hashlib.sha256(body).hexdigest()]
 
 
 @pytest.mark.parametrize('outcome', ['success', 'failure', 'skipped', 'cancelled'])
 def test_report_exports_the_binding_only_after_success(tmp_path, outcome):
-    code, exported, summary = _report(tmp_path, outcome, PAIR)
+    pair = _pair(tmp_path)
+    code, exported, summary = _report(tmp_path, outcome, pair)
     assert code == 0 and outcome in summary
     if outcome == 'success':
-        assert exported == {contract.PATH_ENV: '/runner/ci-s0-baseline/manifest.json',
-                            contract.SHA_ENV: 'a' * 64, contract.REQUIRE_ENV: '1'}
+        assert exported == {contract.PATH_ENV: pair[0].split('=', 1)[1],
+                            contract.SHA_ENV: pair[1].split('=', 1)[1], contract.REQUIRE_ENV: '1'}
     else:
         # A binding written by a producer that then failed never reaches pytest.
         assert exported == {contract.UNAVAILABLE_ENV: outcome}
 
 
-@pytest.mark.parametrize('lines', [None, PAIR[:1], PAIR + [contract.REQUIRE_ENV + '=1'], [PAIR[0], PAIR[0]]])
-def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, lines):
-    code, exported, _ = _report(tmp_path, 'success', lines)
+@pytest.mark.parametrize('mutation', ['missing', 'path_only', 'extra_row', 'duplicate', 'bad_sha',
+                                      'upper_sha', 'wrong_sha', 'outside', 'not_a_file', 'invalid_utf8'])
+def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, mutation):
+    pair = _pair(tmp_path)
+    lines = {
+        'missing': None, 'path_only': pair[:1], 'extra_row': pair + [contract.REQUIRE_ENV + '=1'],
+        'duplicate': [pair[0], pair[0]], 'bad_sha': [pair[0], contract.SHA_ENV + '=bad-sha'],
+        'upper_sha': [pair[0], pair[1].upper().replace(contract.SHA_ENV.upper(), contract.SHA_ENV)],
+        'wrong_sha': [pair[0], contract.SHA_ENV + '=' + '0' * 64],
+        'outside': [contract.PATH_ENV + '=' + str(tmp_path / 'manifest.json'), pair[1]],
+        'not_a_file': [contract.PATH_ENV + '=' + str(tmp_path / 'ci-s0-baseline'), pair[1]],
+        'invalid_utf8': pair,
+    }[mutation]
+    if mutation == 'outside':
+        (tmp_path / 'manifest.json').write_bytes(b'{"schema": 1}')
+    code, exported, _ = _report(tmp_path, 'success', lines) if mutation != 'invalid_utf8' else (None, None, None)
+    if mutation == 'invalid_utf8':
+        (tmp_path / 's0-binding.env').write_bytes(b'\xff\xfe' + b'not utf8')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        env = tmp_path / 'github.env'
+        code = module.report('success', tmp_path / 's0-binding.env', tmp_path / 'ci-s0-baseline', env, None)
+        exported = dict(line.split('=', 1) for line in env.read_text(encoding='utf8').splitlines())
     assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'success-without-binding'}
+
+
+def test_report_summary_write_error_never_blocks(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    env = tmp_path / 'github.env'
+    (tmp_path / 'ci-s0-baseline').mkdir()
+    code = module.report('failure', tmp_path / 'none.env', tmp_path / 'ci-s0-baseline', env,
+                         tmp_path / 'missing-dir' / 'summary.md')
+    assert code == 0
+    assert env.read_text(encoding='utf8') == contract.UNAVAILABLE_ENV + '=failure\n'
 
 
 def test_unavailable_flag_never_admits_a_partial_binding(monkeypatch):
@@ -302,3 +350,38 @@ def test_report_kills_a_stray_s0_process_before_pytest(tmp_path):
     finally:
         if stray.poll() is None:
             stray.kill()
+
+
+def test_report_kills_an_owned_descendant_that_outlived_its_parent(tmp_path, monkeypatch):
+    psutil = pytest.importorskip('psutil')
+    import subprocess
+    import sys
+    import time
+    owner = 's0-test-owner-%d' % os.getpid()
+    pid_file = tmp_path / 'grandchild.pid'
+    # The parent starts a grandchild with no S0 marker on its command line and
+    # exits at once; only the inherited owner token ties it to S0.
+    launcher = ('import subprocess, sys; '
+                'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]); '
+                'open(sys.argv[1], "w").write(str(p.pid))')
+    env = dict(os.environ, ANYMESHER_S0_OWNER=owner)
+    subprocess.run([sys.executable, '-c', launcher, str(pid_file)], env=env, check=True, timeout=60)
+    grandchild = int(pid_file.read_text())
+    try:
+        assert psutil.pid_exists(grandchild)
+        code, exported, _ = _report(tmp_path, 'failure', None, owner=owner)
+        assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'failure'}
+        deadline = time.time() + 30
+        while psutil.pid_exists(grandchild) and time.time() < deadline:
+            try:
+                if psutil.Process(grandchild).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.Error:
+                break
+            time.sleep(.2)
+        assert not psutil.pid_exists(grandchild) or psutil.Process(grandchild).status() == psutil.STATUS_ZOMBIE
+    finally:
+        try:
+            psutil.Process(grandchild).kill()
+        except psutil.Error:
+            pass
