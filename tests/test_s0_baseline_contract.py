@@ -90,6 +90,7 @@ def test_raw_format_rejects_nan_unknown_node_duplicate_and_oversize():
 
 
 def test_required_or_partial_environment_never_uses_local_golden(monkeypatch):
+    monkeypatch.delenv(contract.UNAVAILABLE_ENV, raising=False)
     monkeypatch.delenv(contract.PATH_ENV, raising=False)
     monkeypatch.delenv(contract.SHA_ENV, raising=False)
     monkeypatch.setenv(contract.REQUIRE_ENV, '1')
@@ -154,24 +155,76 @@ def test_loader_patch_is_explicit_and_no_other_python_drift_allowed(tmp_path):
 
 def test_ci_runs_and_reports_the_cold_baseline_in_both_full_profiles():
     # Owner decision 2026-11-25: S0 runs in both full profiles and its result
-    # is reported, but a failed S0 no longer stops the test legs.  The
-    # baseline is required (ANYMESHER_REQUIRE_S0_BASELINE=1) exactly when the
-    # S0 step succeeded; otherwise the leg records it as unavailable.
+    # is reported, but a failed S0 (including its frozen checkouts and its
+    # evidence upload) no longer stops the test legs.  The producer's binding
+    # reaches pytest only through tools/ci_s0_report.py after success.
     source = (Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml').read_text()
     for name, following in (('pytest:', 'native-absent:'), ('wheel-full-linux:', 'qualified-caller-planning:')):
         job = source.split('\n  ' + name, 1)[1].split('\n  ' + following, 1)[0]
-        assert 'ANYMESHER_REQUIRE_S0_BASELINE: "1"' not in job  # never unconditional
+        assert 'ANYMESHER_REQUIRE_S0_BASELINE' not in job  # only ci_s0_report.py exports it
+        for sid in ('s0_old_geometry', 's0_old_mesher'):
+            block = job.split('id: ' + sid, 1)[1].split('\n      - ', 1)[0]
+            assert 'continue-on-error: true' in block
         step = job.split('- name: Produce one cold frozen-source six-face S0 baseline', 1)[1].split('\n      - ', 1)[0]
         assert 'id: s0' in step and 'continue-on-error: true' in step
-        assert 'tools/ci_s0_baseline.py' in step and '--github-env' in step
+        assert "steps.s0_old_geometry.outcome == 'success'" in step and "steps.s0_old_mesher.outcome == 'success'" in step
+        assert 'tools/ci_s0_baseline.py' in step and '--github-env s0-binding.env' in step
+        assert 'GITHUB_ENV' not in step  # the producer never writes the job environment
         report = job.split('- name: Report the S0 result', 1)[1].split('\n      - ', 1)[0]
-        assert 'if: always()' in report and '${{ steps.s0.outcome }}' in report
-        assert 'GITHUB_STEP_SUMMARY' in report and '::warning' in report
-        assert 'ANYMESHER_REQUIRE_S0_BASELINE=1' in report
-        assert contract.UNAVAILABLE_ENV + '=' in report
+        assert 'if: always()' in report and 'continue-on-error' not in report
+        assert '${{ steps.s0.outcome }}' in report
+        assert 'tools/ci_s0_report.py' in report and '--binding s0-binding.env' in report
+        assert '--github-env "$GITHUB_ENV"' in report
+        upload = job.split('- name: Retain cold S0 identity and partial process evidence', 1)[1].split('\n      - ', 1)[0]
+        assert 'continue-on-error: true' in upload
         assert job.index('Report the S0 result') < job.index('-m pytest')
         assert contract.REFS['geometry'] in job and contract.REFS['mesher'] in job
     assert 'python -I -B tools/ci_s0_baseline.py' in source
+
+
+def _report(tmp_path, outcome, binding_lines):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binding = tmp_path / 's0-binding.env'
+    if binding_lines is not None:
+        binding.write_text(''.join(line + '\n' for line in binding_lines), encoding='utf8')
+    env, summary = tmp_path / 'github.env', tmp_path / 'summary.md'
+    code = module.report(outcome, binding, tmp_path / 'ci-s0-baseline', env, summary)
+    exported = dict(line.split('=', 1) for line in env.read_text(encoding='utf8').splitlines())
+    return code, exported, summary.read_text(encoding='utf8')
+
+
+PAIR = [contract.PATH_ENV + '=/runner/ci-s0-baseline/manifest.json', contract.SHA_ENV + '=' + 'a' * 64]
+
+
+@pytest.mark.parametrize('outcome', ['success', 'failure', 'skipped', 'cancelled'])
+def test_report_exports_the_binding_only_after_success(tmp_path, outcome):
+    code, exported, summary = _report(tmp_path, outcome, PAIR)
+    assert code == 0 and outcome in summary
+    if outcome == 'success':
+        assert exported == {contract.PATH_ENV: '/runner/ci-s0-baseline/manifest.json',
+                            contract.SHA_ENV: 'a' * 64, contract.REQUIRE_ENV: '1'}
+    else:
+        # A binding written by a producer that then failed never reaches pytest.
+        assert exported == {contract.UNAVAILABLE_ENV: outcome}
+
+
+@pytest.mark.parametrize('lines', [None, PAIR[:1], PAIR + [contract.REQUIRE_ENV + '=1'], [PAIR[0], PAIR[0]]])
+def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, lines):
+    code, exported, _ = _report(tmp_path, 'success', lines)
+    assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'success-without-binding'}
+
+
+def test_unavailable_flag_never_admits_a_partial_binding(monkeypatch):
+    monkeypatch.setenv(contract.UNAVAILABLE_ENV, 'failure')
+    monkeypatch.delenv(contract.REQUIRE_ENV, raising=False)
+    monkeypatch.setenv(contract.PATH_ENV, '/not/real')
+    monkeypatch.delenv(contract.SHA_ENV, raising=False)
+    with pytest.raises(AssertionError, match='partial'):
+        contract.baseline_environment()
 
 
 def test_supervisor_never_enumerates_unrelated_processes():
@@ -231,3 +284,21 @@ def test_unavailable_baseline_skips_with_the_reported_reason(monkeypatch):
     monkeypatch.setenv(contract.REQUIRE_ENV, '1')
     with pytest.raises(AssertionError, match='required'):
         contract.baseline_environment()
+
+
+def test_report_kills_a_stray_s0_process_before_pytest(tmp_path):
+    psutil = pytest.importorskip('psutil')
+    import subprocess
+    import sys
+    output = tmp_path / 'ci-s0-baseline'
+    output.mkdir()
+    # A stand-in for a surviving cold child: its command line names the output directory.
+    stray = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)', str(output)])
+    try:
+        code, exported, _ = _report(tmp_path, 'failure', None)
+        assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'failure'}
+        assert stray.wait(timeout=30) is not None
+        assert not psutil.pid_exists(stray.pid) or psutil.Process(stray.pid).status() == psutil.STATUS_ZOMBIE
+    finally:
+        if stray.poll() is None:
+            stray.kill()

@@ -93,12 +93,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
+        id: s0_old_geometry
+        # Frozen S0 source only: a failure is reported as the S0 outcome.
+        continue-on-error: true
         with:
           repository: audunarn/ANYgeometry
           ref: f645523c8006efe61e94678a5056fba3c9a6a39d
           path: .s0-old-geometry
           persist-credentials: false
       - uses: actions/checkout@v4
+        id: s0_old_mesher
+        # Frozen S0 source only: a failure is reported as the S0 outcome.
+        continue-on-error: true
         with:
           repository: audunarn/ANYmesh
           ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
@@ -120,27 +126,23 @@ jobs:
       - run: python -c "import anygeometry, anymesher; print(anygeometry.__version__, anymesher.__version__)"
       - name: Produce one cold frozen-source six-face S0 baseline
         id: s0
+        if: steps.s0_old_geometry.outcome == 'success' && steps.s0_old_mesher.outcome == 'success'
         # Reported by the next step; a failed S0 must not stop the test legs.
         continue-on-error: true
         shell: bash
         run: |
           python -m pip install 'psutil>=5.9'
-          python -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env "$GITHUB_ENV"
+          python -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env s0-binding.env
       - name: Report the S0 result (reported; it never stops the test legs)
+        # Blocking on purpose: it fails only when an S0 process survives cleanup.
         if: always()
         shell: bash
         env:
           S0_OUTCOME: ${{ steps.s0.outcome }}
-        run: |
-          echo "### S0 frozen-source baseline: ${S0_OUTCOME}" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$S0_OUTCOME" = "success" ]; then
-            echo "ANYMESHER_REQUIRE_S0_BASELINE=1" >> "$GITHUB_ENV"
-          else
-            echo "::warning title=S0 baseline ${S0_OUTCOME}::No frozen-source S0 baseline in this leg; tests that need it are skipped with this reason, all other tests run. See the s0-cold artifact and tools/ci_s0_baseline.py for how the frozen reference is updated."
-            echo "ANYMESHER_S0_BASELINE_UNAVAILABLE=${S0_OUTCOME}" >> "$GITHUB_ENV"
-          fi
+        run: python -B tools/ci_s0_report.py --outcome "$S0_OUTCOME" --binding s0-binding.env --output ci-s0-baseline --github-env "$GITHUB_ENV"
       - name: Retain cold S0 identity and partial process evidence
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: s0-cold-${{ matrix.os }}-${{ matrix.python-version }}
@@ -290,12 +292,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
+        id: s0_old_geometry
+        # Frozen S0 source only: a failure is reported as the S0 outcome.
+        continue-on-error: true
         with:
           repository: audunarn/ANYgeometry
           ref: f645523c8006efe61e94678a5056fba3c9a6a39d
           path: .s0-old-geometry
           persist-credentials: false
       - uses: actions/checkout@v4
+        id: s0_old_mesher
+        # Frozen S0 source only: a failure is reported as the S0 outcome.
+        continue-on-error: true
         with:
           repository: audunarn/ANYmesh
           ref: aa19c0fa6b796a0d7cb1793a87840f52899dfa24
@@ -326,27 +334,23 @@ jobs:
           assert importlib.util.find_spec('anymesher._native') is not None"
       - name: Produce one cold frozen-source six-face S0 baseline
         id: s0
+        if: steps.s0_old_geometry.outcome == 'success' && steps.s0_old_mesher.outcome == 'success'
         # Reported by the next step; a failed S0 must not stop the test legs.
         continue-on-error: true
         shell: bash
         run: |
           python -m pip install 'psutil>=5.9'
-          python -I -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env "$GITHUB_ENV"
+          python -I -B tools/ci_s0_baseline.py --geometry-source .ecosystem/ANYgeometry --mesher-source . --old-geometry .s0-old-geometry --old-mesher .s0-old-mesher --output ci-s0-baseline --github-env s0-binding.env
       - name: Report the S0 result (reported; it never stops the test legs)
+        # Blocking on purpose: it fails only when an S0 process survives cleanup.
         if: always()
         shell: bash
         env:
           S0_OUTCOME: ${{ steps.s0.outcome }}
-        run: |
-          echo "### S0 frozen-source baseline: ${S0_OUTCOME}" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$S0_OUTCOME" = "success" ]; then
-            echo "ANYMESHER_REQUIRE_S0_BASELINE=1" >> "$GITHUB_ENV"
-          else
-            echo "::warning title=S0 baseline ${S0_OUTCOME}::No frozen-source S0 baseline in this leg; tests that need it are skipped with this reason, all other tests run. See the s0-cold artifact and tools/ci_s0_baseline.py for how the frozen reference is updated."
-            echo "ANYMESHER_S0_BASELINE_UNAVAILABLE=${S0_OUTCOME}" >> "$GITHUB_ENV"
-          fi
+        run: python -B tools/ci_s0_report.py --outcome "$S0_OUTCOME" --binding s0-binding.env --output ci-s0-baseline --github-env "$GITHUB_ENV"
       - name: Retain cold S0 identity and partial process evidence
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: s0-cold-installed-linux
