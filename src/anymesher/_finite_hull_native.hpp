@@ -469,22 +469,30 @@ struct Engine {
         }
     }
 
-    // The option-1 checkpoint: call back, then drop to the live array on any change.
+    // The option-1 checkpoint: call back, then drop to the live array on any change of
+    // (shape, strides, dtype, address) or of the contents (the snapshot's bytes).
     void checkpoint(PyObject* stage) {
         Ref result(checked(PyObject_CallOneArg(callback, stage)));
         if (live) return;
-        std::vector<Py_ssize_t> shape, strides;
-        void* buf = nullptr;
-        bool same = true;
-        if (!read_state(shape, strides, buf, nullptr, nullptr, same)) {
-            live = true;  // not exportable: the dtype or layout changed
-            return;
-        }
-        if (shape != snap.shape || strides != snap.strides || buf != snap.buf) {
+        Py_buffer view;
+        if (PyObject_GetBuffer(points, &view, PyBUF_RECORDS_RO) != 0) {
+            PyErr_Clear();  // not exportable: the dtype or the layout changed
             live = true;
             return;
         }
-        Ref dtype(checked(PyObject_GetAttrString(points, "dtype")));
+        struct Release {
+            Py_buffer* v;
+            ~Release() { PyBuffer_Release(v); }
+        } release{&view};
+        if (view.buf != snap.buf || view.ndim != static_cast<int>(snap.shape.size())
+                || !std::equal(snap.shape.begin(), snap.shape.end(), view.shape)
+                || !std::equal(snap.strides.begin(), snap.strides.end(), view.strides)) {
+            live = true;
+            return;
+        }
+        static PyObject* dtype_name = PyUnicode_InternFromString("dtype");
+        if (dtype_name == nullptr) throw PyError();
+        Ref dtype(checked(PyObject_GetAttr(points, dtype_name)));
         if (dtype.p != snap.dtype) {
             const int equal = PyObject_RichCompareBool(dtype.p, snap.dtype, Py_EQ);
             if (equal < 0) throw PyError();
@@ -493,11 +501,22 @@ struct Engine {
                 return;
             }
         }
-        if (!read_state(shape, strides, buf, nullptr, &snap.bytes, same)) {
-            live = true;
+        const Py_ssize_t n = view.shape[0];
+        const char* base = static_cast<const char*>(view.buf);
+        if (view.strides[0] == 16 && view.strides[1] == 8) {
+            live = std::memcmp(base, snap.bytes.data(), static_cast<size_t>(n) * 16) != 0;
             return;
         }
-        if (!same) live = true;
+        for (Py_ssize_t i = 0; i < n; ++i) {
+            for (int j = 0; j < 2; ++j) {
+                const char* item = base + i * view.strides[0] + j * view.strides[1];
+                if (std::memcmp(snap.bytes.data() + static_cast<size_t>(i) * 16 + static_cast<size_t>(j) * 8,
+                                item, 8) != 0) {
+                    live = true;
+                    return;
+                }
+            }
+        }
     }
 
     PyObject* tri_tuple(const Tri& t) {
