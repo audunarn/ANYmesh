@@ -21,6 +21,20 @@
   the check fails when subnormals are flushed after import. Inherited options that are neither
   reset nor detectable are unsupported, for example Clang's `-fdenormal-fp-math=positive-zero`.
 
+- **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
+  (48 webs, 0.5 m): the Python finite-hull triangulation fallback (615 of 1005 planar seeds) skips
+  cells whose closed bounding box excludes the point being located and feeds its predicates Python
+  float tuples (313 -> 167 s over the 615 captured calls, identical results). Identity contract (owner, 2026-11-25): bit-identical results, refusals,
+  exception types and messages and callback order for every input built from the library's own
+  types (exact `GeometryModel`, `Mesh`, anygeometry surface classes, `TolerancePolicy`) and plain
+  containers (dict, tuple, list, int, float, exact float64/integer ndarrays), under NumPy's default
+  error handling and Python's default warning filters; cancellation callbacks may raise and may
+  change array contents or shape. Every shortcut is guarded by a total allow-list that never calls
+  user code and declines to the original route otherwise. Not defended: observing how many times
+  internal predicates or evaluations run (call counts, repeated identical warnings), buffer reads,
+  monkeypatching of library internals, metaclass tricks on library classes. Tests:
+  `tests/test_tripod_speed_identity.py`.
+
 - **Behaviour change.** A scalar beam eccentricity now stands a stiffener off on the side of its
   plate's surface normal (`GeometryModel.face_normal`) on every meshing route. The nodal normal
   averaged raw element normals, so the mapped route took the face loop's side, while nodes
