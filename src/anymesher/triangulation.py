@@ -1216,17 +1216,28 @@ def _finite_hull_seed(points: np.ndarray,
     hull = _convex_hull(points, cancellation_check=cancellation_check)
     if len(hull) < 3:
         raise MeshError("finite triangulation hull has zero area")
-    # The predicates read every coordinate through float(); a finite float64 array
-    # is handed to them as tuples of the same Python floats (identical values and
-    # decisions, without numpy row indexing).  The location scan skips cells whose
-    # closed bounding box excludes the point: orient2d has an exact sign, so such a
-    # cell can never have all three turns >= 0, and the remaining cells are tested
-    # in the original row order.  Any other input (including ndarray subclasses)
-    # keeps the plain scan.
+    # Speed path, decision-identical to the plain scan below.  The predicates read
+    # every coordinate through float(), so an exact, finite float64 (n, 2) ndarray
+    # is handed to them as tuples of the same Python floats.  The location scan
+    # skips a cell whose closed bounding box excludes the point: orient2d has an
+    # exact sign, so a cell of nonzero area cannot then have all three turns >= 0
+    # (zero-area cells are always scanned); the other cells keep their row order.
+    # After every callback the input is compared with its snapshot; if a callback
+    # changed it, the routine continues on the live array with the plain scan,
+    # as the original does.  Any other input keeps the plain scan throughout.
     array = points if type(points) is np.ndarray else None
     fast = (array is not None and array.dtype == np.float64 and array.ndim == 2
             and array.shape[1] == 2 and bool(np.all(np.isfinite(array))))
+    snapshot = array.tobytes() if fast else None
     coordinates = [tuple(row) for row in array.tolist()] if fast else points
+
+    def checkpoint(stage: str) -> None:
+        nonlocal fast, coordinates
+        cancellation_check(stage)
+        if fast and array.tobytes() != snapshot:
+            fast = False
+            coordinates = points
+
     triangles = [_canonical_triangle((hull[0], hull[i], hull[i + 1]), coordinates)
                  for i in range(1, len(hull) - 1)]
     if fast:
@@ -1236,21 +1247,23 @@ def _finite_hull_seed(points: np.ndarray,
         def boxes(rows: Sequence[tuple[int, int, int]]) -> tuple[np.ndarray, ...]:
             if not rows:
                 empty = np.empty(0, dtype=np.float64)
-                return empty, empty, empty, empty
+                return empty, empty, empty, empty, np.empty(0, dtype=bool)
             index = np.asarray(rows, dtype=np.int64)
             x, y = xs[index], ys[index]
-            return x.min(axis=1), x.max(axis=1), y.min(axis=1), y.max(axis=1)
+            flat = np.asarray([orient2d(coordinates[a], coordinates[b], coordinates[c]) == 0.0
+                               for a, b, c in rows], dtype=bool)
+            return x.min(axis=1), x.max(axis=1), y.min(axis=1), y.max(axis=1), flat
 
-        x0, x1, y0, y1 = boxes(triangles)
+        x0, x1, y0, y1, zero = boxes(triangles)
     installed = set(hull)
     for node in sorted(set(range(len(points))) - installed, key=lambda index: (*points[index], index)):
         if cancellation_check is not None:
-            cancellation_check("python triangulation finite hull insertion")
+            checkpoint("python triangulation finite hull insertion")
         containing = []
         edge = None
         if fast:
             px, py = xs[node], ys[node]
-            rows = np.flatnonzero((x0 <= px) & (px <= x1) & (y0 <= py) & (py <= y1)).tolist()
+            rows = np.flatnonzero(zero | ((x0 <= px) & (px <= x1) & (y0 <= py) & (py <= y1))).tolist()
         else:
             rows = range(len(triangles))
         for row in rows:
@@ -1282,9 +1295,10 @@ def _finite_hull_seed(points: np.ndarray,
         if fast:
             keep = np.ones(len(x0), dtype=bool)
             keep[sorted(removed)] = False
-            bx0, bx1, by0, by1 = boxes(added)
+            bx0, bx1, by0, by1, bzero = boxes(added)
             x0, x1 = np.concatenate((x0[keep], bx0)), np.concatenate((x1[keep], bx1))
             y0, y1 = np.concatenate((y0[keep], by0)), np.concatenate((y1[keep], by1))
+            zero = np.concatenate((zero[keep], bzero))
     # Strict positivity prevents cocircular flip cycles. The work bound is an
     # algorithmic convergence guard, not an operand-count restriction.
     limit = max(64, 32 * len(triangles) ** 2)
@@ -1316,7 +1330,7 @@ def _finite_hull_seed(points: np.ndarray,
 
     def examine(edge: tuple[int, int]) -> None:
         if cancellation_check is not None:
-            cancellation_check("python triangulation finite hull edge")
+            checkpoint("python triangulation finite hull edge")
         if edge in believed:
             return
         if flippable(edge, incidence[edge]):
@@ -1327,14 +1341,14 @@ def _finite_hull_seed(points: np.ndarray,
         examine(edge)
     for _ in range(limit):
         if cancellation_check is not None:
-            cancellation_check("python triangulation finite hull legality")
+            checkpoint("python triangulation finite hull legality")
         edge = None
         while pending:
             candidate = heapq.heappop(pending)
             if candidate not in believed:
                 continue
             if cancellation_check is not None:
-                cancellation_check("python triangulation finite hull edge")
+                checkpoint("python triangulation finite hull edge")
             if not flippable(candidate, incidence[candidate]):
                 believed.discard(candidate)
                 continue

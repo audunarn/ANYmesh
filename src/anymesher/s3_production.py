@@ -224,18 +224,32 @@ def _shell_owner_projection_uv(geometry, mesh, face_by_element):
         return {}
 
 
+def _owner_normal_memo_admitted(geometry, mesh) -> bool:
+    """Whether owner normals may be reused: exact base types with their own methods only."""
+    return (type(geometry) is GeometryModel and type(mesh) is Mesh
+            and all(getattr(getattr(geometry, name), "__func__", None) is getattr(GeometryModel, name)
+                    for name in ("project_to_face", "face_normal", "face_point")))
+
+
 def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
     """Exact inputs of one ``_physical_owner_normal`` evaluation, or None.
 
-    The normal is a deterministic function of the geometry, the face, its
-    FaceUses, the element's corner coordinates and the supplied uv (or, without
+    For an exact ``GeometryModel`` (its own projection and normal methods) the
+    normal is a deterministic function of the model revision, the face, its
+    FaceUses and their orientations, the angular tolerance, the NumPy error
+    state, the element's corner coordinates and the supplied uv (or, without
     one, the projection of the corner centroid).  Only plain float64 corners and
-    uv made of Python/NumPy float64 values are keyed, so equal keys mean equal
-    inputs; anything else is evaluated as before.
+    uv made of float64 values are keyed, so equal keys mean equal inputs.  Every
+    other case (no FaceUse, unreadable corners, other value types) returns None
+    and is evaluated by the original route, which raises its original error.
     """
+    if not uses:
+        return None
     try:
         corners = [mesh.nodes[node_id] for node_id in mesh.corners_of(element_id)]
-    except (KeyError, MeshError):
+        orientations = tuple(int(geometry.face_uses[use].orientation) for use in uses)
+        angular = float(geometry.tolerance.angular)
+    except (KeyError, MeshError, AttributeError, TypeError, ValueError):
         return None
     made = []
     for corner in corners:
@@ -252,7 +266,8 @@ def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
         made_uv = np.asarray(uv, dtype=np.float64).tobytes() + b"t"
     else:
         return None
-    return (geometry.model_id, geometry.revision, int(face_id), uses, tuple(made), made_uv)
+    return (geometry.model_id, geometry.revision, int(face_id), uses, orientations, angular,
+            tuple(sorted(np.geterr().items())), tuple(made), made_uv)
 
 
 def _shell_owner_authority(
@@ -281,7 +296,8 @@ def _shell_owner_authority(
     # evaluated on exactly the same inputs, e.g. before an S3 repair that left most
     # shells unchanged; every other shell is evaluated as before.
     memo = (_normal_memo if isinstance(_normal_memo, dict)
-            and _normal_memo.get("geometry") is geometry else None)
+            and _normal_memo.get("geometry") is geometry
+            and _owner_normal_memo_admitted(geometry, mesh) else None)
     normals = {}
     for element_id in sorted(mesh.shells):
         face_id = face_by_element[element_id]

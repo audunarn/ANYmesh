@@ -266,6 +266,29 @@ def _triangle_edges(connectivity: Sequence[int]) -> tuple[tuple[int, int], ...]:
     return tuple(_edge(made[index], made[(index + 1) % 3]) for index in range(3))
 
 
+_PLAIN_INTEGERS = frozenset((int, *(np.dtype(code).type for code in "bBhHiIlLqQ")))
+
+
+def _plain_shells(mesh: Mesh) -> bool:
+    """Whether reading ``mesh``'s shells has no side effects (exact containers of exact ints).
+
+    Only then may one ``_shell_incidence`` map stand in for a rebuild of the same,
+    unchanged mesh: a rebuild of any other mesh performs observable reads.
+    """
+    if type(mesh) is not Mesh or type(mesh.quads) is not dict or type(mesh.tris) is not dict:
+        return False
+    for cells in (mesh.quads, mesh.tris):
+        for element_id, connectivity in cells.items():
+            if type(element_id) not in _PLAIN_INTEGERS:
+                return False
+            if type(connectivity) in (tuple, list):
+                if any(type(value) not in _PLAIN_INTEGERS for value in connectivity):
+                    return False
+            elif not (type(connectivity) is np.ndarray and connectivity.dtype.kind in "iu"):
+                return False
+    return True
+
+
 def _shell_incidence(mesh: Mesh) -> dict[tuple[int, int], list[tuple[str, int]]]:
     result: dict[tuple[int, int], list[tuple[str, int]]] = {}
     for kind, cells in (("quad", mesh.quads), ("tri", mesh.tris)):
@@ -798,6 +821,7 @@ def repair_s3_admission(
             failing = tuple(item.element_id for item in report.elements if not item.admitted)
             accepted = False
             incidence = _shell_incidence(work)
+            reusable = incidence if _plain_shells(work) else None
             candidates: list[tuple[float, tuple[int, int], int, tuple[int, ...]]] = []
             for element_id in sorted(failing):
                 connectivity = tuple(int(value) for value in work.tris[element_id])
@@ -873,7 +897,7 @@ def repair_s3_admission(
                     selected,
                     next_node_id=next_node_id,
                     next_element_id=next_element_id,
-                    incidence=incidence,
+                    incidence=reusable,
                 )
                 if candidate is None or made_owners is None or made_selected is None:
                     _record(
