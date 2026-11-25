@@ -1,10 +1,10 @@
 name: Tests
 run-name: ${{ inputs.s0_diagnostic_only == true && 'DIAGNOSTIC ONLY - six S0 Mac faces' || 'Tests' }}
 
-# Branches are tested through their pull request; push runs only on main and release tags
-# (owner, 2026-11-25: reduce CI load).
 on:
   push:
+    # Branches are tested through their pull request; push runs only on main and release tags
+    # (owner, 2026-11-25: reduce CI load).
     branches: ["main"]
     tags: ["v*"]
   pull_request:
