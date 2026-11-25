@@ -620,6 +620,41 @@ def test_native_matches_python_for_float64_equal_dtypes_with_another_buffer_form
         assert native[0][0] == "ok"
 
 
+def test_native_holds_the_admitted_dtype_as_long_as_the_python_route():
+    # Codex r6: a finalizer attached to the snapshot dtype runs at the same point on both routes.
+    def make():
+        return np.array([[0.0, 0.0], [4.0, 0.0], [0.0, 4.0], [1.0, 1.0], [2.0, 1.0]])
+
+    def run(points):
+        stages = []
+
+        def cleanup():
+            try:
+                yield
+            finally:
+                points.shape = (10,)
+
+        def callback(stage):
+            stages.append(stage)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                if stage.endswith("convex hull") and stages.count(stage) == 1:
+                    generator = cleanup()
+                    next(generator)
+                    points.dtype = np.dtype("d", metadata={"cleanup": generator})
+                    del generator
+                elif stage.endswith("insertion") and stages.count(stage) == 1:
+                    points.dtype = np.dtype("d")
+
+        try:
+            return ("ok", triangulation._finite_hull_seed(points, callback)), len(stages)
+        except Exception as error:
+            return ("error", type(error).__name__, str(error)), len(stages)
+
+    native = run(make())
+    assert native == _python(run, make())
+
+
 def test_direct_native_calls_validate_their_inputs():
     module = _native_module()
     helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)

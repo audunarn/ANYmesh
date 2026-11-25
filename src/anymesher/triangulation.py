@@ -1261,6 +1261,9 @@ def _finite_hull_seed(points: np.ndarray,
             and len(set(hull)) == len(hull)):
         kernel = _finite_hull_seed_kernel()
         if kernel is not None:
+            # Held in this frame until return (and in a traceback), as the Python route holds its
+            # snapshot: user objects attached to the dtype are released at the same point.
+            admitted_dtype = array.dtype  # noqa: F841
             # The same routine in C++ (decision-identical, see _finite_hull_native.hpp): it takes
             # the snapshot, makes the same callbacks and continues on the live array through the
             # _live_* helpers if a callback changes the input.
