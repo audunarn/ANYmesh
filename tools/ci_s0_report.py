@@ -65,17 +65,25 @@ def stray_processes(output: Path, owner: str | None = None):
     return psutil, list(found.values())
 
 
-def contain(output: Path, owner: str | None = None) -> list[int]:
+def contain(output: Path, owner: str | None = None, rounds: int = 20) -> list[int]:
+    """Kill S0 processes until a fresh scan finds none; return the survivors.
+
+    An owned process can start a child between a scan and its kill, so the
+    scan repeats after every kill round; only an empty fresh scan counts.
+    """
+    alive = []
+    for _ in range(rounds):
+        psutil, processes = stray_processes(output, owner)
+        if not processes:
+            return []
+        for process in processes:
+            try:
+                process.kill()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(processes, timeout=30)
     psutil, processes = stray_processes(output, owner)
-    if not processes:
-        return []
-    for process in processes:
-        try:
-            process.kill()
-        except psutil.Error:
-            pass
-    _, alive = psutil.wait_procs(processes, timeout=30)
-    return [process.pid for process in alive]
+    return sorted({process.pid for process in alive} | {process.pid for process in processes})
 
 
 def read_binding(path: Path, output: Path):
@@ -91,13 +99,13 @@ def read_binding(path: Path, output: Path):
     if not re.fullmatch(r'[0-9a-f]{64}', seal):
         return None
     try:
+        # The producer binds exactly <output>/manifest.json.
         manifest = Path(pairs[PATH_ENV]).resolve(strict=True)
-        root = output.resolve(strict=True)
-        if not manifest.is_file() or not manifest.is_relative_to(root):
+        if manifest != (output / 'manifest.json').resolve(strict=True) or not manifest.is_file():
             return None
         if hashlib.sha256(manifest.read_bytes()).hexdigest() != seal:
             return None
-    except (OSError, ValueError):
+    except Exception:  # any malformed path (OSError, RuntimeError on loops, ...) is unavailable
         return None
     return pairs
 

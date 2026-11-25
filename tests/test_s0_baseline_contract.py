@@ -224,7 +224,8 @@ def test_report_exports_the_binding_only_after_success(tmp_path, outcome):
 
 
 @pytest.mark.parametrize('mutation', ['missing', 'path_only', 'extra_row', 'duplicate', 'bad_sha',
-                                      'upper_sha', 'wrong_sha', 'outside', 'not_a_file', 'invalid_utf8'])
+                                      'upper_sha', 'wrong_sha', 'outside', 'not_a_file', 'invalid_utf8',
+                                      'other_file', 'loop'])
 def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, mutation):
     pair = _pair(tmp_path)
     lines = {
@@ -235,7 +236,20 @@ def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, m
         'outside': [contract.PATH_ENV + '=' + str(tmp_path / 'manifest.json'), pair[1]],
         'not_a_file': [contract.PATH_ENV + '=' + str(tmp_path / 'ci-s0-baseline'), pair[1]],
         'invalid_utf8': pair,
+        'other_file': None, 'loop': None,
     }[mutation]
+    if mutation == 'other_file':
+        # A correctly sealed file that is not the manifest.
+        other = tmp_path / 'ci-s0-baseline' / 'provenance.json'
+        other.write_bytes(b'{}')
+        lines = [contract.PATH_ENV + '=' + str(other), contract.SHA_ENV + '=' + hashlib.sha256(b'{}').hexdigest()]
+    if mutation == 'loop':
+        loop = tmp_path / 'ci-s0-baseline' / 'loop'
+        try:
+            os.symlink(loop, loop)
+        except (OSError, NotImplementedError):
+            pytest.skip('symlinks unavailable')
+        lines = [contract.PATH_ENV + '=' + str(loop), pair[1]]
     if mutation == 'outside':
         (tmp_path / 'manifest.json').write_bytes(b'{"schema": 1}')
     code, exported, _ = _report(tmp_path, 'success', lines) if mutation != 'invalid_utf8' else (None, None, None)
@@ -385,3 +399,26 @@ def test_report_kills_an_owned_descendant_that_outlived_its_parent(tmp_path, mon
             psutil.Process(grandchild).kill()
         except psutil.Error:
             pass
+
+
+def test_containment_rescans_until_no_owned_process_is_left(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    psutil = pytest.importorskip('psutil')
+
+    class Fake:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def kill(self):
+            pass
+
+    # The first scan sees one process; killing it reveals a child started meanwhile.
+    scans = [[Fake(1)], [Fake(2)], []]
+    monkeypatch.setattr(module, 'stray_processes', lambda output, owner: (psutil, scans.pop(0)))
+    monkeypatch.setattr(psutil, 'wait_procs', lambda processes, timeout: (processes, []))
+    assert module.contain(tmp_path) == []
+    assert scans == []
