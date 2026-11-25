@@ -265,7 +265,9 @@ def _mutations():
 
     def reshape(points, seen, count):
         if seen.endswith("insertion") and count == 1:
-            points.shape = (len(points), 2)[::-1] if len(points) == 2 else (2, len(points))
+            with warnings.catch_warnings():  # deprecated in NumPy 2.5, still a supported mutation
+                warnings.simplefilter("ignore", DeprecationWarning)
+                points.shape = (len(points), 2)[::-1] if len(points) == 2 else (2, len(points))
 
     def retype(points, seen, count):
         if seen.endswith("edge") and count == 3:

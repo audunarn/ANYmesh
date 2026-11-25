@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from math import radians, tan
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -135,7 +137,9 @@ def test_finite_hull_seed_follows_a_callback_that_reshapes_the_input():
     # Codex r2: a byte-identical in-place reshape must also drop to the live array.
     def reshape(points, seen, count):
         if seen.endswith("insertion") and count == 1:
-            points.shape = (2, 4)
+            with warnings.catch_warnings():  # deprecated in NumPy 2.5, still a supported mutation
+                warnings.simplefilter("ignore", DeprecationWarning)
+                points.shape = (2, 4)
 
     points = np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
     assert _outcome(points.copy(), reshape) == _outcome(_plain(points), reshape)
