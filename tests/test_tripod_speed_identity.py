@@ -154,66 +154,8 @@ def _qualified(geometry):
             repr(made.structural_preparation["qualified_s3"])), len(made.shells)
 
 
-def test_qualified_s3_with_the_owner_memo_equals_the_route_without_it(monkeypatch):
-    geometry, _ = _square_mesh()
-    calls = _counting(monkeypatch)
-    with_memo, shells = _qualified(geometry)
-    with_memo_calls, calls[0] = calls[0], 0
-    monkeypatch.setattr(s3_production, "_owner_normal_key", lambda *args: None)
-    without, _ = _qualified(geometry)
-    assert with_memo == without
-    assert calls[0] >= 2 * shells
-    # Fails on the old code: unchanged shells are not evaluated a second time.
-    assert with_memo_calls < calls[0]
-
-
-def test_owner_normal_memo_reuses_only_identical_inputs(monkeypatch):
-    geometry, mesh = _square_mesh()
-    fresh, fresh_sources = s3_production._shell_owner_authority(geometry, mesh)
-    memo = {"geometry": geometry, "normals": {}}
-    calls = _counting(monkeypatch)
-    first, first_sources = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    second, second_sources = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    assert calls[0] == len(mesh.shells)
-    assert first == second == fresh and first_sources == second_sources == fresh_sources
-    node = sorted(mesh.nodes)[0]
-    mesh.nodes[node] = mesh.nodes[node] + np.array([1.0e-3, 0.0, 0.0])
-    users = [element for element in mesh.shells if node in mesh.corners_of(element)]
-    calls[0] = 0
-    moved, _ = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    assert calls[0] == len(users)
-    monkeypatch.undo()
-    assert moved == s3_production._shell_owner_authority(geometry, mesh)[0]
-
-
 class _Subclassed(GeometryModel):
     """A subclass may have impure geometry protocols (Codex r1): never memoised."""
-
-
-def test_owner_normal_memo_is_not_used_for_a_subclass_or_another_geometry(monkeypatch):
-    geometry, mesh = _square_mesh()
-    other, _ = _square_mesh()
-    subclassed, sub_mesh = _square_mesh(_Subclassed)
-    calls = _counting(monkeypatch)
-    memo = {"geometry": geometry, "normals": {}}
-    s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    calls[0] = 0
-    s3_production._shell_owner_authority(other, mesh, _normal_memo=memo)
-    assert calls[0] == len(mesh.shells)
-    memo = {"geometry": subclassed, "normals": {}}
-    calls[0] = 0
-    s3_production._shell_owner_authority(subclassed, sub_mesh, _normal_memo=memo)
-    s3_production._shell_owner_authority(subclassed, sub_mesh, _normal_memo=memo)
-    assert calls[0] == 2 * len(sub_mesh.shells) and not memo["normals"]
-
-
-def test_owner_normal_memo_keeps_the_original_refusal_without_a_face_use():
-    geometry, mesh = _square_mesh(owner=False)
-    with pytest.raises(S3OwnerAuthorityError) as plain:
-        s3_production._shell_owner_authority(geometry, mesh)
-    with pytest.raises(S3OwnerAuthorityError) as memoised:
-        s3_production._shell_owner_authority(geometry, mesh, _normal_memo={"geometry": geometry, "normals": {}})
-    assert str(memoised.value) == str(plain.value)
 
 
 OWNER = np.asarray((0.0, 0.0, 1.0))
@@ -346,32 +288,6 @@ def test_finite_hull_seed_calls_no_extra_predicates_before_the_first_insertion(m
     assert counts["fast"] == counts["plain"]
 
 
-def test_owner_normal_memo_needs_default_numpy_error_handling(monkeypatch):
-    geometry, mesh = _square_mesh()
-    calls = _counting(monkeypatch)
-    memo = {"geometry": geometry, "normals": {}}
-    old = np.seterrcall(lambda *args: None)
-    try:
-        with np.errstate(under="call"):
-            s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-            s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    finally:
-        np.seterrcall(old)
-    assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
-
-
-def test_owner_normal_memo_needs_library_values_by_identity():
-    from anygeometry.surfaces import Plane
-
-    class OwnPlane(Plane):
-        pass
-
-    origin, u, v = np.zeros(3), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
-    assert s3_production._library_value(Plane(origin, u, v))
-    assert not s3_production._library_value(OwnPlane(origin, u, v))
-    assert not s3_production._library_value(1.0e155) and not s3_production._library_value(1.0e-30)
-    assert s3_production._library_value(0.0) and s3_production._library_value((1.0, -2.0, 3))
-
 def test_plain_shells_never_calls_user_code_and_needs_plain_nodes():
     class Hostile(type):
         def __eq__(cls, other):
@@ -393,20 +309,6 @@ def test_plain_shells_never_calls_user_code_and_needs_plain_nodes():
 
     mesh.nodes = Nodes(mesh.nodes)
     assert not s3_repair._plain_shells(mesh)
-
-
-def test_owner_normal_memo_declines_magnitudes_that_could_warn(monkeypatch):
-    # Codex r3: a reused evaluation must not skip a NumPy warning; huge coordinates are evaluated each time.
-    geometry, mesh = _square_mesh()
-    for node in mesh.nodes:
-        mesh.nodes[node] = mesh.nodes[node] + np.array([0.0, 0.0, 1.0e155])
-    calls = _counting(monkeypatch)
-    memo = {"geometry": geometry, "normals": {}}
-    with np.errstate(over="ignore", invalid="ignore"):
-        first = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-        second = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    assert first == second
-    assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
 
 
 def test_plain_shells_needs_plain_beams_couplings_and_float64_nodes():
@@ -434,55 +336,3 @@ def test_plain_shells_needs_exact_integer_keys_in_beams_and_couplings():
     assert not s3_repair._plain_shells(mesh)
 
 
-def test_owner_normal_memo_never_hashes_the_model_id(monkeypatch):
-    # Codex r4: the key hashed a UUID subclass model id; the call-local memo no longer reads it.
-    import uuid
-
-    class Id(uuid.UUID):
-        def __hash__(self):
-            raise RuntimeError("hashed")
-
-    geometry, mesh = _square_mesh()
-    object.__setattr__(geometry, "_model_id", Id(str(geometry.model_id)))
-    assert type(geometry.model_id) is Id
-    expected = s3_production._shell_owner_authority(geometry, mesh)
-    memo = {"geometry": geometry, "normals": {}}
-    assert s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo) == expected
-    assert s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo) == expected
-
-
-def test_owner_normal_memo_declines_a_nurbs_surface_without_raising():
-    # Codex r4: the guard read vars() of the slotted NurbsSurface and raised TypeError.
-    from anygeometry.nurbs import NurbsSurface
-
-    surface = NurbsSurface(1, 1, (0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 1.0),
-                           (((0.0, 0.0, 0.0), (0.0, 1.0, 0.0)), ((1.0, 0.0, 0.0), (1.0, 1.0, 0.0))))
-    assert s3_production._library_value(surface) is False
-    geometry, mesh = _square_mesh()
-    face_id = next(iter(geometry.faces))
-    geometry.set_face_parameterization(face_id, surface)
-    uses = tuple(int(u) for u in s3_production._face_use_ids(geometry).get(face_id, ()))
-    assert s3_production._owner_face_admitted(geometry, face_id, uses) is False
-
-
-def test_owner_normal_memo_checks_the_effective_parameterization(monkeypatch):
-    # Codex r4: a parameterization installed with set_face_parameterization is what face_point evaluates.
-    from anygeometry.surfaces import Plane
-
-    class OwnPlane(Plane):
-        pass
-
-    geometry, mesh = _square_mesh()
-    face_id = next(iter(geometry.faces))
-    uses = tuple(int(u) for u in s3_production._face_use_ids(geometry).get(face_id, ()))
-    assert s3_production._owner_face_admitted(geometry, face_id, uses)
-    origin, u, v = np.zeros(3), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
-    geometry.set_face_parameterization(face_id, OwnPlane(origin, u, v))
-    assert not s3_production._owner_face_admitted(geometry, face_id, uses)
-    calls = _counting(monkeypatch)
-    memo = {"geometry": geometry, "normals": {}}
-    s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
-    assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
-    geometry.set_face_parameterization(face_id, Plane(origin, u, v))
-    assert s3_production._owner_face_admitted(geometry, face_id, uses)

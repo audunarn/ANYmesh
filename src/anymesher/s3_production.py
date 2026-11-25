@@ -224,189 +224,11 @@ def _shell_owner_projection_uv(geometry, mesh, face_by_element):
         return {}
 
 
-_DEFAULT_NUMPY_ERRORS = {"divide": "warn", "over": "warn", "under": "ignore", "invalid": "warn"}
-_MAGNITUDE_CAP, _MAGNITUDE_FLOOR = 2.0 ** 64, 2.0 ** -64
-_MODEL_METHODS = ("project_to_face", "face_normal", "face_point", "face_local_uv", "closest_edge_point",
-                  "face_trim_loops_uv")
-_LIBRARY_VALUE_TYPES: dict[int, type] | None = None
-
-
-def _library_value_types() -> dict[int, type]:
-    """Library classes the owner-normal evaluation may meet, by identity (no subclasses).
-
-    Surfaces and parameterizations, edge curves, topology records and the tolerance
-    policy.  NURBS surfaces and NURBS-based curves (lazily prepared state) are not
-    listed: faces using them are evaluated by the original route.
-    """
-    global _LIBRARY_VALUE_TYPES
-    if _LIBRARY_VALUE_TYPES is None:
-        from anygeometry import curves, entities, exact_curves, line_ranges, surfaces, tolerance
-        kinds = [surfaces.Plane, surfaces.Cylinder, surfaces.Cone, surfaces.ExtrudedSurface,
-                 surfaces.RuledSurface, surfaces.CoonsSurface,
-                 curves.Straight, curves.Arc, curves.Spline,
-                 exact_curves.EllipticArc, exact_curves._CylinderSupport, exact_curves.CylinderIntersectionCurve,
-                 line_ranges.LineRange,
-                 entities.Vertex, entities.Edge, entities.OrientedEdge,
-                 tolerance.TolerancePolicy]
-        _LIBRARY_VALUE_TYPES = {id(kind): kind for kind in kinds}
-    return _LIBRARY_VALUE_TYPES
-
-
-def _library_value(value, depth: int = 0) -> bool:
-    """An allow-list over values the evaluation reads: plain, moderate numbers and listed library records.
-
-    Never calls user code: every object is identified by ``type(...)`` identity
-    before any attribute is read, and listed classes are read through their
-    dataclass fields with ``object.__getattribute__``.  Floats are finite, at most
-    2^64 in magnitude and either 0 or at least 2^-64, so the projections and
-    normals computed from them cannot overflow or warn.
-    """
-    if depth > 8:
-        return False
-    kind = type(value)
-    if value is None or kind is bool or kind is str:
-        return True
-    if kind is int:
-        return -_MAGNITUDE_CAP <= value <= _MAGNITUDE_CAP
-    if kind is float or kind is np.float64:
-        magnitude = abs(float(value))
-        return magnitude == 0.0 or _MAGNITUDE_FLOOR <= magnitude <= _MAGNITUDE_CAP
-    if kind is np.ndarray:
-        if value.dtype.kind in "iu":
-            return True
-        if value.dtype != np.float64 or not bool(np.all(np.isfinite(value))):
-            return False
-        magnitude = np.abs(value)
-        return bool(np.all((magnitude == 0.0) | ((magnitude >= _MAGNITUDE_FLOOR) & (magnitude <= _MAGNITUDE_CAP))))
-    if kind is tuple or kind is list:
-        return all(_library_value(item, depth + 1) for item in value)
-    from fractions import Fraction
-    from anygeometry.structural import Orientation
-    if kind is Fraction or kind is Orientation:
-        return True
-    if id(kind) not in _library_value_types():
-        return False
-    import dataclasses
-    if not dataclasses.is_dataclass(kind):
-        return False
-    for field in dataclasses.fields(kind):
-        if not _library_value(object.__getattribute__(value, field.name), depth + 1):
-            return False
-    try:
-        extra = object.__getattribute__(value, "__dict__")
-    except AttributeError:
-        extra = {}
-    if type(extra) is not dict:
-        return False
-    return all(type(name) is str and _library_value(item, depth + 1) for name, item in extra.items())
-
-
-def _owner_normal_memo_admitted(geometry, mesh) -> bool:
-    """Whether owner normals may be reused at all (anything else is evaluated as before).
-
-    Exact library model with its own evaluation methods and no open transaction,
-    plain shell storage, the library tolerance policy, and NumPy's default error
-    handling with no handler.
-    """
-    from .s3_repair import _plain_shells
-    if not (type(geometry) is GeometryModel and type(mesh) is Mesh and _plain_shells(mesh)
-            and np.geterr() == _DEFAULT_NUMPY_ERRORS and np.geterrcall() is None):
-        return False
-    if any(name in object.__getattribute__(geometry, "__dict__") for name in _MODEL_METHODS):
-        return False
-    if object.__getattribute__(geometry, "_transaction_journal") is not None:
-        return False
-    if type(geometry.revision) is not int:
-        return False
-    return _library_value(geometry.tolerance)
-
-
-def _owner_face_admitted(geometry, face_id, uses) -> bool:
-    """Everything the evaluation of a normal on ``face_id`` reads is an allow-listed value.
-
-    The face record (surface and parameterization, outer loop and holes), every
-    loop edge and its curve, the vertices those curves use, and the FaceUses with
-    their orientations (mapped from ANYgeometry's face_point, face_normal and
-    project_to_face).
-    """
-    from anygeometry import curves, entities
-    from anygeometry.structural import FaceUse, Orientation
-    try:
-        face = geometry.faces[face_id]
-        # The fields the evaluation reads (``metadata`` is not read).
-        if type(face) is not entities.Face or not all(
-                _library_value(object.__getattribute__(face, name))
-                for name in ("id", "loop", "corners", "holes", "surface", "parameterization")):
-            return False
-        vertex_ids = []
-        for loop in (face.loop, *face.holes):
-            for oriented in loop:
-                edge = geometry.edges[oriented.edge]
-                if type(edge) is not entities.Edge or not _library_value(edge):
-                    return False
-                vertex_ids.extend((edge.start, edge.end))
-                curve = edge.curve
-                if type(curve) is curves.Arc:
-                    vertex_ids.append(curve.via_vertex)
-                elif type(curve) is curves.Spline:
-                    vertex_ids.extend(curve.control_vertices)
-        for vertex_id in vertex_ids:
-            vertex = geometry.vertices[vertex_id]
-            if type(vertex) is not entities.Vertex or not _library_value(vertex):
-                return False
-        for use in uses:
-            record = geometry.face_uses[use]
-            if type(record) is not FaceUse or type(record.orientation) is not Orientation:
-                return False
-    except (KeyError, IndexError, AttributeError, TypeError, ValueError):
-        return False
-    return True
-
-
-def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
-    """Exact inputs of one ``_physical_owner_normal`` evaluation, or None.
-
-    Called only after ``_owner_normal_memo_admitted`` and ``_owner_face_admitted``:
-    the normal is then a deterministic function of the model revision, the face,
-    its FaceUses and their orientations, the angular tolerance, the element's
-    corner coordinates and the supplied uv (or, without one, the projection of the
-    corner centroid).  Only moderate float64 corners and uv are keyed; every other
-    case returns None and is evaluated by the original route.
-    """
-    if not uses:
-        return None
-    try:
-        corners = [mesh.nodes[node_id] for node_id in mesh.corners_of(element_id)]
-        orientations = tuple(int(geometry.face_uses[use].orientation) for use in uses)
-        angular = float(geometry.tolerance.angular)
-    except (KeyError, MeshError, AttributeError, TypeError, ValueError):
-        return None
-    made = []
-    for corner in corners:
-        if type(corner) is not np.ndarray or corner.shape != (3,) or not _library_value(corner):
-            return None
-        made.append(corner.tobytes())
-    if uv is None:
-        made_uv = None
-    elif type(uv) is np.ndarray:
-        if uv.dtype != np.float64 or uv.shape != (2,) or not _library_value(uv):
-            return None
-        made_uv = uv.tobytes()
-    elif (type(uv) is tuple and len(uv) == 2
-          and all(type(value) is float or type(value) is np.float64 for value in uv)
-          and _library_value(uv)):
-        made_uv = np.asarray(uv, dtype=np.float64).tobytes() + b"t"
-    else:
-        return None
-    return (geometry.revision, int(face_id), uses, orientations, angular, tuple(made), made_uv)
-
-
 def _shell_owner_authority(
     geometry: GeometryModel,
     mesh: Mesh,
     *,
     _certified_uv=None,
-    _normal_memo=None,
 ) -> tuple[
     dict[int, tuple[float, float, float]],
     dict[int, dict[str, Any]],
@@ -423,38 +245,17 @@ def _shell_owner_authority(
     projected_uv = (_shell_owner_projection_uv(geometry, mesh, ordinary)
                     if ordinary else {})
     projected_uv.update(certified_uv)
-    # ``_normal_memo`` (call-local, one geometry object) carries normals already
-    # evaluated on exactly the same inputs, e.g. before an S3 repair that left most
-    # shells unchanged; every other shell is evaluated as before.
-    memo = (_normal_memo if isinstance(_normal_memo, dict)
-            and _normal_memo.get("geometry") is geometry
-            and _owner_normal_memo_admitted(geometry, mesh) else None)
-    normals = {}
-    for element_id in sorted(mesh.shells):
-        face_id = face_by_element[element_id]
-        uv = projected_uv.get(element_id)
-        key = None
-        if memo is not None:
-            uses = tuple(int(value) for value in face_use_ids.get(face_id, ()))
-            admitted = memo.setdefault("faces", {})
-            face_key = (geometry.revision, face_id, uses)
-            if face_key not in admitted:
-                admitted[face_key] = _owner_face_admitted(geometry, face_id, uses)
-            if admitted[face_key]:
-                key = _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv)
-            if key is not None and key in memo["normals"]:
-                normals[element_id] = memo["normals"][key]
-                continue
-        normals[element_id] = _physical_owner_normal(
+    normals = {
+        element_id: _physical_owner_normal(
             geometry,
             mesh,
             element_id=element_id,
-            face_id=face_id,
+            face_id=face_by_element[element_id],
             face_use_ids=face_use_ids,
-            projected_uv=uv,
+            projected_uv=projected_uv.get(element_id),
         )
-        if key is not None:
-            memo["normals"][key] = normals[element_id]
+        for element_id in sorted(mesh.shells)
+    }
     sources = {
         element_id: {
             "face_id": int(face_by_element[element_id]),
@@ -640,9 +441,7 @@ def prepare_qualified_s3_mesh(
     _element_face_map(mesh)
     certified_uv = _validated_curvilinear_reference_uv(geometry, mesh)
     before_cells = _publication_pin(mesh) if certified_uv else None
-    owner_memo = {"geometry": geometry, "normals": {}}
-    shell_owners, _ = _shell_owner_authority(geometry, mesh, _certified_uv=certified_uv,
-                                             _normal_memo=owner_memo)
+    shell_owners, _ = _shell_owner_authority(geometry, mesh, _certified_uv=certified_uv)
     repair_input = mesh
     if certified_uv:
         # The live boundary registry owns immutable geometry views and proof
@@ -666,8 +465,7 @@ def prepare_qualified_s3_mesh(
     made = repair.mesh
     if certified_uv and (_publication_pin(mesh) != before_cells or _publication_pin(made) != before_cells):
         raise S3OwnerAuthorityError('curvilinear S3 repair requires fresh owner cell qualification')
-    shell_owners, owner_sources = _shell_owner_authority(geometry, made, _certified_uv=certified_uv,
-                                                         _normal_memo=owner_memo)
+    shell_owners, owner_sources = _shell_owner_authority(geometry, made, _certified_uv=certified_uv)
     final_admission = assert_s3_admissible(
         made,
         element_ids=repair.element_ids,
