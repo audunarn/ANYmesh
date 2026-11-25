@@ -11,7 +11,6 @@
 
 #include "_triangulation_native.hpp"
 
-#include <cfenv>
 #include <set>
 
 namespace anymesher_native {
@@ -47,6 +46,16 @@ inline double ghost_incircle(const Point& a, const Point& b, const Point& c, con
 // rounding_mode).
 // Broken invariants throw std::runtime_error: an internal error the Python
 // reference retries.
+// Round-to-nearest-even, tested with the arithmetic the predicates use (SSE
+// on x86-64, whatever MXCSR / x87 / FPCR say), exactly as the Python
+// reference's _round_to_nearest does.  volatile keeps it a run-time test.
+inline bool round_to_nearest() {
+    volatile double one = 1.0, half_ulp = 0x1p-53;
+    const double up = one + half_ulp, down = -one - half_ulp;
+    const double odd = one + 1.5 * half_ulp, even = one + 2.0 * half_ulp;
+    return up == one && down == -one && odd == even;
+}
+
 struct GhostRefusal : std::runtime_error {
     GhostRefusal(const char* code_, const char* message) : std::runtime_error(message), code(code_) {}
     const char* code;
@@ -189,7 +198,7 @@ private:
     void check_cancel(const char* phase) {
         if (cancellation_ == nullptr) return;
         cancellation_(context_, phase);
-        if (std::fegetround() != FE_TONEAREST)
+        if (!round_to_nearest())
             throw GhostRefusal("rounding_mode", "a callback changed the rounding mode");
     }
 
@@ -274,7 +283,7 @@ inline PyObject* py_ghost_delaunay(PyObject*, PyObject* args) {
     PyThreadState* released_state = PyEval_SaveThread();
     CallbackContext context{callback, &released_state, false, nullptr, nullptr};
     std::vector<std::array<Index, 3>> triangles;
-    if (std::fegetround() != FE_TONEAREST) {
+    if (!round_to_nearest()) {
         PyEval_RestoreThread(released_state);
         return Py_BuildValue("(ss)", "rounding_mode", "rounding mode is not round-to-nearest");
     }
