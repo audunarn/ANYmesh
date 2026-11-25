@@ -1247,7 +1247,10 @@ def _finite_hull_seed(points: np.ndarray,
             and array.shape[1] == 2 and bool(np.all(np.isfinite(array)))
             # a callback during the hull may have shrunk the array under the hull's rows
             and all(type(index) is int and 0 <= index < array.shape[0] for index in hull))
-    if fast and _NATIVE_FINITE_HULL and array.shape[0] < 2 ** 31:
+    # The native engine also needs distinct hull rows (a hull callback can repeat rows) and
+    # n < 2**28 (exact work limit); any other input keeps the Python routine.
+    if (fast and _NATIVE_FINITE_HULL and 3 <= array.shape[0] < 2 ** 28
+            and len(set(hull)) == len(hull)):
         kernel = _finite_hull_seed_kernel()
         if kernel is not None:
             # The same routine in C++ (decision-identical, see _finite_hull_native.hpp): it takes

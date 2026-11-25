@@ -420,59 +420,61 @@ struct Engine {
         for (PyObject* s : vertex_edges) Py_XDECREF(s);
     }
 
-    // Read layout + contents.  false (no exception set) when the buffer cannot be exported.
-    bool read_state(std::vector<Py_ssize_t>& shape, std::vector<Py_ssize_t>& strides, void*& buf,
-                    std::vector<unsigned char>* bytes, const std::vector<unsigned char>* compare, bool& same) {
-        Py_buffer view;
-        if (PyObject_GetBuffer(points, &view, PyBUF_RECORDS_RO) != 0) {
-            PyErr_Clear();
-            return false;
-        }
-        shape.assign(view.shape, view.shape + view.ndim);
-        strides.assign(view.strides, view.strides + view.ndim);
-        buf = view.buf;
-        same = true;
-        if (bytes != nullptr || compare != nullptr) {
-            // Only called for an (n, 2) float64 layout (the snapshot's or one equal to it).
-            const Py_ssize_t n = view.shape[0];
-            const char* base = static_cast<const char*>(view.buf);
-            if (bytes != nullptr) bytes->resize(static_cast<size_t>(n) * 16);
-            for (Py_ssize_t i = 0; i < n && same; ++i) {
-                for (int j = 0; j < 2; ++j) {
-                    const char* item = base + i * view.strides[0] + j * view.strides[1];
-                    const size_t at = static_cast<size_t>(i) * 16 + static_cast<size_t>(j) * 8;
-                    if (bytes != nullptr) std::memcpy(bytes->data() + at, item, 8);
-                    if (compare != nullptr && std::memcmp(compare->data() + at, item, 8) != 0) {
-                        same = false;
-                        break;
-                    }
-                }
-            }
-        }
-        PyBuffer_Release(&view);
-        return true;
+    struct BufferRelease {
+        Py_buffer* view;
+        ~BufferRelease() { PyBuffer_Release(view); }
+    };
+
+    static bool is_native_float64(const Py_buffer& view) {
+        if (view.itemsize != 8 || view.format == nullptr) return false;
+        const char* f = view.format;
+#if PY_BIG_ENDIAN
+        const char order = '>';
+#else
+        const char order = '<';
+#endif
+        if (f[0] == 'd' && f[1] == 0) return true;
+        return (f[0] == '@' || f[0] == '=' || f[0] == order) && f[1] == 'd' && f[2] == 0;
     }
 
+    // Snapshot and coordinates.  The Python caller guarantees an exact float64 (n, 2) finite
+    // ndarray; anything else (a direct call) is refused before any callback.
     void take_snapshot() {
-        bool same = true;
-        if (!read_state(snap.shape, snap.strides, snap.buf, &snap.bytes, nullptr, same)) {
-            PyErr_SetString(PyExc_SystemError, "finite hull seed: input buffer unavailable");
+        Py_buffer view;
+        if (PyObject_GetBuffer(points, &view, PyBUF_RECORDS_RO) != 0) throw PyError();
+        BufferRelease release{&view};
+        if (view.ndim != 2 || view.shape[1] != 2 || !is_native_float64(view) || view.shape[0] < 3
+                || view.shape[0] >= (static_cast<Py_ssize_t>(1) << 28)) {
+            PyErr_SetString(PyExc_ValueError,
+                            "finite hull seed: points must be a float64 (n, 2) array with 3 <= n < 2**28");
             throw PyError();
         }
-        snap.dtype = checked(PyObject_GetAttrString(points, "dtype"));
-        count = snap.shape[0];
+        snap.shape.assign(view.shape, view.shape + 2);
+        snap.strides.assign(view.strides, view.strides + 2);
+        snap.buf = view.buf;
+        count = view.shape[0];
+        snap.bytes.resize(static_cast<size_t>(count) * 16);
         xs.resize(static_cast<size_t>(count));
         ys.resize(static_cast<size_t>(count));
+        const char* base = static_cast<const char*>(view.buf);
         for (int64_t i = 0; i < count; ++i) {
+            for (int j = 0; j < 2; ++j) {
+                std::memcpy(snap.bytes.data() + i * 16 + j * 8, base + i * view.strides[0] + j * view.strides[1], 8);
+            }
             std::memcpy(&xs[static_cast<size_t>(i)], snap.bytes.data() + i * 16, 8);
             std::memcpy(&ys[static_cast<size_t>(i)], snap.bytes.data() + i * 16 + 8, 8);
+            if (!std::isfinite(xs[static_cast<size_t>(i)]) || !std::isfinite(ys[static_cast<size_t>(i)])) {
+                PyErr_SetString(PyExc_ValueError, "finite hull seed: points must be finite");
+                throw PyError();
+            }
         }
+        snap.dtype = checked(PyObject_GetAttrString(points, "dtype"));
     }
 
     // The option-1 checkpoint: call back, then drop to the live array on any change of
     // (shape, strides, dtype, address) or of the contents (the snapshot's bytes).
     void checkpoint(PyObject* stage) {
-        Ref result(checked(PyObject_CallOneArg(callback, stage)));
+        Py_DECREF(checked(PyObject_CallOneArg(callback, stage)));  // discarded first, as in Python
         if (live) return;
         Py_buffer view;
         if (PyObject_GetBuffer(points, &view, PyBUF_RECORDS_RO) != 0) {
@@ -480,10 +482,7 @@ struct Engine {
             live = true;
             return;
         }
-        struct Release {
-            Py_buffer* v;
-            ~Release() { PyBuffer_Release(v); }
-        } release{&view};
+        BufferRelease release{&view};
         if (view.buf != snap.buf || view.ndim != static_cast<int>(snap.shape.size())
                 || !std::equal(snap.shape.begin(), snap.shape.end(), view.shape)
                 || !std::equal(snap.strides.begin(), snap.strides.end(), view.strides)) {
@@ -664,6 +663,21 @@ struct Engine {
     // 2 = legality did not converge.
     PyObject* run(const std::vector<int64_t>& hull) {
         take_snapshot();
+        {
+            // Distinct, in-range rows (the Python caller routes every other hull to Python).
+            std::vector<char> seen(static_cast<size_t>(count), 0);
+            bool valid = hull.size() >= 3;
+            for (int64_t h : hull) {
+                if (!valid) break;
+                if (h < 0 || h >= count || seen[static_cast<size_t>(h)]) valid = false;
+                else seen[static_cast<size_t>(h)] = 1;
+            }
+            if (!valid) {
+                PyErr_SetString(PyExc_ValueError,
+                                "finite hull seed: hull must hold at least three distinct point rows");
+                throw PyError();
+            }
+        }
         for (size_t i = 1; i + 1 < hull.size(); ++i) {
             triangles.push_back(canonical_triangle(Tri{hull[0], hull[i], hull[i + 1]}));
         }
@@ -733,9 +747,9 @@ struct Engine {
             for (const Tri& t : replacements) triangles.push_back(canonical_triangle(t));
         }
 
+        // max(64, 32 * cells**2), exact: n < 2**28 gives cells < 2**29 and a limit below 2**63.
         const uint64_t cells = triangles.size();
-        uint64_t limit = 32 * cells * cells;  // cells < 2**31, so no overflow below 2**67 ... saturate
-        if (cells > (static_cast<uint64_t>(1) << 29)) limit = UINT64_MAX;
+        uint64_t limit = 32 * cells * cells;
         if (limit < 64) limit = 64;
 
         std::vector<uint64_t> first_seen;
@@ -871,18 +885,33 @@ inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
         stage_legality = PyUnicode_InternFromString("python triangulation finite hull legality");
         if (stage_insertion == nullptr || stage_edge == nullptr || stage_legality == nullptr) return nullptr;
     }
-    std::vector<int64_t> hull;
-    {
-        Ref sequence(PySequence_Fast(hull_object, "hull must be a sequence"));
-        if (sequence.p == nullptr) return nullptr;
-        const Py_ssize_t m = PySequence_Fast_GET_SIZE(sequence.p);
-        for (Py_ssize_t i = 0; i < m; ++i) {
-            const long long v = PyLong_AsLongLong(PySequence_Fast_GET_ITEM(sequence.p, i));
-            if (v == -1 && PyErr_Occurred()) return nullptr;
-            hull.push_back(static_cast<int64_t>(v));
-        }
-    }
     try {
+        std::vector<int64_t> hull;
+        {
+            Ref sequence(PySequence_Fast(hull_object, "hull must be a sequence"));
+            if (sequence.p == nullptr) return nullptr;
+            const Py_ssize_t m = PySequence_Fast_GET_SIZE(sequence.p);
+            for (Py_ssize_t i = 0; i < m; ++i) {
+                PyObject* item = PySequence_Fast_GET_ITEM(sequence.p, i);
+                if (!PyLong_CheckExact(item)) {
+                    PyErr_SetString(PyExc_TypeError, "finite hull seed: hull rows must be int");
+                    return nullptr;
+                }
+                const long long v = PyLong_AsLongLong(item);
+                if (v == -1 && PyErr_Occurred()) return nullptr;
+                hull.push_back(static_cast<int64_t>(v));
+            }
+        }
+        for (PyObject* helper : {location, flip_test, canonical}) {
+            if (!PyCallable_Check(helper)) {
+                PyErr_SetString(PyExc_TypeError, "finite hull seed: helpers must be callable");
+                return nullptr;
+            }
+        }
+        if (callback != Py_None && !PyCallable_Check(callback)) {
+            PyErr_SetString(PyExc_TypeError, "finite hull seed: cancellation_check must be callable or None");
+            return nullptr;
+        }
         Engine engine;
         engine.points = points;
         engine.callback = callback == Py_None ? nullptr : callback;
@@ -901,6 +930,9 @@ inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
     } catch (const std::bad_alloc&) {
         PyErr_NoMemory();
         return nullptr;
+    } catch (...) {
+        PyErr_SetString(PyExc_SystemError, "finite hull seed: internal error");
+        return nullptr;
     }
 }
 
@@ -908,6 +940,12 @@ inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
 inline PyObject* py_fhs_orient_sign(PyObject*, PyObject* args) {
     double v[6];
     if (!PyArg_ParseTuple(args, "dddddd", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5])) return nullptr;
+    for (double value : v) {
+        if (!std::isfinite(value)) {
+            PyErr_SetString(PyExc_ValueError, "finite float64 values expected");
+            return nullptr;
+        }
+    }
     try {
         return PyLong_FromLong(orient_sign(v[0], v[1], v[2], v[3], v[4], v[5]));
     } catch (const CapacityError&) {
@@ -921,6 +959,12 @@ inline PyObject* py_fhs_incircle_sign(PyObject*, PyObject* args) {
     if (!PyArg_ParseTuple(args, "dddddddd", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7])) {
         return nullptr;
     }
+    for (double value : v) {
+        if (!std::isfinite(value)) {
+            PyErr_SetString(PyExc_ValueError, "finite float64 values expected");
+            return nullptr;
+        }
+    }
     try {
         return PyLong_FromLong(incircle_sign(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]));
     } catch (const CapacityError&) {
@@ -933,6 +977,11 @@ inline PyObject* py_fhs_incircle_sign(PyObject*, PyObject* args) {
 inline PyObject* py_fhs_predicate_signs(PyObject*, PyObject* args) {
     Py_buffer view;
     if (!PyArg_ParseTuple(args, "y*", &view)) return nullptr;
+    if (view.len % static_cast<Py_ssize_t>(8 * sizeof(double)) != 0) {
+        PyBuffer_Release(&view);
+        PyErr_SetString(PyExc_ValueError, "rows of eight float64 values expected");
+        return nullptr;
+    }
     const Py_ssize_t rows = view.len / static_cast<Py_ssize_t>(8 * sizeof(double));
     PyObject* out = PyBytes_FromStringAndSize(nullptr, rows * 2);
     if (out == nullptr) {
@@ -940,17 +989,21 @@ inline PyObject* py_fhs_predicate_signs(PyObject*, PyObject* args) {
         return nullptr;
     }
     char* signs = PyBytes_AS_STRING(out);
-    const double* data = static_cast<const double*>(view.buf);
+    const char* data = static_cast<const char*>(view.buf);
     try {
         for (Py_ssize_t i = 0; i < rows; ++i) {
-            const double* v = data + i * 8;
+            double v[8];
+            std::memcpy(v, data + i * 8 * sizeof(double), sizeof(v));  // no alignment assumed
+            for (double value : v) {
+                if (!std::isfinite(value)) throw CapacityError();
+            }
             signs[2 * i] = static_cast<char>(orient_sign(v[0], v[1], v[2], v[3], v[4], v[5]));
             signs[2 * i + 1] = static_cast<char>(incircle_sign(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]));
         }
     } catch (const CapacityError&) {
         PyBuffer_Release(&view);
         Py_DECREF(out);
-        PyErr_SetString(PyExc_SystemError, "capacity");
+        PyErr_SetString(PyExc_ValueError, "finite float64 values expected");
         return nullptr;
     }
     PyBuffer_Release(&view);

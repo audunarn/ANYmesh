@@ -7,8 +7,9 @@ exception type and message) and on the full callback trace, including callbacks 
 reshape, shrink or retype the input.  ``tools/fhs_native_harness.py`` runs the same comparison at
 scale (>= 1e6 predicate cases, >= 1e4 triangulations, the captured tripod calls).
 
-When the extension is absent the Python routine is the only route, so these tests are skipped
-unless ``ANYMESHER_REQUIRE_NATIVE=1`` (then a missing kernel fails).
+When the extension is absent the Python routine is the only route, so these tests are skipped,
+except under ``ANYMESHER_REQUIRE_NATIVE=1`` or on GitHub runners with native enabled (then a missing
+kernel fails).
 """
 from __future__ import annotations
 
@@ -24,7 +25,11 @@ from anymesher import triangulation
 from anymesher.native import _finite_hull_seed_kernel
 
 KERNEL = _finite_hull_seed_kernel()
-REQUIRED = os.environ.get("ANYMESHER_REQUIRE_NATIVE", "0") in {"1", "true", "TRUE"}
+# On GitHub runners the extension is expected to build (a compiler is present), so a missing kernel
+# fails there instead of skipping; ANYMESHER_DISABLE_NATIVE=1 jobs test the pure-Python route.
+REQUIRED = (os.environ.get("ANYMESHER_REQUIRE_NATIVE", "0") in {"1", "true", "TRUE"}
+            or (os.environ.get("GITHUB_ACTIONS") == "true"
+                and os.environ.get("ANYMESHER_DISABLE_NATIVE", "0") not in {"1", "true", "TRUE"}))
 pytestmark = pytest.mark.skipif(KERNEL is None and not REQUIRED, reason="native extension not built")
 
 
@@ -71,8 +76,10 @@ def _outcome(points, mutate=None, with_callback=True, raise_at=None):
 
 
 def _both(points, **kwargs):
-    native = _outcome(points.copy(), **kwargs)
-    python = _python(_outcome, points.copy(), **kwargs)
+    """Native and Python outcomes on fresh inputs; ``points`` may be a factory making each input."""
+    make = points if callable(points) else (lambda: points.copy())
+    native = _outcome(make(), **kwargs)
+    python = _python(_outcome, make(), **kwargs)
     return native, python
 
 
@@ -315,13 +322,109 @@ def test_native_snapshot_detects_a_dtype_view_change():
 
 
 def test_native_matches_python_for_other_layouts_and_types():
-    # float32 and non-finite inputs keep the Python route; reversed and Fortran-order float64 views
-    # take the native route through their strides.
+    # float32 and non-finite inputs keep the Python route; reversed, Fortran-order, every-other-row and
+    # broadcast float64 views take the native route through their strides (Codex r1: built fresh for
+    # each route, never copied to C order).
     base = FAMILIES[0]
-    for points in (base.astype(np.float32), base[::-1], np.asfortranarray(base),
-                   np.r_[base, [[np.inf, 0.0]]]):
-        native, python = _both(points)
+    makers = [
+        (lambda: base.astype(np.float32), None),
+        (lambda: base.copy()[::-1], (-16, 8)),
+        (lambda: np.asfortranarray(base), (8, 8 * len(base))),
+        (lambda: np.repeat(base, 2, axis=0)[::2], (32, 8)),
+        (lambda: np.r_[base, [[np.inf, 0.0]]], None),
+    ]
+    for make, strides in makers:
+        if strides is not None:
+            assert make().strides == strides
+        native, python = _both(make)
         assert native == python
+
+
+def test_native_follows_a_callback_that_changes_only_the_strides():
+    def make():
+        return np.asfortranarray(FAMILIES[1])
+
+    def restride(points, seen, count):
+        if seen.endswith("edge") and count == 2:
+            with warnings.catch_warnings():  # deprecated in NumPy 2.5, still a supported mutation
+                warnings.simplefilter("ignore", DeprecationWarning)
+                points.strides = (16, 8)  # same buffer, shape and dtype; rows reinterpreted
+
+    native, python = _both(make, mutate=restride)
+    assert native == python
+
+
+def test_native_keeps_python_for_a_hull_with_repeated_rows():
+    # Codex r1 (high): a hull callback can make the two monotone chains repeat rows.
+    def bend(points, seen, count):
+        if seen.endswith("convex hull") and count == 5:
+            points[1:3, 1] = 1.0
+
+    points = np.array([(0.0, 0.0), (1.0, -1.0), (2.0, -1.0), (3.0, 0.0)])
+    native, python = _both(points, mutate=bend)
+    assert native == python
+    assert native[0] == ("error", "MeshError", "finite hull triangulation is incomplete")
+
+
+def test_native_discards_the_callback_result_before_the_snapshot_check():
+    # Codex r1: a returned object whose finalizer changes the input acts before the comparison.
+    def make():
+        return np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
+
+    def run(points):
+        stages = []
+
+        def callback(stage):
+            stages.append(stage)
+            if stage.endswith("insertion"):
+                def moving():
+                    try:
+                        yield
+                    finally:
+                        points[3] = (9.0, 9.0)
+
+                generator = moving()
+                next(generator)
+                return generator
+            return None
+
+        try:
+            return ("ok", triangulation._finite_hull_seed(points, callback)), stages
+        except Exception as error:
+            return ("error", type(error).__name__, str(error)), stages
+
+    native = run(make())
+    python = _python(run, make())
+    assert native == python
+    assert native[0] == ("error", "MeshError", "finite hull insertion could not locate a point")
+
+
+def test_direct_native_calls_validate_their_inputs():
+    module = _native_module()
+    helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)
+    good = np.array([(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)])
+    for points, hull, error in (
+        (np.empty((0, 2)), [0, 1, 2], ValueError),
+        (np.zeros(6), [0, 1, 2], ValueError),
+        (good.astype(np.float32), [0, 1, 2], ValueError),
+        (np.array([(0.0, 0.0), (1.0, 0.0), (0.0, np.nan)]), [0, 1, 2], ValueError),
+        (good, [0, 1, 5], ValueError),
+        (good, [0, 1, 1], ValueError),
+        (good, [0, 1], ValueError),
+        (good, [0, 1, 2.0], TypeError),
+    ):
+        with pytest.raises(error):
+            module.finite_hull_seed(points, hull, None, *helpers)
+    with pytest.raises(TypeError):
+        module.finite_hull_seed(good, [0, 1, 2], None, None, None, None)
+    assert module.finite_hull_seed(good, [0, 1, 2], None, *helpers) == [(0, 1, 2)]
+    # The batch probe reads unaligned buffers and refuses partial rows and non-finite values.
+    raw = bytearray(1) + np.arange(8, dtype=np.float64).tobytes()
+    assert len(module.fhs_predicate_signs(memoryview(raw)[1:])) == 2
+    with pytest.raises(ValueError):
+        module.fhs_predicate_signs(np.zeros(7).tobytes())
+    with pytest.raises(ValueError):
+        module.fhs_predicate_signs(np.r_[np.zeros(7), np.inf].tobytes())
 
 
 def test_probe_signs_are_exact_on_bit_patterns():
