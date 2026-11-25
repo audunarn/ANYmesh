@@ -20,6 +20,9 @@ def check_stage(callback, phase):
             errors.append(error)
         raise
 
+def is_stage_cancellation(error):
+    return isinstance(error, _StageCancelled) or any(error is item for item in (_errors.get() or ()))
+
 def preserve_stage_cancellation(error):
     if isinstance(error, _StageCancelled) or any(error is item for item in (_errors.get() or ())):
         raise error

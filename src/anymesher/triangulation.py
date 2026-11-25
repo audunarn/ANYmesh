@@ -5,9 +5,10 @@ from __future__ import annotations
 import heapq
 
 from dataclasses import dataclass, field
-from decimal import Decimal, localcontext
+from decimal import (MAX_EMAX, MIN_EMIN, ROUND_HALF_EVEN, Context, Decimal, DivisionByZero, Inexact,
+                     InvalidOperation, Overflow, localcontext)
 from fractions import Fraction
-from math import floor, fsum, hypot, isfinite, sqrt
+from math import copysign, floor, fsum, hypot, isfinite, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -32,7 +33,43 @@ __all__ = [
 ]
 
 
-_FLOAT_EPSILON = np.finfo(np.float64).eps
+# A Python float, so the filters never raise under strict NumPy error settings.
+_FLOAT_EPSILON = float(np.finfo(np.float64).eps)
+# Trust rules for the float filters.  Their relative error bounds assume normal
+# arithmetic; gradual underflow adds at most 2**-1074 of absolute error per operation
+# and large operands can overflow.  orient2d trusts its filter only when every
+# coordinate difference is at most 2**400 and the product magnitude is at least
+# 2**-800 (underflow error <= 2**-1073 << 8 eps 2**-800); incircle only when every
+# difference is at most 2**200 and its scale is at least 2**-500 (underflow error,
+# even after multiplication by factors up to 2**401, stays below 2**-669 << 32 eps
+# 2**-500).  Otherwise the exact path decides.  Ordinary coordinates never reach
+# either bound, so their decisions are unchanged.
+_ORIENT_DIFFERENCE_CAP, _ORIENT_MAGNITUDE_FLOOR = 2.0 ** 400, 2.0 ** -800
+_INCIRCLE_DIFFERENCE_CAP, _INCIRCLE_SCALE_FLOOR = 2.0 ** 200, 2.0 ** -500
+_SMALLEST_SUBNORMAL = 5e-324
+_DECIMAL_SIGN_DIGITS = 75  # see _exact_orient2d: certified-sign margin in decimal digits
+
+
+def _private_decimal_context() -> Context:
+    """The 80-digit context of the orient2d fallback, every field explicit.
+
+    ``Context(prec=80)`` alone inherits ``decimal.DefaultContext``'s other fields; a
+    caller who narrowed its exponent range would make the decimal evaluation underflow
+    and void the sign certificate.  The full exponent range covers every binary64
+    product (adjusted exponents within about +-650).
+    """
+    return Context(prec=80, rounding=ROUND_HALF_EVEN, Emin=MIN_EMIN, Emax=MAX_EMAX, capitals=1, clamp=0,
+                   flags=[], traps=[InvalidOperation, DivisionByZero, Overflow])
+
+
+_DECIMAL_CONTEXT = _private_decimal_context()  # copied per use, never activated or mutated
+
+
+def _nonzero_sign_kept(value: float, exact: Any) -> float:
+    """``value`` (the rounded exact result), or the smallest subnormal of the exact sign if it rounded to zero."""
+    if value == 0.0 and exact != 0:
+        return _SMALLEST_SUBNORMAL if exact > 0 else -_SMALLEST_SUBNORMAL
+    return value
 
 
 def _decimal(value: float) -> Decimal:
@@ -46,18 +83,133 @@ def orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[fl
     ay = float(first[1]) - float(third[1])
     bx = float(second[0]) - float(third[0])
     by = float(second[1]) - float(third[1])
-    determinant = ax * by - ay * bx
-    error = 8.0 * _FLOAT_EPSILON * (abs(ax * by) + abs(ay * bx))
-    if abs(determinant) > error:
+    left, right = ax * by, ay * bx
+    determinant = left - right
+    magnitude = abs(left) + abs(right)
+    error = 8.0 * _FLOAT_EPSILON * magnitude
+    if (abs(determinant) > error and magnitude >= _ORIENT_MAGNITUDE_FLOOR
+            and max(abs(ax), abs(ay), abs(bx), abs(by)) <= _ORIENT_DIFFERENCE_CAP):
         return determinant
+    return _exact_orient2d(first, second, third)
+
+
+def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[float]) -> float:
+    """The exact-signed determinant of binary-float inputs, equal to the earlier value wherever that was right.
+
+    The earlier 80-digit decimal evaluation runs first, in a fresh context.  When it
+    signals no ``Inexact``, or its value exceeds its rounding-error bound by a 250-fold
+    margin, its sign is exact and its value is the earlier one (bit-identical), so it is
+    returned at once (a nonzero value below the subnormal range keeps its sign).  These
+    are nearly all fallbacks (about 28 % of orient2d calls on the 48-web tripod, mostly
+    collinear stations).  Otherwise the determinant is formed exactly in integers
+    (a fixed 80-digit context is not exact: a coordinate near 1e-16 next to one near 1
+    needs about 90 significant digits, and the rounded differences gave exactly
+    collinear stations a nonzero, sign-wrong orientation).
+    """
+    values = (float(first[0]), float(first[1]), float(second[0]), float(second[1]), float(third[0]), float(third[1]))
+    # A private copy of an 80-digit context, used through its own methods: caller traps,
+    # flags or rounding never act here, and its flags are read directly.
+    context = _DECIMAL_CONTEXT.copy()
+    try:
+        left, right = _decimal_orient2d_products_in(values, context)
+        decimal_value = context.subtract(left, right)
+        # Exact when nothing rounded.  Otherwise each of the five roundings has relative
+        # error <= 5e-80, so |decimal - exact| <= ~4 * 5e-80 * (|left| + |right|)
+        # < 4e-78 * 10**m with m the larger adjusted exponent of the products; a nonzero
+        # value with adjusted exponent >= m - 75 (so |value| >= 10**(m - 75), a margin
+        # over 250-fold) has the exact sign.  (A zero product only raises m: stricter.)
+        certain = decimal_value.is_finite() and (
+            not context.flags[Inexact]
+            or (not decimal_value.is_zero()
+                and decimal_value.adjusted() >= max(left.adjusted(), right.adjusted()) - _DECIMAL_SIGN_DIGITS))
+    except (ArithmeticError, ValueError):
+        decimal_value, certain = None, False
+    if certain:
+        # The earlier value (bit-identical) with its sign exact; a nonzero below the subnormal range keeps its sign.
+        # (Non-finite operands never get here: their decimal value is non-finite or raises.)
+        return _nonzero_sign_kept(float(decimal_value), decimal_value)
+    if not all(isfinite(value) for value in values):
+        # Non-finite operands keep the earlier decimal behaviour unchanged.
+        return _legacy_decimal_orient2d(values)
+    earlier = 0.0 if decimal_value is None or not decimal_value.is_finite() else float(decimal_value)
+    return _integer_orient2d(values, earlier)
+
+
+def _integer_orient2d(values: Sequence[float], earlier: float) -> float:
+    """Exact integer determinant over one power-of-two denominator (finite operands).
+
+    The earlier (rounded) decimal value is kept wherever its sign is right, so values
+    stay bit-identical where it rounded only in magnitude; otherwise the correctly
+    rounded exact value (a nonzero below the subnormal range keeps its sign), and an
+    exact zero keeps the earlier path's signed zero.
+    """
+    ratios = tuple(value.as_integer_ratio() for value in values)
+    shift = max(denominator.bit_length() for _numerator, denominator in ratios) - 1
+    fx, fy, sx, sy, tx, ty = (
+        numerator << (shift - denominator.bit_length() + 1) for numerator, denominator in ratios
+    )
+    exact = (fx - tx) * (sy - ty) - (fy - ty) * (sx - tx)
+    if exact == 0:
+        return _signed_zero_orient2d(values)
+    if earlier != 0.0 and (earlier > 0.0) == (exact > 0):
+        return earlier
+    try:
+        value = float(Fraction(exact, 1 << (2 * shift)))
+    except OverflowError:
+        return float("inf") if exact > 0 else -float("inf")
+    return _nonzero_sign_kept(value, exact)
+
+
+def _signed_zero_orient2d(values: Sequence[float]) -> float:
+    """The signed zero the earlier decimal path returned for an exactly zero determinant.
+
+    Decimal and IEEE binary arithmetic share the signed-zero rules: an exactly zero
+    difference is +0 except (-0) - (+0) = -0, and a zero product carries the xor of
+    the operand signs.  A float difference is zero exactly when the exact one is
+    (gradual underflow), and a nonzero one keeps its sign even if it overflows, so
+    each zero product is built from the operand signs (never inf * 0); equal
+    nonzero products cancel to +0.
+    """
+    ax, ay = values[0] - values[4], values[1] - values[5]
+    bx, by = values[2] - values[4], values[3] - values[5]
+    if (ax == 0.0 or by == 0.0) and (ay == 0.0 or bx == 0.0):
+        first = copysign(0.0, copysign(1.0, ax) * copysign(1.0, by))
+        second = copysign(0.0, copysign(1.0, ay) * copysign(1.0, bx))
+        return first - second
+    return 0.0
+
+
+def _decimal_orient2d_products(values: Sequence[float]) -> tuple[Decimal, Decimal]:
+    """The earlier decimal path's two products in the current decimal context (same operations, same order)."""
+    exact_ax = _decimal(values[0]) - _decimal(values[4])
+    exact_ay = _decimal(values[1]) - _decimal(values[5])
+    exact_bx = _decimal(values[2]) - _decimal(values[4])
+    exact_by = _decimal(values[3]) - _decimal(values[5])
+    return exact_ax * exact_by, exact_ay * exact_bx
+
+
+def _decimal_orient2d_products_in(values: Sequence[float], context: Context) -> tuple[Decimal, Decimal]:
+    """:func:`_decimal_orient2d_products` evaluated in ``context`` (the same operations, the same order)."""
+    # ``Decimal.from_float`` is the exact conversion ``_decimal`` makes (``values`` are floats already);
+    # unlike ``Decimal(float)`` it never consults the caller's FloatOperation trap.
+    from_float = Decimal.from_float
+    fx, fy, sx, sy, tx, ty = (from_float(value) for value in values)
+    subtract, multiply = context.subtract, context.multiply
+    return (multiply(subtract(fx, tx), subtract(sy, ty)),
+            multiply(subtract(fy, ty), subtract(sx, tx)))
+
+
+def _decimal_orient2d(values: Sequence[float]) -> float:
+    """The earlier decimal determinant in the current decimal context."""
+    left, right = _decimal_orient2d_products(values)
+    return float(left - right)
+
+
+def _legacy_decimal_orient2d(values: Sequence[float]) -> float:
+    """The earlier 80-digit decimal evaluation, verbatim (non-finite operands only)."""
     with localcontext() as context:
         context.prec = 80
-        exact_ax = _decimal(first[0]) - _decimal(third[0])
-        exact_ay = _decimal(first[1]) - _decimal(third[1])
-        exact_bx = _decimal(second[0]) - _decimal(third[0])
-        exact_by = _decimal(second[1]) - _decimal(third[1])
-        exact = (exact_ax * exact_by) - (exact_ay * exact_bx)
-    return float(exact)
+        return _decimal_orient2d(values)
 
 
 def incircle(
@@ -66,7 +218,71 @@ def incircle(
     third: Sequence[float],
     point: Sequence[float],
 ) -> float:
-    """Adaptive in-circle predicate, positive for an interior point."""
+    """Adaptive in-circle predicate, positive for an interior point; the sign is exact."""
+
+    ax, ay = float(first[0]) - float(point[0]), float(first[1]) - float(point[1])
+    bx, by = float(second[0]) - float(point[0]), float(second[1]) - float(point[1])
+    cx, cy = float(third[0]) - float(point[0]), float(third[1]) - float(point[1])
+    if max(abs(ax), abs(ay), abs(bx), abs(by), abs(cx), abs(cy)) <= _INCIRCLE_DIFFERENCE_CAP:
+        alift = ax * ax + ay * ay
+        blift = bx * bx + by * by
+        clift = cx * cx + cy * cy
+        determinant = fsum((
+            alift * (bx * cy - by * cx),
+            -blift * (ax * cy - ay * cx),
+            clift * (ax * by - ay * bx),
+        ))
+        # Bound the products before subtracting them: almost collinear stations
+        # can cancel within each cross product. Using the already-cancelled terms
+        # understates roundoff and can certify opposite diagonal flips as illegal
+        # simultaneously. Ambiguous signs use exact binary-input arithmetic.
+        scale = (
+            alift * (abs(bx * cy) + abs(by * cx))
+            + blift * (abs(ax * cy) + abs(ay * cx))
+            + clift * (abs(ax * by) + abs(ay * bx))
+        )
+        if scale >= _INCIRCLE_SCALE_FLOOR and abs(determinant) > 32.0 * _FLOAT_EPSILON * scale:
+            return -determinant if orient2d(first, second, third) < 0.0 else determinant
+    if not isfinite(ax + ay + bx + by + cx + cy):  # inf/NaN anywhere (or a huge sum): check precisely
+        # A non-finite difference: either an operand is non-finite (the earlier code,
+        # verbatim) or finite operands overflowed (the exact path below).
+        if not all(isfinite(float(value)) for item in (first, second, third, point) for value in (item[0], item[1])):
+            return _legacy_incircle(first, second, third, point)
+    # Fixed decimal precision can leave a signed rounding residue even
+    # for an exactly cocircular binary-coordinate rectangle. Such a
+    # residue permits both diagonal flips and prevents convergence.
+    (fax, fay), (fbx, fby), (fcx, fcy), (px, py) = (
+        (Fraction(float(coordinates[0])), Fraction(float(coordinates[1])))
+        for coordinates in (first, second, third, point)
+    )
+    dax, day = fax - px, fay - py
+    dbx, dby = fbx - px, fby - py
+    dcx, dcy = fcx - px, fcy - py
+    da = dax * dax + day * day
+    db = dbx * dbx + dby * dby
+    dc = dcx * dcx + dcy * dcy
+    exact = (
+        da * (dbx * dcy - dby * dcx)
+        - db * (dax * dcy - day * dcx)
+        + dc * (dax * dby - day * dbx)
+    )
+    try:
+        determinant = _nonzero_sign_kept(float(exact), exact)
+    except OverflowError:
+        # Match Decimal-to-float conversion for extreme finite inputs.
+        determinant = float("inf") if exact > 0 else -float("inf")
+    if orient2d(first, second, third) < 0.0:
+        determinant = -determinant
+    return determinant
+
+
+def _legacy_incircle(
+    first: Sequence[float],
+    second: Sequence[float],
+    third: Sequence[float],
+    point: Sequence[float],
+) -> float:
+    """The earlier incircle, verbatim: used only for non-finite operands (unchanged behaviour)."""
 
     ax, ay = float(first[0]) - float(point[0]), float(first[1]) - float(point[1])
     bx, by = float(second[0]) - float(point[0]), float(second[1]) - float(point[1])
@@ -1385,7 +1601,10 @@ def _finish_triangles(
                 cancellation_check("python triangulation domain boundary")
             edge = _normal_edge(int(first), int(second))
             if edge not in incidence:
-                raise MeshError("triangulation lost a domain boundary")
+                error = MeshError("triangulation lost a domain boundary")
+                error.segment_uv = tuple(tuple(float(value) for value in points[node])
+                                         for node in (first, second))
+                raise error
             for row in incidence[edge]:
                 opposite = next(node for node in cells[row] if node not in edge)
                 if orient2d(points[first], points[second], points[opposite]) < 0.0:
@@ -1406,7 +1625,11 @@ def _finish_triangles(
     edges = set(_edge_incidence([tuple(map(int, row)) for row in result]).keys())
     missing = [tuple(map(int, edge)) for edge in prepared.segments if tuple(map(int, edge)) not in edges]
     if missing:
-        raise MeshError(f"triangulation lost mandatory segments: {missing[:3]}")
+        error = MeshError(f"triangulation lost mandatory segments: {missing[:3]}")
+        # Caller diagnostics: the lost segments' end points in the input chart.
+        error.segment_uv = tuple(tuple(float(value) for value in points[node])
+                                 for edge in missing[:3] for node in edge)
+        raise error
     return result
 
 

@@ -21,6 +21,12 @@ class QuadQualityRejected(MeshError):
     """A final quad-first element violates the published shape gates."""
 
 
+def _cell_refusal(error: MeshError, points: Sequence[Any]) -> MeshError:
+    """Attach the failing cell's face-chart corners (``cell_uv``) for caller diagnostics."""
+    error.cell_uv = tuple(tuple(float(value) for value in point) for point in points)
+    return error
+
+
 @dataclass(frozen=True)
 class QuadValidationReport:
     face: int
@@ -162,10 +168,10 @@ def validate_planar_quad_result(
         signed = _signed_area(points)
         if kind == "Q4":
             if not _strict_ccw_quad(points):
-                raise MeshError(f"Q4 cell {cid} is not a simple strictly-positive quad")
+                raise _cell_refusal(MeshError(f"Q4 cell {cid} is not a simple strictly-positive quad"), points)
             reason = quad_violation(points)
             if reason is not None:
-                raise QuadQualityRejected(f"Q4 cell {cid} {body!r}: {reason}")
+                raise _cell_refusal(QuadQualityRejected(f"Q4 cell {cid} {body!r}: {reason}"), points)
             _min_angle, max_angle, jacobian, _aspect = corner_metrics(points)
             worst_jacobian = jacobian if worst_jacobian is None else min(worst_jacobian, jacobian)
             worst_angle = max_angle if worst_angle is None else max(worst_angle, max_angle)
@@ -173,11 +179,11 @@ def validate_planar_quad_result(
             quad_area += signed
         else:
             if not _positive_area(points):
-                raise MeshError(f"T3 cell {cid} is not positively oriented")
+                raise _cell_refusal(MeshError(f"T3 cell {cid} is not positively oriented"), points)
             reason = triangle_violation(points, t3_minimum_angle)
             if reason is not None and (t3_angle_action == "error" or
                                        reason == "triangle is not positively oriented"):
-                raise QuadQualityRejected(f"T3 cell {cid} {body!r}: {reason}")
+                raise _cell_refusal(QuadQualityRejected(f"T3 cell {cid} {body!r}: {reason}"), points)
             min_angle = corner_metrics(points)[0]
             thinnest = min_angle if thinnest is None else min(thinnest, min_angle)
             if reason is not None:

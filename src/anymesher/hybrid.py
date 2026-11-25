@@ -35,6 +35,7 @@ except ImportError:  # Older supported ANYgeometry builds predate schema 6.
 from .boundary import GlobalEdgeBoundaryRegistry, MemberRegistry
 from .core import MeshCore
 from ._stage_cancellation import (check_stage as _stage_check,
+    is_stage_cancellation as _is_stage_cancellation,
     preserve_stage_cancellation as _preserve_stage_cancellation, stage_scope as _stage_scope)
 from .errors import MeshError, StructuredQualityRejected
 from ._hybrid_candidate import _HybridCandidateContext, new_candidate_runtime
@@ -5166,7 +5167,118 @@ def _repair_quad_first_quality(
         )
 
 
-def _quad_first_execute(
+class _QuadFaceRefusalContext:
+    """The face whose per-face quad-first stage is running, for refusal diagnostics only.
+
+    ``raised`` holds (by identity) every exception the caller's cancellation callback
+    raised during the call, so caller-owned exceptions are never annotated.
+    """
+
+    __slots__ = ("domain", "raised")
+
+    def __init__(self) -> None:
+        self.domain: Any = None
+        self.raised: list[BaseException] = []
+
+    def owns(self, error: BaseException) -> bool:
+        """Whether ``error`` (or an exception it was raised from) came from the caller's callback.
+
+        Identity checks only: no exception in the chain is tested for truth or equality.
+        """
+        if not self.raised:
+            return False
+        seen: list[BaseException] = []
+        current: BaseException | None = error
+        while current is not None and not any(current is item for item in seen):
+            seen.append(current)
+            if any(current is item for item in self.raised):
+                return True
+            following = current.__cause__
+            current = current.__context__ if following is None else following
+        return False
+
+    def track(self, callback: "Callable[[str], Any] | None") -> "Callable[[str], Any] | None":
+        """The callback unchanged in effect (same return value and exception), recording what it raises.
+
+        A typed cancellation signal is passed through untouched: owners type-check it
+        (``is_cancellation_signal``) and it reports by return value, never by raising.
+        """
+        if callback is None:
+            return None
+        from anygeometry import is_cancellation_signal
+
+        if is_cancellation_signal(callback):
+            return callback
+        raised = self.raised
+
+        def tracked(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return callback(*args, **kwargs)
+            except BaseException as error:
+                raised.append(error)
+                raise
+
+        return tracked
+
+
+def _quad_face_refusal_location(error: BaseException, domain: Any) -> "tuple[float, float, float] | None":
+    """Lifted centroid of the refusal's chart points (failing cell or lost segments), or ``None``."""
+    try:
+        chart = getattr(error, "cell_uv", None)
+        if chart is None:
+            chart = getattr(error, "segment_uv", None)
+        if chart is None:
+            return None
+        chart = np.asarray(chart, dtype=float)
+        if chart.ndim != 2 or chart.shape[1] != 2 or len(chart) == 0:
+            return None
+        lifted = np.asarray([domain.lift(point) for point in chart], dtype=float)
+        centroid = lifted.mean(axis=0)
+        if centroid.shape != (3,) or not np.all(np.isfinite(centroid)):
+            return None
+        return tuple(float(value) for value in centroid)
+    except Exception:  # diagnostics never replace the refusal
+        return None
+
+
+def _annotate_quad_face_refusal(error: MeshError, context: _QuadFaceRefusalContext) -> None:
+    """Record the working face (and the failing cell's or lost segments' 3D centroid) on a per-face refusal.
+
+    Diagnostics only and message-neutral: the exception keeps its type, cause and
+    message (recovery records ``str(error)``, so a changed message would change a
+    successful fallback result); it gains the attributes ``quad_first_face`` and
+    ``quad_first_location`` (``None`` when unknown), set afresh on every raise.
+    Callers (ANYfem) render them.  Exceptions from the caller's cancellation
+    callback and refusals outside the per-face loop are untouched.
+    """
+    domain = context.domain
+    if domain is None or _is_stage_cancellation(error) or context.owns(error):
+        return
+    try:
+        face_id = int(domain.face_id)
+    except Exception:
+        return
+    location = _quad_face_refusal_location(error, domain)
+    try:
+        error.quad_first_face = face_id
+        error.quad_first_location = location
+    except Exception:  # an exception type without an instance dict keeps its refusal
+        return
+
+
+def _quad_first_execute(geometry: GeometryModel, /, **options: Any) -> "HybridMeshResult":
+    """Run :func:`_quad_first_execute_faces`; a refusal inside one face's stage records that face."""
+    context = _QuadFaceRefusalContext()
+    if options.get("cancellation_check") is not None:
+        options["cancellation_check"] = context.track(options["cancellation_check"])
+    try:
+        return _quad_first_execute_faces(geometry, _refusal_context=context, **options)
+    except MeshError as error:
+        _annotate_quad_face_refusal(error, context)
+        raise
+
+
+def _quad_first_execute_faces(
     geometry: GeometryModel,
     *,
     face_ids: tuple[int, ...],
@@ -5185,6 +5297,7 @@ def _quad_first_execute(
     cancellation_check: "Callable[[str], None] | None" = None,
     smart_mapped: "Any | None" = None,
     context_faces: "Sequence[int] | None" = None,
+    _refusal_context: _QuadFaceRefusalContext | None = None,
 ) -> "HybridMeshResult":
     """Execute the genuine PQ-M1 target-size planar quad route.
 
@@ -5394,7 +5507,9 @@ def _quad_first_execute(
     next_node_id = first_node_id + len(global_nodes)
     next_element_id = 0
 
+    refusal = _QuadFaceRefusalContext() if _refusal_context is None else _refusal_context
     for domain in domains:
+        refusal.domain = domain
         _check_cancellation(cancellation_check, "quad-first:face-seed")
         # The ordinary adaptive route (no SmartMapped seed builder) also admits
         # split-edge rectangles as a station-conforming tensor and freezes any
@@ -5582,6 +5697,7 @@ def _quad_first_execute(
                 local_to_global, global_nodes,
             )
         domain.assert_current(geometry)
+    refusal.domain = None
 
     nodes_of_edge: dict[int, list[int]] = {}
     for edge_id in sorted(registry.chains):
