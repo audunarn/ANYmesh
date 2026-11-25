@@ -162,6 +162,27 @@ def test_owner_checkout_parser_rejects_missing_or_ambiguous_metadata(mutation):
     with pytest.raises(AssertionError,match='exactly one'):owner_checkout_pins(text)
 
 
+def steps(block):
+    """The job's steps, each as its own text."""
+    body=block.split('\n    steps:\n',1)[1]
+    return [piece for piece in re.split(r'^(?=      - )',body,flags=re.M) if piece.startswith('      - ')]
+
+
+def assert_whole_suite_reported(block, runner, junit, ids):
+    """pytest runs everything; afterwards, always, the ids are listed and uploaded with the JUnit report."""
+    listed=steps(block)
+    run=[i for i,step in enumerate(listed) if runner in step and '--junitxml='+junit in step]
+    assert len(run)==1,run
+    assert '--continue-on-collection-errors' in listed[run[0]] and '--maxfail' not in listed[run[0]]
+    report=[i for i,step in enumerate(listed) if 'tools/ci_failed_ids.py '+junit+' --output '+ids in step]
+    assert len(report)==1 and report[0]>run[0],report
+    assert 'if: always()' in listed[report[0]] and 'continue-on-error: true' in listed[report[0]]
+    upload=[i for i,step in enumerate(listed) if 'upload-artifact' in step and re.search(r'^\s+'+re.escape(junit)+r'$',step,flags=re.M)]
+    assert len(upload)==1 and upload[0]>report[0],upload
+    assert 'if: always()' in listed[upload[0]]
+    assert re.search(r'^\s+'+re.escape(ids)+r'$',listed[upload[0]],flags=re.M)
+
+
 def test_full_matrix_and_immutable_owner_pin_are_preserved():
     text=(ROOT/'.github/workflows/ci.yml').read_text();blocks=jobs(text)
     assert 'os: [windows-latest, ubuntu-latest, macos-latest]' in blocks['pytest']
@@ -171,12 +192,11 @@ def test_full_matrix_and_immutable_owner_pin_are_preserved():
     assert '--basetemp=ci-pytest-temp' in blocks['pytest']
     # The full profile runs the whole suite and lists failed ids per leg (owner standing approval 2026-11-26).
     assert '--maxfail' not in blocks['pytest'] and '--maxfail' not in blocks['wheel-full-linux']
-    assert 'tools/ci_failed_ids.py mesh-results.xml --output failed-test-ids.txt' in blocks['pytest']
-    assert 'failed-test-ids.txt' in blocks['pytest'].split('upload-artifact')[1]
+    assert_whole_suite_reported(blocks['pytest'], 'python -m pytest', 'mesh-results.xml', 'failed-test-ids.txt')
     assert 'ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json' in blocks['pytest']
     assert '--junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp' in blocks['wheel-full-linux']
-    assert 'tools/ci_failed_ids.py installed-mesh-results.xml --output installed-failed-test-ids.txt' in blocks['wheel-full-linux']
-    assert 'installed-failed-test-ids.txt' in blocks['wheel-full-linux'].split('upload-artifact')[1]
+    assert_whole_suite_reported(blocks['wheel-full-linux'], 'python -I -B -m pytest', 'installed-mesh-results.xml',
+                                'installed-failed-test-ids.txt')
     assert 'installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json' in blocks['wheel-full-linux']
     from collections import Counter
     assert Counter(owner_checkout_pins(text))==Counter({

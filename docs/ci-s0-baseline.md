@@ -36,11 +36,19 @@ before pytest.
 ## Whole-suite legs and failed test ids (owner standing approval 2026-11-26)
 
 The full-profile pytest legs (`pytest` matrix and the installed wheel in `wheel-full-linux`) run without
-`--maxfail`. A pre-existing failure would otherwise stop every leg at its first failure and hide the rest of the
-Linux and macOS tests. After pytest, `tools/ci_failed_ids.py` writes the failed and errored test ids, in pytest's
-`file::name` form, to the job summary and to `failed-test-ids.txt` (`installed-failed-test-ids.txt`), which are
-uploaded with the JUnit results. A red leg is judged by comparing that list with the same leg on `main`. The
-reporter never changes the leg's result.
+`--maxfail` and with `--continue-on-collection-errors`. A pre-existing failure would otherwise stop every leg at
+its first failure and hide the rest of the Linux and macOS tests. After pytest, `tools/ci_failed_ids.py` runs
+(`if: always()`, `continue-on-error`). It writes the failed and errored test ids, in pytest's `file::name` form,
+to the job summary and to `failed-test-ids.txt` (`installed-failed-test-ids.txt`). Those files are uploaded with
+the JUnit results. A collection error is listed by its module path, and an internal error as `INTERNALERROR`. The
+first line is `# report: ok, <n> failed`, or `# report: unreadable (...)` when the JUnit file is missing or
+malformed, so missing evidence never reads as a clean leg. The reporter never changes the leg's result.
+
+A red leg is judged by comparing its list with the same leg of a `main` run that used these same whole-suite
+commands. A run from before this change stopped at its first failure, so it is not a baseline. The first
+whole-suite dispatch on `main` after this change is the baseline for the PRs that follow. A PR that changes no
+library code, such as this one, is compared with the local whole-suite run of `main`, and with the failures of
+`main`'s own dispatch.
 
 The full matrix runs only on `workflow_dispatch`, the weekly schedule and release tags. Pull requests run the
 smoke jobs only. Dispatch the workflow on the PR branch to see the S0 result and the Linux/macOS legs.

@@ -156,11 +156,12 @@ jobs:
       - name: Build the optional quad-first MCF and TinyAD workers
         run: python tools/build_quad_workers.py
       # The whole suite runs, also when red, so a leg's failures can be compared with main by test id.
-      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp
+      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp --continue-on-collection-errors
         env:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
       - name: Report failed test ids
         if: always()
+        continue-on-error: true
         run: python -B tools/ci_failed_ids.py mesh-results.xml --output failed-test-ids.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -377,8 +378,10 @@ jobs:
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
           --confcutdir=tests --import-mode=importlib tests --durations=25
           --junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp
+          --continue-on-collection-errors
       - name: Report failed test ids of the installed wheel
         if: always()
+        continue-on-error: true
         run: python -B tools/ci_failed_ids.py installed-mesh-results.xml --output installed-failed-test-ids.txt
       - name: Retain installed wheel results and quadratic trial diagnostics
         if: always()

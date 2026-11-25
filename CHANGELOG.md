@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- CI: the full-profile pytest legs run the whole suite (no `--maxfail=1`) and list failed test ids per leg
+- CI: the full-profile pytest legs run the whole suite (no `--maxfail=1`, `--continue-on-collection-errors`) and list failed test ids per leg
   (`tools/ci_failed_ids.py`, job summary and artifact), so a red leg can be compared with `main` by test id.
 - CI: the S0 frozen-source baseline step is reported but no longer stops the test legs. A failed S0
   (currently the compiler proof, frozen mesher ref `aa19c0f` predates `native_cpp.py` up to `210e56a`)
