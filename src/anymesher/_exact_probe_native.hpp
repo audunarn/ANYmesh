@@ -1,12 +1,22 @@
 // Self-check of the error-free transforms behind the exact predicates.
 //
-// two_sum / two_product / split are exact only when every operation rounds
-// separately.  A fused multiply-add contraction (for example clang's default on
-// arm64) turns ``splitter * value - value`` in split into one rounding and the
-// low part of two_product is then wrong.  The extension is built with
-// -ffp-contract=off on non-Windows platforms; tests call this probe and check
-// its results against exact rational arithmetic.
+// two_sum / two_diff / two_product / split are exact only with separately
+// rounded IEEE operations.  Contraction across statements (GCC's default
+// -ffp-contract=fast on FMA targets) breaks split; value-unsafe modes
+// (-ffast-math, -fassociative-math, MSVC /fp:fast) can rewrite two_sum.
+// setup.py builds with -ffp-contract=off (GCC/Clang) and /fp:precise (MSVC);
+// the guards below refuse to compile under an inherited unsafe mode, and
+// tests plus the release wheel smoke check the probe's results against exact
+// rational arithmetic.  Within-statement contraction (Clang's default "on",
+// MSVC /fp:contract) is not detected by the probe: it keeps split exact.
 #pragma once
+
+#if defined(__FAST_MATH__) || defined(__ASSOCIATIVE_MATH__)
+#error "anymesher._native needs IEEE arithmetic: build without -ffast-math / -fassociative-math"
+#endif
+#if defined(_M_FP_FAST)
+#error "anymesher._native needs IEEE arithmetic: build without /fp:fast"
+#endif
 
 #include "_triangulation_native.hpp"
 

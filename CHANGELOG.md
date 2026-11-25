@@ -2,14 +2,18 @@
 
 ## Unreleased
 
-- Build the native extension with `-ffp-contract=off` on non-Windows platforms. The exact
-  orientation and in-circle expansions rely on separately rounded operations (Dekker split,
-  two_sum, two_product). GCC's default cross-statement contraction on an FMA target (for example
-  `-march=haswell` or aarch64 Linux) made `split` wrong for every tested input. Linux x86-64 at the
-  default target compiles to byte-identical machine code. MSVC builds pin the default
-  `/fp:precise`, so an inherited `/fp:fast` no longer applies; Windows output is otherwise unchanged. A new probe
-  (`_native.exact_arithmetic_probe`) and `tests/test_exact_arithmetic_contraction.py` check the
-  compiled transforms against exact rational arithmetic.
+- Build the native extension with `-ffp-contract=off` on non-Windows platforms and pin MSVC's
+  default `/fp:precise`. The exact orientation and in-circle expansions rely on separately rounded
+  operations (Dekker split, two_sum, two_product). GCC's default cross-statement contraction on an
+  FMA target (`-march=haswell`, aarch64 Linux) made `split` wrong for every tested input. Builds
+  under `-ffast-math`, `-fassociative-math` or `/fp:fast` now fail to compile. Measured: GCC 13 at
+  the default x86-64 target compiles `_native.cpp` to byte-identical machine code with and without
+  the flag, and MSVC defaults are unchanged. On FMA targets that contracted before (for example
+  macOS arm64 with Apple clang's within-statement default, not measured here), raw float values of
+  `_native.orient2d`/`incircle`, filtered predicate decisions and native-v2 metric arithmetic can
+  change in the last bits, and with them near-degenerate connectivity. A new probe
+  (`_native.exact_arithmetic_probe`), `tests/test_exact_arithmetic_contraction.py` and the release
+  wheel smoke (native-required) check the compiled transforms against exact rational arithmetic.
 
 - **Behaviour change.** A scalar beam eccentricity now stands a stiffener off on the side of its
   plate's surface normal (`GeometryModel.face_normal`) on every meshing route. The nodal normal
