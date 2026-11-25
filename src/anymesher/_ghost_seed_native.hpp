@@ -193,8 +193,10 @@ private:
     };
 
     // The exact predicates assume round-to-nearest.  The seed never changes
-    // the floating-point environment; it refuses when the caller's mode is
-    // not round-to-nearest (checked on entry) or a callback changed it.
+    // the rounding mode; it refuses when the caller's mode is not
+    // round-to-nearest (checked on entry) or a callback changed it.  Like any
+    // floating-point code (base included), the guard and the predicates raise
+    // sticky inexact flags; trapping floating-point exceptions is unsupported.
     void check_cancel(const char* phase) {
         if (cancellation_ == nullptr) return;
         cancellation_(context_, phase);
