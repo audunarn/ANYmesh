@@ -908,10 +908,7 @@ inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
                 return nullptr;
             }
         }
-        if (callback != Py_None && !PyCallable_Check(callback)) {
-            PyErr_SetString(PyExc_TypeError, "finite hull seed: cancellation_check must be callable or None");
-            return nullptr;
-        }
+        // No callable check on cancellation_check: calling it raises exactly where Python does.
         Engine engine;
         engine.points = points;
         engine.callback = callback == Py_None ? nullptr : callback;

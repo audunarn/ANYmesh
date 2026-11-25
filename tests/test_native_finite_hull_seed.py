@@ -399,6 +399,28 @@ def test_native_discards_the_callback_result_before_the_snapshot_check():
     assert native[0] == ("error", "MeshError", "finite hull insertion could not locate a point")
 
 
+def test_native_raises_where_python_does_for_a_callback_that_stops_being_callable():
+    # Codex r2: the callback is called, never pre-validated, so the TypeError comes at the same call.
+    def run(points):
+        trace = []
+
+        class StopAfterHull:
+            def __call__(self, stage):
+                trace.append(stage)
+                if len(trace) == 8:
+                    del StopAfterHull.__call__
+
+        try:
+            return ("ok", triangulation._finite_hull_seed(points, StopAfterHull())), trace
+        except Exception as error:
+            return ("error", type(error).__name__, str(error)), trace
+
+    points = np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
+    native = run(points.copy())
+    assert native == _python(run, points.copy())
+    assert native[0] == ("error", "TypeError", "'StopAfterHull' object is not callable")
+
+
 def test_direct_native_calls_validate_their_inputs():
     module = _native_module()
     helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)
