@@ -26,6 +26,13 @@ leg:
   partial binding, or a required but unavailable baseline, still fails.
 - The evidence upload has `continue-on-error`.
 
+Containment is best effort against our own producer (owner decision 2026-11-25). The reporter finds S0
+processes by the inherited `ANYMESHER_S0_OWNER` token, by S0 markers on the command line and by descendants,
+and it rescans until two consecutive scans a second apart are empty. A process that forks and exits inside the
+`psutil` snapshot window on two scans in a row is not guaranteed to be seen. Follow-up: run the S0 step under
+OS-level containment (a process group on Linux/macOS, a Job object on Windows) and verify that it is empty
+before pytest.
+
 The full matrix runs only on `workflow_dispatch`, the weekly schedule and release tags. Pull requests run the
 smoke jobs only. Dispatch the workflow on the PR branch to see the S0 result and the Linux/macOS legs.
 
