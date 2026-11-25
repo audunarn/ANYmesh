@@ -74,7 +74,7 @@ def _outcome(points, mutate=None):
 
     try:
         result = ("ok", triangulation._finite_hull_seed(points, callback))
-    except MeshError as error:
+    except Exception as error:  # compared, never swallowed: the type and message are the outcome
         result = ("error", type(error).__name__, str(error))
     return result, stages
 
@@ -309,4 +309,92 @@ def test_incidence_is_not_reused_for_side_effecting_connectivity():
     mesh = _sliver_patch(10.0)
     assert s3_repair._plain_shells(mesh)
     mesh.tris[10] = _LoggingTuple(mesh.tris[10])
+    assert not s3_repair._plain_shells(mesh)
+
+
+def test_finite_hull_seed_follows_a_callback_that_reshapes_the_input():
+    # Codex r2: a byte-identical in-place reshape must also drop to the live array.
+    def reshape(points, seen, count):
+        if seen.endswith("insertion") and count == 1:
+            points.shape = (2, 4)
+
+    points = np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
+    assert _outcome(points.copy(), reshape) == _outcome(_plain(points), reshape)
+
+
+def test_finite_hull_seed_calls_no_extra_predicates_before_the_first_insertion(monkeypatch):
+    # Codex r2: the zero-area flags come from a vectorised float filter, not from extra orient2d calls.
+    counts = {}
+    original = triangulation.orient2d
+    calls = [0]
+
+    def counted(*args):
+        calls[0] += 1
+        return original(*args)
+
+    monkeypatch.setattr(triangulation, "orient2d", counted)
+    for label, points in (("fast", CASES[2].copy()), ("plain", _plain(CASES[2]))):
+        calls[0] = 0
+        seen = []
+
+        def callback(stage):
+            if stage.endswith("insertion") and not seen:
+                seen.append(calls[0])
+
+        triangulation._finite_hull_seed(points, callback)
+        counts[label] = seen[0]
+    assert counts["fast"] == counts["plain"]
+
+
+def test_owner_normal_memo_needs_default_numpy_error_handling(monkeypatch):
+    geometry, mesh = _square_mesh()
+    calls = _counting(monkeypatch)
+    memo = {"geometry": geometry, "normals": {}}
+    old = np.seterrcall(lambda *args: None)
+    try:
+        with np.errstate(under="call"):
+            s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
+            s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
+    finally:
+        np.seterrcall(old)
+    assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
+
+
+def test_owner_normal_memo_needs_a_library_surface():
+    from anygeometry.surfaces import Plane
+
+    class OwnPlane(Plane):
+        pass
+
+    class Face:
+        def __init__(self, surface):
+            self.surface = surface
+
+    class Model:
+        faces = {1: Face(object.__new__(Plane)), 2: Face(object.__new__(OwnPlane))}
+
+    assert s3_production._library_surface(Model, 1)
+    assert not s3_production._library_surface(Model, 2)
+
+
+def test_plain_shells_never_calls_user_code_and_needs_plain_nodes():
+    class Hostile(type):
+        def __eq__(cls, other):
+            raise RuntimeError("compared")
+
+        def __hash__(cls):
+            raise RuntimeError("hashed")
+
+    class Odd(tuple, metaclass=Hostile):
+        pass
+
+    mesh = _sliver_patch(10.0)
+    mesh.tris[10] = Odd(mesh.tris[10])
+    assert not s3_repair._plain_shells(mesh)
+    mesh = _sliver_patch(10.0)
+
+    class Nodes(dict):
+        pass
+
+    mesh.nodes = Nodes(mesh.nodes)
     assert not s3_repair._plain_shells(mesh)

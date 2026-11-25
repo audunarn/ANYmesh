@@ -1228,13 +1228,16 @@ def _finite_hull_seed(points: np.ndarray,
     array = points if type(points) is np.ndarray else None
     fast = (array is not None and array.dtype == np.float64 and array.ndim == 2
             and array.shape[1] == 2 and bool(np.all(np.isfinite(array))))
-    snapshot = array.tobytes() if fast else None
+    def layout():
+        return (array.shape, array.strides, array.dtype, array.__array_interface__["data"][0])
+
+    snapshot = (layout(), array.tobytes()) if fast else None
     coordinates = [tuple(row) for row in array.tolist()] if fast else points
 
     def checkpoint(stage: str) -> None:
         nonlocal fast, coordinates
         cancellation_check(stage)
-        if fast and array.tobytes() != snapshot:
+        if fast and (layout() != snapshot[0] or array.tobytes() != snapshot[1]):
             fast = False
             coordinates = points
 
@@ -1250,9 +1253,20 @@ def _finite_hull_seed(points: np.ndarray,
                 return empty, empty, empty, empty, np.empty(0, dtype=bool)
             index = np.asarray(rows, dtype=np.int64)
             x, y = xs[index], ys[index]
-            flat = np.asarray([orient2d(coordinates[a], coordinates[b], coordinates[c]) == 0.0
-                               for a, b, c in rows], dtype=bool)
-            return x.min(axis=1), x.max(axis=1), y.min(axis=1), y.max(axis=1), flat
+            # orient2d's own float filter, elementwise (the same IEEE operations): a
+            # cell it certifies has nonzero area; every other cell is treated as
+            # possibly flat and always scanned.  No predicate is called here.
+            with np.errstate(all="ignore"):
+                ax, ay = x[:, 0] - x[:, 2], y[:, 0] - y[:, 2]
+                bx, by = x[:, 1] - x[:, 2], y[:, 1] - y[:, 2]
+                left, right = ax * by, ay * bx
+                determinant = left - right
+                magnitude = np.abs(left) + np.abs(right)
+                certified = ((np.abs(determinant) > 8.0 * _FLOAT_EPSILON * magnitude)
+                             & (magnitude >= _ORIENT_MAGNITUDE_FLOOR)
+                             & (np.maximum(np.maximum(np.abs(ax), np.abs(ay)), np.maximum(np.abs(bx), np.abs(by)))
+                                <= _ORIENT_DIFFERENCE_CAP))
+            return x.min(axis=1), x.max(axis=1), y.min(axis=1), y.max(axis=1), ~certified
 
         x0, x1, y0, y1, zero = boxes(triangles)
     installed = set(hull)

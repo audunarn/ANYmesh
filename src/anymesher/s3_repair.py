@@ -266,7 +266,8 @@ def _triangle_edges(connectivity: Sequence[int]) -> tuple[tuple[int, int], ...]:
     return tuple(_edge(made[index], made[(index + 1) % 3]) for index in range(3))
 
 
-_PLAIN_INTEGERS = frozenset((int, *(np.dtype(code).type for code in "bBhHiIlLqQ")))
+# Identities only: membership tests by id() never call user code (no __eq__/__hash__).
+_PLAIN_INTEGER_IDS = frozenset(id(kind) for kind in (int, *(np.dtype(code).type for code in "bBhHiIlLqQ")))
 
 
 def _plain_shells(mesh: Mesh) -> bool:
@@ -275,16 +276,22 @@ def _plain_shells(mesh: Mesh) -> bool:
     Only then may one ``_shell_incidence`` map stand in for a rebuild of the same,
     unchanged mesh: a rebuild of any other mesh performs observable reads.
     """
-    if type(mesh) is not Mesh or type(mesh.quads) is not dict or type(mesh.tris) is not dict:
+    if (type(mesh) is not Mesh or type(mesh.quads) is not dict or type(mesh.tris) is not dict
+            or type(mesh.nodes) is not dict):
         return False
+    for position in mesh.nodes.values():
+        if type(position) is not np.ndarray or position.dtype.kind != "f":
+            return False
     for cells in (mesh.quads, mesh.tris):
         for element_id, connectivity in cells.items():
-            if type(element_id) not in _PLAIN_INTEGERS:
+            if id(type(element_id)) not in _PLAIN_INTEGER_IDS:
                 return False
-            if type(connectivity) in (tuple, list):
-                if any(type(value) not in _PLAIN_INTEGERS for value in connectivity):
-                    return False
-            elif not (type(connectivity) is np.ndarray and connectivity.dtype.kind in "iu"):
+            kind = type(connectivity)
+            if kind is tuple or kind is list:
+                for value in connectivity:
+                    if id(type(value)) not in _PLAIN_INTEGER_IDS:
+                        return False
+            elif not (kind is np.ndarray and connectivity.dtype.kind in "iu"):
                 return False
     return True
 

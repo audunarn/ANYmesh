@@ -224,11 +224,32 @@ def _shell_owner_projection_uv(geometry, mesh, face_by_element):
         return {}
 
 
+_DEFAULT_NUMPY_ERRORS = {"divide": "warn", "over": "warn", "under": "ignore", "invalid": "warn"}
+
+
 def _owner_normal_memo_admitted(geometry, mesh) -> bool:
-    """Whether owner normals may be reused: exact base types with their own methods only."""
-    return (type(geometry) is GeometryModel and type(mesh) is Mesh
+    """Whether owner normals may be reused (an allow-list; anything else is evaluated as before).
+
+    Exact library types with their own methods, plain node storage, the library's
+    tolerance policy and NumPy's default error handling with no handler, so that
+    an evaluation has no observable effect beyond its result.
+    """
+    from anygeometry.tolerance import TolerancePolicy
+    return (type(geometry) is GeometryModel and type(mesh) is Mesh and type(mesh.nodes) is dict
+            and type(geometry.tolerance) is TolerancePolicy
+            and np.geterr() == _DEFAULT_NUMPY_ERRORS and np.geterrcall() is None
             and all(getattr(getattr(geometry, name), "__func__", None) is getattr(GeometryModel, name)
                     for name in ("project_to_face", "face_normal", "face_point")))
+
+
+def _library_surface(geometry, face_id) -> bool:
+    """The face's surface (and its class) come from the anygeometry package itself."""
+    try:
+        surface_type = type(geometry.faces[face_id].surface)
+    except (KeyError, AttributeError):
+        return False
+    module = surface_type.__dict__.get("__module__") if "__module__" in surface_type.__dict__ else None
+    return type(module) is str and (module == "anygeometry" or module.startswith("anygeometry."))
 
 
 def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
@@ -243,7 +264,7 @@ def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
     other case (no FaceUse, unreadable corners, other value types) returns None
     and is evaluated by the original route, which raises its original error.
     """
-    if not uses:
+    if not uses or not _library_surface(geometry, face_id):
         return None
     try:
         corners = [mesh.nodes[node_id] for node_id in mesh.corners_of(element_id)]
