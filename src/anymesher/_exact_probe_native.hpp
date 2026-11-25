@@ -24,14 +24,20 @@ namespace anymesher_native {
 
 inline PyObject* py_exact_arithmetic_probe(PyObject*, PyObject* args) {
     double a = 0.0, b = 0.0;
-    if (!PyArg_ParseTuple(args, "dd:exact_arithmetic_probe", &a, &b)) return nullptr;
+    double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0, cx = 0.0, cy = 0.0;
+    if (!PyArg_ParseTuple(args, "dd|dddddd:exact_arithmetic_probe", &a, &b,
+                          &ax, &ay, &bx, &by, &cx, &cy)) return nullptr;
+    // Orientation of (ax, ay), (bx, by), (cx, cy) when given, otherwise of a
+    // fixed construction from a and b.
+    const bool explicit_points = PyTuple_GET_SIZE(args) == 8;
     double product = 0.0, product_tail = 0.0, sum = 0.0, sum_tail = 0.0;
     double high = 0.0, low = 0.0;
     two_product(a, b, product, product_tail);
     two_sum(a, b, sum, sum_tail);
     split(a, high, low);
-    const int orientation = expansion_sign(exact_orient_expansion(
-        Point{a, b}, Point{b, a}, Point{a + b, a - b}));
+    const int orientation = explicit_points
+        ? expansion_sign(exact_orient_expansion(Point{ax, ay}, Point{bx, by}, Point{cx, cy}))
+        : expansion_sign(exact_orient_expansion(Point{a, b}, Point{b, a}, Point{a + b, a - b}));
     return Py_BuildValue("(dddddd i)", product, product_tail, sum, sum_tail, high, low, orientation);
 }
 

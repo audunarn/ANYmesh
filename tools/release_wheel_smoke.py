@@ -132,7 +132,9 @@ def main() -> int:
         from anymesher._exact_arithmetic_check import exact_arithmetic_failures
 
         failures = exact_arithmetic_failures(_native.exact_arithmetic_probe)
-        assert not failures, ("inexact native arithmetic (fused multiply-add?)", failures[:5])
+        if failures:  # not an assert: python -O must not skip it
+            raise SystemExit(f"inexact native arithmetic (fused multiply-add?): "
+                             f"{len(failures)} failures, first {failures[:5]}")
         exact_arithmetic = "passed"
 
     cylindrical = _cylindrical_frontal(options.require_native)

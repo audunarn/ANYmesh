@@ -45,12 +45,19 @@ _ensure_msvc_tools_on_path()
 
 
 # The exact predicates use error-free transforms (Dekker split, two_sum,
-# two_product) that need separately rounded operations; a fused multiply-add
-# contraction across statements (GCC default on FMA targets) breaks split.
+# two_product) that need separately rounded IEEE operations: a fused
+# multiply-add contraction across statements (GCC default on FMA targets)
+# breaks split, and value-unsafe modes can reassociate two_sum.  These options
+# follow any inherited CFLAGS and reset them (GCC 13: -ffast-math or
+# -funsafe-math-optimizations followed by these leave no unsafe macro set and
+# the probe exact).
 # MSVC: /fp:precise is the default (no contraction); pinned so an inherited
 # /fp:fast (CL environment variable) is overridden.  An explicit /fp:contract
 # still contracts, but only within one expression, which keeps split exact.
-compile_args = ["/std:c++17", "/O2", "/fp:precise"] if sys.platform == "win32" else ["-std=c++17", "-O3", "-ffp-contract=off"]
+compile_args = ["/std:c++17", "/O2", "/fp:precise"] if sys.platform == "win32" else [
+    "-std=c++17", "-O3", "-fno-fast-math", "-fno-unsafe-math-optimizations",
+    "-fno-associative-math", "-fno-reciprocal-math", "-ffp-contract=off",
+]
 link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else []
 
 extensions = []
