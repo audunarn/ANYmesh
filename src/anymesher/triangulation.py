@@ -1216,16 +1216,46 @@ def _finite_hull_seed(points: np.ndarray,
     hull = _convex_hull(points, cancellation_check=cancellation_check)
     if len(hull) < 3:
         raise MeshError("finite triangulation hull has zero area")
-    triangles = [_canonical_triangle((hull[0], hull[i], hull[i + 1]), points)
+    # The predicates read every coordinate through float(); a finite float64 array
+    # is handed to them as tuples of the same Python floats (identical values and
+    # decisions, without numpy row indexing).  The location scan skips cells whose
+    # closed bounding box excludes the point: orient2d has an exact sign, so such a
+    # cell can never have all three turns >= 0, and the remaining cells are tested
+    # in the original row order.  Any other input (including ndarray subclasses)
+    # keeps the plain scan.
+    array = points if type(points) is np.ndarray else None
+    fast = (array is not None and array.dtype == np.float64 and array.ndim == 2
+            and array.shape[1] == 2 and bool(np.all(np.isfinite(array))))
+    coordinates = [tuple(row) for row in array.tolist()] if fast else points
+    triangles = [_canonical_triangle((hull[0], hull[i], hull[i + 1]), coordinates)
                  for i in range(1, len(hull) - 1)]
+    if fast:
+        xs = np.ascontiguousarray(array[:, 0])
+        ys = np.ascontiguousarray(array[:, 1])
+
+        def boxes(rows: Sequence[tuple[int, int, int]]) -> tuple[np.ndarray, ...]:
+            if not rows:
+                empty = np.empty(0, dtype=np.float64)
+                return empty, empty, empty, empty
+            index = np.asarray(rows, dtype=np.int64)
+            x, y = xs[index], ys[index]
+            return x.min(axis=1), x.max(axis=1), y.min(axis=1), y.max(axis=1)
+
+        x0, x1, y0, y1 = boxes(triangles)
     installed = set(hull)
     for node in sorted(set(range(len(points))) - installed, key=lambda index: (*points[index], index)):
         if cancellation_check is not None:
             cancellation_check("python triangulation finite hull insertion")
         containing = []
         edge = None
-        for row, triangle in enumerate(triangles):
-            turns = [orient2d(points[triangle[i]], points[triangle[(i + 1) % 3]], points[node])
+        if fast:
+            px, py = xs[node], ys[node]
+            rows = np.flatnonzero((x0 <= px) & (px <= x1) & (y0 <= py) & (py <= y1)).tolist()
+        else:
+            rows = range(len(triangles))
+        for row in rows:
+            triangle = triangles[row]
+            turns = [orient2d(coordinates[triangle[i]], coordinates[triangle[(i + 1) % 3]], coordinates[node])
                      for i in range(3)]
             if min(turns) >= 0.0:
                 containing.append(row)
@@ -1247,7 +1277,14 @@ def _finite_hull_seed(points: np.ndarray,
             replacements = [(a, b, node), (b, c, node), (c, a, node)]
         removed = set(containing)
         triangles = [triangle for row, triangle in enumerate(triangles) if row not in removed]
-        triangles.extend(_canonical_triangle(triangle, points) for triangle in replacements)
+        added = [_canonical_triangle(triangle, coordinates) for triangle in replacements]
+        triangles.extend(added)
+        if fast:
+            keep = np.ones(len(x0), dtype=bool)
+            keep[sorted(removed)] = False
+            bx0, bx1, by0, by1 = boxes(added)
+            x0, x1 = np.concatenate((x0[keep], bx0)), np.concatenate((x1[keep], bx1))
+            y0, y1 = np.concatenate((y0[keep], by0)), np.concatenate((y1[keep], by1))
     # Strict positivity prevents cocircular flip cycles. The work bound is an
     # algorithmic convergence guard, not an operand-count restriction.
     limit = max(64, 32 * len(triangles) ** 2)
@@ -1274,8 +1311,8 @@ def _finite_hull_seed(points: np.ndarray,
         a = next(node for node in first if node not in edge)
         b = next(node for node in second if node not in edge)
         return (_normal_edge(a, b) not in incidence
-                and _proper_intersection(points[edge[0]], points[edge[1]], points[a], points[b])
-                and incircle(*(points[node] for node in first), points[b]) > 0.0)
+                and _proper_intersection(coordinates[edge[0]], coordinates[edge[1]], coordinates[a], coordinates[b])
+                and incircle(*(coordinates[node] for node in first), coordinates[b]) > 0.0)
 
     def examine(edge: tuple[int, int]) -> None:
         if cancellation_check is not None:
@@ -1314,8 +1351,8 @@ def _finite_hull_seed(points: np.ndarray,
         a = next(node for node in first if node not in edge)
         b = next(node for node in second if node not in edge)
         e0, e1 = edge
-        triangles[rows[0]] = _canonical_triangle((a, b, e0), points)
-        triangles[rows[1]] = _canonical_triangle((b, a, e1), points)
+        triangles[rows[0]] = _canonical_triangle((a, b, e0), coordinates)
+        triangles[rows[1]] = _canonical_triangle((b, a, e1), coordinates)
         believed.discard(edge)
         del incidence[edge]
         vertex_edges[e0].discard(edge)

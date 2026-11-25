@@ -224,11 +224,43 @@ def _shell_owner_projection_uv(geometry, mesh, face_by_element):
         return {}
 
 
+def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
+    """Exact inputs of one ``_physical_owner_normal`` evaluation, or None.
+
+    The normal is a deterministic function of the geometry, the face, its
+    FaceUses, the element's corner coordinates and the supplied uv (or, without
+    one, the projection of the corner centroid).  Only plain float64 corners and
+    uv made of Python/NumPy float64 values are keyed, so equal keys mean equal
+    inputs; anything else is evaluated as before.
+    """
+    try:
+        corners = [mesh.nodes[node_id] for node_id in mesh.corners_of(element_id)]
+    except (KeyError, MeshError):
+        return None
+    made = []
+    for corner in corners:
+        if type(corner) is not np.ndarray or corner.dtype != np.float64 or corner.shape != (3,):
+            return None
+        made.append(corner.tobytes())
+    if uv is None:
+        made_uv = None
+    elif type(uv) is np.ndarray:
+        if uv.dtype != np.float64 or uv.shape != (2,):
+            return None
+        made_uv = uv.tobytes()
+    elif type(uv) is tuple and len(uv) == 2 and all(type(value) in (float, np.float64) for value in uv):
+        made_uv = np.asarray(uv, dtype=np.float64).tobytes() + b"t"
+    else:
+        return None
+    return (geometry.model_id, geometry.revision, int(face_id), uses, tuple(made), made_uv)
+
+
 def _shell_owner_authority(
     geometry: GeometryModel,
     mesh: Mesh,
     *,
     _certified_uv=None,
+    _normal_memo=None,
 ) -> tuple[
     dict[int, tuple[float, float, float]],
     dict[int, dict[str, Any]],
@@ -245,17 +277,32 @@ def _shell_owner_authority(
     projected_uv = (_shell_owner_projection_uv(geometry, mesh, ordinary)
                     if ordinary else {})
     projected_uv.update(certified_uv)
-    normals = {
-        element_id: _physical_owner_normal(
+    # ``_normal_memo`` (call-local, one geometry object) carries normals already
+    # evaluated on exactly the same inputs, e.g. before an S3 repair that left most
+    # shells unchanged; every other shell is evaluated as before.
+    memo = (_normal_memo if isinstance(_normal_memo, dict)
+            and _normal_memo.get("geometry") is geometry else None)
+    normals = {}
+    for element_id in sorted(mesh.shells):
+        face_id = face_by_element[element_id]
+        uv = projected_uv.get(element_id)
+        key = None
+        if memo is not None:
+            uses = tuple(int(value) for value in face_use_ids.get(face_id, ()))
+            key = _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv)
+            if key is not None and key in memo["normals"]:
+                normals[element_id] = memo["normals"][key]
+                continue
+        normals[element_id] = _physical_owner_normal(
             geometry,
             mesh,
             element_id=element_id,
-            face_id=face_by_element[element_id],
+            face_id=face_id,
             face_use_ids=face_use_ids,
-            projected_uv=projected_uv.get(element_id),
+            projected_uv=uv,
         )
-        for element_id in sorted(mesh.shells)
-    }
+        if key is not None:
+            memo["normals"][key] = normals[element_id]
     sources = {
         element_id: {
             "face_id": int(face_by_element[element_id]),
@@ -441,7 +488,9 @@ def prepare_qualified_s3_mesh(
     _element_face_map(mesh)
     certified_uv = _validated_curvilinear_reference_uv(geometry, mesh)
     before_cells = _publication_pin(mesh) if certified_uv else None
-    shell_owners, _ = _shell_owner_authority(geometry, mesh, _certified_uv=certified_uv)
+    owner_memo = {"geometry": geometry, "normals": {}}
+    shell_owners, _ = _shell_owner_authority(geometry, mesh, _certified_uv=certified_uv,
+                                             _normal_memo=owner_memo)
     repair_input = mesh
     if certified_uv:
         # The live boundary registry owns immutable geometry views and proof
@@ -465,7 +514,8 @@ def prepare_qualified_s3_mesh(
     made = repair.mesh
     if certified_uv and (_publication_pin(mesh) != before_cells or _publication_pin(made) != before_cells):
         raise S3OwnerAuthorityError('curvilinear S3 repair requires fresh owner cell qualification')
-    shell_owners, owner_sources = _shell_owner_authority(geometry, made, _certified_uv=certified_uv)
+    shell_owners, owner_sources = _shell_owner_authority(geometry, made, _certified_uv=certified_uv,
+                                                         _normal_memo=owner_memo)
     final_admission = assert_s3_admissible(
         made,
         element_ids=repair.element_ids,

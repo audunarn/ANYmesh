@@ -471,6 +471,7 @@ def _candidate_bisection(
     *,
     next_node_id: int,
     next_element_id: int,
+    incidence: Mapping[tuple[int, int], Sequence[tuple[str, int]]] | None = None,
 ) -> tuple[
     Mesh | None,
     dict[int, np.ndarray] | None,
@@ -480,7 +481,9 @@ def _candidate_bisection(
 ]:
     if mesh.order != "linear":
         return None, None, None, 0, "local bisection is restricted to linear T3 meshes"
-    incidence = _shell_incidence(mesh).get(edge, ())
+    # ``incidence`` is the caller's ``_shell_incidence(mesh)`` of this same, unchanged
+    # mesh (read only here); without it the map is rebuilt.
+    incidence = (_shell_incidence(mesh) if incidence is None else incidence).get(edge, ())
     if not incidence or len(incidence) > 2:
         return None, None, None, 0, "edge incidence is missing or non-manifold"
     if any(kind != "tri" or element_id not in selected for kind, element_id in incidence):
@@ -870,6 +873,7 @@ def repair_s3_admission(
                     selected,
                     next_node_id=next_node_id,
                     next_element_id=next_element_id,
+                    incidence=incidence,
                 )
                 if candidate is None or made_owners is None or made_selected is None:
                     _record(
