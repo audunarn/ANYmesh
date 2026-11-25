@@ -16,6 +16,10 @@
   change in the last bits, and with them near-degenerate connectivity. A new probe
   (`_native.exact_arithmetic_probe`), `tests/test_exact_arithmetic_contraction.py` and the release
   wheel smoke (native-required) check the compiled transforms against exact rational arithmetic.
+  Supported: the default GCC, Clang and MSVC floating-point semantics. Builds under
+  `-ffinite-math-only` or x87 excess precision (`FLT_EVAL_METHOD != 0`) also fail to compile, and
+  the check fails when subnormals are flushed after import. Inherited options that are neither
+  reset nor detectable are unsupported, for example Clang's `-fdenormal-fp-math=positive-zero`.
 
 - **Behaviour change.** A scalar beam eccentricity now stands a stiffener off on the side of its
   plate's surface normal (`GeometryModel.face_normal`) on every meshing route. The nodal normal

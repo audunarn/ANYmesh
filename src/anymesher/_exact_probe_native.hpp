@@ -17,7 +17,9 @@
 // setup.py resets the value-unsafe options after inherited flags; what it
 // cannot reset is refused here, and run-time damage (for example
 // flush-to-zero from a fast-math startup object) is caught by
-// anymesher._exact_arithmetic_check.
+// anymesher._exact_arithmetic_check.  Unsupported (owner decision
+// 2026-11-25): inherited options that are neither reset nor detectable, for
+// example Clang's -fdenormal-fp-math=positive-zero.
 #if defined(__FAST_MATH__) || defined(__ASSOCIATIVE_MATH__)
 #error "anymesher._native needs IEEE arithmetic: build without -ffast-math / -fassociative-math"
 #endif
