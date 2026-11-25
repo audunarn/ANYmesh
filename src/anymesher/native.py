@@ -303,7 +303,9 @@ def _run_reference_native_seed(points, orientation, circle, cancellation_check):
             try:
                 return function(*args)
             except BaseException as error:
-                captured.append((error, error.__traceback__))
+                # Keep only the instance: reading any attribute of a hostile
+                # exception could raise and be mistaken for a native refusal.
+                captured.append(error)
                 raise _ReferenceSeedCallbackFailure from None
         return invoke
 
@@ -313,12 +315,12 @@ def _run_reference_native_seed(points, orientation, circle, cancellation_check):
             checked(cancellation_check) if cancellation_check is not None else None,
         )
     except _ReferenceSeedCallbackFailure:
-        error, traceback = captured[0]
         # Re-raise the captured instance itself: an overridden
         # ``with_traceback`` must not replace the caller's exception.
-        del traceback
-        raise error
+        raise captured[0] from None
     except RuntimeError as error:
+        if captured:
+            raise captured[0] from None
         # A refused cavity/point-location attempt has published nothing.
         # The unchanged full Python insertion remains authoritative.
         return None, "reference_seed_native_refusal: " + str(error)

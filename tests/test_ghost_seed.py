@@ -348,41 +348,126 @@ def test_native_ghost_codes_only_input_properties_as_refusals(monkeypatch):
 
 def _rounding_control():
     import ctypes
+    import platform
     import sys
     if sys.platform == "win32":
         library, downward = ctypes.CDLL("ucrtbase"), 0x0100
-    elif sys.platform == "darwin":
-        library = ctypes.CDLL(None)
-        import platform
-        downward = 0x00800000 if platform.machine() == "arm64" else 0x0400
     else:
-        library, downward = ctypes.CDLL(None), 0x0400
-    return library.fegetround, library.fesetround, downward
+        library = ctypes.CDLL(None)
+        machine = platform.machine().lower()
+        downward = 0x00800000 if machine in {"arm64", "aarch64"} else 0x0400
+    get, put = library.fegetround, library.fesetround
+    original = get()
+    if put(downward) != 0 or get() != downward:
+        put(original)
+        pytest.skip("cannot set FE_DOWNWARD with the assumed constant")
+    put(original)
+    return get, put, downward
 
 
-def test_native_ghost_seed_runs_under_round_to_nearest_and_restores_the_mode():
-    _extension()
-    try:
-        get, put, downward = _rounding_control()
-    except OSError:
-        pytest.skip("no C runtime rounding control")
-    # Review r3 fixture: exactly cocircular; under FE_DOWNWARD a native
-    # certificate evaluated in the caller's mode accepted the tie.
+def _review_r3_points():
+    # Review r3 fixture: exactly cocircular; under FE_DOWNWARD a certificate
+    # evaluated in that mode accepted the tie.
     s, k = 2. ** -45, 28340226917889
     cx, cy = -6823211715099, 42014152124534
     radius = 10. * k * s
     outer = [[-radius, -radius], [0., np.nextafter(-radius, np.inf)], [radius, -radius],
              [radius, radius], [-radius, radius]]
     interior = [[s * (cx + k * u), s * (cy + k * v)] for u, v in ((5, 0), (-4, 3), (3, -4), (4, -3))]
-    points = np.ascontiguousarray(outer + interior, dtype=float)
-    seen = []
+    return np.array(outer), np.array(interior)
+
+
+def test_ghost_seeds_refuse_a_non_nearest_rounding_mode_and_change_nothing(monkeypatch):
+    _extension()
+    try:
+        get, put, downward = _rounding_control()
+    except OSError:
+        pytest.skip("no C runtime rounding control")
+    outer, interior = _review_r3_points()
+    points = np.ascontiguousarray(np.vstack((outer, interior)))
     original = get()
     put(downward)
     try:
-        actual, reason = native._run_ghost_native_seed(points, lambda phase: seen.append(get()))
+        native_result = native._run_ghost_native_seed(points, None)
+        try:
+            ghost_bowyer_watson(points, triangulation.orient2d, triangulation.incircle)
+            python_reason = None
+        except GhostSeedRefusal as refusal:
+            python_reason = refusal.reason
+        actual = triangulation.triangulate_polygon(
+            outer, interior_points=interior, backend="python", _reference_native_seed=True)
+        with monkeypatch.context() as patch:
+            _without_ghost(patch)
+            expected = triangulation.triangulate_polygon(
+                outer, interior_points=interior, backend="python", _reference_native_seed=True)
         after = get()
     finally:
         put(original)
-    assert actual is None and reason.startswith("ghost_seed_native_refusal: cocircular:")
-    assert after == downward
-    assert seen and set(seen) == {downward}
+    assert after == downward  # the seed never changes the environment
+    assert native_result[0] is None
+    assert native_result[1].startswith("ghost_seed_native_refusal: rounding_mode:")
+    assert python_reason == "rounding_mode"
+    assert actual.triangles.tobytes() == expected.triangles.tobytes()
+
+
+@pytest.mark.parametrize("native_path", [True, False])
+def test_a_callback_changing_the_rounding_mode_is_a_refusal(monkeypatch, native_path):
+    _extension()
+    try:
+        get, put, downward = _rounding_control()
+    except OSError:
+        pytest.skip("no C runtime rounding control")
+    angle = next(a for a in ANGLES if _ghost_or_tie(_rotated_rectangle(a)[1]) is not None)
+    _, points = _rotated_rectangle(angle, stations=80)
+    original = get()
+    flipped = []
+
+    def cancel(phase):
+        if not flipped:
+            flipped.append(phase)
+            put(downward)
+
+    try:
+        if native_path:
+            actual, reason = native._run_ghost_native_seed(points, cancel)
+        else:
+            with pytest.raises(GhostSeedRefusal) as caught:
+                ghost_bowyer_watson(points, triangulation.orient2d, triangulation.incircle, cancel)
+    finally:
+        put(original)
+    if native_path:
+        assert actual is None
+        assert reason.startswith("ghost_seed_native_refusal: rounding_mode:")
+    else:
+        assert caught.value.reason == "rounding_mode"
+
+
+class _HostileTraceback(RuntimeError):
+    @property
+    def __traceback__(self):
+        raise RuntimeError("traceback denied")
+
+    @__traceback__.setter
+    def __traceback__(self, value):
+        pass
+
+
+@pytest.mark.parametrize("phase", ["native triangulation insertion", "native ghost seed certificate"])
+def test_hostile_traceback_property_keeps_identity_and_never_falls_back(monkeypatch, phase):
+    _extension()
+    angle = next(a for a in ANGLES if _ghost_or_tie(_rotated_rectangle(a)[1]) is not None)
+    outer, points = _rotated_rectangle(angle)
+    error = _HostileTraceback("stop")
+
+    def cancel(where):
+        if where == phase:
+            raise error
+
+    monkeypatch.setattr(triangulation, "_finite_hull_seed", _forbidden("fallback ran"))
+    monkeypatch.setattr(triangulation, "ghost_bowyer_watson", _forbidden("python retry ran"))
+    with pytest.raises(_HostileTraceback) as caught:
+        triangulation.triangulate_polygon(
+            outer, interior_points=points[len(outer):], backend="python",
+            _reference_native_seed=True, cancellation_check=cancel,
+        )
+    assert caught.value is error

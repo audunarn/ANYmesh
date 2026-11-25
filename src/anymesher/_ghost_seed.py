@@ -45,9 +45,10 @@ GHOST = -1
 class GhostSeedRefusal(Exception):
     """The symbolic-infinity seed could not certify a result.
 
-    ``reason`` is a stable code.  Properties of the input (``too_few``,
-    ``duplicate``, ``collinear``, ``cocircular``) are shared with the native
-    mirror, which returns them as refusals; broken invariants
+    ``reason`` is a stable code.  Properties of the input or environment
+    (``too_few``, ``duplicate``, ``collinear``, ``cocircular``,
+    ``rounding_mode``) are shared with the native mirror, which returns them
+    as refusals; broken invariants
     (``non_positive``, ``nonmanifold``, ``lost_twin``, ``not_located``,
     ``not_delaunay``) are internal errors there and cannot occur with exact
     predicates.
@@ -58,6 +59,12 @@ class GhostSeedRefusal(Exception):
         self.reason = reason
 
 
+def _round_to_nearest(one: float = 1.0, half_ulp: float = 2. ** -53) -> bool:
+    """True only under round-to-nearest-even (evaluated at run time)."""
+    return (one + half_ulp == one and -one - half_ulp == -one
+            and one + 1.5 * half_ulp == one + 2. * half_ulp)
+
+
 def ghost_bowyer_watson(
     points,
     orient2d: Callable[..., float],
@@ -65,6 +72,16 @@ def ghost_bowyer_watson(
     cancellation_check: Callable[[str], None] | None = None,
 ) -> list[tuple[int, int, int]]:
     """Return the sorted canonical cells of a complete Delaunay triangulation."""
+    if not _round_to_nearest():
+        raise GhostSeedRefusal("rounding mode is not round-to-nearest", reason="rounding_mode")
+    if cancellation_check is not None:
+        callback = cancellation_check
+
+        def cancellation_check(phase: str) -> None:
+            callback(phase)
+            if not _round_to_nearest():
+                raise GhostSeedRefusal("a callback changed the rounding mode",
+                                       reason="rounding_mode")
     count = len(points)
     if count < 3:
         raise GhostSeedRefusal("ghost seed needs at least three points", reason="too_few")

@@ -43,7 +43,8 @@ inline double ghost_incircle(const Point& a, const Point& b, const Point& c, con
 }
 
 // A refusal for a property of the input with a stable code shared with
-// _ghost_seed.GhostSeedRefusal (too_few, duplicate, collinear, cocircular).
+// _ghost_seed.GhostSeedRefusal (too_few, duplicate, collinear, cocircular,
+// rounding_mode).
 // Broken invariants throw std::runtime_error: an internal error the Python
 // reference retries.
 struct GhostRefusal : std::runtime_error {
@@ -51,21 +52,13 @@ struct GhostRefusal : std::runtime_error {
     const char* code;
 };
 
-struct RoundToNearest {
-    int saved;
-    RoundToNearest() : saved(std::fegetround()) { std::fesetround(FE_TONEAREST); }
-    ~RoundToNearest() { std::fesetround(saved); }
-};
-
 class GhostSeed {
 public:
     using Cancellation = void (*)(void*, const char*);
     static constexpr Index kGhost = -1;
 
-    GhostSeed(std::vector<Point> points, Cancellation cancellation, void* context,
-              int caller_rounding)
-        : points_(std::move(points)), cancellation_(cancellation), context_(context),
-          caller_rounding_(caller_rounding) {}
+    GhostSeed(std::vector<Point> points, Cancellation cancellation, void* context)
+        : points_(std::move(points)), cancellation_(cancellation), context_(context) {}
 
     std::vector<std::array<Index, 3>> run() {
         const Index count = static_cast<Index>(points_.size());
@@ -190,18 +183,14 @@ private:
         }
     };
 
-    // The exact predicates assume round-to-nearest.  The caller's rounding
-    // mode is restored around every callback and on exit (RoundToNearest).
+    // The exact predicates assume round-to-nearest.  The seed never changes
+    // the floating-point environment; it refuses when the caller's mode is
+    // not round-to-nearest (checked on entry) or a callback changed it.
     void check_cancel(const char* phase) {
         if (cancellation_ == nullptr) return;
-        std::fesetround(caller_rounding_);
-        try {
-            cancellation_(context_, phase);
-        } catch (...) {
-            std::fesetround(FE_TONEAREST);
-            throw;
-        }
-        std::fesetround(FE_TONEAREST);
+        cancellation_(context_, phase);
+        if (std::fegetround() != FE_TONEAREST)
+            throw GhostRefusal("rounding_mode", "a callback changed the rounding mode");
     }
 
     bool between(Index a, Index b, Index p) const {
@@ -249,7 +238,6 @@ private:
     std::vector<Point> points_;
     Cancellation cancellation_ = nullptr;
     void* context_ = nullptr;
-    int caller_rounding_ = FE_TONEAREST;
     std::vector<std::array<Index, 3>> cells_;
     std::vector<unsigned char> alive_;
     std::vector<Index> free_;
@@ -286,9 +274,12 @@ inline PyObject* py_ghost_delaunay(PyObject*, PyObject* args) {
     PyThreadState* released_state = PyEval_SaveThread();
     CallbackContext context{callback, &released_state, false, nullptr, nullptr};
     std::vector<std::array<Index, 3>> triangles;
+    if (std::fegetround() != FE_TONEAREST) {
+        PyEval_RestoreThread(released_state);
+        return Py_BuildValue("(ss)", "rounding_mode", "rounding mode is not round-to-nearest");
+    }
     try {
-        RoundToNearest rounding;
-        GhostSeed engine(std::move(points), invoke_callback, &context, rounding.saved);
+        GhostSeed engine(std::move(points), invoke_callback, &context);
         triangles = engine.run();
     } catch (const CallbackFailure&) {
         PyEval_RestoreThread(released_state);
