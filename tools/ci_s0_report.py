@@ -71,11 +71,21 @@ def contain(output: Path, owner: str | None = None, rounds: int = 20) -> list[in
     An owned process can start a child between a scan and its kill, so the
     scan repeats after every kill round; only an empty fresh scan counts.
     """
+    import time
+
     alive = []
+    quiet = 0
     for _ in range(rounds):
         psutil, processes = stray_processes(output, owner)
         if not processes:
-            return []
+            # Two consecutive empty scans a second apart: a child started just
+            # before a scan by a parent that then exited is seen by the next one.
+            quiet += 1
+            if quiet == 2 or psutil is None:
+                return []
+            time.sleep(1.)
+            continue
+        quiet = 0
         for process in processes:
             try:
                 process.kill()
@@ -99,9 +109,17 @@ def read_binding(path: Path, output: Path):
     if not re.fullmatch(r'[0-9a-f]{64}', seal):
         return None
     try:
-        # The producer binds exactly <output>/manifest.json.
-        manifest = Path(pairs[PATH_ENV]).resolve(strict=True)
-        if manifest != (output / 'manifest.json').resolve(strict=True) or not manifest.is_file():
+        # The producer binds exactly <output>/manifest.json: the exported path
+        # must be that path itself (no alias), a regular file and no symlink,
+        # inside the real output directory.
+        given = Path(pairs[PATH_ENV])
+        expected = output / 'manifest.json'
+        if given.is_symlink() or expected.is_symlink() or output.is_symlink():
+            return None
+        if os.path.normcase(str(given.absolute())) != os.path.normcase(str(expected.absolute())):
+            return None
+        manifest = given.resolve(strict=True)
+        if not manifest.is_file() or not manifest.is_relative_to(output.resolve(strict=True)):
             return None
         if hashlib.sha256(manifest.read_bytes()).hexdigest() != seal:
             return None

@@ -225,7 +225,7 @@ def test_report_exports_the_binding_only_after_success(tmp_path, outcome):
 
 @pytest.mark.parametrize('mutation', ['missing', 'path_only', 'extra_row', 'duplicate', 'bad_sha',
                                       'upper_sha', 'wrong_sha', 'outside', 'not_a_file', 'invalid_utf8',
-                                      'other_file', 'loop'])
+                                      'other_file', 'loop', 'alias'])
 def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, mutation):
     pair = _pair(tmp_path)
     lines = {
@@ -236,8 +236,16 @@ def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, m
         'outside': [contract.PATH_ENV + '=' + str(tmp_path / 'manifest.json'), pair[1]],
         'not_a_file': [contract.PATH_ENV + '=' + str(tmp_path / 'ci-s0-baseline'), pair[1]],
         'invalid_utf8': pair,
-        'other_file': None, 'loop': None,
+        'other_file': None, 'loop': None, 'alias': None,
     }[mutation]
+    if mutation == 'alias':
+        # A correctly sealed symlink alias of the manifest in another directory.
+        alias = tmp_path / 'elsewhere.json'
+        try:
+            os.symlink(tmp_path / 'ci-s0-baseline' / 'manifest.json', alias)
+        except (OSError, NotImplementedError):
+            pytest.skip('symlinks unavailable')
+        lines = [contract.PATH_ENV + '=' + str(alias), pair[1]]
     if mutation == 'other_file':
         # A correctly sealed file that is not the manifest.
         other = tmp_path / 'ci-s0-baseline' / 'provenance.json'
@@ -416,9 +424,12 @@ def test_containment_rescans_until_no_owned_process_is_left(tmp_path, monkeypatc
         def kill(self):
             pass
 
-    # The first scan sees one process; killing it reveals a child started meanwhile.
-    scans = [[Fake(1)], [Fake(2)], []]
+    import time
+    # The first scan sees one process; killing it reveals a child started
+    # meanwhile; one empty scan is not enough, a child appears in the next.
+    scans = [[Fake(1)], [Fake(2)], [], [Fake(3)], [], []]
     monkeypatch.setattr(module, 'stray_processes', lambda output, owner: (psutil, scans.pop(0)))
     monkeypatch.setattr(psutil, 'wait_procs', lambda processes, timeout: (processes, []))
+    monkeypatch.setattr(time, 'sleep', lambda seconds: None)
     assert module.contain(tmp_path) == []
     assert scans == []
