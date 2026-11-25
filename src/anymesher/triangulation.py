@@ -5,7 +5,8 @@ from __future__ import annotations
 import heapq
 
 from dataclasses import dataclass, field
-from decimal import Context, Decimal, Inexact, localcontext
+from decimal import (MAX_EMAX, MIN_EMIN, ROUND_HALF_EVEN, Context, Decimal, DivisionByZero, Inexact,
+                     InvalidOperation, Overflow, localcontext)
 from fractions import Fraction
 from math import copysign, floor, fsum, hypot, isfinite, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -47,7 +48,21 @@ _ORIENT_DIFFERENCE_CAP, _ORIENT_MAGNITUDE_FLOOR = 2.0 ** 400, 2.0 ** -800
 _INCIRCLE_DIFFERENCE_CAP, _INCIRCLE_SCALE_FLOOR = 2.0 ** 200, 2.0 ** -500
 _SMALLEST_SUBNORMAL = 5e-324
 _DECIMAL_SIGN_DIGITS = 75  # see _exact_orient2d: certified-sign margin in decimal digits
-_DECIMAL_CONTEXT = Context(prec=80)  # copied per use, never activated or mutated
+
+
+def _private_decimal_context() -> Context:
+    """The 80-digit context of the orient2d fallback, every field explicit.
+
+    ``Context(prec=80)`` alone inherits ``decimal.DefaultContext``'s other fields; a
+    caller who narrowed its exponent range would make the decimal evaluation underflow
+    and void the sign certificate.  The full exponent range covers every binary64
+    product (adjusted exponents within about +-650).
+    """
+    return Context(prec=80, rounding=ROUND_HALF_EVEN, Emin=MIN_EMIN, Emax=MAX_EMAX, capitals=1, clamp=0,
+                   flags=[], traps=[InvalidOperation, DivisionByZero, Overflow])
+
+
+_DECIMAL_CONTEXT = _private_decimal_context()  # copied per use, never activated or mutated
 
 
 def _nonzero_sign_kept(value: float, exact: Any) -> float:
@@ -175,8 +190,10 @@ def _decimal_orient2d_products(values: Sequence[float]) -> tuple[Decimal, Decima
 
 def _decimal_orient2d_products_in(values: Sequence[float], context: Context) -> tuple[Decimal, Decimal]:
     """:func:`_decimal_orient2d_products` evaluated in ``context`` (the same operations, the same order)."""
-    # ``Decimal(float)`` is the exact conversion ``_decimal`` makes (``values`` are floats already).
-    fx, fy, sx, sy, tx, ty = (Decimal(value) for value in values)
+    # ``Decimal.from_float`` is the exact conversion ``_decimal`` makes (``values`` are floats already);
+    # unlike ``Decimal(float)`` it never consults the caller's FloatOperation trap.
+    from_float = Decimal.from_float
+    fx, fy, sx, sy, tx, ty = (from_float(value) for value in values)
     subtract, multiply = context.subtract, context.multiply
     return (multiply(subtract(fx, tx), subtract(sy, ty)),
             multiply(subtract(fy, ty), subtract(sx, tx)))

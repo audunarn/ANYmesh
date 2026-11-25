@@ -209,3 +209,29 @@ def test_an_inexact_decimal_fallback_with_a_certain_sign_keeps_the_earlier_value
     earlier = float(left - right)
     value = orient2d(*points)
     assert value == earlier and value > 0.0 and Fraction(*_exact_ratio(points)) > 0
+
+
+def test_a_narrow_default_decimal_exponent_range_cannot_change_the_sign(monkeypatch):
+    """Codex r5 (High): the private 80-digit context must not inherit DefaultContext's exponent range."""
+    import decimal
+
+    import anymesher.triangulation as triangulation
+
+    monkeypatch.setattr(decimal.DefaultContext, "Emin", -170)
+    monkeypatch.setattr(triangulation, "_DECIMAL_CONTEXT", triangulation._private_decimal_context())
+    points = ((4.9e-250, 1.0), (5.1e-250, 2.0), (0.0, 0.0))
+    assert Fraction(*_exact_ratio(points)) > 0
+    assert orient2d(*points) == float.fromhex("0x1.aebaa746bbf7ep-829")
+
+
+def test_a_caller_float_operation_trap_cannot_change_the_value():
+    """Codex r5 (Medium): float -> Decimal conversion must not consult the caller's FloatOperation trap."""
+    from decimal import FloatOperation, localcontext
+
+    points = ((3 * 2.0 ** -809, 0.0), (0.0, 1 - 2.0 ** -52), (0.0, 0.0))
+    expected = float.fromhex("0x1.7ffffffffffffp-808")
+    assert orient2d(*points) == expected
+    with localcontext() as context:
+        context.traps[FloatOperation] = True
+        assert orient2d(*points) == expected
+        assert not context.flags[FloatOperation]
