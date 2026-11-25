@@ -1,9 +1,11 @@
 name: Tests
 run-name: ${{ inputs.s0_diagnostic_only == true && 'DIAGNOSTIC ONLY - six S0 Mac faces' || 'Tests' }}
 
+# Branches are tested through their pull request; push runs only on main and release tags
+# (owner, 2026-11-25: reduce CI load).
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -14,6 +16,12 @@ on:
         description: 'Run only the bounded S0 Mac diagnostic; not the full CI or a release gate'
   schedule:
     - cron: "0 2 * * 0"
+
+# Superseded pull-request runs are cancelled.  Every other run (main pushes, tags, schedules,
+# dispatches) gets a group of its own, so it is never cancelled or replaced by a newer run.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
