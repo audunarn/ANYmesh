@@ -390,6 +390,9 @@ def test_original_ch9_point_three_mesh_matches_complete_reference(monkeypatch, r
     for row in rows.values():
         row["seed_triangulation_backend"] = "python"
     assert a == b
+    # Dictionary equality treats -0.0 and 0.0 alike: also compare bytes.
+    import json
+    assert json.dumps(a, sort_keys=True).encode() == json.dumps(b, sort_keys=True).encode()
 
 
 def test_constrained_annular_chart_has_successful_native_insertion():

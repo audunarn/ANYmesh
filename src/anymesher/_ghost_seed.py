@@ -43,7 +43,15 @@ GHOST = -1
 
 
 class GhostSeedRefusal(Exception):
-    """The symbolic-infinity seed could not certify a result."""
+    """The symbolic-infinity seed could not certify a result.
+
+    ``reason`` is a stable code.  Properties of the input (``too_few``,
+    ``duplicate``, ``collinear``, ``cocircular``) are shared with the native
+    mirror, which returns them as refusals; broken invariants
+    (``non_positive``, ``nonmanifold``, ``lost_twin``, ``not_located``,
+    ``not_delaunay``) are internal errors there and cannot occur with exact
+    predicates.
+    """
 
     def __init__(self, message: str, reason: str) -> None:
         super().__init__(message)

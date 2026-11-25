@@ -314,7 +314,10 @@ def _run_reference_native_seed(points, orientation, circle, cancellation_check):
         )
     except _ReferenceSeedCallbackFailure:
         error, traceback = captured[0]
-        raise error.with_traceback(traceback)
+        # Re-raise the captured instance itself: an overridden
+        # ``with_traceback`` must not replace the caller's exception.
+        del traceback
+        raise error
     except RuntimeError as error:
         # A refused cavity/point-location attempt has published nothing.
         # The unchanged full Python insertion remains authoritative.

@@ -308,3 +308,81 @@ def test_callback_exceptions_keep_their_identity_and_never_fall_back(monkeypatch
             _reference_native_seed=True, cancellation_check=cancel,
         )
     assert caught.value is error
+
+
+
+@pytest.mark.parametrize("phase", ["native triangulation insertion"])
+def test_reference_seed_callback_identity_survives_hostile_with_traceback(phase):
+    _extension()
+    outer, points = _rotated_rectangle(.3)
+    error = _Hostile("stop")
+
+    def cancel(where):
+        if where == phase:
+            raise error
+
+    with pytest.raises(_Hostile) as caught:
+        triangulation.triangulate_polygon(
+            outer, interior_points=points[len(outer):], backend="python",
+            _reference_native_seed=True, cancellation_check=cancel,
+        )
+    assert caught.value is error
+
+
+def test_native_ghost_codes_only_input_properties_as_refusals(monkeypatch):
+    # A broken native invariant is an internal error: Python retries it.
+    _extension()
+    angle = next(a for a in ANGLES if _ghost_or_tie(_rotated_rectangle(a)[1]) is not None)
+    outer, points = _rotated_rectangle(angle)
+    complete = triangulation._complete_hull_seed
+    monkeypatch.setattr(triangulation, "_run_ghost_native_seed",
+                        lambda *args: (None, "ghost_seed_native_error: ghost seed lost an edge twin"))
+    monkeypatch.setattr(triangulation, "_finite_hull_seed", _forbidden("fallback ran"))
+    result = triangulation.triangulate_polygon(
+        outer, interior_points=points[len(outer):], backend="python", _reference_native_seed=True,
+    )
+    assert result.native_diagnostics["ghost_seed_attempts"] == (
+        "ghost_seed_native_error: ghost seed lost an edge twin", "python")
+    assert complete is triangulation._complete_hull_seed
+
+
+def _rounding_control():
+    import ctypes
+    import sys
+    if sys.platform == "win32":
+        library, downward = ctypes.CDLL("ucrtbase"), 0x0100
+    elif sys.platform == "darwin":
+        library = ctypes.CDLL(None)
+        import platform
+        downward = 0x00800000 if platform.machine() == "arm64" else 0x0400
+    else:
+        library, downward = ctypes.CDLL(None), 0x0400
+    return library.fegetround, library.fesetround, downward
+
+
+def test_native_ghost_seed_runs_under_round_to_nearest_and_restores_the_mode():
+    _extension()
+    try:
+        get, put, downward = _rounding_control()
+    except OSError:
+        pytest.skip("no C runtime rounding control")
+    # Review r3 fixture: exactly cocircular; under FE_DOWNWARD a native
+    # certificate evaluated in the caller's mode accepted the tie.
+    s, k = 2. ** -45, 28340226917889
+    cx, cy = -6823211715099, 42014152124534
+    radius = 10. * k * s
+    outer = [[-radius, -radius], [0., np.nextafter(-radius, np.inf)], [radius, -radius],
+             [radius, radius], [-radius, radius]]
+    interior = [[s * (cx + k * u), s * (cy + k * v)] for u, v in ((5, 0), (-4, 3), (3, -4), (4, -3))]
+    points = np.ascontiguousarray(outer + interior, dtype=float)
+    seen = []
+    original = get()
+    put(downward)
+    try:
+        actual, reason = native._run_ghost_native_seed(points, lambda phase: seen.append(get()))
+        after = get()
+    finally:
+        put(original)
+    assert actual is None and reason.startswith("ghost_seed_native_refusal: cocircular:")
+    assert after == downward
+    assert seen and set(seen) == {downward}

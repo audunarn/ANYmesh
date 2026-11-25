@@ -11,6 +11,7 @@
 
 #include "_triangulation_native.hpp"
 
+#include <cfenv>
 #include <set>
 
 namespace anymesher_native {
@@ -41,11 +42,19 @@ inline double ghost_incircle(const Point& a, const Point& b, const Point& c, con
     return static_cast<double>(expansion_sign(exact_incircle_expansion(a, b, c, p)));
 }
 
-// An algorithm refusal with a stable code (see _ghost_seed.GhostSeedRefusal);
-// any other exception is an internal error, never a refusal.
+// A refusal for a property of the input with a stable code shared with
+// _ghost_seed.GhostSeedRefusal (too_few, duplicate, collinear, cocircular).
+// Broken invariants throw std::runtime_error: an internal error the Python
+// reference retries.
 struct GhostRefusal : std::runtime_error {
     GhostRefusal(const char* code_, const char* message) : std::runtime_error(message), code(code_) {}
     const char* code;
+};
+
+struct RoundToNearest {
+    int saved;
+    RoundToNearest() : saved(std::fegetround()) { std::fesetround(FE_TONEAREST); }
+    ~RoundToNearest() { std::fesetround(saved); }
 };
 
 class GhostSeed {
@@ -53,8 +62,10 @@ public:
     using Cancellation = void (*)(void*, const char*);
     static constexpr Index kGhost = -1;
 
-    GhostSeed(std::vector<Point> points, Cancellation cancellation, void* context)
-        : points_(std::move(points)), cancellation_(cancellation), context_(context) {}
+    GhostSeed(std::vector<Point> points, Cancellation cancellation, void* context,
+              int caller_rounding)
+        : points_(std::move(points)), cancellation_(cancellation), context_(context),
+          caller_rounding_(caller_rounding) {}
 
     std::vector<std::array<Index, 3>> run() {
         const Index count = static_cast<Index>(points_.size());
@@ -98,7 +109,7 @@ public:
                 const Index id = owner_.at(DirectedKey{ghost.first, ghost.second});
                 if (conflict(id, p)) { start = id; break; }
             }
-            if (start < 0) throw GhostRefusal("not_located", "ghost seed could not locate a point");
+            if (start < 0) throw std::runtime_error("ghost seed could not locate a point");
             ++stamp_;
             if (mark_.size() < cells_.size()) mark_.resize(cells_.size(), 0);
             cavity.clear(); pending.clear(); boundary.clear();
@@ -109,7 +120,7 @@ public:
                 for (int i = 0; i < 3; ++i) {
                     const Index u = cell[i], v = cell[(i + 1) % 3];
                     const auto found = owner_.find(DirectedKey{v, u});
-                    if (found == owner_.end()) throw GhostRefusal("lost_twin", "ghost seed lost an edge twin");
+                    if (found == owner_.end()) throw std::runtime_error("ghost seed lost an edge twin");
                     const Index neighbour = found->second;
                     if (mark_[neighbour] == stamp_) continue;
                     if (conflict(neighbour, p)) {
@@ -147,7 +158,7 @@ public:
             for (Index node : other) if (node != u && node != v) opposite = node;
             const double value =
                 ghost_incircle(points_[cell[0]], points_[cell[1]], points_[cell[2]], points_[opposite]);
-            if (value > 0.0) throw GhostRefusal("not_delaunay", "ghost seed result is not Delaunay");
+            if (value > 0.0) throw std::runtime_error("ghost seed result is not Delaunay");
             tie = tie || value == 0.0;
         }
         // Exactly cocircular ties admit several Delaunay triangulations; the
@@ -179,8 +190,18 @@ private:
         }
     };
 
+    // The exact predicates assume round-to-nearest.  The caller's rounding
+    // mode is restored around every callback and on exit (RoundToNearest).
     void check_cancel(const char* phase) {
-        if (cancellation_ != nullptr) cancellation_(context_, phase);
+        if (cancellation_ == nullptr) return;
+        std::fesetround(caller_rounding_);
+        try {
+            cancellation_(context_, phase);
+        } catch (...) {
+            std::fesetround(FE_TONEAREST);
+            throw;
+        }
+        std::fesetround(FE_TONEAREST);
     }
 
     bool between(Index a, Index b, Index p) const {
@@ -202,7 +223,7 @@ private:
 
     void add_finite(Index a, Index b, Index c) {
         if (ghost_orient(points_[a], points_[b], points_[c]) <= 0.0)
-            throw GhostRefusal("non_positive", "ghost seed created a non-positive cell");
+            throw std::runtime_error("ghost seed created a non-positive cell");
         add_cell({a, b, c});
     }
 
@@ -212,7 +233,7 @@ private:
         else { id = static_cast<Index>(cells_.size()); cells_.push_back(cell); alive_.push_back(1); }
         for (int i = 0; i < 3; ++i) {
             if (!owner_.emplace(DirectedKey{cell[i], cell[(i + 1) % 3]}, id).second)
-                throw GhostRefusal("nonmanifold", "ghost seed created a nonmanifold edge");
+                throw std::runtime_error("ghost seed created a nonmanifold edge");
         }
         if (cell[2] == kGhost) ghosts_.insert({cell[0], cell[1]});
     }
@@ -228,6 +249,7 @@ private:
     std::vector<Point> points_;
     Cancellation cancellation_ = nullptr;
     void* context_ = nullptr;
+    int caller_rounding_ = FE_TONEAREST;
     std::vector<std::array<Index, 3>> cells_;
     std::vector<unsigned char> alive_;
     std::vector<Index> free_;
@@ -265,7 +287,8 @@ inline PyObject* py_ghost_delaunay(PyObject*, PyObject* args) {
     CallbackContext context{callback, &released_state, false, nullptr, nullptr};
     std::vector<std::array<Index, 3>> triangles;
     try {
-        GhostSeed engine(std::move(points), invoke_callback, &context);
+        RoundToNearest rounding;
+        GhostSeed engine(std::move(points), invoke_callback, &context, rounding.saved);
         triangles = engine.run();
     } catch (const CallbackFailure&) {
         PyEval_RestoreThread(released_state);
