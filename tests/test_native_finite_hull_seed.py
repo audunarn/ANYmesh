@@ -525,6 +525,86 @@ def test_native_survives_a_callback_that_corrupts_its_private_edge_sets():
         pass
 
 
+def test_direct_native_calls_need_an_exact_ndarray_and_an_exact_hull_container():
+    # Codex r4 (high): a subclass's dtype property could resize the array under a held buffer view;
+    # (low) a custom hull iterable ran foreign iteration before validation.
+    module = _native_module()
+    helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)
+
+    class Resizing(np.ndarray):
+        @property
+        def dtype(self):
+            self.resize((3, 2), refcheck=False)
+            return super().dtype
+
+    good = np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (1.0, 1.0)])
+    sub = good.copy().view(Resizing)
+    with pytest.raises(TypeError):
+        module.finite_hull_seed(sub, [0, 1, 2], lambda stage: None, *helpers, triangulation._FHS_STAGES)
+    iterated = []
+
+    class Hull:
+        def __iter__(self):
+            iterated.append(True)
+            return iter([0, 1, 2])
+
+    with pytest.raises(TypeError):
+        module.finite_hull_seed(good, Hull(), None, *helpers, triangulation._FHS_STAGES)
+    assert iterated == []
+    assert module.finite_hull_seed(good, (0, 1, 2), None, *helpers, triangulation._FHS_STAGES)
+
+
+def test_native_private_edge_sets_are_invisible_to_the_gc():
+    # Codex r4 (low): the engine's vertex-edge sets cannot be reached through gc.get_objects().
+    import gc
+
+    points = FAMILIES[1].copy()
+    n = len(points)
+    seen = []
+
+    def look(stage):
+        if stage.endswith("legality") and not seen:
+            seen.append(sum(1 for item in gc.get_objects()
+                            if type(item) is set and item
+                            and all(type(e) is tuple and len(e) == 2 and all(type(v) is int and 0 <= v < n for v in e)
+                                    for e in item)))
+
+    triangulation._finite_hull_seed(points, look)
+    assert seen == [0]
+    seen.clear()
+    _python(triangulation._finite_hull_seed, points.copy(), look)
+    assert seen and seen[0] > 0  # the Python route's sets are ordinary tracked sets
+
+
+def test_native_result_list_is_never_visible_half_built():
+    # Codex r4 (high, CPython 3.11 path): no GC pass during result construction may find a list with
+    # empty slots. A gen-0 threshold of 1 makes allocations collect; the callback looks (read-only) for
+    # a list whose length exceeds the items its iterator yields (iteration stops at an empty slot).
+    import gc
+
+    points = FAMILIES[3].copy()
+    expected = _python(triangulation._finite_hull_seed, points.copy())
+    half_built = []
+
+    def look(phase, info):
+        if phase == "start":
+            for item in gc.get_objects():
+                if type(item) is list and item:
+                    if sum(1 for _ in item) != len(item):
+                        half_built.append(len(item))
+
+    old = gc.get_threshold()
+    gc.callbacks.append(look)
+    gc.set_threshold(1, 1, 1)
+    try:
+        got = triangulation._finite_hull_seed(points.copy())
+    finally:
+        gc.set_threshold(*old)
+        gc.callbacks.remove(look)
+    assert got == expected
+    assert half_built == []
+
+
 def test_direct_native_calls_validate_their_inputs():
     module = _native_module()
     helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)

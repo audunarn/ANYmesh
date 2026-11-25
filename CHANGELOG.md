@@ -16,7 +16,9 @@
   the entry below. Added to "not defended" (owner, 2026-11-25): the Python frames between the
   routine and its callback (the engine calls the callback from C), and so `RecursionError` near
   the recursion limit, caller-frame inspection, warnings attributed by `stacklevel` (and
-  module-based filtering of them), traceback contents, and tracing/profiling hooks. Tests: `tests/test_native_finite_hull_seed.py`,
+  module-based filtering of them), traceback contents, and tracing/profiling hooks. Also (owner,
+  2026-11-25): direct calls of private native functions and interpreter-level hooks (gc
+  callbacks, `gc.get_objects` tampering) are not defended for results; memory safety is kept. Tests: `tests/test_native_finite_hull_seed.py`,
   `tests/test_tripod_speed_identity.py` (both routes); scale harness `tools/fhs_native_harness.py`.
 
 - **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example

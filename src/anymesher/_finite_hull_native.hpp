@@ -441,6 +441,9 @@ struct Engine {
     // Snapshot and coordinates.  The Python caller guarantees an exact float64 (n, 2) finite
     // ndarray; anything else (a direct call) is refused before any callback.
     void take_snapshot() {
+        // Python-visible reads first; while the buffer view is held no Python code runs.
+        dtype_name.p = checked(PyUnicode_FromString("dtype"));
+        snap.dtype = checked(PyObject_GetAttr(points, dtype_name.p));
         Py_buffer view;
         if (PyObject_GetBuffer(points, &view, PyBUF_RECORDS_RO) != 0) throw PyError();
         BufferRelease release{&view};
@@ -469,8 +472,6 @@ struct Engine {
                 throw PyError();
             }
         }
-        dtype_name.p = checked(PyUnicode_FromString("dtype"));
-        snap.dtype = checked(PyObject_GetAttr(points, dtype_name.p));
     }
 
     // The option-1 checkpoint: call back, then drop to the live array on any change of
@@ -478,6 +479,18 @@ struct Engine {
     void checkpoint(PyObject* stage) {
         Py_DECREF(checked(PyObject_CallOneArg(callback, stage)));  // discarded first, as in Python
         if (live) return;
+        {
+            // dtype first, without a view held (an exact ndarray: numpy's own getter and comparison).
+            Ref dtype(checked(PyObject_GetAttr(points, dtype_name.p)));
+            if (dtype.p != snap.dtype) {
+                const int equal = PyObject_RichCompareBool(dtype.p, snap.dtype, Py_EQ);
+                if (equal < 0) throw PyError();
+                if (!equal) {
+                    live = true;
+                    return;
+                }
+            }
+        }
         Py_buffer view;
         if (PyObject_GetBuffer(points, &view, PyBUF_RECORDS_RO) != 0) {
             PyErr_Clear();  // not exportable: the dtype or the layout changed
@@ -485,20 +498,12 @@ struct Engine {
             return;
         }
         BufferRelease release{&view};
-        if (view.buf != snap.buf || view.ndim != static_cast<int>(snap.shape.size())
+        // From here to the release no Python code runs; the bytes are read under the export.
+        if (view.buf != snap.buf || view.ndim != static_cast<int>(snap.shape.size()) || !is_native_float64(view)
                 || !std::equal(snap.shape.begin(), snap.shape.end(), view.shape)
                 || !std::equal(snap.strides.begin(), snap.strides.end(), view.strides)) {
             live = true;
             return;
-        }
-        Ref dtype(checked(PyObject_GetAttr(points, dtype_name.p)));
-        if (dtype.p != snap.dtype) {
-            const int equal = PyObject_RichCompareBool(dtype.p, snap.dtype, Py_EQ);
-            if (equal < 0) throw PyError();
-            if (!equal) {
-                live = true;
-                return;
-            }
         }
         const Py_ssize_t n = view.shape[0];
         const char* base = static_cast<const char*>(view.buf);
@@ -657,7 +662,10 @@ struct Engine {
 
     void set_add(int64_t vertex, PyObject* edge) {
         PyObject*& s = vertex_edges[static_cast<size_t>(vertex)];
-        if (s == nullptr) s = checked(PySet_New(nullptr));
+        if (s == nullptr) {
+            s = checked(PySet_New(nullptr));
+            PyObject_GC_UnTrack(s);  // private: invisible to gc.get_objects(); holds no cycles
+        }
         if (PySet_Add(s, edge) != 0) throw PyError();
     }
 
@@ -826,12 +834,20 @@ struct Engine {
             if (!found_edge) {
                 std::vector<Tri> result = triangles;
                 std::sort(result.begin(), result.end());
-                Ref list(checked(PyList_New(static_cast<Py_ssize_t>(result.size()))));
-                for (size_t i = 0; i < result.size(); ++i) {
-                    PyList_SET_ITEM(list.p, static_cast<Py_ssize_t>(i), tri_tuple(result[i]));
+                // Every tuple exists before the list does: no allocation (hence no GC pass) can
+                // see a partly filled list.
+                std::vector<PyObject*> items;
+                items.reserve(result.size());
+                struct Owned {
+                    std::vector<PyObject*>* v;
+                    ~Owned() { for (PyObject* o : *v) Py_XDECREF(o); }
+                } owned{&items};
+                for (const Tri& t : result) items.push_back(tri_tuple(t));
+                PyObject* out = checked(PyList_New(static_cast<Py_ssize_t>(items.size())));
+                for (size_t i = 0; i < items.size(); ++i) {
+                    PyList_SET_ITEM(out, static_cast<Py_ssize_t>(i), items[i]);  // steals
+                    items[i] = nullptr;
                 }
-                PyObject* out = list.p;
-                list.p = nullptr;
                 return out;
             }
             const Rows rows = rows_of(edge);
@@ -920,12 +936,28 @@ inline PyObject* py_finite_hull_seed(PyObject*, PyObject* args) {
     Ref stage_insertion(Py_NewRef(PyTuple_GET_ITEM(stages, 0)));
     Ref stage_edge(Py_NewRef(PyTuple_GET_ITEM(stages, 1)));
     Ref stage_legality(Py_NewRef(PyTuple_GET_ITEM(stages, 2)));
+    {
+        // Exact numpy.ndarray only (its type cannot be reassigned): attribute reads and the buffer
+        // export are numpy's own and run no Python code.
+        Ref numpy(PyImport_ImportModule("numpy"));
+        if (numpy.p == nullptr) return nullptr;
+        Ref ndarray(PyObject_GetAttrString(numpy.p, "ndarray"));
+        if (ndarray.p == nullptr) return nullptr;
+        if (reinterpret_cast<PyObject*>(Py_TYPE(points)) != ndarray.p) {
+            PyErr_SetString(PyExc_TypeError, "finite hull seed: points must be an exact numpy.ndarray");
+            return nullptr;
+        }
+    }
     Ref held_points(Py_NewRef(points));
     Ref held_helpers[3] = {Ref(Py_NewRef(location)), Ref(Py_NewRef(flip_test)), Ref(Py_NewRef(canonical))};
     Ref held_callback(Py_NewRef(callback));
     try {
         std::vector<int64_t> hull;
         {
+            if (!PyList_CheckExact(hull_object) && !PyTuple_CheckExact(hull_object)) {
+                PyErr_SetString(PyExc_TypeError, "finite hull seed: hull must be a list or tuple of int");
+                return nullptr;
+            }
             Ref sequence(PySequence_Fast(hull_object, "hull must be a sequence"));
             if (sequence.p == nullptr) return nullptr;
             const Py_ssize_t m = PySequence_Fast_GET_SIZE(sequence.p);
