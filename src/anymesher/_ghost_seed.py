@@ -45,7 +45,7 @@ GHOST = -1
 class GhostSeedRefusal(Exception):
     """The symbolic-infinity seed could not certify a result."""
 
-    def __init__(self, message: str, reason: str = "refused") -> None:
+    def __init__(self, message: str, reason: str) -> None:
         super().__init__(message)
         self.reason = reason
 
@@ -59,12 +59,12 @@ def ghost_bowyer_watson(
     """Return the sorted canonical cells of a complete Delaunay triangulation."""
     count = len(points)
     if count < 3:
-        raise GhostSeedRefusal("ghost seed needs at least three points")
+        raise GhostSeedRefusal("ghost seed needs at least three points", reason="too_few")
     coords = [(float(row[0]), float(row[1])) for row in points.tolist()]
     order = sorted(range(count), key=lambda row: (coords[row][0], coords[row][1], row))
     for first, second in zip(order, order[1:]):
         if coords[first] == coords[second]:
-            raise GhostSeedRefusal("ghost seed refuses duplicate stations")
+            raise GhostSeedRefusal("ghost seed refuses duplicate stations", reason="duplicate")
 
     # Directed edge (u, v) -> cell key that contains it.  Cells are tuples:
     # finite CCW (a, b, c) or ghost (a, b, GHOST).
@@ -76,7 +76,7 @@ def ghost_bowyer_watson(
         a, b, c = cell
         for edge in ((a, b), (b, c), (c, a)):
             if edge in owner:
-                raise GhostSeedRefusal("ghost seed created a nonmanifold edge")
+                raise GhostSeedRefusal("ghost seed created a nonmanifold edge", reason="nonmanifold")
             owner[edge] = cell
         cells.add(cell)
         if c == GHOST:
@@ -104,7 +104,7 @@ def ghost_bowyer_watson(
     def finite(a: int, b: int, c: int) -> tuple[int, int, int]:
         turn = orient2d(coords[a], coords[b], coords[c])
         if turn <= 0.0:
-            raise GhostSeedRefusal("ghost seed created a non-positive cell")
+            raise GhostSeedRefusal("ghost seed created a non-positive cell", reason="non_positive")
         return (a, b, c)
 
     # Initial fan over the leading collinear run.
@@ -112,7 +112,7 @@ def ghost_bowyer_watson(
     while apex < count and orient2d(coords[order[0]], coords[order[1]], coords[order[apex]]) == 0.0:
         apex += 1
     if apex == count:
-        raise GhostSeedRefusal("ghost seed input is collinear")
+        raise GhostSeedRefusal("ghost seed input is collinear", reason="collinear")
     top = order[apex]
     side = orient2d(coords[order[0]], coords[order[1]], coords[top])
     for index in range(apex - 1):
@@ -128,7 +128,7 @@ def ghost_bowyer_watson(
         p = order[position]
         start = next((cell for cell in sorted(ghosts) if conflict(cell, p)), None)
         if start is None:
-            raise GhostSeedRefusal("ghost seed could not locate a point")
+            raise GhostSeedRefusal("ghost seed could not locate a point", reason="not_located")
         cavity = {start}
         pending = [start]
         while pending:
@@ -136,7 +136,7 @@ def ghost_bowyer_watson(
             for u, v in ((a, b), (b, c), (c, a)):
                 neighbour = owner.get((v, u))
                 if neighbour is None:
-                    raise GhostSeedRefusal("ghost seed lost an edge twin")
+                    raise GhostSeedRefusal("ghost seed lost an edge twin", reason="lost_twin")
                 if neighbour not in cavity and conflict(neighbour, p):
                     cavity.add(neighbour)
                     pending.append(neighbour)
@@ -169,7 +169,7 @@ def ghost_bowyer_watson(
         opposite = next(node for node in other if node not in (u, v))
         value = incircle(*(coords[node] for node in cell), coords[opposite])
         if value > 0.0:
-            raise GhostSeedRefusal("ghost seed result is not Delaunay")
+            raise GhostSeedRefusal("ghost seed result is not Delaunay", reason="not_delaunay")
         tie = tie or value == 0.0
     if tie:
         raise GhostSeedRefusal("ghost seed has cocircular ties", reason="cocircular")

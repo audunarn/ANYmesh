@@ -155,7 +155,9 @@ def test_discarded_native_hull_reports_actual_python(monkeypatch):
     assert actual.native_diagnostics == {
         "reference_native_seed": True, "insertion_discarded": True,
         "discarded_seed": "anymesher-cpp17-reference-seed",
-        "ghost_seed": "ghost_seed_native_refusal: ghost seed has cocircular ties",
+        "ghost_seed": "ghost_seed_native_refusal: cocircular: ghost seed has cocircular ties",
+        "ghost_seed_attempts": (
+            "ghost_seed_native_refusal: cocircular: ghost seed has cocircular ties",),
     }
     assert len(checks) == 4  # initial rejection and the finite-hull check, twice
 
@@ -175,6 +177,7 @@ def test_discarded_native_hull_is_completed_by_the_native_ghost_seed(monkeypatch
         "reference_native_seed": True, "insertion_discarded": True,
         "discarded_seed": "anymesher-cpp17-reference-seed",
         "ghost_seed": "anymesher-cpp17-ghost-seed",
+        "ghost_seed_attempts": ("anymesher-cpp17-ghost-seed",),
     }
     assert len(checks) == 4  # initial rejection and the ghost-seed check, twice
 
@@ -188,7 +191,7 @@ def test_refused_ghost_seed_keeps_the_finite_hull_route(monkeypatch, native_ghos
 
     def refuse(*args, **kwargs):
         python_calls.append(None)
-        raise GhostSeedRefusal("forced")
+        raise GhostSeedRefusal("forced", reason="forced")
 
     monkeypatch.setattr(triangulation, "ghost_bowyer_watson", refuse)
     native_result = {
@@ -213,7 +216,13 @@ def test_refused_ghost_seed_keeps_the_finite_hull_route(monkeypatch, native_ghos
         "reference_native_seed": True, "insertion_discarded": True,
         "discarded_seed": "anymesher-cpp17-reference-seed",
         "ghost_seed": ("ghost_seed_native_refusal: forced" if native_ghost == "refused"
-                       else "ghost_seed_python_refusal: forced"),
+                       else "ghost_seed_python_refusal: forced: forced"),
+        "ghost_seed_attempts": {
+            "absent": ("ghost_seed_capability_absent", "ghost_seed_python_refusal: forced: forced"),
+            "refused": ("ghost_seed_native_refusal: forced",),
+            "uncertified": ("ghost_seed_native_uncertified",
+                            "ghost_seed_python_refusal: forced: forced"),
+        }[native_ghost],
     }
 
 
@@ -364,6 +373,14 @@ def test_original_ch9_point_three_mesh_matches_complete_reference(monkeypatch, r
         kwargs["_reference_native_seed"] = False
         return original(*args, **kwargs)
     monkeypatch.setattr(seed, "triangulate_polygon", python_seed)
+    # Expected side: the pre-change route (incomplete seeds always use the
+    # finite-hull fan), so equality also proves the ghost seed changes nothing.
+    from anymesher._ghost_seed import GhostSeedRefusal
+
+    def no_ghost(*args, **kwargs):
+        raise GhostSeedRefusal("disabled", reason="disabled")
+
+    monkeypatch.setattr(triangulation, "ghost_bowyer_watson", no_ghost)
     expected = _generate(model, (face,), .3, order="quadratic").mesh
     assert _persistent_state(model) == persistent
     a, b = deepcopy(mesh_to_dict(actual)), mesh_to_dict(expected)

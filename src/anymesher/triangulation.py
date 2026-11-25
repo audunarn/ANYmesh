@@ -1957,29 +1957,46 @@ def constrained_planar_triangulation(
             # cocircular ties, refusals and uncertified seeds keep the fan.
             discarded = used_backend == "anymesher-cpp17-reference-seed"
             native_route = _reference_native_seed and chosen == "python"
-            ghost = outcome = None
+            ghost = None
+            attempts: list[str] = []
             if native_route:
                 candidate, reason = _run_ghost_native_seed(prepared.points, cancellation_check)
                 if candidate is None:
-                    outcome = reason
+                    attempts.append(reason)
                 elif _complete_hull_seed(prepared.points, candidate, cancellation_check):
-                    ghost, outcome = candidate, "anymesher-cpp17-ghost-seed"
+                    ghost = candidate
+                    attempts.append("anymesher-cpp17-ghost-seed")
                 else:
-                    outcome = "ghost_seed_native_uncertified"
+                    attempts.append("ghost_seed_native_uncertified")
             # A native refusal made the Python reference's decisions; only an
-            # absent, unsupported or uncertified native seed is retried.
-            if ghost is None and not (outcome or "").startswith("ghost_seed_native_refusal"):
+            # absent, unsupported, failed or uncertified native seed is retried.
+            if ghost is None and not (attempts and attempts[-1].startswith(
+                    "ghost_seed_native_refusal")):
+                callback_errors: list[BaseException] = []
+
+                def guarded(phase: str) -> None:
+                    try:
+                        cancellation_check(phase)
+                    except BaseException as error:
+                        callback_errors.append(error)
+                        raise
+
                 try:
                     candidate = ghost_bowyer_watson(
-                        prepared.points, orient2d, incircle, cancellation_check
+                        prepared.points, orient2d, incircle,
+                        guarded if cancellation_check is not None else None,
                     )
                 except GhostSeedRefusal as refusal:
-                    outcome = "ghost_seed_python_refusal: " + str(refusal)
+                    if callback_errors:
+                        # The callback raised a refusal type: cancellation, not a refusal.
+                        raise callback_errors[0] from None
+                    attempts.append(f"ghost_seed_python_refusal: {refusal.reason}: {refusal}")
                 else:
                     if _complete_hull_seed(prepared.points, candidate, cancellation_check):
-                        ghost, outcome = candidate, "python"
+                        ghost = candidate
+                        attempts.append("python")
                     else:
-                        outcome = "ghost_seed_python_uncertified"
+                        attempts.append("ghost_seed_python_uncertified")
             if ghost is not None:
                 triangles = ghost
             else:
@@ -1987,7 +2004,7 @@ def constrained_planar_triangulation(
             if native_route:
                 used_backend = (
                     "anymesher-cpp17-ghost-seed"
-                    if outcome == "anymesher-cpp17-ghost-seed" else "python"
+                    if attempts[-1] == "anymesher-cpp17-ghost-seed" else "python"
                 )
                 if used_backend != "python":
                     selected_backend = used_backend
@@ -1999,7 +2016,8 @@ def constrained_planar_triangulation(
                     "discarded_seed": (
                         "anymesher-cpp17-reference-seed" if discarded else "python"
                     ),
-                    "ghost_seed": outcome,
+                    "ghost_seed": attempts[-1],
+                    "ghost_seed_attempts": tuple(attempts),
                 }
         protected: set[tuple[int, int]] = set()
         # ``_recover_segment`` returns the triangles unchanged when the segment

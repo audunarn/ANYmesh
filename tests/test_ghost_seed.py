@@ -58,7 +58,7 @@ def test_super_triangle_seed_is_incomplete_on_rotated_stations(angle):
 def _without_ghost(monkeypatch):
     """The pre-change route: incomplete seeds always reach the finite-hull fan."""
     def refuse(*args, **kwargs):
-        raise GhostSeedRefusal("disabled")
+        raise GhostSeedRefusal("disabled", reason="disabled")
 
     monkeypatch.setattr(triangulation, "ghost_bowyer_watson", refuse)
     monkeypatch.setattr(triangulation, "_run_ghost_native_seed",
@@ -74,11 +74,36 @@ def _review_tie_fixture():
     return outer, interior
 
 
+def _scaled_review_tie_fixture():
+    # Review r2 fixture: exactly cocircular interior stations (scaled integer
+    # coordinates); under FP contraction a native certificate published the
+    # other diagonal.  It must refuse and keep the finite-hull fan's choice.
+    s, k = 2. ** -45, 75890737893414
+    radius = 10. * k * s
+    outer = np.array([[-radius, -radius], [0., np.nextafter(-radius, np.inf)], [radius, -radius],
+                      [radius, radius], [-radius, radius]])
+    interior = np.array([[s * (133755125355830 + k * u), s * (-19747421224915 + k * v)]
+                         for u, v in ((5, 0), (-4, 3), (3, -4), (4, -3))])
+    return outer, interior
+
+
 def _inputs():
     for angle in ANGLES:
         outer, points = _rotated_rectangle(angle)
         yield f"rotated-{angle}", outer, points[len(outer):]
     yield ("review-tie", *_review_tie_fixture())
+    yield ("review-tie-scaled", *_scaled_review_tie_fixture())
+
+
+def test_scaled_review_fixture_is_an_exact_tie_refused_on_both_paths():
+    _extension()
+    outer, interior = _scaled_review_tie_fixture()
+    points = np.ascontiguousarray(np.vstack((outer, interior)))
+    with pytest.raises(GhostSeedRefusal) as caught:
+        ghost_bowyer_watson(points, triangulation.orient2d, triangulation.incircle)
+    assert caught.value.reason == "cocircular"
+    actual, reason = native._run_ghost_native_seed(points, None)
+    assert actual is None and reason.startswith("ghost_seed_native_refusal: cocircular:")
 
 
 @pytest.mark.parametrize("reference_native_seed", [True, False])
@@ -186,7 +211,7 @@ def test_native_ghost_seed_matches_python_reference(kind, points):
     expected = _ghost_or_tie(points)
     actual, reason = native._run_ghost_native_seed(points, None)
     if expected is None:
-        assert actual is None and reason.endswith("cocircular ties")
+        assert actual is None and reason.startswith("ghost_seed_native_refusal: cocircular:")
         assert kind != "random"
         return
     assert reason is None
@@ -199,15 +224,18 @@ def test_native_ghost_seed_matches_python_reference(kind, points):
 
 @pytest.mark.parametrize("points,message", [
     (np.array([[0., 0.], [1., 1.], [2., 2.]]), "collinear"),
+    (np.array([[0., 0.], [1., 0.]]), "too_few"),
     (np.array([[0., 0.], [1., 0.], [1., 0.], [0., 1.]]), "duplicate"),
     (np.array([[0., 0.], [1., 0.], [1., 1.], [0., 1.]]), "cocircular"),
 ])
 def test_ghost_seed_refusals_are_typed_and_shared(points, message):
     _extension()
-    with pytest.raises(GhostSeedRefusal, match=message):
+    code = message
+    with pytest.raises(GhostSeedRefusal) as caught:
         ghost_bowyer_watson(points, triangulation.orient2d, triangulation.incircle)
+    assert caught.value.reason == code
     actual, reason = native._run_ghost_native_seed(np.ascontiguousarray(points), None)
-    assert actual is None and message in reason
+    assert actual is None and reason.startswith(f"ghost_seed_native_refusal: {code}: ")
 
 
 class _Stop(RuntimeError):
@@ -244,3 +272,39 @@ def test_cancellation_inside_the_ghost_seed_is_not_a_fallback(monkeypatch, phase
             _reference_native_seed=True, cancellation_check=cancel,
         )
     assert str(caught.value) == phase
+
+
+class _Hostile(RuntimeError):
+    def with_traceback(self, traceback):  # a replacement must not reach the caller
+        return RuntimeError("replaced")
+
+
+@pytest.mark.parametrize("error_type", [_Stop, _Hostile, GhostSeedRefusal, KeyboardInterrupt])
+@pytest.mark.parametrize("native_path", [True, False])
+def test_callback_exceptions_keep_their_identity_and_never_fall_back(monkeypatch, error_type,
+                                                                     native_path):
+    if native_path:
+        _extension()
+    else:
+        monkeypatch.setattr(triangulation, "_run_ghost_native_seed",
+                            lambda *args: (None, "ghost_seed_capability_absent"))
+    angle = next(a for a in ANGLES if _ghost_or_tie(_rotated_rectangle(a)[1]) is not None)
+    outer, points = _rotated_rectangle(angle)
+    if error_type is GhostSeedRefusal:
+        error = GhostSeedRefusal("stop", reason="stop")
+    else:
+        error = error_type("stop")
+    phase = ("native ghost seed certificate" if native_path
+             else "python triangulation ghost seed certificate")
+
+    def cancel(where):
+        if where == phase:
+            raise error
+
+    monkeypatch.setattr(triangulation, "_finite_hull_seed", _forbidden("fallback ran"))
+    with pytest.raises(error_type) as caught:
+        triangulation.triangulate_polygon(
+            outer, interior_points=points[len(outer):], backend="python",
+            _reference_native_seed=True, cancellation_check=cancel,
+        )
+    assert caught.value is error

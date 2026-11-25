@@ -200,9 +200,12 @@ def run_native_triangulation(
 def _run_ghost_native_seed(points, cancellation_check):
     """Native mirror of ``_ghost_seed.ghost_bowyer_watson`` or a typed absence.
 
-    Returns ``(triangles, None)`` or ``(None, reason)``.  A native refusal
-    publishes nothing; the caller then runs the Python reference, which makes
-    the same decisions and refuses the same inputs.
+    Returns ``(triangles, None)`` or ``(None, reason)``.  ``reason`` starts with
+    ``ghost_seed_native_refusal: <code>:`` for an algorithm refusal (the Python
+    reference makes the same decisions and refuses the same inputs), with
+    ``ghost_seed_native_error:`` for an internal failure, or names an absent
+    capability or unsupported input.  Cancellation exceptions propagate as
+    the same instance.
     """
     from types import BuiltinFunctionType
 
@@ -231,20 +234,25 @@ def _run_ghost_native_seed(points, cancellation_check):
         try:
             return cancellation_check(phase)
         except BaseException as error:
-            captured.append((error, error.__traceback__))
+            captured.append(error)
             raise _ReferenceSeedCallbackFailure from None
 
     try:
         raw = kernel(points, checked if cancellation_check is not None else None)
-    except _ReferenceSeedCallbackFailure:
-        # Cancellation (of any exception type) is never a refusal.
-        error, traceback = captured[0]
-        raise error.with_traceback(traceback)
-    except RuntimeError as error:
+    except BaseException as error:
+        # A callback exception (any type) is re-raised as the same instance and
+        # is never a refusal.  Anything else raised here is an internal error:
+        # the Python reference retries it.
         if captured:
-            error, traceback = captured[0]
-            raise error.with_traceback(traceback)
-        return None, "ghost_seed_native_refusal: " + str(error)
+            raise captured[0] from None
+        if isinstance(error, RuntimeError):
+            return None, "ghost_seed_native_error: " + str(error)
+        raise
+    if captured:
+        raise captured[0] from None
+    if isinstance(raw, tuple):
+        code, message = raw
+        return None, f"ghost_seed_native_refusal: {code}: {message}"
     triangles = [tuple(map(int, row)) for row in raw]
     if (triangles != sorted(set(triangles))
             or any(len(row) != 3 or min(row) < 0 or max(row) >= len(points)

@@ -41,6 +41,13 @@ inline double ghost_incircle(const Point& a, const Point& b, const Point& c, con
     return static_cast<double>(expansion_sign(exact_incircle_expansion(a, b, c, p)));
 }
 
+// An algorithm refusal with a stable code (see _ghost_seed.GhostSeedRefusal);
+// any other exception is an internal error, never a refusal.
+struct GhostRefusal : std::runtime_error {
+    GhostRefusal(const char* code_, const char* message) : std::runtime_error(message), code(code_) {}
+    const char* code;
+};
+
 class GhostSeed {
 public:
     using Cancellation = void (*)(void*, const char*);
@@ -51,7 +58,7 @@ public:
 
     std::vector<std::array<Index, 3>> run() {
         const Index count = static_cast<Index>(points_.size());
-        if (count < 3) throw std::runtime_error("ghost seed needs at least three points");
+        if (count < 3) throw GhostRefusal("too_few", "ghost seed needs at least three points");
         std::vector<Index> order(static_cast<std::size_t>(count));
         std::iota(order.begin(), order.end(), Index{0});
         std::sort(order.begin(), order.end(), [this](Index a, Index b) {
@@ -61,13 +68,13 @@ public:
             const Point& a = points_[order[i - 1]];
             const Point& b = points_[order[i]];
             if (a.x == b.x && a.y == b.y)
-                throw std::runtime_error("ghost seed refuses duplicate stations");
+                throw GhostRefusal("duplicate", "ghost seed refuses duplicate stations");
         }
         std::size_t apex = 2;
         while (apex < order.size() &&
                ghost_orient(points_[order[0]], points_[order[1]], points_[order[apex]]) == 0.0)
             ++apex;
-        if (apex == order.size()) throw std::runtime_error("ghost seed input is collinear");
+        if (apex == order.size()) throw GhostRefusal("collinear", "ghost seed input is collinear");
         const Index top = order[apex];
         const double side = ghost_orient(points_[order[0]], points_[order[1]], points_[top]);
         for (std::size_t i = 0; i + 1 < apex; ++i) {
@@ -91,7 +98,7 @@ public:
                 const Index id = owner_.at(DirectedKey{ghost.first, ghost.second});
                 if (conflict(id, p)) { start = id; break; }
             }
-            if (start < 0) throw std::runtime_error("ghost seed could not locate a point");
+            if (start < 0) throw GhostRefusal("not_located", "ghost seed could not locate a point");
             ++stamp_;
             if (mark_.size() < cells_.size()) mark_.resize(cells_.size(), 0);
             cavity.clear(); pending.clear(); boundary.clear();
@@ -102,7 +109,7 @@ public:
                 for (int i = 0; i < 3; ++i) {
                     const Index u = cell[i], v = cell[(i + 1) % 3];
                     const auto found = owner_.find(DirectedKey{v, u});
-                    if (found == owner_.end()) throw std::runtime_error("ghost seed lost an edge twin");
+                    if (found == owner_.end()) throw GhostRefusal("lost_twin", "ghost seed lost an edge twin");
                     const Index neighbour = found->second;
                     if (mark_[neighbour] == stamp_) continue;
                     if (conflict(neighbour, p)) {
@@ -140,12 +147,12 @@ public:
             for (Index node : other) if (node != u && node != v) opposite = node;
             const double value =
                 ghost_incircle(points_[cell[0]], points_[cell[1]], points_[cell[2]], points_[opposite]);
-            if (value > 0.0) throw std::runtime_error("ghost seed result is not Delaunay");
+            if (value > 0.0) throw GhostRefusal("not_delaunay", "ghost seed result is not Delaunay");
             tie = tie || value == 0.0;
         }
         // Exactly cocircular ties admit several Delaunay triangulations; the
         // caller keeps its finite-hull tie choice (see _ghost_seed.py).
-        if (tie) throw std::runtime_error("ghost seed has cocircular ties");
+        if (tie) throw GhostRefusal("cocircular", "ghost seed has cocircular ties");
         std::vector<std::array<Index, 3>> result;
         for (std::size_t id = 0; id < cells_.size(); ++id) {
             if (!alive_[id] || cells_[id][2] == kGhost) continue;
@@ -195,7 +202,7 @@ private:
 
     void add_finite(Index a, Index b, Index c) {
         if (ghost_orient(points_[a], points_[b], points_[c]) <= 0.0)
-            throw std::runtime_error("ghost seed created a non-positive cell");
+            throw GhostRefusal("non_positive", "ghost seed created a non-positive cell");
         add_cell({a, b, c});
     }
 
@@ -205,7 +212,7 @@ private:
         else { id = static_cast<Index>(cells_.size()); cells_.push_back(cell); alive_.push_back(1); }
         for (int i = 0; i < 3; ++i) {
             if (!owner_.emplace(DirectedKey{cell[i], cell[(i + 1) % 3]}, id).second)
-                throw std::runtime_error("ghost seed created a nonmanifold edge");
+                throw GhostRefusal("nonmanifold", "ghost seed created a nonmanifold edge");
         }
         if (cell[2] == kGhost) ghosts_.insert({cell[0], cell[1]});
     }
@@ -263,6 +270,10 @@ inline PyObject* py_ghost_delaunay(PyObject*, PyObject* args) {
     } catch (const CallbackFailure&) {
         PyEval_RestoreThread(released_state);
         return nullptr;
+    } catch (const GhostRefusal& refusal) {
+        // Refusals are returned, not raised: (code, message).
+        PyEval_RestoreThread(released_state);
+        return Py_BuildValue("(ss)", refusal.code, refusal.what());
     } catch (const std::bad_alloc&) {
         PyEval_RestoreThread(released_state);
         return PyErr_NoMemory();
