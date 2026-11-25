@@ -169,10 +169,14 @@ def test_full_matrix_and_immutable_owner_pin_are_preserved():
     assert 'python -m pytest --durations=25' in blocks['pytest']
     assert '--junitxml=mesh-results.xml' in blocks['pytest']
     assert '--basetemp=ci-pytest-temp' in blocks['pytest']
-    assert '--basetemp=ci-pytest-temp --maxfail=1' in blocks['pytest']
+    # The full profile runs the whole suite and lists failed ids per leg (owner standing approval 2026-11-26).
+    assert '--maxfail' not in blocks['pytest'] and '--maxfail' not in blocks['wheel-full-linux']
+    assert 'tools/ci_failed_ids.py mesh-results.xml --output failed-test-ids.txt' in blocks['pytest']
+    assert 'failed-test-ids.txt' in blocks['pytest'].split('upload-artifact')[1]
     assert 'ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json' in blocks['pytest']
     assert '--junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp' in blocks['wheel-full-linux']
-    assert '--basetemp=installed-ci-pytest-temp --maxfail=1' in blocks['wheel-full-linux']
+    assert 'tools/ci_failed_ids.py installed-mesh-results.xml --output installed-failed-test-ids.txt' in blocks['wheel-full-linux']
+    assert 'installed-failed-test-ids.txt' in blocks['wheel-full-linux'].split('upload-artifact')[1]
     assert 'installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json' in blocks['wheel-full-linux']
     from collections import Counter
     assert Counter(owner_checkout_pins(text))==Counter({

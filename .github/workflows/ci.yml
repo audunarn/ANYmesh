@@ -155,16 +155,20 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Build the optional quad-first MCF and TinyAD workers
         run: python tools/build_quad_workers.py
-      # Red runs return the first full diagnostic promptly; green still runs all cases.
-      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp --maxfail=1
+      # The whole suite runs, also when red, so a leg's failures can be compared with main by test id.
+      - run: python -m pytest --durations=25 --junitxml=mesh-results.xml --basetemp=ci-pytest-temp
         env:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
+      - name: Report failed test ids
+        if: always()
+        run: python -B tools/ci_failed_ids.py mesh-results.xml --output failed-test-ids.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mesh-results-${{ matrix.os }}-${{ matrix.python-version }}
           path: |
             mesh-results.xml
+            failed-test-ids.txt
             ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json
             ci-pytest-temp/test_work_bearing_quadratic_tr*/oracle.json
             ci-pytest-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json
@@ -372,7 +376,10 @@ jobs:
         run: >-
           python -I -B -m pytest -p no:cacheprovider -o pythonpath=
           --confcutdir=tests --import-mode=importlib tests --durations=25
-          --junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp --maxfail=1
+          --junitxml=installed-mesh-results.xml --basetemp=installed-ci-pytest-temp
+      - name: Report failed test ids of the installed wheel
+        if: always()
+        run: python -B tools/ci_failed_ids.py installed-mesh-results.xml --output installed-failed-test-ids.txt
       - name: Retain installed wheel results and quadratic trial diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -380,6 +387,7 @@ jobs:
           name: installed-mesh-results
           path: |
             installed-mesh-results.xml
+            installed-failed-test-ids.txt
             installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/trial.json
             installed-ci-pytest-temp/test_work_bearing_quadratic_tr*/oracle.json
             installed-ci-pytest-temp/test_actual_parallel_warm_clos*/caller-parallel-receipt.json

@@ -33,6 +33,15 @@ and it rescans until two consecutive scans a second apart are empty. A process t
 OS-level containment (a process group on Linux/macOS, a Job object on Windows) and verify that it is empty
 before pytest.
 
+## Whole-suite legs and failed test ids (owner standing approval 2026-11-26)
+
+The full-profile pytest legs (`pytest` matrix and the installed wheel in `wheel-full-linux`) run without
+`--maxfail`. A pre-existing failure would otherwise stop every leg at its first failure and hide the rest of the
+Linux and macOS tests. After pytest, `tools/ci_failed_ids.py` writes the failed and errored test ids, in pytest's
+`file::name` form, to the job summary and to `failed-test-ids.txt` (`installed-failed-test-ids.txt`), which are
+uploaded with the JUnit results. A red leg is judged by comparing that list with the same leg on `main`. The
+reporter never changes the leg's result.
+
 The full matrix runs only on `workflow_dispatch`, the weekly schedule and release tags. Pull requests run the
 smoke jobs only. Dispatch the workflow on the PR branch to see the S0 result and the Linux/macOS legs.
 
