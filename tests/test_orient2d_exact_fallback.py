@@ -164,3 +164,48 @@ def test_ordinary_ambiguous_value_is_bit_identical_to_the_earlier_path():
     a, b, c = (x, x), (0.5 + 2.0 ** -51, 0.5), (1.0, 1.0)
     assert _exact(a, b, c) > 0
     assert orient2d(a, b, c) == float.fromhex("0x1.8000000000001p-52")
+
+
+def test_a_fallback_the_decimal_evaluates_exactly_does_no_integer_work(monkeypatch):
+    """Cost guard (48-web paired timing, 2026-11-25): about 28 % of orient2d calls fall back, mostly exactly
+    collinear stations whose 80-digit decimal value is exact.  That value is the earlier one and its sign is
+    exact, so it is returned directly; only an inexact decimal evaluation takes the integer path."""
+    import anymesher.triangulation as triangulation
+
+    def integer_work(*_args, **_kwargs):
+        raise AssertionError("integer path taken for a decimal-exact fallback")
+
+    monkeypatch.setattr(triangulation, "_signed_zero_orient2d", integer_work)
+    monkeypatch.setattr(triangulation, "_integer_orient2d", integer_work, raising=False)
+    for points in (((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)), ((0.5, 0.25), (1.5, 0.75), (2.5, 1.25)),
+                   ((-0.0, 0.0), (0.0, 1.5), (0.0, -3.25))):
+        value = orient2d(*points)
+        assert value == float(Fraction(*_exact_ratio(points))), points
+
+
+def _exact_ratio(points):
+    (ax, ay), (bx, by), (cx, cy) = ((Fraction(x), Fraction(y)) for x, y in points)
+    exact = (ax - cx) * (by - cy) - (ay - cy) * (bx - cx)
+    return exact.numerator, exact.denominator
+
+
+def test_an_inexact_decimal_fallback_with_a_certain_sign_keeps_the_earlier_value_without_integer_work(monkeypatch):
+    """Nearly collinear real-geometry stations have long exact decimals, so the 80-digit evaluation rounds; when
+    its value exceeds the rounding-error bound by the margin, it is returned (the earlier value, exact sign)."""
+    import math
+    from decimal import localcontext
+
+    import anymesher.triangulation as triangulation
+
+    def integer_work(*_args, **_kwargs):
+        raise AssertionError("integer path taken although the decimal sign is certain")
+
+    monkeypatch.setattr(triangulation, "_integer_orient2d", integer_work)
+    points = ((0.1, 0.1), (0.3, math.nextafter(0.3, 1.0)), (0.0, 0.0))
+    with localcontext() as context:
+        context.prec = 80
+        left, right = triangulation._decimal_orient2d_products(tuple(v for point in points for v in point))
+        assert context.flags[triangulation.Inexact]  # the decimal evaluation rounds
+    earlier = float(left - right)
+    value = orient2d(*points)
+    assert value == earlier and value > 0.0 and Fraction(*_exact_ratio(points)) > 0

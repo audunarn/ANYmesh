@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 
 from dataclasses import dataclass, field
-from decimal import Context, Decimal, localcontext
+from decimal import Context, Decimal, Inexact, localcontext
 from fractions import Fraction
 from math import copysign, floor, fsum, hypot, isfinite, sqrt
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -46,6 +46,8 @@ _FLOAT_EPSILON = float(np.finfo(np.float64).eps)
 _ORIENT_DIFFERENCE_CAP, _ORIENT_MAGNITUDE_FLOOR = 2.0 ** 400, 2.0 ** -800
 _INCIRCLE_DIFFERENCE_CAP, _INCIRCLE_SCALE_FLOOR = 2.0 ** 200, 2.0 ** -500
 _SMALLEST_SUBNORMAL = 5e-324
+_DECIMAL_SIGN_DIGITS = 75  # see _exact_orient2d: certified-sign margin in decimal digits
+_DECIMAL_CONTEXT = Context(prec=80)  # copied per use, never activated or mutated
 
 
 def _nonzero_sign_kept(value: float, exact: Any) -> float:
@@ -77,22 +79,55 @@ def orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[fl
 
 
 def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequence[float]) -> float:
-    """The correctly rounded exact determinant of binary-float inputs.
+    """The exact-signed determinant of binary-float inputs, equal to the earlier value wherever that was right.
 
-    Every finite double is an integer times a power of two, so the inputs are
-    scaled to integers sharing one power-of-two denominator and the
-    determinant is formed in exact integer arithmetic.  (A fixed 80-digit
-    decimal context is not exact: a coordinate near 1e-16 next to one near 1
-    needs about 90 significant digits, and the rounded differences gave
-    exactly collinear stations a nonzero, sign-wrong orientation.)  The sign is
-    always exact: a nonzero determinant below the subnormal range returns the
-    smallest subnormal of its sign, and an exact zero keeps the earlier path's
-    signed zero.
+    The earlier 80-digit decimal evaluation runs first, in a fresh context.  When it
+    signals no ``Inexact``, or its value exceeds its rounding-error bound by a 250-fold
+    margin, its sign is exact and its value is the earlier one (bit-identical), so it is
+    returned at once (a nonzero value below the subnormal range keeps its sign).  These
+    are nearly all fallbacks (about 28 % of orient2d calls on the 48-web tripod, mostly
+    collinear stations).  Otherwise the determinant is formed exactly in integers
+    (a fixed 80-digit context is not exact: a coordinate near 1e-16 next to one near 1
+    needs about 90 significant digits, and the rounded differences gave exactly
+    collinear stations a nonzero, sign-wrong orientation).
     """
-    values = tuple(float(value) for value in (first[0], first[1], second[0], second[1], third[0], third[1]))
+    values = (float(first[0]), float(first[1]), float(second[0]), float(second[1]), float(third[0]), float(third[1]))
+    # A private copy of an 80-digit context, used through its own methods: caller traps,
+    # flags or rounding never act here, and its flags are read directly.
+    context = _DECIMAL_CONTEXT.copy()
+    try:
+        left, right = _decimal_orient2d_products_in(values, context)
+        decimal_value = context.subtract(left, right)
+        # Exact when nothing rounded.  Otherwise each of the five roundings has relative
+        # error <= 5e-80, so |decimal - exact| <= ~4 * 5e-80 * (|left| + |right|)
+        # < 4e-78 * 10**m with m the larger adjusted exponent of the products; a nonzero
+        # value with adjusted exponent >= m - 75 (so |value| >= 10**(m - 75), a margin
+        # over 250-fold) has the exact sign.  (A zero product only raises m: stricter.)
+        certain = decimal_value.is_finite() and (
+            not context.flags[Inexact]
+            or (not decimal_value.is_zero()
+                and decimal_value.adjusted() >= max(left.adjusted(), right.adjusted()) - _DECIMAL_SIGN_DIGITS))
+    except (ArithmeticError, ValueError):
+        decimal_value, certain = None, False
+    if certain:
+        # The earlier value (bit-identical) with its sign exact; a nonzero below the subnormal range keeps its sign.
+        # (Non-finite operands never get here: their decimal value is non-finite or raises.)
+        return _nonzero_sign_kept(float(decimal_value), decimal_value)
     if not all(isfinite(value) for value in values):
         # Non-finite operands keep the earlier decimal behaviour unchanged.
         return _legacy_decimal_orient2d(values)
+    earlier = 0.0 if decimal_value is None or not decimal_value.is_finite() else float(decimal_value)
+    return _integer_orient2d(values, earlier)
+
+
+def _integer_orient2d(values: Sequence[float], earlier: float) -> float:
+    """Exact integer determinant over one power-of-two denominator (finite operands).
+
+    The earlier (rounded) decimal value is kept wherever its sign is right, so values
+    stay bit-identical where it rounded only in magnitude; otherwise the correctly
+    rounded exact value (a nonzero below the subnormal range keeps its sign), and an
+    exact zero keeps the earlier path's signed zero.
+    """
     ratios = tuple(value.as_integer_ratio() for value in values)
     shift = max(denominator.bit_length() for _numerator, denominator in ratios) - 1
     fx, fy, sx, sy, tx, ty = (
@@ -101,15 +136,6 @@ def _exact_orient2d(first: Sequence[float], second: Sequence[float], third: Sequ
     exact = (fx - tx) * (sy - ty) - (fy - ty) * (sx - tx)
     if exact == 0:
         return _signed_zero_orient2d(values)
-    # The earlier 80-digit evaluation is kept wherever its sign is right, so values
-    # stay bit-identical where it rounded only in magnitude; otherwise the
-    # correctly rounded exact value (a nonzero below the subnormal range keeps its
-    # sign).  A fresh context: caller traps never replace a finite result.
-    try:
-        with localcontext(Context(prec=80)):
-            earlier = _decimal_orient2d(values)
-    except (ArithmeticError, ValueError):
-        earlier = 0.0
     if earlier != 0.0 and (earlier > 0.0) == (exact > 0):
         return earlier
     try:
@@ -138,13 +164,28 @@ def _signed_zero_orient2d(values: Sequence[float]) -> float:
     return 0.0
 
 
-def _decimal_orient2d(values: Sequence[float]) -> float:
-    """The earlier decimal determinant in the current decimal context."""
+def _decimal_orient2d_products(values: Sequence[float]) -> tuple[Decimal, Decimal]:
+    """The earlier decimal path's two products in the current decimal context (same operations, same order)."""
     exact_ax = _decimal(values[0]) - _decimal(values[4])
     exact_ay = _decimal(values[1]) - _decimal(values[5])
     exact_bx = _decimal(values[2]) - _decimal(values[4])
     exact_by = _decimal(values[3]) - _decimal(values[5])
-    return float((exact_ax * exact_by) - (exact_ay * exact_bx))
+    return exact_ax * exact_by, exact_ay * exact_bx
+
+
+def _decimal_orient2d_products_in(values: Sequence[float], context: Context) -> tuple[Decimal, Decimal]:
+    """:func:`_decimal_orient2d_products` evaluated in ``context`` (the same operations, the same order)."""
+    # ``Decimal(float)`` is the exact conversion ``_decimal`` makes (``values`` are floats already).
+    fx, fy, sx, sy, tx, ty = (Decimal(value) for value in values)
+    subtract, multiply = context.subtract, context.multiply
+    return (multiply(subtract(fx, tx), subtract(sy, ty)),
+            multiply(subtract(fy, ty), subtract(sx, tx)))
+
+
+def _decimal_orient2d(values: Sequence[float]) -> float:
+    """The earlier decimal determinant in the current decimal context."""
+    left, right = _decimal_orient2d_products(values)
+    return float(left - right)
 
 
 def _legacy_decimal_orient2d(values: Sequence[float]) -> float:
