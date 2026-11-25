@@ -605,6 +605,21 @@ def test_native_result_list_is_never_visible_half_built():
     assert half_built == []
 
 
+def test_native_matches_python_for_float64_equal_dtypes_with_another_buffer_format():
+    # Codex r5: dtypes equal to float64 whose buffer format is not 'd' (longdouble on Windows,
+    # a float64 dtype with fields) take the Python route and give the Python outcome.
+    base = FAMILIES[1]
+    dtypes = [np.dtype((np.float64, [("a", np.float64)]))]
+    if np.dtype(np.longdouble) == np.float64:
+        dtypes.append(np.dtype(np.longdouble))
+    for dtype in dtypes:
+        points = base.astype(dtype)
+        assert points.dtype == np.float64 and memoryview(points).format != "d"
+        native, python = _both(lambda: base.astype(dtype))
+        assert native == python
+        assert native[0][0] == "ok"
+
+
 def test_direct_native_calls_validate_their_inputs():
     module = _native_module()
     helpers = (triangulation._live_location, triangulation._live_flip_test, triangulation._canonical_triangle)

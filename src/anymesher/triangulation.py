@@ -1254,7 +1254,10 @@ def _finite_hull_seed(points: np.ndarray,
             and all(type(index) is int and 0 <= index < array.shape[0] for index in hull))
     # The native engine also needs distinct hull rows (a hull callback can repeat rows) and
     # n < 2**28 (exact work limit); any other input keeps the Python routine.
+    # The buffer must be plain binary64 too: a dtype equal to float64 can export another format
+    # (longdouble on Windows, a float64 dtype with fields); those keep the Python routine.
     if (fast and _NATIVE_FINITE_HULL and 3 <= array.shape[0] < 2 ** 28
+            and array.dtype.char == "d" and array.dtype.fields is None
             and len(set(hull)) == len(hull)):
         kernel = _finite_hull_seed_kernel()
         if kernel is not None:
