@@ -235,21 +235,64 @@ def _owner_normal_memo_admitted(geometry, mesh) -> bool:
     an evaluation has no observable effect beyond its result.
     """
     from anygeometry.tolerance import TolerancePolicy
-    return (type(geometry) is GeometryModel and type(mesh) is Mesh and type(mesh.nodes) is dict
+    from .s3_repair import _plain_shells
+    return (type(geometry) is GeometryModel and type(mesh) is Mesh and _plain_shells(mesh)
             and type(geometry.tolerance) is TolerancePolicy
             and np.geterr() == _DEFAULT_NUMPY_ERRORS and np.geterrcall() is None
             and all(getattr(getattr(geometry, name), "__func__", None) is getattr(GeometryModel, name)
                     for name in ("project_to_face", "face_normal", "face_point")))
 
 
+_LIBRARY_SURFACE_IDS: frozenset[int] | None = None
+_MAGNITUDE_CAP, _MAGNITUDE_FLOOR = 2.0 ** 64, 2.0 ** -64
+
+
+def _library_surface_ids() -> frozenset[int]:
+    global _LIBRARY_SURFACE_IDS
+    if _LIBRARY_SURFACE_IDS is None:
+        from anygeometry.nurbs import NurbsSurface
+        from anygeometry.surfaces import Cone, CoonsSurface, Cylinder, ExtrudedSurface, Plane, RuledSurface
+        _LIBRARY_SURFACE_IDS = frozenset(
+            id(kind) for kind in (Plane, Cylinder, Cone, ExtrudedSurface, RuledSurface, CoonsSurface, NurbsSurface))
+    return _LIBRARY_SURFACE_IDS
+
+
+def _moderate(value, *, divisor: bool, depth: int = 0) -> bool:
+    """Plain numbers whose evaluation cannot overflow (an allow-list: other types decline).
+
+    Every float is finite and at most 2^64 in magnitude; a ``divisor`` value is also
+    0 or at least 2^-64.  Products and quotients of such values stay far from the
+    float64 range, so the projections and normals evaluated from them emit no
+    NumPy warning and a reused result has no skipped side effect.
+    """
+    kind = type(value)
+    if kind is bool or kind is int:
+        return abs(value) <= _MAGNITUDE_CAP
+    if kind is float or kind is np.float64:
+        magnitude = abs(float(value))
+        return (magnitude <= _MAGNITUDE_CAP
+                and (not divisor or magnitude == 0.0 or magnitude >= _MAGNITUDE_FLOOR))
+    if kind is np.ndarray:
+        if value.dtype != np.float64 or not bool(np.all(np.isfinite(value))):
+            return False
+        magnitude = np.abs(value)
+        return bool(np.all(magnitude <= _MAGNITUDE_CAP)
+                    and (not divisor or np.all((magnitude == 0.0) | (magnitude >= _MAGNITUDE_FLOOR))))
+    if (kind is tuple or kind is list) and depth < 4:
+        return all(_moderate(item, divisor=divisor, depth=depth + 1) for item in value)
+    return False
+
+
 def _library_surface(geometry, face_id) -> bool:
-    """The face's surface (and its class) come from the anygeometry package itself."""
+    """The face's surface is an exact anygeometry surface with moderate parameters."""
     try:
-        surface_type = type(geometry.faces[face_id].surface)
+        surface = geometry.faces[face_id].surface
     except (KeyError, AttributeError):
         return False
-    module = surface_type.__dict__.get("__module__") if "__module__" in surface_type.__dict__ else None
-    return type(module) is str and (module == "anygeometry" or module.startswith("anygeometry."))
+    if id(type(surface)) not in _library_surface_ids():
+        return False
+    fields = vars(surface)
+    return all(type(name) is str and _moderate(value, divisor=True) for name, value in fields.items())
 
 
 def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
@@ -274,16 +317,19 @@ def _owner_normal_key(geometry, mesh, element_id, face_id, uses, uv):
         return None
     made = []
     for corner in corners:
-        if type(corner) is not np.ndarray or corner.dtype != np.float64 or corner.shape != (3,):
+        if (type(corner) is not np.ndarray or corner.dtype != np.float64 or corner.shape != (3,)
+                or not _moderate(corner, divisor=False)):
             return None
         made.append(corner.tobytes())
     if uv is None:
         made_uv = None
     elif type(uv) is np.ndarray:
-        if uv.dtype != np.float64 or uv.shape != (2,):
+        if uv.dtype != np.float64 or uv.shape != (2,) or not _moderate(uv, divisor=False):
             return None
         made_uv = uv.tobytes()
-    elif type(uv) is tuple and len(uv) == 2 and all(type(value) in (float, np.float64) for value in uv):
+    elif (type(uv) is tuple and len(uv) == 2
+          and all(type(value) is float or type(value) is np.float64 for value in uv)
+          and _moderate(uv, divisor=False)):
         made_uv = np.asarray(uv, dtype=np.float64).tobytes() + b"t"
     else:
         return None

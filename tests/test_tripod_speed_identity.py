@@ -398,3 +398,31 @@ def test_plain_shells_never_calls_user_code_and_needs_plain_nodes():
 
     mesh.nodes = Nodes(mesh.nodes)
     assert not s3_repair._plain_shells(mesh)
+
+
+def test_owner_normal_memo_declines_magnitudes_that_could_warn(monkeypatch):
+    # Codex r3: a reused evaluation must not skip a NumPy warning; huge coordinates are evaluated each time.
+    geometry, mesh = _square_mesh()
+    for node in mesh.nodes:
+        mesh.nodes[node] = mesh.nodes[node] + np.array([0.0, 0.0, 1.0e155])
+    calls = _counting(monkeypatch)
+    memo = {"geometry": geometry, "normals": {}}
+    with np.errstate(over="ignore", invalid="ignore"):
+        first = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
+        second = s3_production._shell_owner_authority(geometry, mesh, _normal_memo=memo)
+    assert first == second
+    assert calls[0] == 2 * len(mesh.shells) and not memo["normals"]
+    assert not s3_production._moderate(1.0e155, divisor=False)
+    assert not s3_production._moderate(1.0e-30, divisor=True) and s3_production._moderate(0.0, divisor=True)
+
+
+def test_plain_shells_needs_plain_beams_couplings_and_float64_nodes():
+    class Beams(dict):
+        pass
+
+    mesh = _sliver_patch(10.0)
+    mesh.beams = Beams()
+    assert not s3_repair._plain_shells(mesh)
+    mesh = _sliver_patch(10.0)
+    mesh.nodes[1] = mesh.nodes[1].astype(np.float32)
+    assert not s3_repair._plain_shells(mesh)

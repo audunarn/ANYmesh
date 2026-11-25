@@ -277,10 +277,12 @@ def _plain_shells(mesh: Mesh) -> bool:
     unchanged mesh: a rebuild of any other mesh performs observable reads.
     """
     if (type(mesh) is not Mesh or type(mesh.quads) is not dict or type(mesh.tris) is not dict
-            or type(mesh.nodes) is not dict):
+            or type(mesh.nodes) is not dict or type(mesh.beams) is not dict
+            or type(mesh.couplings) is not dict):
         return False
-    for position in mesh.nodes.values():
-        if type(position) is not np.ndarray or position.dtype.kind != "f":
+    for node_id, position in mesh.nodes.items():
+        if (id(type(node_id)) not in _PLAIN_INTEGER_IDS or type(position) is not np.ndarray
+                or position.dtype != np.float64):
             return False
     for cells in (mesh.quads, mesh.tris):
         for element_id, connectivity in cells.items():
