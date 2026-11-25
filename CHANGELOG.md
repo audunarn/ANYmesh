@@ -6,7 +6,8 @@
   orientation and in-circle expansions rely on separately rounded operations (Dekker split,
   two_sum, two_product). GCC's default cross-statement contraction on an FMA target (for example
   `-march=haswell` or aarch64 Linux) made `split` wrong for every tested input. Linux x86-64 at the
-  default target compiles to byte-identical machine code, and Windows is unchanged. A new probe
+  default target compiles to byte-identical machine code. MSVC builds pin the default
+  `/fp:precise`, so an inherited `/fp:fast` no longer applies; Windows output is otherwise unchanged. A new probe
   (`_native.exact_arithmetic_probe`) and `tests/test_exact_arithmetic_contraction.py` check the
   compiled transforms against exact rational arithmetic.
 
