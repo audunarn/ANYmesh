@@ -266,41 +266,6 @@ def _triangle_edges(connectivity: Sequence[int]) -> tuple[tuple[int, int], ...]:
     return tuple(_edge(made[index], made[(index + 1) % 3]) for index in range(3))
 
 
-# Identities only: membership tests by id() never call user code (no __eq__/__hash__).
-_PLAIN_INTEGER_IDS = frozenset(id(kind) for kind in (int, *(np.dtype(code).type for code in "bBhHiIlLqQ")))
-
-
-def _plain_shells(mesh: Mesh) -> bool:
-    """Whether reading ``mesh``'s shells has no side effects (exact containers of exact ints).
-
-    Only then may one ``_shell_incidence`` map stand in for a rebuild of the same,
-    unchanged mesh: a rebuild of any other mesh performs observable reads.
-    """
-    if (type(mesh) is not Mesh or type(mesh.quads) is not dict or type(mesh.tris) is not dict
-            or type(mesh.nodes) is not dict or type(mesh.beams) is not dict
-            or type(mesh.couplings) is not dict):
-        return False
-    for node_id, position in mesh.nodes.items():
-        if (id(type(node_id)) not in _PLAIN_INTEGER_IDS or type(position) is not np.ndarray
-                or position.dtype != np.float64):
-            return False
-    for element_id in mesh.couplings:
-        if id(type(element_id)) not in _PLAIN_INTEGER_IDS:
-            return False
-    for cells in (mesh.quads, mesh.tris, mesh.beams):
-        for element_id, connectivity in cells.items():
-            if id(type(element_id)) not in _PLAIN_INTEGER_IDS:
-                return False
-            kind = type(connectivity)
-            if kind is tuple or kind is list:
-                for value in connectivity:
-                    if id(type(value)) not in _PLAIN_INTEGER_IDS:
-                        return False
-            elif not (kind is np.ndarray and connectivity.dtype.kind in "iu"):
-                return False
-    return True
-
-
 def _shell_incidence(mesh: Mesh) -> dict[tuple[int, int], list[tuple[str, int]]]:
     result: dict[tuple[int, int], list[tuple[str, int]]] = {}
     for kind, cells in (("quad", mesh.quads), ("tri", mesh.tris)):
@@ -506,7 +471,6 @@ def _candidate_bisection(
     *,
     next_node_id: int,
     next_element_id: int,
-    incidence: Mapping[tuple[int, int], Sequence[tuple[str, int]]] | None = None,
 ) -> tuple[
     Mesh | None,
     dict[int, np.ndarray] | None,
@@ -516,9 +480,7 @@ def _candidate_bisection(
 ]:
     if mesh.order != "linear":
         return None, None, None, 0, "local bisection is restricted to linear T3 meshes"
-    # ``incidence`` is the caller's ``_shell_incidence(mesh)`` of this same, unchanged
-    # mesh (read only here); without it the map is rebuilt.
-    incidence = (_shell_incidence(mesh) if incidence is None else incidence).get(edge, ())
+    incidence = _shell_incidence(mesh).get(edge, ())
     if not incidence or len(incidence) > 2:
         return None, None, None, 0, "edge incidence is missing or non-manifold"
     if any(kind != "tri" or element_id not in selected for kind, element_id in incidence):
@@ -833,7 +795,6 @@ def repair_s3_admission(
             failing = tuple(item.element_id for item in report.elements if not item.admitted)
             accepted = False
             incidence = _shell_incidence(work)
-            reusable = incidence if _plain_shells(work) else None
             candidates: list[tuple[float, tuple[int, int], int, tuple[int, ...]]] = []
             for element_id in sorted(failing):
                 connectivity = tuple(int(value) for value in work.tris[element_id])
@@ -909,7 +870,6 @@ def repair_s3_admission(
                     selected,
                     next_node_id=next_node_id,
                     next_element_id=next_element_id,
-                    incidence=reusable,
                 )
                 if candidate is None or made_owners is None or made_selected is None:
                     _record(

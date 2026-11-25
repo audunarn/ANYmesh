@@ -2,11 +2,10 @@
 
 ## Unreleased
 
-- **Speed, results unchanged.** Two quad-first shortcuts, measured on the floating tripod example
+- **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
   (48 webs, 0.5 m): the Python finite-hull triangulation fallback (615 of 1005 planar seeds) skips
   cells whose closed bounding box excludes the point being located and feeds its predicates Python
-  float tuples (313 -> 167 s over the 615 captured calls, identical results); S3 bisection candidates read the repair loop's edge-incidence map instead of rebuilding
-  the whole-mesh map. Identity contract (owner, 2026-11-25): bit-identical results, refusals,
+  float tuples (313 -> 167 s over the 615 captured calls, identical results). Identity contract (owner, 2026-11-25): bit-identical results, refusals,
   exception types and messages and callback order for every input built from the library's own
   types (exact `GeometryModel`, `Mesh`, anygeometry surface classes, `TolerancePolicy`) and plain
   containers (dict, tuple, list, int, float, exact float64/integer ndarrays), under NumPy's default

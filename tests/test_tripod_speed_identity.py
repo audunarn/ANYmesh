@@ -3,10 +3,6 @@
 1. ``_finite_hull_seed``: bounding-box prefilter + tuple coordinates == the plain scan (driven through an
    ndarray subclass, which keeps the original code path), callbacks and errors included, with far fewer
    orientation predicates.
-4. ``prepare_qualified_s3_mesh``: owner normals evaluated before the S3 repair are reused afterwards on the same
-   inputs; the result equals the route with the memo disabled.
-5. ``repair_s3_admission``: bisection candidates read the caller's incidence map; the result equals the route
-   that rebuilds it.
 """
 from __future__ import annotations
 
@@ -15,11 +11,8 @@ from math import radians, tan
 import numpy as np
 import pytest
 
-from anygeometry import GeometryModel
-
-from anymesher import Mesh, MeshError, generate_hybrid_mesh_result, repair_s3_admission
-from anymesher import s3_production, s3_repair, triangulation
-from anymesher.s3_production import S3OwnerAuthorityError
+from anymesher import MeshError
+from anymesher import triangulation
 
 
 class _PlainArray(np.ndarray):
@@ -124,138 +117,6 @@ def test_finite_hull_seed_prefilter_skips_cells_that_cannot_contain_the_point(mo
     assert fast_calls < 0.75 * calls[0]
 
 
-def _square_mesh(geometry_type=GeometryModel, owner=True):
-    geometry = geometry_type()
-    face_id = geometry.add_plate(
-        geometry.add_points(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0))))
-    if owner:
-        geometry.add_sheet((face_id,))
-    result = generate_hybrid_mesh_result(geometry, target_size=0.25, strategy="native",
-                                         native_backend="python", recombine=False,
-                                         structural_preparation=False)
-    return geometry, result.mesh
-
-
-def _counting(monkeypatch):
-    calls = [0]
-    original = s3_production._physical_owner_normal
-
-    def counted(*args, **kwargs):
-        calls[0] += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(s3_production, "_physical_owner_normal", counted)
-    return calls
-
-
-def _qualified(geometry):
-    made = generate_hybrid_mesh_result(geometry, target_size=0.25, strategy="native", native_backend="python",
-                                       recombine=False, structural_preparation=False, qualified_s3=True).mesh
-    return (tuple((k, tuple(map(float, made.nodes[k]))) for k in sorted(made.nodes)),
-            tuple((k, tuple(v)) for k, v in sorted(made.shells.items())),
-            repr(made.structural_preparation["qualified_s3"])), len(made.shells)
-
-
-class _Subclassed(GeometryModel):
-    """A subclass may have impure geometry protocols (Codex r1): never memoised."""
-
-
-OWNER = np.asarray((0.0, 0.0, 1.0))
-
-
-def _sliver_patch(angle_deg: float) -> Mesh:
-    return Mesh(
-        nodes={
-            1: np.asarray((0.0, 0.0, 0.0)),
-            2: np.asarray((1.0, 0.0, 0.0)),
-            3: np.asarray((1.0, tan(radians(angle_deg)), 0.0)),
-            4: np.asarray((0.0, 1.0, 0.0)),
-            5: np.asarray((2.0, 0.5, 0.0)),
-        },
-        tris={10: (1, 2, 3), 20: (1, 3, 4), 30: (2, 5, 3)},
-        elements_of_face={7: [10, 20, 30]},
-        elements_of_sheet={8: [10, 20, 30]},
-    )
-
-
-def _mesh_signature(mesh):
-    return (tuple((k, tuple(float(v) for v in mesh.nodes[k])) for k in sorted(mesh.nodes)),
-            tuple((k, tuple(mesh.tris[k])) for k in sorted(mesh.tris)),
-            tuple((k, tuple(v)) for k, v in sorted(mesh.elements_of_face.items())))
-
-
-def _candidate_signature(made):
-    owners = None if made[1] is None else tuple((k, tuple(v)) for k, v in sorted(made[1].items()))
-    return None if made[0] is None else _mesh_signature(made[0]), owners, made[2], made[3], made[4]
-
-
-def test_candidate_bisection_with_the_callers_incidence_matches_a_rebuild():
-    mesh = _sliver_patch(10.0)
-    owners = {element: OWNER for element in mesh.tris}
-    selected = frozenset(mesh.tris)
-    incidence = s3_repair._shell_incidence(mesh)
-    for edge in sorted(incidence):
-        attached = tuple(sorted(owner for kind, owner in incidence[edge] if kind == "tri"))
-        rebuilt = s3_repair._candidate_bisection(mesh, edge, attached, owners, selected,
-                                                 next_node_id=6, next_element_id=31)
-        reused = s3_repair._candidate_bisection(mesh, edge, attached, owners, selected,
-                                                next_node_id=6, next_element_id=31, incidence=incidence)
-        assert _candidate_signature(reused) == _candidate_signature(rebuilt)
-
-
-def _repair_outcome():
-    mesh = _sliver_patch(10.0)
-    try:
-        result = repair_s3_admission(mesh, element_owner_normals={element: tuple(OWNER) for element in mesh.tris})
-    except Exception as error:  # compared, never swallowed: the type and message are part of the outcome
-        return ("error", type(error).__name__, str(error))
-    return ("ok", _mesh_signature(result.mesh), result.admission.admitted, result.edge_flips,
-            tuple((a.action, a.status, a.detail) for a in result.attempts))
-
-
-def test_repair_with_incidence_reuse_equals_the_rebuilding_route(monkeypatch):
-    inside = [False]
-    rebuilt_inside = [0]
-    called = [0]
-    original_incidence = s3_repair._shell_incidence
-    original_bisection = s3_repair._candidate_bisection
-
-    def incidence(mesh):
-        if inside[0]:
-            rebuilt_inside[0] += 1
-        return original_incidence(mesh)
-
-    def bisection(*args, **kwargs):
-        called[0] += 1
-        inside[0] = True
-        try:
-            return original_bisection(*args, **kwargs)
-        finally:
-            inside[0] = False
-
-    monkeypatch.setattr(s3_repair, "_shell_incidence", incidence)
-    monkeypatch.setattr(s3_repair, "_candidate_bisection", bisection)
-    reused = _repair_outcome()
-    # Fails on the old code, where every bisection candidate rebuilt the whole-mesh map.
-    assert called[0] > 0 and rebuilt_inside[0] == 0
-    monkeypatch.setattr(s3_repair, "_plain_shells", lambda mesh: False)
-    rebuilt_inside[0] = 0
-    rebuilding = _repair_outcome()
-    assert rebuilt_inside[0] > 0
-    assert reused == rebuilding
-
-
-class _LoggingTuple(tuple):
-    """Connectivity whose reads are observable (Codex r1): the map is rebuilt, never reused."""
-
-
-def test_incidence_is_not_reused_for_side_effecting_connectivity():
-    mesh = _sliver_patch(10.0)
-    assert s3_repair._plain_shells(mesh)
-    mesh.tris[10] = _LoggingTuple(mesh.tris[10])
-    assert not s3_repair._plain_shells(mesh)
-
-
 def test_finite_hull_seed_follows_a_callback_that_reshapes_the_input():
     # Codex r2: a byte-identical in-place reshape must also drop to the live array.
     def reshape(points, seen, count):
@@ -288,56 +149,6 @@ def test_finite_hull_seed_calls_no_extra_predicates_before_the_first_insertion(m
         triangulation._finite_hull_seed(points, callback)
         counts[label] = seen[0]
     assert counts["fast"] == counts["plain"]
-
-
-def test_plain_shells_never_calls_user_code_and_needs_plain_nodes():
-    class Hostile(type):
-        def __eq__(cls, other):
-            raise RuntimeError("compared")
-
-        def __hash__(cls):
-            raise RuntimeError("hashed")
-
-    class Odd(tuple, metaclass=Hostile):
-        pass
-
-    mesh = _sliver_patch(10.0)
-    mesh.tris[10] = Odd(mesh.tris[10])
-    assert not s3_repair._plain_shells(mesh)
-    mesh = _sliver_patch(10.0)
-
-    class Nodes(dict):
-        pass
-
-    mesh.nodes = Nodes(mesh.nodes)
-    assert not s3_repair._plain_shells(mesh)
-
-
-def test_plain_shells_needs_plain_beams_couplings_and_float64_nodes():
-    class Beams(dict):
-        pass
-
-    mesh = _sliver_patch(10.0)
-    mesh.beams = Beams()
-    assert not s3_repair._plain_shells(mesh)
-    mesh = _sliver_patch(10.0)
-    mesh.nodes[1] = mesh.nodes[1].astype(np.float32)
-    assert not s3_repair._plain_shells(mesh)
-
-
-def test_plain_shells_needs_exact_integer_keys_in_beams_and_couplings():
-    # Codex r4: an int subclass key can run user code (e.g. in max()) after the map was captured.
-    class Key(int):
-        pass
-
-    mesh = _sliver_patch(10.0)
-    mesh.beams = {Key(99): (1, 2)}
-    assert not s3_repair._plain_shells(mesh)
-    mesh = _sliver_patch(10.0)
-    mesh.beams = {99: (1, Key(2))}
-    assert not s3_repair._plain_shells(mesh)
-
-
 
 
 @pytest.mark.parametrize("stage,when", [("convex hull", k) for k in range(1, 9)] + [("hull validation", 1)])
