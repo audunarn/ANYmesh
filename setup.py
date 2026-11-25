@@ -56,7 +56,8 @@ _ensure_msvc_tools_on_path()
 # still contracts, but only within one expression, which keeps split exact.
 compile_args = ["/std:c++17", "/O2", "/fp:precise"] if sys.platform == "win32" else [
     "-std=c++17", "-O3", "-fno-fast-math", "-fno-unsafe-math-optimizations",
-    "-fno-associative-math", "-fno-reciprocal-math", "-ffp-contract=off",
+    "-fno-associative-math", "-fno-reciprocal-math", "-fno-finite-math-only",
+    "-ffp-contract=off",
 ]
 link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else []
 

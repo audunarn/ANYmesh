@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import random
+import sys
 from fractions import Fraction
 
 
@@ -55,8 +56,18 @@ def _triples(count: int):
                 yield p, q, third
 
 
+def _subnormals_preserved() -> bool:
+    # A fast-math startup object linked into the extension can set
+    # flush-to-zero / denormals-are-zero for the importing thread.
+    tiny = sys.float_info.min
+    half = tiny / 2.
+    return half != 0. and half * 2. == tiny and math.ulp(0.) > 0.
+
+
 def exact_arithmetic_failures(probe, count: int = 4000) -> list[tuple]:
     failures = []
+    if not _subnormals_preserved():
+        failures.append(("subnormal", "flush-to-zero after import", None))
     signs = set()
     for p, q, r in _triples(count // 4):
         orientation = probe(1., 1., *p, *q, *r)[6]
