@@ -1227,7 +1227,9 @@ def _finite_hull_seed(points: np.ndarray,
     # as the original does.  Any other input keeps the plain scan throughout.
     array = points if type(points) is np.ndarray else None
     fast = (array is not None and array.dtype == np.float64 and array.ndim == 2
-            and array.shape[1] == 2 and bool(np.all(np.isfinite(array))))
+            and array.shape[1] == 2 and bool(np.all(np.isfinite(array)))
+            # a callback during the hull may have shrunk the array under the hull's rows
+            and all(type(index) is int and 0 <= index < array.shape[0] for index in hull))
     def layout():
         return (array.shape, array.strides, array.dtype, array.__array_interface__["data"][0])
 

@@ -27,7 +27,9 @@ class _PlainArray(np.ndarray):
 
 
 def _plain(points: np.ndarray) -> np.ndarray:
-    return np.array(points, dtype=points.dtype, copy=True).view(_PlainArray)
+    made = _PlainArray(points.shape, dtype=points.dtype)  # owns its buffer, like the exact copy
+    made[...] = points
+    return made
 
 
 def _cases():
@@ -336,3 +338,16 @@ def test_plain_shells_needs_exact_integer_keys_in_beams_and_couplings():
     assert not s3_repair._plain_shells(mesh)
 
 
+
+
+@pytest.mark.parametrize("stage,when", [("convex hull", k) for k in range(1, 9)] + [("hull validation", 1)])
+def test_finite_hull_seed_follows_a_callback_that_shrinks_the_input_during_the_hull(stage, when):
+    # Codex r5: a hull computed before a callback shrank the array references stale rows; the
+    # shortcut must then keep the original ndarray indexing (same IndexError and message).
+    def shrink(points, seen, count):
+        if seen.endswith(stage) and count == when:
+            points.resize((3, 2), refcheck=False)
+
+    for points in (np.array([(0.0, 0.0), (4.0, 0.0), (0.0, 4.0), (4.0, 4.0)]),
+                   np.array([(0.0, 0.0), (0.0, 4.0), (4.0, 4.0), (4.0, 0.0)]), CASES[1]):
+        assert _outcome(points.copy(), shrink) == _outcome(_plain(points), shrink)
