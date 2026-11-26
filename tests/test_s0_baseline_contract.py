@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,7 @@ def test_raw_format_rejects_nan_unknown_node_duplicate_and_oversize():
 
 
 def test_required_or_partial_environment_never_uses_local_golden(monkeypatch):
+    monkeypatch.delenv(contract.UNAVAILABLE_ENV, raising=False)
     monkeypatch.delenv(contract.PATH_ENV, raising=False)
     monkeypatch.delenv(contract.SHA_ENV, raising=False)
     monkeypatch.setenv(contract.REQUIRE_ENV, '1')
@@ -152,16 +154,147 @@ def test_loader_patch_is_explicit_and_no_other_python_drift_allowed(tmp_path):
         module.loader_payload(actual, tmp_path / 'source')
 
 
-def test_ci_requires_cold_baseline_in_both_full_profiles():
+def test_ci_runs_and_reports_the_cold_baseline_in_both_full_profiles():
+    # Owner decision 2026-11-25: S0 runs in both full profiles and its result
+    # is reported, but a failed S0 (including its frozen checkouts and its
+    # evidence upload) no longer stops the test legs.  The producer's binding
+    # reaches pytest only through tools/ci_s0_report.py after success.
     source = (Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml').read_text()
     for name, following in (('pytest:', 'native-absent:'), ('wheel-full-linux:', 'qualified-caller-planning:')):
         job = source.split('\n  ' + name, 1)[1].split('\n  ' + following, 1)[0]
-        assert 'ANYMESHER_REQUIRE_S0_BASELINE: "1"' in job
-        assert 'tools/ci_s0_baseline.py' in job
+        assert 'ANYMESHER_REQUIRE_S0_BASELINE' not in job  # only ci_s0_report.py exports it
+        for sid in ('s0_old_geometry', 's0_old_mesher'):
+            block = job.split('id: ' + sid, 1)[1].split('\n      - ', 1)[0]
+            assert 'continue-on-error: true' in block
+        step = job.split('- name: Produce one cold frozen-source six-face S0 baseline', 1)[1].split('\n      - ', 1)[0]
+        assert 'id: s0' in step and 'continue-on-error: true' in step
+        assert "steps.s0_old_geometry.outcome == 'success'" in step and "steps.s0_old_mesher.outcome == 'success'" in step
+        assert 'tools/ci_s0_baseline.py' in step and '--github-env s0-binding.env' in step
+        assert 'GITHUB_ENV' not in step  # the producer never writes the job environment
+        report = job.split('- name: Report the S0 result', 1)[1].split('\n      - ', 1)[0]
+        assert 'if: always()' in report and 'continue-on-error' not in report
+        assert '${{ steps.s0.outcome }}' in report
+        assert 'tools/ci_s0_report.py' in report and '--binding s0-binding.env' in report
+        token = step.split('ANYMESHER_S0_OWNER: ', 1)[1].split('\n', 1)[0]
+        assert 'github.run_id' in token and '--owner "' + token + '"' in report
+        assert '--github-env "$GITHUB_ENV"' in report
+        upload = job.split('- name: Retain cold S0 identity and partial process evidence', 1)[1].split('\n      - ', 1)[0]
+        assert 'continue-on-error: true' in upload
+        assert job.index('Report the S0 result') < job.index('-m pytest')
         assert contract.REFS['geometry'] in job and contract.REFS['mesher'] in job
-        assert '--github-env' in job
-        assert 'if: always()' in job
     assert 'python -I -B tools/ci_s0_baseline.py' in source
+
+
+def _report(tmp_path, outcome, binding_lines, owner=None):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    binding = tmp_path / 's0-binding.env'
+    if binding_lines is not None:
+        binding.write_text(''.join(line + '\n' for line in binding_lines), encoding='utf8')
+    env, summary = tmp_path / 'github.env', tmp_path / 'summary.md'
+    output = tmp_path / 'ci-s0-baseline'
+    output.mkdir(exist_ok=True)
+    code = module.report(outcome, binding, output, env, summary, owner)
+    exported = dict(line.split('=', 1) for line in env.read_text(encoding='utf8').splitlines())
+    return code, exported, summary.read_text(encoding='utf8')
+
+
+def _pair(tmp_path, body=b'{"schema": 1}'):
+    output = tmp_path / 'ci-s0-baseline'
+    output.mkdir(exist_ok=True)
+    manifest = output / 'manifest.json'
+    manifest.write_bytes(body)
+    return [contract.PATH_ENV + '=' + str(manifest), contract.SHA_ENV + '=' + hashlib.sha256(body).hexdigest()]
+
+
+@pytest.mark.parametrize('outcome', ['success', 'failure', 'skipped', 'cancelled'])
+def test_report_exports_the_binding_only_after_success(tmp_path, outcome):
+    pair = _pair(tmp_path)
+    code, exported, summary = _report(tmp_path, outcome, pair)
+    assert code == 0 and outcome in summary
+    if outcome == 'success':
+        assert exported == {contract.PATH_ENV: pair[0].split('=', 1)[1],
+                            contract.SHA_ENV: pair[1].split('=', 1)[1], contract.REQUIRE_ENV: '1'}
+    else:
+        # A binding written by a producer that then failed never reaches pytest.
+        assert exported == {contract.UNAVAILABLE_ENV: outcome}
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'path_only', 'extra_row', 'duplicate', 'bad_sha',
+                                      'upper_sha', 'wrong_sha', 'outside', 'not_a_file', 'invalid_utf8',
+                                      'other_file', 'loop', 'alias'])
+def test_report_refuses_a_missing_or_malformed_binding_after_success(tmp_path, mutation):
+    pair = _pair(tmp_path)
+    lines = {
+        'missing': None, 'path_only': pair[:1], 'extra_row': pair + [contract.REQUIRE_ENV + '=1'],
+        'duplicate': [pair[0], pair[0]], 'bad_sha': [pair[0], contract.SHA_ENV + '=bad-sha'],
+        'upper_sha': [pair[0], pair[1].upper().replace(contract.SHA_ENV.upper(), contract.SHA_ENV)],
+        'wrong_sha': [pair[0], contract.SHA_ENV + '=' + '0' * 64],
+        'outside': [contract.PATH_ENV + '=' + str(tmp_path / 'manifest.json'), pair[1]],
+        'not_a_file': [contract.PATH_ENV + '=' + str(tmp_path / 'ci-s0-baseline'), pair[1]],
+        'invalid_utf8': pair,
+        'other_file': None, 'loop': None, 'alias': None,
+    }[mutation]
+    if mutation == 'alias':
+        # A correctly sealed symlink alias of the manifest in another directory.
+        alias = tmp_path / 'elsewhere.json'
+        try:
+            os.symlink(tmp_path / 'ci-s0-baseline' / 'manifest.json', alias)
+        except (OSError, NotImplementedError):
+            pytest.skip('symlinks unavailable')
+        lines = [contract.PATH_ENV + '=' + str(alias), pair[1]]
+    if mutation == 'other_file':
+        # A correctly sealed file that is not the manifest.
+        other = tmp_path / 'ci-s0-baseline' / 'provenance.json'
+        other.write_bytes(b'{}')
+        lines = [contract.PATH_ENV + '=' + str(other), contract.SHA_ENV + '=' + hashlib.sha256(b'{}').hexdigest()]
+    if mutation == 'loop':
+        loop = tmp_path / 'ci-s0-baseline' / 'loop'
+        try:
+            os.symlink(loop, loop)
+        except (OSError, NotImplementedError):
+            pytest.skip('symlinks unavailable')
+        lines = [contract.PATH_ENV + '=' + str(loop), pair[1]]
+    if mutation == 'outside':
+        (tmp_path / 'manifest.json').write_bytes(b'{"schema": 1}')
+    code, exported, _ = _report(tmp_path, 'success', lines) if mutation != 'invalid_utf8' else (None, None, None)
+    if mutation == 'invalid_utf8':
+        (tmp_path / 's0-binding.env').write_bytes(b'\xff\xfe' + b'not utf8')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        env = tmp_path / 'github.env'
+        code = module.report('success', tmp_path / 's0-binding.env', tmp_path / 'ci-s0-baseline', env, None)
+        exported = dict(line.split('=', 1) for line in env.read_text(encoding='utf8').splitlines())
+    assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'success-without-binding'}
+
+
+def test_report_summary_write_error_never_blocks(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    env = tmp_path / 'github.env'
+    (tmp_path / 'ci-s0-baseline').mkdir()
+    code = module.report('failure', tmp_path / 'none.env', tmp_path / 'ci-s0-baseline', env,
+                         tmp_path / 'missing-dir' / 'summary.md')
+    assert code == 0
+    assert env.read_text(encoding='utf8') == contract.UNAVAILABLE_ENV + '=failure\n'
+
+
+def test_unavailable_flag_never_admits_a_partial_binding(monkeypatch):
+    monkeypatch.setenv(contract.UNAVAILABLE_ENV, 'failure')
+    monkeypatch.delenv(contract.REQUIRE_ENV, raising=False)
+    monkeypatch.setenv(contract.PATH_ENV, '/not/real')
+    monkeypatch.delenv(contract.SHA_ENV, raising=False)
+    with pytest.raises(AssertionError, match='partial'):
+        contract.baseline_environment()
 
 
 def test_supervisor_never_enumerates_unrelated_processes():
@@ -208,3 +341,95 @@ def test_assert_output_consumes_exact_packet_and_rejects_changed_warm_bytes(tmp_
     monkeypatch.delenv(contract.SHA_ENV)
     with pytest.raises(AssertionError, match='required S0 cold baseline'):
         contract.assert_output('planar', mesh, contract.HISTORICAL, digest=digest)
+
+
+def test_unavailable_baseline_skips_with_the_reported_reason(monkeypatch):
+    monkeypatch.delenv(contract.PATH_ENV, raising=False)
+    monkeypatch.delenv(contract.SHA_ENV, raising=False)
+    monkeypatch.delenv(contract.REQUIRE_ENV, raising=False)
+    monkeypatch.setenv(contract.UNAVAILABLE_ENV, 'failure')
+    with pytest.raises(pytest.skip.Exception, match='unavailable.*failure'):
+        contract.baseline_environment()
+    # Never both: a required baseline that is unavailable still fails.
+    monkeypatch.setenv(contract.REQUIRE_ENV, '1')
+    with pytest.raises(AssertionError, match='required'):
+        contract.baseline_environment()
+
+
+def test_report_kills_a_stray_s0_process_before_pytest(tmp_path):
+    psutil = pytest.importorskip('psutil')
+    import subprocess
+    import sys
+    output = tmp_path / 'ci-s0-baseline'
+    output.mkdir()
+    # A stand-in for a surviving cold child: its command line names the output directory.
+    stray = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)', str(output)])
+    try:
+        code, exported, _ = _report(tmp_path, 'failure', None)
+        assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'failure'}
+        assert stray.wait(timeout=30) is not None
+        assert not psutil.pid_exists(stray.pid) or psutil.Process(stray.pid).status() == psutil.STATUS_ZOMBIE
+    finally:
+        if stray.poll() is None:
+            stray.kill()
+
+
+def test_report_kills_an_owned_descendant_that_outlived_its_parent(tmp_path, monkeypatch):
+    psutil = pytest.importorskip('psutil')
+    import subprocess
+    import sys
+    import time
+    owner = 's0-test-owner-%d' % os.getpid()
+    pid_file = tmp_path / 'grandchild.pid'
+    # The parent starts a grandchild with no S0 marker on its command line and
+    # exits at once; only the inherited owner token ties it to S0.
+    launcher = ('import subprocess, sys; '
+                'p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]); '
+                'open(sys.argv[1], "w").write(str(p.pid))')
+    env = dict(os.environ, ANYMESHER_S0_OWNER=owner)
+    subprocess.run([sys.executable, '-c', launcher, str(pid_file)], env=env, check=True, timeout=60)
+    grandchild = int(pid_file.read_text())
+    try:
+        assert psutil.pid_exists(grandchild)
+        code, exported, _ = _report(tmp_path, 'failure', None, owner=owner)
+        assert code == 0 and exported == {contract.UNAVAILABLE_ENV: 'failure'}
+        deadline = time.time() + 30
+        while psutil.pid_exists(grandchild) and time.time() < deadline:
+            try:
+                if psutil.Process(grandchild).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.Error:
+                break
+            time.sleep(.2)
+        assert not psutil.pid_exists(grandchild) or psutil.Process(grandchild).status() == psutil.STATUS_ZOMBIE
+    finally:
+        try:
+            psutil.Process(grandchild).kill()
+        except psutil.Error:
+            pass
+
+
+def test_containment_rescans_until_no_owned_process_is_left(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ci_s0_report', Path(__file__).resolve().parents[1] / 'tools' / 'ci_s0_report.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    psutil = pytest.importorskip('psutil')
+
+    class Fake:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def kill(self):
+            pass
+
+    import time
+    # The first scan sees one process; killing it reveals a child started
+    # meanwhile; one empty scan is not enough, a child appears in the next.
+    scans = [[Fake(1)], [Fake(2)], [], [Fake(3)], [], []]
+    monkeypatch.setattr(module, 'stray_processes', lambda output, owner: (psutil, scans.pop(0)))
+    monkeypatch.setattr(psutil, 'wait_procs', lambda processes, timeout: (processes, []))
+    monkeypatch.setattr(time, 'sleep', lambda seconds: None)
+    assert module.contain(tmp_path) == []
+    assert scans == []

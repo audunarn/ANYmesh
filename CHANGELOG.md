@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- CI: the full-profile pytest legs run the whole suite (no `--maxfail=1`, `--continue-on-collection-errors`) and list failed test ids per leg
+  (`tools/ci_failed_ids.py`, job summary and artifact), so a red leg can be compared with `main` by test id.
+- CI: the S0 frozen-source baseline step is reported but no longer stops the test legs. A failed S0
+  (currently the compiler proof, frozen mesher ref `aa19c0f` predates `native_cpp.py` up to `210e56a`)
+  used to end every full-matrix pytest leg before any test ran. Tests that need the baseline are now
+  skipped with the reported reason, and the baseline is required exactly when S0 succeeded. How a
+  reviewed build-file change moves the frozen reference: `docs/ci-s0-baseline.md`.
 - **Speed, results unchanged.** The finite-hull triangulation fallback runs natively: when the
   compiled extension provides `finite_hull_seed`, `_finite_hull_seed` hands the fan seed, exact
   point insertion and Lawson flips to C++ (`_finite_hull_native.hpp`) for exact float64 (n, 2)
