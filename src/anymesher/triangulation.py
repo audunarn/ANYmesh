@@ -19,8 +19,10 @@ from .native import (
     NativeBoundarySelection,
     run_native_triangulation,
     snapshot_native_boundary,
+    _run_ghost_native_seed,
     _run_reference_native_seed,
 )
+from ._ghost_seed import GhostSeedRefusal, ghost_bowyer_watson
 
 __all__ = [
     "PlanarTriangulation",
@@ -2015,12 +2017,74 @@ def constrained_planar_triangulation(
         if triangles is None:
             triangles = _bowyer_watson(prepared.points)
         if not _complete_hull_seed(prepared.points, triangles, cancellation_check):
-            triangles = _finite_hull_seed(prepared.points, cancellation_check)
-            if used_backend == "anymesher-cpp17-reference-seed":
-                used_backend = "python"
-                fallback_reason = "reference_seed_incomplete_hull"
+            # The finite super triangle lost hull cells (almost collinear hull
+            # stations).  A symbolic vertex at infinity covers the hull by
+            # construction.  It is published only when strictly Delaunay, so
+            # it equals the finite-hull fan's result cell for cell; exactly
+            # cocircular ties, refusals and uncertified seeds keep the fan.
+            discarded = used_backend == "anymesher-cpp17-reference-seed"
+            native_route = _reference_native_seed and chosen == "python"
+            ghost = None
+            attempts: list[str] = []
+            if native_route:
+                candidate, reason = _run_ghost_native_seed(prepared.points, cancellation_check)
+                if candidate is None:
+                    attempts.append(reason)
+                elif _complete_hull_seed(prepared.points, candidate, cancellation_check):
+                    ghost = candidate
+                    attempts.append("anymesher-cpp17-ghost-seed")
+                else:
+                    attempts.append("ghost_seed_native_uncertified")
+            # A native refusal made the Python reference's decisions; only an
+            # absent, unsupported, failed or uncertified native seed is retried.
+            if ghost is None and not (attempts and attempts[-1].startswith(
+                    "ghost_seed_native_refusal")):
+                callback_errors: list[BaseException] = []
+
+                def guarded(phase: str) -> None:
+                    try:
+                        cancellation_check(phase)
+                    except BaseException as error:
+                        callback_errors.append(error)
+                        raise
+
+                try:
+                    candidate = ghost_bowyer_watson(
+                        prepared.points, orient2d, incircle,
+                        guarded if cancellation_check is not None else None,
+                    )
+                except GhostSeedRefusal as refusal:
+                    if callback_errors:
+                        # The callback raised a refusal type: cancellation, not a refusal.
+                        raise callback_errors[0] from None
+                    attempts.append(f"ghost_seed_python_refusal: {refusal.reason}: {refusal}")
+                else:
+                    if _complete_hull_seed(prepared.points, candidate, cancellation_check):
+                        ghost = candidate
+                        attempts.append("python")
+                    else:
+                        attempts.append("ghost_seed_python_uncertified")
+            if ghost is not None:
+                triangles = ghost
+            else:
+                triangles = _finite_hull_seed(prepared.points, cancellation_check)
+            if native_route:
+                used_backend = (
+                    "anymesher-cpp17-ghost-seed"
+                    if attempts[-1] == "anymesher-cpp17-ghost-seed" else "python"
+                )
+                if used_backend != "python":
+                    selected_backend = used_backend
+                if discarded:
+                    fallback_reason = "reference_seed_incomplete_hull"
                 native_diagnostics = {
-                    "reference_native_seed": True, "insertion_discarded": True,
+                    "reference_native_seed": discarded,
+                    "insertion_discarded": True,
+                    "discarded_seed": (
+                        "anymesher-cpp17-reference-seed" if discarded else "python"
+                    ),
+                    "ghost_seed": attempts[-1],
+                    "ghost_seed_attempts": tuple(attempts),
                 }
         protected: set[tuple[int, int]] = set()
         # ``_recover_segment`` returns the triangles unchanged when the segment

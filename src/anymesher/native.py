@@ -197,6 +197,70 @@ def run_native_triangulation(
     return NativeTriangulation(result_points, result_triangles, diagnostics)
 
 
+def _run_ghost_native_seed(points, cancellation_check):
+    """Native mirror of ``_ghost_seed.ghost_bowyer_watson`` or a typed absence.
+
+    Returns ``(triangles, None)`` or ``(None, reason)``.  ``reason`` starts with
+    ``ghost_seed_native_refusal: <code>:`` for an algorithm refusal (the Python
+    reference makes the same decisions and refuses the same inputs), with
+    ``ghost_seed_native_error:`` for an internal failure, or names an absent
+    capability or unsupported input.  Cancellation exceptions propagate as
+    the same instance.
+    """
+    from types import BuiltinFunctionType
+
+    module_name = f"{__package__}._native"
+    if find_spec(module_name) is None:
+        return None, "ghost_seed_capability_absent"
+    extension = import_module(module_name)
+    kernel = getattr(extension, "ghost_delaunay", None)
+    if type(kernel) is not BuiltinFunctionType:
+        return None, "ghost_seed_capability_absent"
+    if (type(points) is not np.ndarray or points.dtype != np.dtype(np.float64)
+            or points.ndim != 2 or points.shape[1] != 2
+            or not points.flags.c_contiguous):
+        return None, "ghost_seed_array_unsupported"
+    magnitudes = np.abs(points)
+    nonzero = magnitudes[magnitudes != 0.]
+    # Same admitted range as the reference seed: the exact expansions of the
+    # native orientation and in-circle predicates cannot under/overflow.
+    if (not np.isfinite(magnitudes).all()
+            or np.max(magnitudes, initial=0.) > 2.**64
+            or (len(nonzero) and np.min(nonzero) < 2.**-64)):
+        return None, "ghost_seed_coordinate_range"
+    captured = []
+
+    def checked(phase):
+        try:
+            return cancellation_check(phase)
+        except BaseException as error:
+            captured.append(error)
+            raise _ReferenceSeedCallbackFailure from None
+
+    try:
+        raw = kernel(points, checked if cancellation_check is not None else None)
+    except BaseException as error:
+        # A callback exception (any type) is re-raised as the same instance and
+        # is never a refusal.  Anything else raised here is an internal error:
+        # the Python reference retries it.
+        if captured:
+            raise captured[0] from None
+        if isinstance(error, RuntimeError):
+            return None, "ghost_seed_native_error: " + str(error)
+        raise
+    if captured:
+        raise captured[0] from None
+    if isinstance(raw, tuple):
+        code, message = raw
+        return None, f"ghost_seed_native_refusal: {code}: {message}"
+    triangles = [tuple(map(int, row)) for row in raw]
+    if (triangles != sorted(set(triangles))
+            or any(len(row) != 3 or min(row) < 0 or max(row) >= len(points)
+                   for row in triangles)):
+        raise MeshError("ghost seed returned malformed connectivity")
+    return triangles, None
+
+
 class _ReferenceSeedCallbackFailure(BaseException):
     """Keep callback exceptions distinct from native construction refusal."""
 
@@ -239,7 +303,9 @@ def _run_reference_native_seed(points, orientation, circle, cancellation_check):
             try:
                 return function(*args)
             except BaseException as error:
-                captured.append((error, error.__traceback__))
+                # Keep only the instance: reading any attribute of a hostile
+                # exception could raise and be mistaken for a native refusal.
+                captured.append(error)
                 raise _ReferenceSeedCallbackFailure from None
         return invoke
 
@@ -249,9 +315,12 @@ def _run_reference_native_seed(points, orientation, circle, cancellation_check):
             checked(cancellation_check) if cancellation_check is not None else None,
         )
     except _ReferenceSeedCallbackFailure:
-        error, traceback = captured[0]
-        raise error.with_traceback(traceback)
+        # Re-raise the captured instance itself: an overridden
+        # ``with_traceback`` must not replace the caller's exception.
+        raise captured[0] from None
     except RuntimeError as error:
+        if captured:
+            raise captured[0] from None
         # A refused cavity/point-location attempt has published nothing.
         # The unchanged full Python insertion remains authoritative.
         return None, "reference_seed_native_refusal: " + str(error)

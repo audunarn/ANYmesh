@@ -123,18 +123,27 @@ def test_present_unloadable_extension_error_is_not_absence(monkeypatch):
     assert caught.value is error
 
 
-def test_discarded_native_hull_reports_actual_python(monkeypatch):
-    _extension()
+def _reject_first_hull_check(monkeypatch):
     complete = triangulation._complete_hull_seed
     checks = []
     reject_next = [True]
+
     def reject_first_seed(*args):
         checks.append(None)
         if reject_next:
             reject_next.pop()
             return False
         return complete(*args)
+
     monkeypatch.setattr(triangulation, "_complete_hull_seed", reject_first_seed)
+    return checks, reject_next
+
+
+def test_discarded_native_hull_reports_actual_python(monkeypatch):
+    # A unit square is cocircular: the ghost seed refuses the tie and the
+    # finite-hull fan keeps the earlier result and labels.
+    _extension()
+    checks, reject_next = _reject_first_hull_check(monkeypatch)
     outer = np.array([[0., 0.], [1., 0.], [1., 1.], [0., 1.]])
     actual = triangulation.triangulate_polygon(outer, backend="python", _reference_native_seed=True)
     reject_next.append(True)
@@ -145,8 +154,76 @@ def test_discarded_native_hull_reports_actual_python(monkeypatch):
     assert actual.fallback_reason == "reference_seed_incomplete_hull"
     assert actual.native_diagnostics == {
         "reference_native_seed": True, "insertion_discarded": True,
+        "discarded_seed": "anymesher-cpp17-reference-seed",
+        "ghost_seed": "ghost_seed_native_refusal: cocircular: ghost seed has cocircular ties",
+        "ghost_seed_attempts": (
+            "ghost_seed_native_refusal: cocircular: ghost seed has cocircular ties",),
     }
-    assert len(checks) == 4  # initial rejection and real finite-hull check, twice
+    assert len(checks) == 4  # initial rejection and the finite-hull check, twice
+
+
+def test_discarded_native_hull_is_completed_by_the_native_ghost_seed(monkeypatch):
+    _extension()
+    checks, reject_next = _reject_first_hull_check(monkeypatch)
+    outer = np.array([[0., 0.], [1., 0.], [1.3, 1.1], [-.2, .7]])
+    actual = triangulation.triangulate_polygon(outer, backend="python", _reference_native_seed=True)
+    reject_next.append(True)
+    expected = triangulation.triangulate_polygon(outer, backend="python")
+    _same_result(actual, expected)
+    assert actual.actual_backend == actual.backend == "anymesher-cpp17-ghost-seed"
+    assert actual.selected_backend == "anymesher-cpp17-ghost-seed"
+    assert actual.fallback_reason == "reference_seed_incomplete_hull"
+    assert actual.native_diagnostics == {
+        "reference_native_seed": True, "insertion_discarded": True,
+        "discarded_seed": "anymesher-cpp17-reference-seed",
+        "ghost_seed": "anymesher-cpp17-ghost-seed",
+        "ghost_seed_attempts": ("anymesher-cpp17-ghost-seed",),
+    }
+    assert len(checks) == 4  # initial rejection and the ghost-seed check, twice
+
+
+@pytest.mark.parametrize("native_ghost", ["absent", "refused", "uncertified"])
+def test_refused_ghost_seed_keeps_the_finite_hull_route(monkeypatch, native_ghost):
+    _extension()
+    from anymesher._ghost_seed import GhostSeedRefusal
+    _reject_first_hull_check(monkeypatch)
+    python_calls = []
+
+    def refuse(*args, **kwargs):
+        python_calls.append(None)
+        raise GhostSeedRefusal("forced", reason="forced")
+
+    monkeypatch.setattr(triangulation, "ghost_bowyer_watson", refuse)
+    native_result = {
+        "absent": (None, "ghost_seed_capability_absent"),
+        "refused": (None, "ghost_seed_native_refusal: forced"),
+        "uncertified": ([(0, 1, 2)], None),
+    }[native_ghost]
+    monkeypatch.setattr(triangulation, "_run_ghost_native_seed", lambda *args: native_result)
+    called = []
+    finite = triangulation._finite_hull_seed
+    monkeypatch.setattr(triangulation, "_finite_hull_seed",
+                        lambda *args: called.append(None) or finite(*args))
+    outer = np.array([[0., 0.], [1., 0.], [1.3, 1.1], [-.2, .7]])
+    actual = triangulation.triangulate_polygon(outer, backend="python", _reference_native_seed=True)
+    assert called == [None]
+    # A native refusal made the Python reference's decisions: no retry.
+    assert python_calls == ([] if native_ghost == "refused" else [None])
+    assert actual.actual_backend == actual.backend == "python"
+    assert actual.selected_backend == "anymesher-cpp17-reference-seed"
+    assert actual.fallback_reason == "reference_seed_incomplete_hull"
+    assert actual.native_diagnostics == {
+        "reference_native_seed": True, "insertion_discarded": True,
+        "discarded_seed": "anymesher-cpp17-reference-seed",
+        "ghost_seed": ("ghost_seed_native_refusal: forced" if native_ghost == "refused"
+                       else "ghost_seed_python_refusal: forced: forced"),
+        "ghost_seed_attempts": {
+            "absent": ("ghost_seed_capability_absent", "ghost_seed_python_refusal: forced: forced"),
+            "refused": ("ghost_seed_native_refusal: forced",),
+            "uncertified": ("ghost_seed_native_uncertified",
+                            "ghost_seed_python_refusal: forced: forced"),
+        }[native_ghost],
+    }
 
 
 def test_extreme_coordinates_are_reference_fallback():
@@ -280,8 +357,13 @@ def test_original_ch9_point_three_mesh_matches_complete_reference(monkeypatch, r
     assert attempts and len(attempts) == len(completed)
     for attempt, result in zip(attempts, completed):
         if attempt["native_returned"]:
-            assert result["selected"] == "anymesher-cpp17-reference-seed"
-            if result["actual"] == "python":
+            assert result["selected"] in {
+                "anymesher-cpp17-reference-seed", "anymesher-cpp17-ghost-seed",
+            }
+            if result["actual"] != "anymesher-cpp17-reference-seed":
+                # Incomplete super-triangle hull: completed by the native ghost
+                # seed (or, if that refused, the finite-hull Python route).
+                assert result["actual"] in {"anymesher-cpp17-ghost-seed", "python"}
                 assert result["reason"] == "reference_seed_incomplete_hull"
                 assert result["diagnostics"]["insertion_discarded"] is True
         else:
@@ -291,6 +373,14 @@ def test_original_ch9_point_three_mesh_matches_complete_reference(monkeypatch, r
         kwargs["_reference_native_seed"] = False
         return original(*args, **kwargs)
     monkeypatch.setattr(seed, "triangulate_polygon", python_seed)
+    # Expected side: the pre-change route (incomplete seeds always use the
+    # finite-hull fan), so equality also proves the ghost seed changes nothing.
+    from anymesher._ghost_seed import GhostSeedRefusal
+
+    def no_ghost(*args, **kwargs):
+        raise GhostSeedRefusal("disabled", reason="disabled")
+
+    monkeypatch.setattr(triangulation, "ghost_bowyer_watson", no_ghost)
     expected = _generate(model, (face,), .3, order="quadratic").mesh
     assert _persistent_state(model) == persistent
     a, b = deepcopy(mesh_to_dict(actual)), mesh_to_dict(expected)
@@ -300,6 +390,9 @@ def test_original_ch9_point_three_mesh_matches_complete_reference(monkeypatch, r
     for row in rows.values():
         row["seed_triangulation_backend"] = "python"
     assert a == b
+    # Dictionary equality treats -0.0 and 0.0 alike: also compare bytes.
+    import json
+    assert json.dumps(a, sort_keys=True).encode() == json.dumps(b, sort_keys=True).encode()
 
 
 def test_constrained_annular_chart_has_successful_native_insertion():

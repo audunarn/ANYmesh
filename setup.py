@@ -78,6 +78,7 @@ if os.environ.get("ANYMESHER_DISABLE_NATIVE", "0") not in {"1", "true", "TRUE"}:
             depends=[
                 "src/anymesher/_triangulation_native.hpp",
                 "src/anymesher/_exact_probe_native.hpp",
+                "src/anymesher/_ghost_seed_native.hpp",
                 "src/anymesher/_quality_pipeline_native.hpp",
                 "src/anymesher/_native_v2.hpp",
                 "src/anymesher/_native_t3_storage.hpp",
