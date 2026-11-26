@@ -2,8 +2,16 @@
 
 ## Unreleased
 
+- CI: the full-profile pytest legs run the whole suite (no `--maxfail=1`, `--continue-on-collection-errors`) and list failed test ids per leg
+  (`tools/ci_failed_ids.py`, job summary and artifact), so a red leg can be compared with `main` by test id.
+- CI: the S0 frozen-source baseline step is reported but no longer stops the test legs. A failed S0
+  (currently the compiler proof, frozen mesher ref `aa19c0f` predates `native_cpp.py` up to `210e56a`)
+  used to end every full-matrix pytest leg before any test ran. Tests that need the baseline are now
+  skipped with the reported reason, and the baseline is required exactly when S0 succeeded. How a
+  reviewed build-file change moves the frozen reference: `docs/ci-s0-baseline.md`.
 - Build the native extension with value-safe floating point: `-fno-fast-math
-  -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -ffp-contract=off`
+  -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -fno-finite-math-only
+  -ffp-contract=off`
   after any inherited `CFLAGS` on non-Windows platforms, and pin MSVC's
   default `/fp:precise`. The exact orientation and in-circle expansions rely on separately rounded
   operations (Dekker split, two_sum, two_product). GCC's default cross-statement contraction on an
@@ -20,6 +28,20 @@
   `-ffinite-math-only` or x87 excess precision (`FLT_EVAL_METHOD != 0`) also fail to compile, and
   the check fails when subnormals are flushed after import. Inherited options that are neither
   reset nor detectable are unsupported, for example Clang's `-fdenormal-fp-math=positive-zero`.
+
+- **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
+  (48 webs, 0.5 m): the Python finite-hull triangulation fallback (615 of 1005 planar seeds) skips
+  cells whose closed bounding box excludes the point being located and feeds its predicates Python
+  float tuples (313 -> 167 s over the 615 captured calls, identical results). Identity contract (owner, 2026-11-25): bit-identical results, refusals,
+  exception types and messages and callback order for every input built from the library's own
+  types (exact `GeometryModel`, `Mesh`, anygeometry surface classes, `TolerancePolicy`) and plain
+  containers (dict, tuple, list, int, float, exact float64/integer ndarrays), under NumPy's default
+  error handling and Python's default warning filters; cancellation callbacks may raise and may
+  change array contents or shape. Every shortcut is guarded by a total allow-list that never calls
+  user code and declines to the original route otherwise. Not defended: observing how many times
+  internal predicates or evaluations run (call counts, repeated identical warnings), buffer reads,
+  monkeypatching of library internals, metaclass tricks on library classes. Tests:
+  `tests/test_tripod_speed_identity.py`.
 
 - **Behaviour change.** A scalar beam eccentricity now stands a stiffener off on the side of its
   plate's surface normal (`GeometryModel.face_normal`) on every meshing route. The nodal normal
