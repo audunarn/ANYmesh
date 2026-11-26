@@ -45,31 +45,45 @@ def test_ids_match_pytests_own_report_for_a_real_run(tmp_path):
     assert _tool().failed_ids(junit) == printed
 
 
-def test_status_line_tells_missing_evidence_from_a_clean_report(tmp_path, monkeypatch):
+def _suite(cases, tests=None, failures=0, errors=0):
+    tests = cases.count('<testcase') if tests is None else tests
+    return (f'<testsuites><testsuite name="pytest" tests="{tests}" failures="{failures}" errors="{errors}">'
+            + cases + '</testsuite></testsuites>')
+
+
+def test_status_line_and_exit_tell_missing_evidence_from_a_clean_report(tmp_path, monkeypatch):
     tool = _tool()
     summary = tmp_path / 'summary.md'
     monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(summary))
-    clean = tmp_path / 'clean.xml'
-    clean.write_text('<testsuites><testsuite><testcase classname="tests.t" name="test_x" /></testsuite></testsuites>',
-                     encoding='utf8')
-    internal = tmp_path / 'internal.xml'
-    internal.write_text('<testsuites><testsuite><testcase classname="pytest" name="internal"><error />'
-                        '</testcase></testsuite></testsuites>', encoding='utf8')
-    bad = tmp_path / 'bad.xml'
-    bad.write_text('<testsuites', encoding='utf8')
+    reports = {
+        'clean': _suite('<testcase classname="tests.t" name="test_x" />'),
+        'internal': _suite('<testcase classname="pytest" name="internal"><error /></testcase>', errors=1),
+        'bad': '<testsuites',
+        'unrelated': '<project><testcase classname="tests.t" name="test_x"><failure /></testcase></project>',
+        'declared_without_cases': _suite('', tests=1, failures=1),
+        'no_cases': _suite(''),
+        'undercounted': _suite('<testcase classname="tests.t" name="test_x"><failure /></testcase>', failures=0),
+        'no_suite': '<testsuites />',
+        'missing_counts': '<testsuites><testsuite><testcase classname="tests.t" name="test_x" /></testsuite></testsuites>',
+    }
+    for name, text in reports.items():
+        (tmp_path / f'{name}.xml').write_text(text, encoding='utf8')
     out = tmp_path / 'ids.txt'
-    for report, expected in [(clean, ['# report: ok, 0 failed']),
-                             (internal, ['# report: ok, 1 failed', 'INTERNALERROR'])]:
-        assert tool.main([str(report), '--output', str(out)]) == 0
+    for name, expected in [('clean', ['# report: ok, 0 failed']),
+                           ('internal', ['# report: ok, 1 failed', 'INTERNALERROR'])]:
+        assert tool.main([str(tmp_path / f'{name}.xml'), '--output', str(out)]) == 0
         assert out.read_text(encoding='utf8').splitlines() == expected
-    for report in (tmp_path / 'missing.xml', bad):
-        assert tool.main([str(report), '--output', str(out)]) == 0
-        assert out.read_text(encoding='utf8').startswith('# report: unreadable (')
-    assert summary.read_text(encoding='utf8').count('### Failed test ids (') == 4
+    # Fail closed: without complete evidence the step, and so the leg, fails.
+    for name, status in [('missing', 'unreadable'), ('bad', 'unreadable'), ('unrelated', 'incomplete'),
+                         ('declared_without_cases', 'incomplete'), ('no_cases', 'incomplete'),
+                         ('undercounted', 'incomplete'), ('no_suite', 'incomplete'), ('missing_counts', 'incomplete')]:
+        assert tool.main([str(tmp_path / f'{name}.xml'), '--output', str(out)]) == 1, name
+        assert out.read_text(encoding='utf8').startswith(f'# report: {status} ('), name
+    assert summary.read_text(encoding='utf8').count('### Failed test ids (') == 10
 
 
 def test_write_errors_never_fail_the_step(tmp_path, monkeypatch):
     clean = tmp_path / 'clean.xml'
-    clean.write_text('<testsuites />', encoding='utf8')
+    clean.write_text(_suite('<testcase classname="tests.t" name="test_x" />'), encoding='utf8')
     monkeypatch.setenv('GITHUB_STEP_SUMMARY', str(tmp_path / 'no-such-dir' / 'summary.md'))
     assert _tool().main([str(clean), '--output', str(tmp_path / 'no-such-dir' / 'ids.txt')]) == 0

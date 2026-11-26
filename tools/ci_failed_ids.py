@@ -10,10 +10,16 @@ cannot pass for a clean leg:
 - ``# report: ok, <n> failed`` followed by the ids, one per line and sorted, in
   the form pytest prints them (``file::name``; a collection error is the module
   path; an internal error is ``INTERNALERROR``);
-- ``# report: unreadable (<reason>)`` when the JUnit file is missing or malformed.
+- ``# report: unreadable (<reason>)`` when the JUnit file is missing or malformed;
+- ``# report: incomplete (<reason>)`` when it is not a complete pytest report:
+  another root element, no test case, or a ``<testsuite>`` whose declared
+  ``tests``/``failures``/``errors`` differ from its test cases.
 
-The same goes to the job summary. This step never changes the leg's result:
-pytest's own exit status does that, and every write error here is a warning.
+The same goes to the job summary. Contract (owner standing approval,
+2026-11-26): best-effort parsing of our own pytest JUnit output. An unreadable
+or incomplete report fails the step, and so the leg, because that leg cannot
+be compared by test id. Otherwise the step exits 0 and pytest's own exit
+status decides the leg. Write errors here are warnings.
 """
 from __future__ import annotations
 
@@ -45,9 +51,31 @@ def case_id(case) -> str:
     return '::'.join(['/'.join(parts) + '.py'] + classes + [name])
 
 
+class Incomplete(ValueError):
+    """The report is not a complete pytest JUnit report."""
+
+
 def failed_ids(report: Path) -> list[str]:
     root = ET.parse(report).getroot()
-    return sorted({case_id(case) for case in root.iter('testcase')
+    if root.tag not in ('testsuites', 'testsuite'):
+        raise Incomplete(f'root element <{root.tag}> is not a pytest JUnit report')
+    suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')
+    if not suites:
+        raise Incomplete('no <testsuite>')
+    total = 0
+    for suite in suites:
+        cases = suite.findall('testcase')
+        counted = {'tests': len(cases),
+                   'failures': sum(len(case.findall('failure')) for case in cases),
+                   'errors': sum(len(case.findall('error')) for case in cases)}
+        for key, value in counted.items():
+            declared = suite.get(key)
+            if declared is None or not declared.isdigit() or int(declared) != value:
+                raise Incomplete(f'<testsuite {key}="{declared}"> but {value} found')
+        total += len(cases)
+    if total == 0:
+        raise Incomplete('no test cases')
+    return sorted({case_id(case) for suite in suites for case in suite.findall('testcase')
                    if case.find('failure') is not None or case.find('error') is not None})
 
 
@@ -56,6 +84,8 @@ def render(report: Path) -> tuple[str, list[str] | None]:
         ids = failed_ids(report)
     except (OSError, ET.ParseError) as error:
         return f'# report: unreadable ({type(error).__name__}: {error})', None
+    except Incomplete as error:
+        return f'# report: incomplete ({error})', None
     return f'# report: ok, {len(ids)} failed', ids
 
 
@@ -81,6 +111,10 @@ def main(argv=None) -> int:
                     stream.write('```\n' + body + '```\n')
         except OSError as error:
             print(f'::warning title=failed ids::could not write the job summary: {error}')
+    if ids is None:
+        # Fail closed: without complete evidence the leg cannot be compared by test id.
+        print(f'::error title=failed ids::{status[2:]}')
+        return 1
     return 0
 
 

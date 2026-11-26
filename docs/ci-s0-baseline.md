@@ -38,11 +38,18 @@ before pytest.
 The full-profile pytest legs (`pytest` matrix and the installed wheel in `wheel-full-linux`) run without
 `--maxfail` and with `--continue-on-collection-errors`. A pre-existing failure would otherwise stop every leg at
 its first failure and hide the rest of the Linux and macOS tests. After pytest, `tools/ci_failed_ids.py` runs
-(`if: always()`, `continue-on-error`). It writes the failed and errored test ids, in pytest's `file::name` form,
+(`if: always()`). It writes the failed and errored test ids, in pytest's `file::name` form,
 to the job summary and to `failed-test-ids.txt` (`installed-failed-test-ids.txt`). Those files are uploaded with
 the JUnit results. A collection error is listed by its module path, and an internal error as `INTERNALERROR`. The
-first line is `# report: ok, <n> failed`, or `# report: unreadable (...)` when the JUnit file is missing or
-malformed, so missing evidence never reads as a clean leg. The reporter never changes the leg's result.
+first line is `# report: ok, <n> failed`. It is `# report: unreadable (...)` when the JUnit file is missing or
+malformed, and `# report: incomplete (...)` when it is not a complete pytest report. That covers another root
+element, no test case, or a `<testsuite>` whose declared `tests`/`failures`/`errors` differ from its cases.
+
+Reporter contract (owner standing approval 2026-11-26): best-effort parsing of our own pytest JUnit output. An
+unreadable or incomplete report fails the reporter step, and so the leg, because the leg cannot be compared by
+test id. Otherwise the step passes and pytest's exit status decides the leg. Write errors are warnings. The CI
+contract test pins each whole-suite pytest command exactly. A change to selection or stopping options (`-x`,
+`-k`, a second pytest step) therefore fails the contract and needs a reviewed contract change.
 
 A red leg is judged by comparing its list with the same leg of a `main` run that used these same whole-suite
 commands. A run from before this change stopped at its first failure, so it is not a baseline. The first

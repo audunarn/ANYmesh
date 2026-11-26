@@ -161,7 +161,6 @@ jobs:
           ANYMESHER_REQUIRE_QUAD_WORKERS: "1"
       - name: Report failed test ids
         if: always()
-        continue-on-error: true
         run: python -B tools/ci_failed_ids.py mesh-results.xml --output failed-test-ids.txt
       - uses: actions/upload-artifact@v4
         if: always()
@@ -381,7 +380,6 @@ jobs:
           --continue-on-collection-errors
       - name: Report failed test ids of the installed wheel
         if: always()
-        continue-on-error: true
         run: python -B tools/ci_failed_ids.py installed-mesh-results.xml --output installed-failed-test-ids.txt
       - name: Retain installed wheel results and quadratic trial diagnostics
         if: always()
