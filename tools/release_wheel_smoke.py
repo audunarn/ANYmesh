@@ -126,6 +126,17 @@ def main() -> int:
     assert structured.structured_layout.status == "applied"
     assert structured.mesh.quads
 
+    exact_arithmetic = "skipped (native not required)"
+    if options.require_native:
+        from anymesher import _native
+        from anymesher._exact_arithmetic_check import exact_arithmetic_failures
+
+        failures = exact_arithmetic_failures(_native.exact_arithmetic_probe)
+        if failures:  # not an assert: python -O must not skip it
+            raise SystemExit(f"inexact native arithmetic (fused multiply-add?): "
+                             f"{len(failures)} failures, first {failures[:5]}")
+        exact_arithmetic = "passed"
+
     cylindrical = _cylindrical_frontal(options.require_native)
 
     print(
@@ -140,6 +151,7 @@ def main() -> int:
                 ],
                 "structured": structured.structured_layout.status,
                 "cylindrical_frontal": cylindrical,
+                "exact_arithmetic": exact_arithmetic,
             },
             sort_keys=True,
         )

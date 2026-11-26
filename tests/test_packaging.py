@@ -286,6 +286,9 @@ def test_sdist_contains_the_installed_wheel_smoke_and_cylinder_fixture(
     assert f"{root}/tools/release_wheel_smoke.py" in members
     assert f"{root}/tools/run_dev_smoke.py" in members
     assert f"{root}/benchmarks/native_v2_cylinder_cases.py" in members
+    assert f"{root}/src/anymesher/_exact_probe_native.hpp" in members
+    assert f"{root}/src/anymesher/_exact_arithmetic_check.py" in members
+    assert f"{root}/tests/test_exact_arithmetic_contraction.py" in members
 
 
 @pytest.mark.skipif(
