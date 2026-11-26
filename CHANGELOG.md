@@ -9,6 +9,25 @@
   used to end every full-matrix pytest leg before any test ran. Tests that need the baseline are now
   skipped with the reported reason, and the baseline is required exactly when S0 succeeded. How a
   reviewed build-file change moves the frozen reference: `docs/ci-s0-baseline.md`.
+- Build the native extension with value-safe floating point: `-fno-fast-math
+  -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -fno-finite-math-only
+  -ffp-contract=off`
+  after any inherited `CFLAGS` on non-Windows platforms, and pin MSVC's
+  default `/fp:precise`. The exact orientation and in-circle expansions rely on separately rounded
+  operations (Dekker split, two_sum, two_product). GCC's default cross-statement contraction on an
+  FMA target (`-march=haswell`, aarch64 Linux) made `split` wrong for every tested input. Builds
+  under `-ffast-math`, `-fassociative-math` or `/fp:fast` now fail to compile. Measured: GCC 13 at
+  the default x86-64 target compiles `_native.cpp` to byte-identical machine code with and without
+  the flag, and MSVC defaults are unchanged. On FMA targets that contracted before (for example
+  macOS arm64 with Apple clang's within-statement default, not measured here), raw float values of
+  `_native.orient2d`/`incircle`, filtered predicate decisions and native-v2 metric arithmetic can
+  change in the last bits, and with them near-degenerate connectivity. A new probe
+  (`_native.exact_arithmetic_probe`), `tests/test_exact_arithmetic_contraction.py` and the release
+  wheel smoke (native-required) check the compiled transforms against exact rational arithmetic.
+  Supported: the default GCC, Clang and MSVC floating-point semantics. Builds under
+  `-ffinite-math-only` or x87 excess precision (`FLT_EVAL_METHOD != 0`) also fail to compile, and
+  the check fails when subnormals are flushed after import. Inherited options that are neither
+  reset nor detectable are unsupported, for example Clang's `-fdenormal-fp-math=positive-zero`.
 - **Speed, results unchanged.** The finite-hull triangulation fallback runs natively: when the
   compiled extension provides `finite_hull_seed`, `_finite_hull_seed` hands the fan seed, exact
   point insertion and Lawson flips to C++ (`_finite_hull_native.hpp`) for exact float64 (n, 2)

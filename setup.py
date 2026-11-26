@@ -44,8 +44,25 @@ def _ensure_msvc_tools_on_path() -> None:
 _ensure_msvc_tools_on_path()
 
 
-compile_args = ["/std:c++17", "/O2"] if sys.platform == "win32" else ["-std=c++17", "-O3"]
-link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else []
+# The exact predicates use error-free transforms (Dekker split, two_sum,
+# two_product) that need separately rounded IEEE operations: a fused
+# multiply-add contraction across statements (GCC default on FMA targets)
+# breaks split, and value-unsafe modes can reassociate two_sum.  These options
+# follow any inherited CFLAGS and reset them (GCC 13: -ffast-math or
+# -funsafe-math-optimizations followed by these leave no unsafe macro set and
+# the probe exact).
+# MSVC: /fp:precise is the default (no contraction); pinned so an inherited
+# /fp:fast (CL environment variable) is overridden.  An explicit /fp:contract
+# still contracts, but only within one expression, which keeps split exact.
+compile_args = ["/std:c++17", "/O2", "/fp:precise"] if sys.platform == "win32" else [
+    "-std=c++17", "-O3", "-fno-fast-math", "-fno-unsafe-math-optimizations",
+    "-fno-associative-math", "-fno-reciprocal-math", "-fno-finite-math-only",
+    "-ffp-contract=off",
+]
+# Repeated on the link line: a link-time optimization step must not pick up an
+# inherited contraction or fast-math setting (GCC 13 keeps the compile-time
+# options under -flto; this is a backstop for other toolchains).
+link_args = ["/MANIFEST:NO"] if sys.platform == "win32" else compile_args[2:]
 
 extensions = []
 require_native = os.environ.get("ANYMESHER_REQUIRE_NATIVE", "0") in {
@@ -60,6 +77,7 @@ if os.environ.get("ANYMESHER_DISABLE_NATIVE", "0") not in {"1", "true", "TRUE"}:
             ["src/anymesher/_native.cpp"],
             depends=[
                 "src/anymesher/_triangulation_native.hpp",
+                "src/anymesher/_exact_probe_native.hpp",
                 "src/anymesher/_quality_pipeline_native.hpp",
                 "src/anymesher/_native_v2.hpp",
                 "src/anymesher/_native_t3_storage.hpp",
