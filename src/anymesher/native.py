@@ -265,6 +265,21 @@ class _ReferenceSeedCallbackFailure(BaseException):
     """Keep callback exceptions distinct from native construction refusal."""
 
 
+def _finite_hull_seed_kernel():
+    """The native finite-hull seed (decision-identical to the Python routine), or None if absent.
+
+    As for the reference seed, a present but unloadable extension is a packaging failure and
+    raises; an older extension without the function keeps the Python routine.
+    """
+    from types import BuiltinFunctionType
+
+    module_name = f"{__package__}._native"
+    if find_spec(module_name) is None:
+        return None
+    kernel = getattr(import_module(module_name), "finite_hull_seed", None)
+    return kernel if type(kernel) is BuiltinFunctionType else None
+
+
 def _run_reference_native_seed(points, orientation, circle, cancellation_check):
     """Optional insertion only; the Python caller owns all PSLG finishing.
 

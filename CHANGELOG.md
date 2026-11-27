@@ -28,6 +28,26 @@
   `-ffinite-math-only` or x87 excess precision (`FLT_EVAL_METHOD != 0`) also fail to compile, and
   the check fails when subnormals are flushed after import. Inherited options that are neither
   reset nor detectable are unsupported, for example Clang's `-fdenormal-fp-math=positive-zero`.
+- **Speed, results unchanged.** The finite-hull triangulation fallback runs natively: when the
+  compiled extension provides `finite_hull_seed`, `_finite_hull_seed` hands the fan seed, exact
+  point insertion and Lawson flips to C++ (`_finite_hull_native.hpp`) for exact float64 (n, 2)
+  finite ndarrays with distinct hull rows and n < 2**28; the hull, the completeness check and the
+  refusals stay in Python, and without the extension the Python routine runs unchanged. The C++
+  predicates use the Python predicates' float filters (same IEEE operations, no FP contraction)
+  and exact integer arithmetic otherwise, so every orientation/in-circle sign is the Python one.
+  Callbacks: the same stage objects at the same points, the same snapshot check after each call,
+  and on a change the routine continues on the live array through the original Python
+  predicate expressions. Floating tripod, 615 captured calls: identical results, 10.2 s native
+  replay on the development PC (312.9 s Python capture on the bench PC). Same identity contract as
+  the entry below. Added to "not defended" (owner, 2026-11-25): the Python frames between the
+  routine and its callback (the engine calls the callback from C), and so `RecursionError` near
+  the recursion limit, caller-frame inspection, warnings attributed by `stacklevel` (and
+  module-based filtering of them), traceback contents, and tracing/profiling hooks. Also (owner,
+  2026-11-25): direct calls of private native functions and interpreter-level hooks (gc
+  callbacks, `gc.get_objects` tampering) are not defended for results; memory safety is kept. Also
+  (owner, 2026-11-25): finalizer timing of user objects attached to inputs (for example dtype
+  metadata). Tests: `tests/test_native_finite_hull_seed.py`,
+  `tests/test_tripod_speed_identity.py` (both routes); scale harness `tools/fhs_native_harness.py`.
 
 - **Speed, results unchanged.** A quad-first shortcut, measured on the floating tripod example
   (48 webs, 0.5 m): the Python finite-hull triangulation fallback (615 of 1005 planar seeds) skips

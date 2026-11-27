@@ -19,6 +19,7 @@ from .native import (
     NativeBoundarySelection,
     run_native_triangulation,
     snapshot_native_boundary,
+    _finite_hull_seed_kernel,
     _run_ghost_native_seed,
     _run_reference_native_seed,
 )
@@ -1207,6 +1208,27 @@ def _complete_hull_seed(points: np.ndarray, triangles: Sequence[tuple[int, int, 
     return len(reached) == len(triangles)
 
 
+# Private switch: False keeps the Python finite-hull seed even when the native one is built.
+_NATIVE_FINITE_HULL = True
+# Callback stages of _finite_hull_seed; both routes pass these very objects.
+_FHS_STAGE_INSERTION = "python triangulation finite hull insertion"
+_FHS_STAGE_EDGE = "python triangulation finite hull edge"
+_FHS_STAGE_LEGALITY = "python triangulation finite hull legality"
+_FHS_STAGES = (_FHS_STAGE_INSERTION, _FHS_STAGE_EDGE, _FHS_STAGE_LEGALITY)
+
+
+def _live_location(points: Any, triangle: tuple[int, int, int], node: int) -> tuple[bool, list[int]]:
+    """The location test of ``_finite_hull_seed`` on the live array (native engine, changed input)."""
+    turns = [orient2d(points[triangle[i]], points[triangle[(i + 1) % 3]], points[node]) for i in range(3)]
+    return min(turns) >= 0.0, [i for i, turn in enumerate(turns) if turn == 0.0]
+
+
+def _live_flip_test(points: Any, e0: int, e1: int, a: int, b: int, first: tuple[int, int, int]) -> bool:
+    """The geometric part of ``flippable`` in ``_finite_hull_seed`` on the live array."""
+    return bool(_proper_intersection(points[e0], points[e1], points[a], points[b])
+                and incircle(*(points[node] for node in first), points[b]) > 0.0)
+
+
 def _finite_hull_seed(points: np.ndarray,
                       cancellation_check: Callable[[str], None] | None = None) -> list[tuple[int, int, int]]:
     """Seed a complete finite disk when removal of the super triangle loses cells.
@@ -1232,6 +1254,31 @@ def _finite_hull_seed(points: np.ndarray,
             and array.shape[1] == 2 and bool(np.all(np.isfinite(array)))
             # a callback during the hull may have shrunk the array under the hull's rows
             and all(type(index) is int and 0 <= index < array.shape[0] for index in hull))
+    # The native engine also needs distinct hull rows (a hull callback can repeat rows) and
+    # n < 2**28 (exact work limit); any other input keeps the Python routine.
+    # The buffer must be plain binary64 too: a dtype equal to float64 can export another format
+    # (longdouble on Windows, a float64 dtype with fields); those keep the Python routine.
+    if (fast and _NATIVE_FINITE_HULL and 3 <= array.shape[0] < 2 ** 28
+            and array.dtype.char == "d" and array.dtype.fields is None
+            and len(set(hull)) == len(hull)):
+        kernel = _finite_hull_seed_kernel()
+        if kernel is not None:
+            # Held in this frame until return (and in a traceback), as the Python route holds its
+            # snapshot: user objects attached to the dtype are released at the same point.
+            admitted_dtype = array.dtype  # noqa: F841
+            # The same routine in C++ (decision-identical, see _finite_hull_native.hpp): it takes
+            # the snapshot, makes the same callbacks and continues on the live array through the
+            # _live_* helpers if a callback changes the input.
+            outcome = kernel(points, hull, cancellation_check, _live_location, _live_flip_test,
+                             _canonical_triangle, _FHS_STAGES)
+            if type(outcome) is int:
+                if outcome == 1:
+                    raise MeshError("finite hull insertion could not locate a point")
+                raise MeshError("finite hull triangulation legality did not converge")
+            if not _complete_hull_seed(points, outcome, cancellation_check):
+                raise MeshError("finite hull triangulation is incomplete")
+            return outcome
+
     def layout():
         return (array.shape, array.strides, array.dtype, array.__array_interface__["data"][0])
 
@@ -1276,7 +1323,7 @@ def _finite_hull_seed(points: np.ndarray,
     installed = set(hull)
     for node in sorted(set(range(len(points))) - installed, key=lambda index: (*points[index], index)):
         if cancellation_check is not None:
-            checkpoint("python triangulation finite hull insertion")
+            checkpoint(_FHS_STAGE_INSERTION)
         containing = []
         edge = None
         if fast:
@@ -1348,7 +1395,7 @@ def _finite_hull_seed(points: np.ndarray,
 
     def examine(edge: tuple[int, int]) -> None:
         if cancellation_check is not None:
-            checkpoint("python triangulation finite hull edge")
+            checkpoint(_FHS_STAGE_EDGE)
         if edge in believed:
             return
         if flippable(edge, incidence[edge]):
@@ -1359,14 +1406,14 @@ def _finite_hull_seed(points: np.ndarray,
         examine(edge)
     for _ in range(limit):
         if cancellation_check is not None:
-            checkpoint("python triangulation finite hull legality")
+            checkpoint(_FHS_STAGE_LEGALITY)
         edge = None
         while pending:
             candidate = heapq.heappop(pending)
             if candidate not in believed:
                 continue
             if cancellation_check is not None:
-                checkpoint("python triangulation finite hull edge")
+                checkpoint(_FHS_STAGE_EDGE)
             if not flippable(candidate, incidence[candidate]):
                 believed.discard(candidate)
                 continue

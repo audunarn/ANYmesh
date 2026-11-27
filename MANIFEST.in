@@ -18,3 +18,4 @@ include src/anymesher/_triangulation_native.hpp
 include src/anymesher/_exact_probe_native.hpp
 include src/anymesher/_ghost_seed_native.hpp
 include src/anymesher/_native_v2.hpp
+include src/anymesher/_finite_hull_native.hpp
